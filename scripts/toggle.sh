@@ -45,6 +45,7 @@ else
   # -hf: full-height split on the window's left edge
   id="$(tmux split-window -hbf -d -l "${width:-30}" -P -F '#{pane_id}' "bash '$DIR/scripts/sidebar.sh'")"
   tmux set-option -g @agents-mon-sidebar "$id"
+  tmux select-pane -t "$id"
   # follow window/session switches
   tmux set-hook -g 'after-select-window[42]' "run-shell 'bash $DIR/scripts/follow.sh'"
   tmux set-hook -g 'client-session-changed[42]' "run-shell 'bash $DIR/scripts/follow.sh'"
