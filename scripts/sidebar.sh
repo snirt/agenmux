@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# Sidebar — runs inside the sidebar pane.
+# Keys: j/k or arrows move selection, Enter jumps to agent, q closes.
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+STATE_FILE="${TMPDIR:-/tmp}/agents-mon-$$.state"
+export AGENTS_MON_SELF="${TMUX_PANE:-}"
+# row map for click-to-jump: line N of this file = agent row N in the sidebar
+ROWS_FILE="${TMPDIR:-/tmp}/agents-mon-rows-${TMUX_PANE#%}"
+
+SCAN_FILE="$STATE_FILE.scan"
+# last scan survives across instances so a fresh popup renders instantly
+CACHE_FILE="${TMPDIR:-/tmp}/agents-mon-scan-cache"
+
+cleanup() {
+  printf '\033[?25h'
+  [ -n "${scan_pid:-}" ] && kill "$scan_pid" 2>/dev/null
+  rm -f "$STATE_FILE" "$ROWS_FILE" "$SCAN_FILE" "$SCAN_FILE.partial"
+  exit 0
+}
+trap cleanup INT TERM EXIT
+
+printf '\033[?25l\033[2J'
+: > "$STATE_FILE"
+
+E=$'\033'
+NL=$'\n'
+# arrow keys deliver their bytes together; only a bare Esc hits this timeout.
+# bash >=4 can wait 50ms — old bash 3.2 is stuck with 1s (integer-only -t)
+if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then ESC_WAIT=0.05 READ_WAIT=0.25; else ESC_WAIT=1 READ_WAIT=1; fi
+debounced=""
+nrows=0
+sel=1
+sel_pane=""  # selection sticks to this pane across rescans until moved
+last_active=""
+
+sync_sel_pane() { # remember which pane the cursor is on
+  sel_pane="$(printf '%s' "$debounced" | awk -F'\t' -v n="$sel" 'NR == n { print $1 }')"
+}
+
+restore_sel() { # after a rescan, follow the remembered pane's new position
+  local idx
+  [ -n "$sel_pane" ] || { sync_sel_pane; return; }
+  idx="$(printf '%s' "$debounced" | awk -F'\t' -v p="$sel_pane" '$1 == p { print NR; exit }')"
+  if [ -n "$idx" ]; then
+    sel="$idx"
+  else
+    [ "$sel" -gt "$nrows" ] && sel=$nrows
+    [ "$sel" -lt 1 ] && sel=1
+    sync_sel_pane
+  fi
+}
+
+color_dot() { # sets $dot and $badge — no subshell, render runs hot
+  badge=""
+  case "$1" in
+    blocked) dot="$E[31m●$E[0m" ;;
+    working) dot="$E[33m●$E[0m" ;;
+    done)    dot="$E[32m●$E[0m"; badge=" $E[34m✦$E[0m" ;;  # finished, not viewed yet
+    *)       dot="$E[32m●$E[0m" ;;
+  esac
+}
+
+# scans run in the background so the key loop stays responsive
+scan_pid=""
+last_scan_start=0
+start_scan() {
+  { # remember current width so follow.sh can restore it after the sidebar
+    # gets orphaned full-width (skip popup mode and the full-width state)
+    if [ -z "${AGENTS_MON_PIN:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
+      w="$(tmux display-message -p -t "$TMUX_PANE" '#{pane_width}' 2>/dev/null)"
+      ww="$(tmux display-message -p -t "$TMUX_PANE" '#{window_width}' 2>/dev/null)"
+      [ -n "$w" ] && [ "$w" != "$ww" ] && tmux set-option -g @agents-mon-last-width "$w"
+    fi
+    bash "$DIR/scripts/scan.sh" list > "$SCAN_FILE.partial" 2>/dev/null \
+      && mv "$SCAN_FILE.partial" "$SCAN_FILE"; } &
+  scan_pid=$!
+  last_scan_start=$SECONDS
+}
+
+scan_tick() { # consume a finished background scan from $SCAN_FILE
+  local scan pane loc agent state cwd prev prev_state ticks show new_state_file active
+  scan="$(cat "$SCAN_FILE")"
+  rm -f "$SCAN_FILE"
+  printf '%s\n' "$scan" > "$CACHE_FILE"
+  active="$(tmux display-message -p -t "$(tmux list-clients -F '#{session_id}' | head -n 1)" '#{pane_id}' 2>/dev/null)"
+
+  # idle debounce: show idle only after 2 consecutive idle ticks (redraws
+  # flash idle-looking frames mid-render — ccmanager lesson)
+  debounced=""
+  new_state_file=""
+  nrows=0
+  while IFS=$'\t' read -r pane loc agent state cwd; do
+    [ -n "$pane" ] || continue
+    prev="$(grep "^$pane " "$STATE_FILE" 2>/dev/null)"
+    prev_state="$(printf '%s' "$prev" | awk '{print $2}')"
+    ticks="$(printf '%s' "$prev" | awk '{print $3}')"
+    show="$state"
+    if [ "$state" = "idle" ] && [ -n "$prev_state" ] && [ "$prev_state" != "idle" ] \
+       && [ "$prev_state" != "done" ] && [ "${ticks:-0}" -lt 1 ]; then
+      # debounce: hold the previous state one tick before trusting idle
+      show="$prev_state"
+      new_state_file="$new_state_file$pane $prev_state $(( ${ticks:-0} + 1 ))$NL"
+    elif [ "$state" = "idle" ] && [ "$pane" != "$active" ] \
+         && { [ "$prev_state" = "working" ] || [ "$prev_state" = "done" ]; }; then
+      # finished while unfocused — flag as done until the pane is viewed
+      show="done"
+      new_state_file="$new_state_file$pane done 0$NL"
+    else
+      new_state_file="$new_state_file$pane $state 0$NL"
+    fi
+    debounced="$debounced$pane	$loc	$agent	$show	$cwd$NL"
+    nrows=$((nrows + 1))
+  done <<EOF
+$scan
+EOF
+  printf '%s' "$new_state_file" > "$STATE_FILE"
+  [ "$sel" -gt "$nrows" ] && sel=$nrows
+  [ "$sel" -lt 1 ] && sel=1
+  restore_sel
+}
+
+render() {
+  local frame b=0 w=0 i=0 d=0 n=0 pane loc agent state cwd mark cols rest avail
+  local client active idx
+  cols="$(tput cols 2>/dev/null)"; cols="${cols:-30}"
+  # single cursor: when focus lands on an agent pane, the cursor snaps to it;
+  # otherwise it stays where j/k left it
+  # active pane of the client's current session (session id is target-safe
+  # even when session names contain spaces/colons)
+  client="$(tmux list-clients -F '#{session_id}' | head -n 1)"
+  active="$(tmux display-message -p -t "$client" '#{pane_id}' 2>/dev/null)"
+  if [ -n "$active" ] && [ "$active" != "$last_active" ]; then
+    idx="$(printf '%s' "$debounced" | awk -F'\t' -v p="$active" '$1 == p { print NR; exit }')"
+    if [ -n "$idx" ]; then sel="$idx"; sel_pane="$active"; fi
+    last_active="$active"
+  fi
+  while IFS=$'\t' read -r pane loc agent state cwd; do
+    [ -n "$pane" ] || continue
+    case "$state" in blocked) b=$((b+1));; working) w=$((w+1));; done) d=$((d+1)); i=$((i+1));; *) i=$((i+1));; esac
+  done <<EOF
+$debounced
+EOF
+  frame="$E[H$E[1magents$E[0m  $E[31m●$E[0m $b  $E[33m●$E[0m $w  $E[32m●$E[0m $i"
+  [ "$d" -gt 0 ] && frame="$frame  $E[34m✦$E[0m $d"
+  frame="$frame$E[K$NL$E[K$NL"
+  # rows file mirrors visual lines from y=2 so clicks map 1:1 ("-" = header)
+  local vis="" session=""
+  if [ -z "$debounced" ]; then
+    frame="$frame$E[2mno agents$E[0m$E[K$NL"
+  else
+    while IFS=$'\t' read -r pane loc agent state cwd; do
+      [ -n "$pane" ] || continue
+      if [ "${loc%%:*}" != "$session" ]; then
+        session="${loc%%:*}"
+        frame="$frame$E[1;34m$session$E[0m$E[K$NL"
+        vis="$vis-$NL"
+      fi
+      n=$((n + 1))
+      if [ "$n" = "$sel" ]; then mark="$E[1m❯$E[0m "; else mark="  "; fi
+      rest="${loc#*:} $cwd"                      # window.pane + dir
+      avail=$((cols - 5 - ${#agent}))            # "❯ ● name " prefix
+      [ "$avail" -gt 0 ] && rest="${rest:0:$avail}"
+      color_dot "$state"
+      frame="$frame$mark$dot $E[1m$agent$E[0m$badge $E[2m$rest$E[0m$E[K$NL"
+      vis="$vis$pane$NL"
+    done <<EOF
+$debounced
+EOF
+  fi
+  printf '%s' "$vis" > "$ROWS_FILE"
+  printf '%s' "$frame$E[J"
+}
+
+jump() {
+  local target client
+  target="$(printf '%s' "$debounced" | awk -F'\t' -v n="$sel" 'NR == n { print $1 }')"
+  case "$target" in %*) ;; *) return ;; esac
+  if [ -n "${AGENTS_MON_PIN:-}" ]; then
+    # popup holds the client — switch-client would fail cross-session.
+    # Hand the target to toggle.sh, which jumps after the popup closes.
+    printf '%s' "$target" > "$AGENTS_MON_PIN.jump"
+    exit 0
+  fi
+  client="$(tmux list-clients -F '#{client_name}' | head -n 1)"
+  [ -n "$client" ] && tmux switch-client -c "$client" -t "$target" 2>/dev/null
+  tmux select-window -t "$target"
+  tmux select-pane -t "$target"
+}
+
+quit() { [ -n "${AGENTS_MON_PIN:-}" ] && rm -f "$AGENTS_MON_PIN"; exit 0; }
+
+# seed from the previous instance's scan for an instant first frame
+[ -f "$CACHE_FILE" ] && cp "$CACHE_FILE" "$SCAN_FILE"
+start_scan
+while :; do
+  [ -f "$SCAN_FILE" ] && scan_tick
+  render
+  # relaunch a scan every ~2s once the previous one finished
+  if ! kill -0 "$scan_pid" 2>/dev/null && [ ! -f "$SCAN_FILE" ] \
+     && [ $((SECONDS - last_scan_start)) -ge 2 ]; then
+    start_scan
+  fi
+  if IFS= read -rsn1 -t "$READ_WAIT" key; then
+    case "$key" in
+      j) sel=$((sel + 1)) ;;
+      k) sel=$((sel - 1)) ;;
+      q) quit ;;
+      l) jump ;;
+      '') jump ;;  # Enter
+      "$E")
+        rest=""
+        read -rsn2 -t "$ESC_WAIT" rest
+        case "$rest" in
+          '[A') sel=$((sel - 1)) ;;
+          '[B') sel=$((sel + 1)) ;;
+          '') quit ;;  # bare Esc
+        esac
+        ;;
+    esac
+    [ "$sel" -lt 1 ] && sel=1
+    [ "$sel" -gt "$nrows" ] && sel=$nrows
+    [ "$sel" -lt 1 ] && sel=1
+    sync_sel_pane
+  fi
+done

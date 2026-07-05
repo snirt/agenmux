@@ -1,0 +1,5 @@
+• Working on refactoring the auth module
+
+  ⠧ Thinking (12s · esc to interrupt)
+
+  ctrl+c to quit

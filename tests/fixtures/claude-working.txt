@@ -1,0 +1,46 @@
+      49    local b="${1##*/}"
+      50    b="${b%.js}"; b="${b%.cmd}"; b="${b%.exe}"
+
+⏺ Update(tmux-agents-mon/scripts/scan.sh)
+  ⎿  Added 3 lines, removed 4 lines
+       98  }
+       99
+      100  identify_agent() { # $1=pane_pid $2=pane_current_command -> prints agent index
+      101 -  local base idx line
+      102 -  base="$(normalize_bin "$2")"
+      103 -  agent_for_bin "$base" && return 0
+      104 -  is_generic_runtime "$base" || return 1
+      101 +  local idx line
+      102 +  agent_for_bin "$(normalize_bin "$2")" && return 0
+      103 +  # no direct match: walk pane's process tree (wrappers, node CLIs, odd shells)
+      104    while IFS= read -r line; do
+      105      [ -n "$line" ] || continue
+      106      idx="$(agent_for_bin "$(normalize_bin "${line%% *}")")" && { printf '%s' "$idx"; return 0; }
+
+  Thought for 19s, ran 1 shell command
+
+⏺ Update(tmux-agents-mon/scripts/scan.sh)
+  ⎿  Added 1 line
+      137
+      138  scan() { # one line per agent pane: pane_id \t loc \t agent \t state \t dir
+      139    local pane pid cmd path loc title idx state
+      140 +  PS_CACHE="$(ps -axo pid=,ppid=,command=)"  # one ps per scan; subshells inherit
+      141    while IFS=$'\t' read -r pane pid cmd path loc title; do
+      142      [ -n "${AGENTS_MON_SELF:-}" ] && [ "$pane" = "$AGENTS_MON_SELF" ] && continue  # sidebar skips itself
+      143      idx="$(identify_agent "$pid" "$cmd")" || continue
+
+  Thought for 1m 37s
+
+⏺ Now fixtures — capture real screens from the live panes:
+
+  Running 1 shell command…
+  ⎿  $ cd /Users/dev/Projects/demo/tmux-agents-mon && mkdir -p tests/fixtures && tmux capture-pane -p -t %25 > tests/fixtures/claude-idle.txt && tmux
+     capture-pane -p -t %7 > tests/fixtures/codex-idle.txt && tmux capture-pane -p -t %26 > tests/fixtures/pi-idle.txt && tmux capture-pane -…
+
+✽ Processing… (20m 29s · ↓ 45.4k tokens)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── tmux-agents-mon-plugin ──
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   /Users/dev/Projects/demo  Fable 5 10%                                                                                                                  /rc
+  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

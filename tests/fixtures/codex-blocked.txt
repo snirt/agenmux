@@ -1,0 +1,8 @@
+• I need to run a command that touches files outside the workspace.
+
+  ▌ Allow command?
+  ▌   rm -rf /tmp/build-cache
+  ▌
+  ▌ press enter to confirm or esc to cancel
+
+  ctrl+c to quit

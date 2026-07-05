@@ -1,0 +1,7 @@
+│  Write src/index.ts
+
+△ Permission required
+
+  Allow opencode to write to src/index.ts?
+
+  ↑↓ select · enter confirm · esc dismiss

@@ -1,0 +1,23 @@
+⏺ Read the failing test and traced the assertion to the date formatting helper.
+
+⏺ Read(src/utils/format.ts)
+  ⎿  Read 42 lines
+
+⏺ The helper drops the timezone offset before comparing, so tests pass locally
+  but fail in CI (UTC). Fixed by comparing epoch milliseconds instead.
+
+⏺ Update(src/utils/format.ts)
+  ⎿  Updated src/utils/format.ts with 2 additions and 2 removals
+
+⏺ Bash(npm test)
+  ⎿  Test Suites: 4 passed, 4 total
+     Tests:       31 passed, 31 total
+
+⏺ All tests pass. The fix compares epoch milliseconds, which is
+  timezone-independent, instead of formatted strings.
+
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+   demo main  Claude  2%                                                     /rc
+  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)
