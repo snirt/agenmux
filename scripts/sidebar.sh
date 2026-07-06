@@ -30,6 +30,8 @@ if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then ESC_WAIT=0.05 READ_WAIT=0.25; else ESC_
 debounced=""
 nrows=0
 sel=1
+SPIN='⣾⣽⣻⢿⡿⣟⣯⣷'   # full-height working frames; done = ⣿ (spinner complete)
+tick=0
 sel_pane=""  # selection sticks to this pane across rescans until moved
 last_active=""
 
@@ -53,10 +55,11 @@ restore_sel() { # after a rescan, follow the remembered pane's new position
 color_dot() { # sets $dot and $badge — no subshell, render runs hot
   badge=""
   case "$1" in
-    blocked) dot="$E[31m●$E[0m" ;;
-    working) dot="$E[33m●$E[0m" ;;
-    done)    dot="$E[32m●$E[0m"; badge=" $E[34m✦$E[0m" ;;  # finished, not viewed yet
-    *)       dot="$E[32m●$E[0m" ;;
+    blocked) # blink on/off every 2 ticks (~0.5s)
+      if [ $(( tick / 2 % 2 )) -eq 0 ]; then dot="$E[31m⣿$E[0m"; else dot=" "; fi ;;
+    working) dot="$E[33m${SPIN:tick % 8:1}$E[0m" ;;
+    done)    dot="$E[32m⣿$E[0m"; badge=" $E[34m✦$E[0m" ;;  # finished, not viewed yet
+    *)       dot="$E[32m⣿$E[0m" ;;
   esac
 }
 
@@ -120,7 +123,7 @@ EOF
 }
 
 render() {
-  local frame b=0 w=0 i=0 d=0 n=0 pane loc agent state cwd mark cols rest avail
+  local frame n=0 pane loc agent state cwd mark cols rest avail
   local client active idx
   cols="$(tput cols 2>/dev/null)"; cols="${cols:-30}"
   # single cursor: when focus lands on an agent pane, the cursor snaps to it;
@@ -134,15 +137,7 @@ render() {
     if [ -n "$idx" ]; then sel="$idx"; sel_pane="$active"; fi
     last_active="$active"
   fi
-  while IFS=$'\t' read -r pane loc agent state cwd; do
-    [ -n "$pane" ] || continue
-    case "$state" in blocked) b=$((b+1));; working) w=$((w+1));; done) d=$((d+1)); i=$((i+1));; *) i=$((i+1));; esac
-  done <<EOF
-$debounced
-EOF
-  frame="$E[H$E[1magents$E[0m  $E[31m●$E[0m $b  $E[33m●$E[0m $w  $E[32m●$E[0m $i"
-  [ "$d" -gt 0 ] && frame="$frame  $E[34m✦$E[0m $d"
-  frame="$frame$E[K$NL$E[K$NL"
+  frame="$E[H$E[1magents$E[0m$E[K$NL$E[K$NL"
   # rows file mirrors visual lines from y=2 so clicks map 1:1 ("-" = header)
   local vis="" session=""
   if [ -z "$debounced" ]; then
@@ -193,6 +188,7 @@ quit() { [ -n "${AGENTS_MON_PIN:-}" ] && rm -f "$AGENTS_MON_PIN"; exit 0; }
 [ -f "$CACHE_FILE" ] && cp "$CACHE_FILE" "$SCAN_FILE"
 start_scan
 while :; do
+  tick=$(( (tick + 1) % 40 ))  # divisible by 8 (spin) and 4 (blink)
   [ -f "$SCAN_FILE" ] && scan_tick
   render
   # relaunch a scan every ~2s once the previous one finished

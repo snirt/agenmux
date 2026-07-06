@@ -154,9 +154,9 @@ status() { # compact segment for status-line, empty when no agents
     $4 == "blocked" { b++ } $4 == "working" { w++ } $4 == "idle" { i++ }
     END {
       out = ""
-      if (b) out = out "🔴" b " "
-      if (w) out = out "🟡" w " "
-      if (i) out = out "🟢" i " "
+      if (b) out = out "#[fg=red]⣿#[default]" b " "
+      if (w) out = out "#[fg=yellow]⣾#[default]" w " "
+      if (i) out = out "#[fg=green]⣿#[default]" i " "
       sub(/ $/, "", out); printf "%s", out
     }'
 }
