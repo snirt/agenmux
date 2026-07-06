@@ -8,12 +8,12 @@ USER_AGENTS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/tmux-agents-mon/agents"
 
 # ponytail: parallel indexed arrays, bash 3.2 (macOS) has no assoc arrays
 N=0
-declare -a A_NAME A_BINS A_HINTS A_BT A_BS A_WT A_WS A_IS A_ORDER A_TS A_SS
+declare -a A_NAME A_BINS A_HINTS A_BT A_BS A_WT A_WS A_IS A_ORDER A_TS A_SS A_SC
 
 load_conf() {
   AGENT_BINS="" AGENT_PATH_HINTS="" BLOCKED_TITLE="" BLOCKED_SCREEN=""
   WORKING_TITLE="" WORKING_SCREEN="" IDLE_SCREEN="" CHECK_ORDER="" TITLE_STRIP=""
-  SUBJECT_SCREEN=""
+  SUBJECT_SCREEN="" SUBJECT_CMD=""
   . "$1"
   local name idx i=0
   name="$(basename "$1" .conf)"
@@ -33,6 +33,7 @@ load_conf() {
   A_ORDER[$idx]="${CHECK_ORDER:-bt wt bs ws}"
   A_TS[$idx]="$TITLE_STRIP"
   A_SS[$idx]="$SUBJECT_SCREEN"
+  A_SC[$idx]="$SUBJECT_CMD"
   [ "$idx" = "$N" ] && N=$((N + 1))
 }
 
@@ -149,10 +150,13 @@ scan() { # one line per agent pane: pane_id \t loc \t agent \t state \t dir \t t
     state="$(detect_state "$idx" "$title" "$screen")"
     # subject: drop agent decoration prefix, blank when it just echoes dir/agent
     [ -n "${A_TS[$idx]}" ] && title="$(printf '%s' "$title" | sed -E "s,${A_TS[$idx]},,")"
+    title="${title% - ${path##*/}}"  # pi titles "name - dir"; drop the dir echo
     case "$title" in "${path##*/}"|"${A_NAME[$idx]}") title="" ;; esac
     # no titled subject (codex idles back to dir) — scrape it off the screen
     [ -z "$title" ] && [ -n "${A_SS[$idx]}" ] \
       && title="$(printf '%s\n' "$screen" | sed -nE "s,${A_SS[$idx]},\1,p" | tail -n 1)"
+    # still nothing (pi keeps its subject in the session file) — ask the conf
+    [ -z "$title" ] && [ -n "${A_SC[$idx]}" ] && title="$(eval "${A_SC[$idx]}" 2>/dev/null)"
     title="${title//$'\t'/ }"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$pane" "$loc" "${A_NAME[$idx]}" "$state" "${path##*/}" "$title"
   done <<EOF
