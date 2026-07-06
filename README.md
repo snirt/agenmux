@@ -53,6 +53,8 @@ set -g @agents-mon-popup-key 'e'    # optional: dedicated key that always opens 
 set -g @agents-mon-width '30'       # sidebar/popup width
 set -g @agents-mon-display 'popup'  # make the main key open a popup (default: left split)
 set -g @agents-mon-height '15'      # popup height (popup mode only)
+set -g @agents-mon-hide-windows 'agents*'  # hide matching windows from the prefix+w picker
+                                    # (one fnmatch pattern; set to '' to restore the default picker)
 ```
 
 With both keys set (e.g. `@agents-mon-key 'E'`, `@agents-mon-popup-key 'e'`)
