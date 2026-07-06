@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sidebar — runs inside the sidebar pane.
-# Keys: j/k or arrows move selection, Enter jumps to agent, q closes.
+# Keys: j/k or arrows move selection, Enter jumps to agent, ? help, q closes.
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 STATE_FILE="${TMPDIR:-/tmp}/agents-mon-$$.state"
 export AGENTS_MON_SELF="${TMUX_PANE:-}"
@@ -18,6 +18,9 @@ cleanup() {
   exit 0
 }
 trap cleanup INT TERM EXIT
+# resize rewraps the old frame into garbage; clear now — the signal also
+# interrupts the key-loop read, so the next render comes instantly
+trap 'printf "\033[2J"' WINCH
 
 printf '\033[?25l\033[2J'
 : > "$STATE_FILE"
@@ -52,13 +55,13 @@ restore_sel() { # after a rescan, follow the remembered pane's new position
   fi
 }
 
-color_dot() { # sets $dot and $badge — no subshell, render runs hot
-  badge=""
+color_dot() { # sets $dot — no subshell, render runs hot
   case "$1" in
     blocked) # blink on/off every 2 ticks (~0.5s)
       if [ $(( tick / 2 % 2 )) -eq 0 ]; then dot="$E[31m⣿$E[0m"; else dot=" "; fi ;;
     working) dot="$E[33m${SPIN:tick % 8:1}$E[0m" ;;
-    done)    dot="$E[32m⣿$E[0m"; badge=" $E[34m✦$E[0m" ;;  # finished, not viewed yet
+    done) # finished, not viewed yet — blink green
+      if [ $(( tick / 2 % 2 )) -eq 0 ]; then dot="$E[32m⣿$E[0m"; else dot=" "; fi ;;
     *)       dot="$E[32m⣿$E[0m" ;;
   esac
 }
@@ -81,7 +84,7 @@ start_scan() {
 }
 
 scan_tick() { # consume a finished background scan from $SCAN_FILE
-  local scan pane loc agent state cwd prev prev_state ticks show new_state_file active
+  local scan pane loc agent state cwd title prev prev_state ticks show new_state_file active
   scan="$(cat "$SCAN_FILE")"
   rm -f "$SCAN_FILE"
   printf '%s\n' "$scan" > "$CACHE_FILE"
@@ -92,26 +95,28 @@ scan_tick() { # consume a finished background scan from $SCAN_FILE
   debounced=""
   new_state_file=""
   nrows=0
-  while IFS=$'\t' read -r pane loc agent state cwd; do
+  while IFS=$'\t' read -r pane loc agent state cwd title; do
     [ -n "$pane" ] || continue
     prev="$(grep "^$pane " "$STATE_FILE" 2>/dev/null)"
     prev_state="$(printf '%s' "$prev" | awk '{print $2}')"
     ticks="$(printf '%s' "$prev" | awk '{print $3}')"
+    # agents like codex only title the pane while working — keep last subject
+    [ -z "$title" ] && title="$(printf '%s' "$prev" | cut -d' ' -f4-)"
     show="$state"
     if [ "$state" = "idle" ] && [ -n "$prev_state" ] && [ "$prev_state" != "idle" ] \
        && [ "$prev_state" != "done" ] && [ "${ticks:-0}" -lt 1 ]; then
       # debounce: hold the previous state one tick before trusting idle
       show="$prev_state"
-      new_state_file="$new_state_file$pane $prev_state $(( ${ticks:-0} + 1 ))$NL"
+      new_state_file="$new_state_file$pane $prev_state $(( ${ticks:-0} + 1 )) $title$NL"
     elif [ "$state" = "idle" ] && [ "$pane" != "$active" ] \
          && { [ "$prev_state" = "working" ] || [ "$prev_state" = "done" ]; }; then
       # finished while unfocused — flag as done until the pane is viewed
       show="done"
-      new_state_file="$new_state_file$pane done 0$NL"
+      new_state_file="$new_state_file$pane done 0 $title$NL"
     else
-      new_state_file="$new_state_file$pane $state 0$NL"
+      new_state_file="$new_state_file$pane $state 0 $title$NL"
     fi
-    debounced="$debounced$pane	$loc	$agent	$show	$cwd$NL"
+    debounced="$debounced$pane	$loc	$agent	$show	$cwd	$title$NL"
     nrows=$((nrows + 1))
   done <<EOF
 $scan
@@ -123,9 +128,15 @@ EOF
 }
 
 render() {
-  local frame n=0 pane loc agent state cwd mark cols rest avail
+  local frame n=0 pane loc agent state cwd title mark cols rows cap used rest avail
   local client active idx
-  cols="$(tput cols 2>/dev/null)"; cols="${cols:-30}"
+  # tput can report the client size, not the pane's — ask tmux directly
+  IFS=' ' read -r cols rows <<EOF
+$(tmux display-message -p -t "${TMUX_PANE:-}" '#{pane_width} #{pane_height}' 2>/dev/null)
+EOF
+  [ -n "$cols" ] || cols="$(tput cols 2>/dev/null)"; cols="${cols:-30}"
+  [ -n "$rows" ] || rows="$(tput lines 2>/dev/null)"; rows="${rows:-24}"
+  cap=$((rows - 1))  # writing the last row's newline would scroll the pane
   # single cursor: when focus lands on an agent pane, the cursor snaps to it;
   # otherwise it stays where j/k left it
   # active pane of the client's current session (session id is target-safe
@@ -139,25 +150,34 @@ render() {
   fi
   frame="$E[H$E[1magents$E[0m$E[K$NL$E[K$NL"
   # rows file mirrors visual lines from y=2 so clicks map 1:1 ("-" = header)
-  local vis="" session=""
+  local vis="" session="" used=2  # header + blank line already emitted
   if [ -z "$debounced" ]; then
     frame="$frame$E[2mno agents$E[0m$E[K$NL"
   else
-    while IFS=$'\t' read -r pane loc agent state cwd; do
+    while IFS=$'\t' read -r pane loc agent state cwd title; do
       [ -n "$pane" ] || continue
       if [ "${loc%%:*}" != "$session" ]; then
+        [ $((used + 2)) -gt "$cap" ] && break  # no room for header + record
         session="${loc%%:*}"
         frame="$frame$E[1;34m$session$E[0m$E[K$NL"
         vis="$vis-$NL"
+        used=$((used + 1))
       fi
+      [ "$used" -ge "$cap" ] && break  # pane full — clip, never scroll
       n=$((n + 1))
       if [ "$n" = "$sel" ]; then mark="$E[1m❯$E[0m "; else mark="  "; fi
+      color_dot "$state"
       rest="${loc#*:} $cwd"                      # window.pane + dir
       avail=$((cols - 5 - ${#agent}))            # "❯ ● name " prefix
       [ "$avail" -gt 0 ] && rest="${rest:0:$avail}"
-      color_dot "$state"
-      frame="$frame$mark$dot $E[1m$agent$E[0m$badge $E[2m$rest$E[0m$E[K$NL"
+      frame="$frame$mark$dot $E[1m$agent$E[0m $E[2m$rest$E[0m$E[K$NL"
       vis="$vis$pane$NL"
+      used=$((used + 1))
+      if [ -n "$title" ] && [ "$used" -lt "$cap" ]; then  # subject line under the record
+        frame="$frame    $E[2m${title:0:cols - 4}$E[0m$E[K$NL"
+        vis="$vis$pane$NL"
+        used=$((used + 1))
+      fi
     done <<EOF
 $debounced
 EOF
@@ -184,6 +204,23 @@ jump() {
 
 quit() { [ -n "${AGENTS_MON_PIN:-}" ] && rm -f "$AGENTS_MON_PIN"; exit 0; }
 
+show_help() { # blocks until a key; animations pause meanwhile
+  printf '%s' "$E[2J$E[H$E[1magents — help$E[0m$NL$NL\
+$E[1mstatus$E[0m$NL\
+ $E[32m⣿$E[0m  idle$NL\
+ $E[33m⠹$E[0m  working (spinner)$NL\
+ $E[31m⣿$E[0m  blocked, waiting for input (blinks)$NL\
+ $E[32m⣿$E[0m  done, not viewed yet (blinks)$NL$NL\
+$E[1mkeys$E[0m$NL\
+ j/k ↑/↓  move selection$NL\
+ Enter/l  jump to agent$NL\
+ q Esc    close sidebar$NL\
+ ?        this help$NL$NL\
+$E[2mpress any key to return$E[0m"
+  IFS= read -rsn1
+  printf '%s' "$E[2J"
+}
+
 # seed from the previous instance's scan for an instant first frame
 [ -f "$CACHE_FILE" ] && cp "$CACHE_FILE" "$SCAN_FILE"
 start_scan
@@ -202,6 +239,7 @@ while :; do
       k) sel=$((sel - 1)) ;;
       q) quit ;;
       l) jump ;;
+      '?') show_help ;;
       '') jump ;;  # Enter
       "$E")
         rest=""

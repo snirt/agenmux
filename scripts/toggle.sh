@@ -42,6 +42,8 @@ if [ -n "$cur" ] && tmux list-panes -a -F '#{pane_id}' | grep -qx "$cur"; then
   tmux select-pane -t "$cur"
 else
   width="$(tmux show-option -gqv @agents-mon-width)"
+  # save layout so follow.sh can restore pane sizes when the sidebar leaves
+  tmux set-option -g "@agents-mon-layout-$(tmux display-message -p '#{window_id}')" "$(tmux display-message -p '#{window_layout}')"
   # -hf: full-height split on the window's left edge
   id="$(tmux split-window -hbf -d -l "${width:-30}" -P -F '#{pane_id}' "bash '$DIR/scripts/sidebar.sh'")"
   tmux set-option -g @agents-mon-sidebar "$id"

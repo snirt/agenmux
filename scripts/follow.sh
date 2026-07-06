@@ -27,5 +27,15 @@ if [ "$width" = "$win_w" ]; then
 else
   tmux set-option -g @agents-mon-last-width "$width"
 fi
+# remember this window's layout so pane sizes can be restored when the
+# sidebar leaves (tmux dumps the freed space onto one adjacent pane)
+tmux set-option -g "@agents-mon-layout-${cur_win}" "$(tmux display-message -p '#{window_layout}')"
 tmux join-pane -hbf -d -l "${width:-30}" -s "$sb" -t "$active"
 tmux resize-pane -t "$sb" -x "${width:-30}"
+# ponytail: restores pre-join layout; manual resizes made while the sidebar
+# was in the window are lost on leave (fails harmlessly if panes changed)
+old_layout="$(tmux show-option -gqv "@agents-mon-layout-${sb_win}")"
+if [ -n "$old_layout" ]; then
+  tmux select-layout -t "$sb_win" "$old_layout" 2>/dev/null
+  tmux set-option -gu "@agents-mon-layout-${sb_win}"
+fi

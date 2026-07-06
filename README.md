@@ -36,7 +36,8 @@ Requirements: tmux, bash, grep, awk, ps. No build step.
 - **Click an agent row** in the sidebar to jump to that agent's pane
   (requires `set -g mouse on`; clicks elsewhere keep default behavior)
 - In the sidebar: `j`/`k` or `↑`/`↓` move the `❯` cursor, `Enter` or `l` jumps to
-  the selected agent, `q` closes the sidebar; the cursor snaps to whichever
+  the selected agent, `?` shows help (statuses + keys), `q` closes the sidebar;
+  the cursor snaps to whichever
   agent pane currently has focus
 - Add `#{agents_mon}` anywhere in `status-right`/`status-left` for the compact
   summary, e.g. `🔴1 🟡2 🟢1` (empty when no agents are running)

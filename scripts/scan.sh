@@ -8,11 +8,12 @@ USER_AGENTS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/tmux-agents-mon/agents"
 
 # ponytail: parallel indexed arrays, bash 3.2 (macOS) has no assoc arrays
 N=0
-declare -a A_NAME A_BINS A_HINTS A_BT A_BS A_WT A_WS A_IS A_ORDER
+declare -a A_NAME A_BINS A_HINTS A_BT A_BS A_WT A_WS A_IS A_ORDER A_TS A_SS
 
 load_conf() {
   AGENT_BINS="" AGENT_PATH_HINTS="" BLOCKED_TITLE="" BLOCKED_SCREEN=""
-  WORKING_TITLE="" WORKING_SCREEN="" IDLE_SCREEN="" CHECK_ORDER=""
+  WORKING_TITLE="" WORKING_SCREEN="" IDLE_SCREEN="" CHECK_ORDER="" TITLE_STRIP=""
+  SUBJECT_SCREEN=""
   . "$1"
   local name idx i=0
   name="$(basename "$1" .conf)"
@@ -30,6 +31,8 @@ load_conf() {
   A_WS[$idx]="$WORKING_SCREEN"
   A_IS[$idx]="$IDLE_SCREEN"
   A_ORDER[$idx]="${CHECK_ORDER:-bt wt bs ws}"
+  A_TS[$idx]="$TITLE_STRIP"
+  A_SS[$idx]="$SUBJECT_SCREEN"
   [ "$idx" = "$N" ] && N=$((N + 1))
 }
 
@@ -136,14 +139,22 @@ detect_state() { # $1=agent idx $2=title $3=screen text -> prints state
 
 # --- commands --------------------------------------------------------------
 
-scan() { # one line per agent pane: pane_id \t loc \t agent \t state \t dir
-  local pane pid cmd path loc title idx state
+scan() { # one line per agent pane: pane_id \t loc \t agent \t state \t dir \t title
+  local pane pid cmd path loc title idx state screen
   PS_CACHE="$(ps -axo pid=,ppid=,command=)"  # one ps per scan; subshells inherit
   while IFS=$'\t' read -r pane pid cmd path loc title; do
     [ -n "${AGENTS_MON_SELF:-}" ] && [ "$pane" = "$AGENTS_MON_SELF" ] && continue  # sidebar skips itself
     idx="$(identify_agent "$pid" "$cmd")" || continue
-    state="$(detect_state "$idx" "$title" "$(tmux capture-pane -p -t "$pane" 2>/dev/null)")"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$pane" "$loc" "${A_NAME[$idx]}" "$state" "${path##*/}"
+    screen="$(tmux capture-pane -p -t "$pane" 2>/dev/null)"
+    state="$(detect_state "$idx" "$title" "$screen")"
+    # subject: drop agent decoration prefix, blank when it just echoes dir/agent
+    [ -n "${A_TS[$idx]}" ] && title="$(printf '%s' "$title" | sed -E "s,${A_TS[$idx]},,")"
+    case "$title" in "${path##*/}"|"${A_NAME[$idx]}") title="" ;; esac
+    # no titled subject (codex idles back to dir) — scrape it off the screen
+    [ -z "$title" ] && [ -n "${A_SS[$idx]}" ] \
+      && title="$(printf '%s\n' "$screen" | sed -nE "s,${A_SS[$idx]},\1,p" | tail -n 1)"
+    title="${title//$'\t'/ }"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$pane" "$loc" "${A_NAME[$idx]}" "$state" "${path##*/}" "$title"
   done <<EOF
 $(tmux list-panes -a -F '#{pane_id}	#{pane_pid}	#{pane_current_command}	#{pane_current_path}	#{session_name}:#{window_index}.#{pane_index}	#{pane_title}')
 EOF
