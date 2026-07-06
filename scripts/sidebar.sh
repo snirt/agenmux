@@ -30,7 +30,7 @@ if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then ESC_WAIT=0.05 READ_WAIT=0.25; else ESC_
 debounced=""
 nrows=0
 sel=1
-SPIN='⣾⣽⣻⢿⡿⣟⣯⣷'   # full-height working frames; done = ⣿ (spinner complete)
+SPIN='⠹⢸⣰⣤⣆⡇⠏⠛'   # 4-dot snake, clockwise; done = ⣿ (spinner complete)
 tick=0
 sel_pane=""  # selection sticks to this pane across rescans until moved
 last_active=""
