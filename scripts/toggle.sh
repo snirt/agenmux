@@ -15,7 +15,7 @@ if [ "$mode" = "popup" ] || [ "$mode" = "float" ]; then
   # remove the pin inside sidebar.sh and end the loop
   while [ -f "$PIN" ]; do
     tmux display-popup -E -w "${width:-40}" -h "${height:-15}" \
-      "AGENTS_MON_PIN='$PIN' bash '$DIR/scripts/sidebar.sh'" || { rm -f "$PIN"; break; }
+      "AGENTS_MON_PIN='$PIN' bash '$DIR/scripts/sidebar.sh'"
     # popup closed for a jump — the client is free now, actually switch
     if [ -f "$PIN.jump" ]; then
       target="$(cat "$PIN.jump")"; rm -f "$PIN.jump"
@@ -23,6 +23,12 @@ if [ "$mode" = "popup" ] || [ "$mode" = "float" ]; then
       [ -n "$client" ] && tmux switch-client -c "$client" -t "$target" 2>/dev/null
       tmux select-window -t "$target"
       tmux select-pane -t "$target"
+    else
+      # If the popup command exits without an explicit jump or quit (for
+      # example the sidebar/helper process was killed), do not reopen it from
+      # the stale pin. The next key trigger will create a fresh popup.
+      rm -f "$PIN"
+      break
     fi
   done
   exit 0

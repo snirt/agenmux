@@ -15,6 +15,9 @@ cleanup() {
   printf '\033[?25h'
   [ -n "${scan_pid:-}" ] && kill "$scan_pid" 2>/dev/null
   rm -f "$STATE_FILE" "$ROWS_FILE" "$SCAN_FILE" "$SCAN_FILE.partial"
+  if [ -n "${AGENTS_MON_PIN:-}" ] && [ ! -f "$AGENTS_MON_PIN.jump" ]; then
+    rm -f "$AGENTS_MON_PIN"
+  fi
   exit 0
 }
 trap cleanup INT TERM EXIT
@@ -26,6 +29,8 @@ printf '\033[?25l\033[2J'
 : > "$STATE_FILE"
 
 E=$'\033'
+C_C=$'\003'
+C_D=$'\004'
 NL=$'\n'
 # arrow keys deliver their bytes together; only a bare Esc hits this timeout.
 # bash >=4 can wait 50ms — old bash 3.2 is stuck with 1s (integer-only -t)
@@ -238,6 +243,8 @@ while :; do
       j) sel=$((sel + 1)) ;;
       k) sel=$((sel - 1)) ;;
       q) quit ;;
+      "$C_C") quit ;;
+      "$C_D") quit ;;
       l) jump ;;
       '?') show_help ;;
       '') jump ;;  # Enter
@@ -255,5 +262,11 @@ while :; do
     [ "$sel" -gt "$nrows" ] && sel=$nrows
     [ "$sel" -lt 1 ] && sel=1
     sync_sel_pane
+  else
+    # Ctrl-D can arrive as EOF rather than a literal byte. Timeouts return
+    # >128; EOF returns 1. Treat EOF as an explicit close so the popup process
+    # exits and toggle.sh can tear down the popup instead of leaving a shell in
+    # the floating window.
+    [ "$?" -eq 1 ] && quit
   fi
 done
