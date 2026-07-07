@@ -201,6 +201,10 @@ jump() {
     printf '%s' "$target" > "$AGENTS_MON_PIN.jump"
     exit 0
   fi
+  # move the sidebar into the target window BEFORE switching the view — the
+  # join-pane reflow happens off-screen, so no flash/bump on arrival. The
+  # select-window/switch-client hooks then no-op (sidebar already there).
+  bash "$DIR/scripts/follow.sh" "$target"
   client="$(tmux list-clients -F '#{client_name}' | head -n 1)"
   [ -n "$client" ] && tmux switch-client -c "$client" -t "$target" 2>/dev/null
   tmux select-window -t "$target"

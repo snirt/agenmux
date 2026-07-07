@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Hook handler: move the sidebar pane into the newly selected window.
+# Optional $1 = target pane: move the sidebar into that pane's window instead
+# of the client's — lets jump/click relocate the sidebar BEFORE switching the
+# view, so the reflow happens off-screen (no visible flash/bump).
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 sb="$(tmux show-option -gqv @agents-mon-sidebar)"
@@ -10,11 +13,14 @@ if ! tmux list-panes -a -F '#{pane_id}' | grep -qx "$sb"; then
   exit 0
 fi
 
-cur_win="$(tmux display-message -p '#{window_id}')"
+active="${1:-$(tmux display-message -p '#{pane_id}')}"
+cur_session="$(tmux display-message -p -t "$active" '#{session_name}')"
+[ "$cur_session" = "pi" ] && exit 0
+
+cur_win="$(tmux display-message -p -t "$active" '#{window_id}')"
 sb_win="$(tmux display-message -p -t "$sb" '#{window_id}')"
 [ "$cur_win" = "$sb_win" ] && exit 0
 
-active="$(tmux display-message -p '#{pane_id}')"
 [ "$active" = "$sb" ] && exit 0
 # keep the sidebar's current width (incl. manual resizes) across moves —
 # unless it fills its window (orphaned after last real pane closed), then
@@ -29,7 +35,7 @@ else
 fi
 # remember this window's layout so pane sizes can be restored when the
 # sidebar leaves (tmux dumps the freed space onto one adjacent pane)
-tmux set-option -g "@agents-mon-layout-${cur_win}" "$(tmux display-message -p '#{window_layout}')"
+tmux set-option -g "@agents-mon-layout-${cur_win}" "$(tmux display-message -p -t "$cur_win" '#{window_layout}')"
 tmux join-pane -hbf -d -l "${width:-30}" -s "$sb" -t "$active"
 tmux resize-pane -t "$sb" -x "${width:-30}"
 # ponytail: restores pre-join layout; manual resizes made while the sidebar
