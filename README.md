@@ -8,7 +8,7 @@ segment show every detected agent and its state:
 - ✦ badge — finished working while you were elsewhere; clears when you view it
 - 🟢 **idle** — waiting at the prompt
 
-Supported out of the box: **Claude Code, Codex, OpenCode, Pi**. Adding an agent
+Supported out of the box: **Claude Code, Codex, Hermes, OpenCode, Pi**. Adding an agent
 is one small config file — no code.
 
 Detection is scraping-only: agents are identified by walking each pane's process

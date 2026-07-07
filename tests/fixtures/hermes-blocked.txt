@@ -1,0 +1,10 @@
+Review required
+
+Dangerous command
+rm -rf ./tmp
+
+Allow once
+Allow for this session
+Deny
+
+↑/↓ to select · enter to confirm · show full command
