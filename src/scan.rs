@@ -21,10 +21,14 @@ pub fn scan(
     cache: &mut IdentCache,
     self_pane: Option<&str>,
 ) -> Result<Vec<PaneRow>, TmuxError> {
+    tmux.sync()?;
     let panes = tmux.run(LIST_FMT)?;
     let mut snap: Option<Snapshot> = None;
     let mut rows = Vec::new();
     let mut seen = IdentCache::new();
+    let buf = format!("agents-mon-{}", std::process::id());
+    let cap = std::env::temp_dir().join(&buf);
+    let mut captured_any = false;
     for line in panes.lines() {
         let mut f = line.splitn(6, '\t');
         let (Some(pane), Some(pid), Some(cmd), Some(path), Some(loc), Some(title)) = (
@@ -53,7 +57,14 @@ pub fn scan(
         let Some(idx) = confs.iter().position(|c| c.name == name) else {
             continue; // conf removed since cached
         };
-        let screen = tmux.run(&format!("capture-pane -p -t '{pane}'"))?;
+        // pane content must never travel over the control pipe: a pane
+        // displaying literal "%end <t> <num>" text (logs, this plugin's own
+        // docs...) would terminate the response block early and desync every
+        // later command. Route it through a buffer + file instead.
+        tmux.run(&format!("capture-pane -b '{buf}' -t '{pane}'"))?;
+        tmux.run(&format!("save-buffer -b '{buf}' '{}'", cap.display()))?;
+        captured_any = true;
+        let screen = std::fs::read_to_string(&cap).unwrap_or_default();
         let state = crate::detect::detect_state(&confs[idx], title, &screen);
         let subject = crate::detect::subject(&confs[idx], title, &screen, path);
         rows.push(PaneRow {
@@ -64,6 +75,10 @@ pub fn scan(
             cwd: path.rsplit('/').next().unwrap_or(path).to_string(),
             title: subject,
         });
+    }
+    if captured_any {
+        let _ = tmux.run(&format!("delete-buffer -b '{buf}'"));
+        let _ = std::fs::remove_file(&cap);
     }
     *cache = seen; // dead panes pruned
     Ok(rows)

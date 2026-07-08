@@ -68,7 +68,22 @@ impl Tmux {
         self.stdin.write_all(cmd.as_bytes())?;
         self.stdin.write_all(b"\n")?;
         self.stdin.flush()?;
-        self.read_block()
+        let r = self.read_block();
+        debug_log(cmd, &r);
+        r
+    }
+
+    /// Resync barrier: discard any stale/unsolicited response blocks (hook
+    /// run-shell results, etc.) until our marker echoes back. Makes the pipe
+    /// self-healing — an off-by-one can survive at most one poll cycle.
+    pub fn sync(&mut self) -> Result<(), TmuxError> {
+        self.stdin.write_all(b"display-message -p am-sync\n")?;
+        self.stdin.flush()?;
+        loop {
+            if self.read_block()? == "am-sync\n" {
+                return Ok(());
+            }
+        }
     }
 
     /// read_line that survives EINTR: SIGWINCH lands mid-read and BufReader
@@ -129,6 +144,20 @@ impl Tmux {
 /// "%begin <time> <num> <flags>" -> num
 fn block_tag(rest: &str) -> &str {
     rest.split_whitespace().nth(1).unwrap_or("")
+}
+
+/// AGENTS_MON_DEBUG=<file>: trace every command/response pair.
+fn debug_log(cmd: &str, r: &Result<String, TmuxError>) {
+    let Ok(path) = std::env::var("AGENTS_MON_DEBUG") else {
+        return;
+    };
+    let summary = match r {
+        Ok(b) => format!("ok {}B {:?}", b.len(), b.chars().take(60).collect::<String>()),
+        Err(e) => format!("ERR {e}"),
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "[{}] {:.60} -> {}", std::process::id(), cmd, summary);
+    }
 }
 
 impl Drop for Tmux {

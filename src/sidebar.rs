@@ -426,17 +426,23 @@ impl Sidebar {
             .arg(follow)
             .arg(&target)
             .status();
-        if let Ok(clients) = self.tmux.run(
-            "list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_name}'",
-        ) {
-            if let Some(client) = clients.lines().next() {
-                let _ = self
-                    .tmux
-                    .run(&format!("switch-client -c '{client}' -t '{target}'"));
-            }
+        // switch/select MUST NOT go over the control pipe: they fire the
+        // plugin's select-window/session hooks, and tmux delivers each hook's
+        // run-shell result to the triggering client as an extra %begin/%end
+        // block — desyncing every later response. Fork plain tmux instead
+        // (jump is rare and user-initiated).
+        let client = self
+            .tmux
+            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_name}'")
+            .ok()
+            .and_then(|c| c.lines().next().map(str::to_string));
+        let mut cmd = std::process::Command::new("tmux");
+        if let Some(client) = &client {
+            cmd.args(["switch-client", "-c", client, "-t", &target, ";"]);
         }
-        let _ = self.tmux.run(&format!("select-window -t '{target}'"));
-        let _ = self.tmux.run(&format!("select-pane -t '{target}'"));
+        let _ = cmd
+            .args(["select-window", "-t", &target, ";", "select-pane", "-t", &target])
+            .status();
         false
     }
 
