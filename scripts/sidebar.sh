@@ -23,7 +23,8 @@ cleanup() {
 trap cleanup INT TERM EXIT
 # resize rewraps the old frame into garbage; clear now — the signal also
 # interrupts the key-loop read, so the next render comes instantly
-trap 'printf "\033[2J"' WINCH
+trap 'printf "\033[2J"; force_render=1' WINCH
+force_render=1
 
 printf '\033[?25l\033[2J'
 : > "$STATE_FILE"
@@ -90,7 +91,7 @@ start_scan() {
 
 scan_tick() { # consume a finished background scan from $SCAN_FILE
   local scan pane loc agent state cwd title prev prev_state ticks show new_state_file active
-  scan="$(cat "$SCAN_FILE")"
+  scan="$(<"$SCAN_FILE")"
   rm -f "$SCAN_FILE"
   printf '%s\n' "$scan" > "$CACHE_FILE"
   active="$(tmux display-message -p -t "$(tmux list-clients -F '#{session_id}' | head -n 1)" '#{pane_id}' 2>/dev/null)"
@@ -235,8 +236,10 @@ $E[2mpress any key to return$E[0m"
 start_scan
 while :; do
   tick=$(( (tick + 1) % 40 ))  # divisible by 8 (spin) and 4 (blink)
-  [ -f "$SCAN_FILE" ] && scan_tick
-  render
+  [ -f "$SCAN_FILE" ] && { scan_tick; force_render=1; }
+  # animated states need every tick; all-idle only redraws on scan/key/resize
+  case "$debounced" in *working*|*blocked*|*done*) force_render=1 ;; esac
+  if [ -n "$force_render" ]; then render; force_render=""; fi
   # relaunch a scan every ~2s once the previous one finished
   if ! kill -0 "$scan_pid" 2>/dev/null && [ ! -f "$SCAN_FILE" ] \
      && [ $((SECONDS - last_scan_start)) -ge 2 ]; then
@@ -266,6 +269,7 @@ while :; do
     [ "$sel" -gt "$nrows" ] && sel=$nrows
     [ "$sel" -lt 1 ] && sel=1
     sync_sel_pane
+    force_render=1
   else
     # Ctrl-D can arrive as EOF rather than a literal byte. Timeouts return
     # >128; EOF returns 1. Treat EOF as an explicit close so the popup process

@@ -140,12 +140,45 @@ detect_state() { # $1=agent idx $2=title $3=screen text -> prints state
 
 # --- commands --------------------------------------------------------------
 
+IDENT_CACHE="${TMPDIR:-/tmp}/agents-mon-ident-cache"
+
+idx_for_name() { # agent name -> index, fails if conf gone
+  local i=0
+  while [ "$i" -lt "$N" ]; do
+    [ "${A_NAME[$i]}" = "$1" ] && { printf '%s' "$i"; return 0; }
+    i=$((i + 1))
+  done
+  return 1
+}
+
 scan() { # one line per agent pane: pane_id \t loc \t agent \t state \t dir \t title
-  local pane pid cmd path loc title idx state screen
-  PS_CACHE="$(ps -axo pid=,ppid=,command=)"  # one ps per scan; subshells inherit
+  local pane pid cmd path loc title idx state screen ident name new_ident=""
+  # identification (ps tree walk) is the expensive half of a scan — reuse last
+  # scan's verdict per pane; pid+cmd in the key invalidates when the pane's
+  # foreground process changes. ponytail: two agents with identical
+  # pane_current_command (e.g. both bare "node") could serve a stale hit
+  ident="
+$([ -f "$IDENT_CACHE" ] && printf '%s' "$(<"$IDENT_CACHE")")"
+  # cold cache: many identifications coming, pre-fork one shared ps
+  [ "$ident" != "
+" ] || PS_CACHE="$(ps -axo pid=,ppid=,command=)"
   while IFS=$'\t' read -r pane pid cmd path loc title; do
     [ -n "${AGENTS_MON_SELF:-}" ] && [ "$pane" = "$AGENTS_MON_SELF" ] && continue  # sidebar skips itself
-    idx="$(identify_agent "$pid" "$cmd")" || continue
+    # leading-\n anchor keeps the match at line start — no fork per pane
+    name=""
+    case "$ident" in *"
+$pane	$pid	$cmd	"*)
+      name="${ident#*"
+$pane	$pid	$cmd	"}"; name="${name%%
+*}" ;;
+    esac
+    if [ -z "$name" ] || { [ "$name" != "-" ] && ! idx_for_name "$name" >/dev/null; }; then
+      if idx="$(identify_agent "$pid" "$cmd")"; then name="${A_NAME[$idx]}"; else name="-"; fi
+    fi
+    new_ident="$new_ident$pane	$pid	$cmd	$name
+"
+    [ "$name" = "-" ] && continue
+    idx="$(idx_for_name "$name")"
     screen="$(tmux capture-pane -p -t "$pane" 2>/dev/null)"
     state="$(detect_state "$idx" "$title" "$screen")"
     # subject: drop agent decoration prefix, blank when it just echoes dir/agent
@@ -162,10 +195,20 @@ scan() { # one line per agent pane: pane_id \t loc \t agent \t state \t dir \t t
   done <<EOF
 $(tmux list-panes -a -F '#{pane_id}	#{pane_pid}	#{pane_current_command}	#{pane_current_path}	#{session_name}:#{window_index}.#{pane_index}	#{pane_title}')
 EOF
+  printf '%s' "$new_ident" > "$IDENT_CACHE"
 }
 
 status() { # compact segment for status-line, empty when no agents
-  scan | awk -F'\t' '
+  local cache="${TMPDIR:-/tmp}/agents-mon-scan-cache" src mtime
+  # sidebar already scans every ~2s and caches the result — reuse it instead
+  # of running a duplicate full scan from the status line
+  mtime="$(stat -f %m "$cache" 2>/dev/null || stat -c %Y "$cache" 2>/dev/null)"
+  if [ -n "$mtime" ] && [ $(( $(date +%s) - mtime )) -lt 6 ]; then
+    src="$(<"$cache")"
+  else
+    src="$(scan)"
+  fi
+  printf '%s\n' "$src" | awk -F'\t' '
     $4 == "blocked" { b++ } $4 == "working" { w++ } $4 == "idle" { i++ }
     END {
       out = ""
