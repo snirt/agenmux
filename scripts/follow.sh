@@ -13,6 +13,22 @@ if ! tmux list-panes -a -F '#{pane_id}' | grep -qx "$sb"; then
   exit 0
 fi
 
+# session switches fire after-select-window AND client-session-changed — two
+# instances race, the loser snapshots a with-sidebar layout that can never be
+# restored, and the window leaks the sidebar's width on every hop. Serialize:
+# waiters re-read state after the lock, so duplicates hit cur_win == sb_win
+# below and no-op.
+LOCK="${TMPDIR:-/tmp}/agents-mon-follow.lock"
+for _ in $(seq 20); do
+  mkdir "$LOCK" 2>/dev/null && { locked=1; break; }
+  pid="$(cat "$LOCK/pid" 2>/dev/null)"
+  [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null && rm -rf "$LOCK"
+  sleep 0.1
+done
+[ -n "${locked:-}" ] || exit 0
+echo $$ > "$LOCK/pid"
+trap 'rm -rf "$LOCK"' EXIT
+
 active="${1:-$(tmux display-message -p '#{pane_id}')}"
 cur_session="$(tmux display-message -p -t "$active" '#{session_name}')"
 [ "$cur_session" = "pi" ] && exit 0

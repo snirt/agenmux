@@ -6,7 +6,19 @@
 # because an orphaned sidebar exists in another window/session.
 sb="$(tmux show-option -gqv @agents-mon-sidebar)"
 [ -n "$sb" ] || exit 0
-win="$(tmux display-message -p -t "$sb" '#{window_id}' 2>/dev/null)" || exit 0
+win="$(tmux display-message -p -t "$sb" '#{window_id}' 2>/dev/null)"
+if [ -z "$win" ]; then
+  # sidebar died (q/Esc) — without this, the freed width lands on one
+  # neighbor and the skewed sizes get re-saved as "clean" on the next visit
+  tmux show-options -g 2>/dev/null | sed -n 's/^\(@agents-mon-layout-@[0-9]*\) .*/\1/p' |
+    while read -r opt; do
+      tmux select-layout -t "${opt#@agents-mon-layout-}" \
+        "$(tmux show-option -gqv "$opt")" 2>/dev/null
+      tmux set-option -gu "$opt"
+    done
+  tmux set-option -gu @agents-mon-sidebar
+  exit 0
+fi
 [ "$(tmux list-panes -t "$win" -F x | wc -l)" -eq 1 ] || exit 0
 
 session="$(tmux display-message -p -t "$sb" '#{session_id}')"
@@ -18,7 +30,7 @@ while IFS= read -r client; do
   [ "$client_win" = "$win" ] && clients="$clients$client
 "
 done <<EOF
-$(tmux list-clients -F '#{client_name}')
+$(tmux list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_name}')
 EOF
 
 [ -n "$clients" ] || exit 0

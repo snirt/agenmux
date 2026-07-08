@@ -3,6 +3,15 @@
 # or floating popup (set -g @agents-mon-display 'popup'; stays until q/Esc).
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# prefer the Rust binary when built; bash sidebar otherwise
+BIN="$(tmux show-option -gqv @agents-mon-bin)"
+[ -n "$BIN" ] || BIN="$DIR/target/release/agents-mon"
+if [ -x "$BIN" ]; then
+  SIDEBAR_CMD="'$BIN' sidebar"
+else
+  SIDEBAR_CMD="bash '$DIR/scripts/sidebar.sh'"
+fi
+
 # mode from arg (bound key) or @agents-mon-display; default split sidebar
 mode="${1:-$(tmux show-option -gqv @agents-mon-display)}"
 if [ "$mode" = "popup" ] || [ "$mode" = "float" ]; then
@@ -15,11 +24,11 @@ if [ "$mode" = "popup" ] || [ "$mode" = "float" ]; then
   # remove the pin inside sidebar.sh and end the loop
   while [ -f "$PIN" ]; do
     tmux display-popup -E -w "${width:-40}" -h "${height:-15}" \
-      "AGENTS_MON_PIN='$PIN' bash '$DIR/scripts/sidebar.sh'"
+      "AGENTS_MON_PIN='$PIN' $SIDEBAR_CMD"
     # popup closed for a jump — the client is free now, actually switch
     if [ -f "$PIN.jump" ]; then
       target="$(cat "$PIN.jump")"; rm -f "$PIN.jump"
-      client="$(tmux list-clients -F '#{client_name}' | head -n 1)"
+      client="$(tmux list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_name}' | head -n 1)"
       [ -n "$client" ] && tmux switch-client -c "$client" -t "$target" 2>/dev/null
       tmux select-window -t "$target"
       tmux select-pane -t "$target"
@@ -51,7 +60,7 @@ else
   # save layout so follow.sh can restore pane sizes when the sidebar leaves
   tmux set-option -g "@agents-mon-layout-$(tmux display-message -p '#{window_id}')" "$(tmux display-message -p '#{window_layout}')"
   # -hf: full-height split on the window's left edge
-  id="$(tmux split-window -hbf -d -l "${width:-30}" -P -F '#{pane_id}' "bash '$DIR/scripts/sidebar.sh'")"
+  id="$(tmux split-window -hbf -d -l "${width:-30}" -P -F '#{pane_id}' "$SIDEBAR_CMD")"
   tmux set-option -g @agents-mon-sidebar "$id"
   tmux select-pane -t "$id"
   # follow window/session switches

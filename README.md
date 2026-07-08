@@ -29,6 +29,16 @@ to `~/.tmux.conf`.
 
 Requirements: tmux, bash, grep, awk, ps. No build step.
 
+### Optional: Rust engine
+
+`make build` (needs [cargo](https://rustup.rs)) compiles a native engine that
+replaces the bash scan/sidebar hot path — same behavior, ~10x less CPU (one
+persistent tmux control-mode connection instead of hundreds of forks per
+refresh). The plugin picks it up automatically on the next toggle; without it,
+everything keeps running in bash. `@agents-mon-bin` overrides the binary path.
+Agent detection stays in `agents/*.conf` either way — adding or tuning agents
+never needs a rebuild.
+
 ## Usage
 
 - `prefix + A` — toggle the sidebar (left split, auto-refreshes every 2s);

@@ -13,7 +13,7 @@ case "$target" in
   %*)
     # relocate the sidebar off-screen first — no visible reflow after switch
     bash "$DIR/scripts/follow.sh" "$target"
-    client="$(tmux list-clients -F '#{client_name}' | head -n 1)"
+    client="$(tmux list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_name}' | head -n 1)"
     [ -n "$client" ] && tmux switch-client -c "$client" -t "$target" 2>/dev/null
     tmux select-window -t "$target"
     tmux select-pane -t "$target"

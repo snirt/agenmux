@@ -1,0 +1,13 @@
+[package]
+name = "agents-mon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+regex = "1"
+libc = "0.2"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
+[profile.release]
+strip = true
+lto = true

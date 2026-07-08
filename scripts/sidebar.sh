@@ -94,7 +94,7 @@ scan_tick() { # consume a finished background scan from $SCAN_FILE
   scan="$(<"$SCAN_FILE")"
   rm -f "$SCAN_FILE"
   printf '%s\n' "$scan" > "$CACHE_FILE"
-  active="$(tmux display-message -p -t "$(tmux list-clients -F '#{session_id}' | head -n 1)" '#{pane_id}' 2>/dev/null)"
+  active="$(tmux display-message -p -t "$(tmux list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{session_id}' | head -n 1)" '#{pane_id}' 2>/dev/null)"
 
   # idle debounce: show idle only after 2 consecutive idle ticks (redraws
   # flash idle-looking frames mid-render — ccmanager lesson)
@@ -147,7 +147,7 @@ EOF
   # otherwise it stays where j/k left it
   # active pane of the client's current session (session id is target-safe
   # even when session names contain spaces/colons)
-  client="$(tmux list-clients -F '#{session_id}' | head -n 1)"
+  client="$(tmux list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{session_id}' | head -n 1)"
   active="$(tmux display-message -p -t "$client" '#{pane_id}' 2>/dev/null)"
   if [ -n "$active" ] && [ "$active" != "$last_active" ]; then
     idx="$(printf '%s' "$debounced" | awk -F'\t' -v p="$active" '$1 == p { print NR; exit }')"
@@ -206,7 +206,7 @@ jump() {
   # join-pane reflow happens off-screen, so no flash/bump on arrival. The
   # select-window/switch-client hooks then no-op (sidebar already there).
   bash "$DIR/scripts/follow.sh" "$target"
-  client="$(tmux list-clients -F '#{client_name}' | head -n 1)"
+  client="$(tmux list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_name}' | head -n 1)"
   [ -n "$client" ] && tmux switch-client -c "$client" -t "$target" 2>/dev/null
   tmux select-window -t "$target"
   tmux select-pane -t "$target"

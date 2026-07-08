@@ -47,7 +47,14 @@ elif [ -n "$(tmux show-options -gq @agents-mon-hide-windows)" ]; then
 fi
 
 # replace #{agents_mon} placeholder in status-left/right with the live segment
-seg="#(bash $CURRENT_DIR/scripts/scan.sh status)"
+# (Rust binary when built — see `make build`; bash fallback otherwise)
+BIN="$(tmux show-option -gqv @agents-mon-bin)"
+[ -n "$BIN" ] || BIN="$CURRENT_DIR/target/release/agents-mon"
+if [ -x "$BIN" ]; then
+  seg="#($BIN status)"
+else
+  seg="#(bash $CURRENT_DIR/scripts/scan.sh status)"
+fi
 for opt in status-left status-right; do
   v="$(tmux show-option -gqv "$opt")"
   case "$v" in
