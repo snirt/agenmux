@@ -6,8 +6,10 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # prefer the Rust binary when built; bash sidebar otherwise
 BIN="$(tmux show-option -gqv @agents-mon-bin)"
 [ -n "$BIN" ] || BIN="$DIR/target/release/agents-mon"
+# command must start with a bare word: tmux hands it to default-shell,
+# and e.g. nushell rejects a quoted token in command position
 if [ -x "$BIN" ]; then
-  SIDEBAR_CMD="'$BIN' sidebar"
+  SIDEBAR_CMD="bash -c \"'$BIN' sidebar\""
 else
   SIDEBAR_CMD="bash '$DIR/scripts/sidebar.sh'"
 fi
