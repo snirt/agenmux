@@ -71,6 +71,18 @@ impl Tmux {
         self.read_block()
     }
 
+    /// read_line that survives EINTR: SIGWINCH lands mid-read and BufReader
+    /// does not retry Interrupted — aborting here would desync the pipe
+    /// (every later command pairs with the wrong response block).
+    fn read_line_retry(&mut self, line: &mut String) -> std::io::Result<usize> {
+        loop {
+            match self.rdr.read_line(line) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                r => return r,
+            }
+        }
+    }
+
     /// Read until a complete %begin..%end/%error block; returns its body.
     /// Lines outside a block are notifications (%exit => Exited).
     fn read_block(&mut self) -> Result<String, TmuxError> {
@@ -78,7 +90,7 @@ impl Tmux {
         // wait for %begin
         let tag = loop {
             line.clear();
-            if self.rdr.read_line(&mut line)? == 0 {
+            if self.read_line_retry(&mut line)? == 0 {
                 return Err(TmuxError::Exited);
             }
             let l = line.trim_end_matches(['\n', '\r']);
@@ -95,7 +107,7 @@ impl Tmux {
         let mut body = String::new();
         loop {
             line.clear();
-            if self.rdr.read_line(&mut line)? == 0 {
+            if self.read_line_retry(&mut line)? == 0 {
                 return Err(TmuxError::Exited);
             }
             let l = line.trim_end_matches(['\n', '\r']);

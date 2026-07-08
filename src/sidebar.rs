@@ -198,8 +198,10 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         if now >= next_scan {
             match sb.scan_tick() {
                 Ok(()) => {}
-                Err(TmuxError::Exited) => break,
-                Err(_) => {}
+                // a pipe I/O error can leave a response block half-read —
+                // the pipe is desynced, restarting is the only safe move
+                Err(TmuxError::Exited) | Err(TmuxError::Io(_)) => break,
+                Err(TmuxError::Error(_)) => {} // e.g. pane died mid-scan
             }
             next_scan = now + Duration::from_secs(2);
             sb.render(false);
