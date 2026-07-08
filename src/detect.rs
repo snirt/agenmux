@@ -5,7 +5,9 @@ use crate::conf::{AgentConf, Check};
 pub fn detect_state(conf: &AgentConf, title: &str, screen: &str) -> &'static str {
     let lines: Vec<&str> = screen.lines().collect();
     let start = lines.len().saturating_sub(20);
-    let tail = lines[start..].join("\n");
+    // NBSP -> space: agents pad prompt lines with U+00A0, which Rust's
+    // ASCII-only [[:space:]] would miss (breaks the idle-prompt guard)
+    let tail = lines[start..].join("\n").replace('\u{a0}', " ");
     for c in &conf.check_order {
         let hit = match c {
             Check::Bt => m(&conf.blocked_title, title).then_some("blocked"),
