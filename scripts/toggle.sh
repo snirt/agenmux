@@ -63,6 +63,8 @@ else
   tmux set-option -g "@agents-mon-layout-$(tmux display-message -p '#{window_id}')" "$(tmux display-message -p '#{window_layout}')"
   # -hf: full-height split on the window's left edge
   id="$(tmux split-window -hbf -d -l "${width:-30}" -P -F '#{pane_id}' "$SIDEBAR_CMD")"
+  tmux set-option -p -t "$id" allow-rename off
+  tmux select-pane -t "$id" -T 'agents-mon'
   tmux set-option -g @agents-mon-sidebar "$id"
   tmux select-pane -t "$id"
   # follow window/session switches
