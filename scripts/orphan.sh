@@ -12,11 +12,17 @@ if [ -z "$win" ]; then
   # neighbor and the skewed sizes get re-saved as "clean" on the next visit
   tmux show-options -g 2>/dev/null | sed -n 's/^\(@agents-mon-layout-@[0-9]*\) .*/\1/p' |
     while read -r opt; do
-      tmux select-layout -t "${opt#@agents-mon-layout-}" \
-        "$(tmux show-option -gqv "$opt")" 2>/dev/null
+      lay="$(tmux show-option -gqv "$opt")"
+      win="${opt#@agents-mon-layout-}"
+      # size-mismatched restores leave dead (dotted) window area — skip them
+      size="${lay#*,}"; size="${size%%,*}"
+      [ "$size" = "$(tmux display-message -p -t "$win" '#{window_width}x#{window_height}' 2>/dev/null)" ] \
+        && tmux select-layout -t "$win" "$lay" 2>/dev/null
       tmux set-option -gu "$opt"
     done
   tmux set-option -gu @agents-mon-sidebar
+  tmux set-option -gu @agents-mon-sidebar-win
+  tmux set-option -gu @agents-mon-prev-win
   exit 0
 fi
 [ "$(tmux list-panes -t "$win" -F x | wc -l)" -eq 1 ] || exit 0

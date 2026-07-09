@@ -1,6 +1,7 @@
 // tmux control-mode client: one persistent pipe, commands in, framed
 // responses out. Replaces one fork per tmux command with a write+read.
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::io::AsRawFd;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 pub enum TmuxError {
@@ -86,6 +87,43 @@ impl Tmux {
         }
     }
 
+    /// Pipe fd for the caller's poll loop — readable means notifications
+    /// (or a stale block) are queued.
+    pub fn fd(&self) -> libc::c_int {
+        self.rdr.get_ref().as_raw_fd()
+    }
+
+    /// Data already sitting in the BufReader — poll on fd() alone would miss it.
+    pub fn buffered(&self) -> bool {
+        !self.rdr.buffer().is_empty()
+    }
+
+    /// Consume queued notification lines without blocking; true when one of
+    /// them signals a focus change (active pane/window/session moved).
+    /// Stale %begin blocks (hook run-shell results) are consumed line by
+    /// line here too — the next sync() barrier realigns the pipe anyway.
+    pub fn drain_notifications(&mut self) -> Result<bool, TmuxError> {
+        let mut focus = false;
+        while self.buffered() || fd_readable(self.fd()) {
+            let mut line = String::new();
+            if self.read_line_retry(&mut line)? == 0 {
+                return Err(TmuxError::Exited);
+            }
+            let l = line.trim_end_matches(['\n', '\r']);
+            if l.starts_with("%exit") {
+                return Err(TmuxError::Exited);
+            }
+            if l.starts_with("%window-pane-changed")
+                || l.starts_with("%session-window-changed")
+                || l.starts_with("%session-changed")
+                || l.starts_with("%client-session-changed")
+            {
+                focus = true;
+            }
+        }
+        Ok(focus)
+    }
+
     /// read_line that survives EINTR: SIGWINCH lands mid-read and BufReader
     /// does not retry Interrupted — aborting here would desync the pipe
     /// (every later command pairs with the wrong response block).
@@ -139,6 +177,16 @@ impl Tmux {
             body.push('\n');
         }
     }
+}
+
+/// fd readable right now (0ms poll)?
+fn fd_readable(fd: libc::c_int) -> bool {
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    unsafe { libc::poll(&mut p, 1, 0) > 0 && p.revents & libc::POLLIN != 0 }
 }
 
 /// "%begin <time> <num> <flags>" -> num

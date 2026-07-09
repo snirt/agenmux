@@ -72,6 +72,32 @@ fn poll_stdin(timeout: Option<Duration>) -> bool {
     unsafe { libc::poll(&mut fds, 1, ms) > 0 && fds.revents & libc::POLLIN != 0 }
 }
 
+/// poll stdin + the tmux control pipe; returns (key_ready, pipe_ready).
+/// pipe_buffered short-circuits the wait — data is already in the BufReader.
+fn poll_inputs(pipe_fd: libc::c_int, pipe_buffered: bool, timeout: Duration) -> (bool, bool) {
+    let mut fds = [
+        libc::pollfd {
+            fd: 0,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: pipe_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    let ms = if pipe_buffered {
+        0
+    } else {
+        timeout.as_millis().min(i32::MAX as u128) as i32
+    };
+    let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, ms) };
+    let key = n > 0 && fds[0].revents & libc::POLLIN != 0;
+    let pipe = pipe_buffered || (n > 0 && fds[1].revents & libc::POLLIN != 0);
+    (key, pipe)
+}
+
 /// Read one byte; None on EOF or error.
 fn read_byte() -> Option<u8> {
     let mut b = [0u8; 1];
@@ -216,7 +242,17 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         } else {
             next_scan.saturating_duration_since(now)
         };
-        if poll_stdin(Some(wake)) {
+        let (key_ready, pipe_ready) = poll_inputs(sb.tmux.fd(), sb.tmux.buffered(), wake);
+        if pipe_ready {
+            // focus notification (%window-pane-changed etc.) — rescan now so
+            // the cursor snaps to the newly focused pane without the 2s wait
+            match sb.tmux.drain_notifications() {
+                Ok(true) => next_scan = Instant::now(),
+                Ok(false) => {}
+                Err(_) => break,
+            }
+        }
+        if key_ready {
             match read_key() {
                 Key::Down => sb.move_sel(1),
                 Key::Up => sb.move_sel(-1),
@@ -263,24 +299,6 @@ fn cleanup(rows_file: &PathBuf, pin: &Option<String>) {
 
 impl Sidebar {
     fn scan_tick(&mut self) -> Result<(), TmuxError> {
-        // remember current width so follow.sh can restore it after the
-        // sidebar gets orphaned full-width (skip popup mode)
-        if self.pin.is_none() && !self.self_pane.is_empty() {
-            if let Ok(out) = self.tmux.run(&format!(
-                "display-message -p -t '{}' '#{{pane_width}} #{{window_width}}'",
-                self.self_pane
-            )) {
-                let mut it = out.split_whitespace();
-                if let (Some(w), Some(ww)) = (it.next(), it.next()) {
-                    if w != ww {
-                        let _ = self
-                            .tmux
-                            .run(&format!("set-option -g @agents-mon-last-width {w}"));
-                    }
-                }
-            }
-        }
-
         let scanned = scan::scan(
             &mut self.tmux,
             &self.confs,
@@ -431,11 +449,22 @@ impl Sidebar {
         // run-shell result to the triggering client as an extra %begin/%end
         // block — desyncing every later response. Fork plain tmux instead
         // (jump is rare and user-initiated).
+        // pick the most recently active client — with several terminals
+        // attached, the first listed one may not be the one the user is
+        // looking at (and the 'focused' flag sticks on all of them)
         let client = self
             .tmux
-            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_name}'")
+            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_activity} #{client_name}'")
             .ok()
-            .and_then(|c| c.lines().next().map(str::to_string));
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| {
+                        let (act, name) = l.split_once(' ')?;
+                        Some((act.parse::<u64>().ok()?, name.to_string()))
+                    })
+                    .max_by_key(|(act, _)| *act)
+                    .map(|(_, name)| name)
+            });
         let mut cmd = std::process::Command::new("tmux");
         if let Some(client) = &client {
             cmd.args(["switch-client", "-c", client, "-t", &target, ";"]);

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Mouse click handler: in the sidebar, jump to the clicked agent's pane;
 # anywhere else, replicate tmux's default click (select pane + pass through).
-# Args: $1 = clicked #{pane_id}, $2 = #{mouse_y}
-pane="$1" y="$2"
+# Args: $1 = clicked #{pane_id}, $2 = #{mouse_y}, $3 = #{client_name} (the
+# clicking client — exact, unlike any post-hoc guess)
+pane="$1" y="$2" client="$3"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ROWS_FILE="${TMPDIR:-/tmp}/agents-mon-rows-${pane#%}"
 
@@ -13,7 +14,7 @@ case "$target" in
   %*)
     # relocate the sidebar off-screen first — no visible reflow after switch
     bash "$DIR/scripts/follow.sh" "$target"
-    client="$(tmux list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_name}' | head -n 1)"
+    [ -n "$client" ] || client="$(bash "$DIR/scripts/client.sh")"
     [ -n "$client" ] && tmux switch-client -c "$client" -t "$target" 2>/dev/null
     tmux select-window -t "$target"
     tmux select-pane -t "$target"
