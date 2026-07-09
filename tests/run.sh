@@ -4,20 +4,32 @@
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0 count=0
 
-for fx in "$DIR"/tests/fixtures/*.txt; do
-  base="$(basename "$fx" .txt)"
-  agent="${base%%-*}"
-  expected="${base#*-}"; expected="${expected%%-*}"
-  title=""
-  [ -f "${fx%.txt}.title" ] && title="$(cat "${fx%.txt}.title")"
-  got="$(bash "$DIR/scripts/scan.sh" detect "$DIR/agents/$agent.conf" "$fx" "$title")"
-  count=$((count + 1))
-  if [ "$got" = "$expected" ]; then
-    echo "ok   $base"
-  else
-    echo "FAIL $base: expected $expected, got $got"
-    fail=1
-  fi
+# fixtures run against bash, and against the Rust engine when built —
+# both stay honest
+engines="bash"
+BIN="${AGENTS_MON_BIN:-$DIR/target/release/agents-mon}"
+[ -x "$BIN" ] && engines="bash rust"
+
+for engine in $engines; do
+  for fx in "$DIR"/tests/fixtures/*.txt; do
+    base="$(basename "$fx" .txt)"
+    agent="${base%%-*}"
+    expected="${base#*-}"; expected="${expected%%-*}"
+    title=""
+    [ -f "${fx%.txt}.title" ] && title="$(cat "${fx%.txt}.title")"
+    if [ "$engine" = rust ]; then
+      got="$("$BIN" detect "$DIR/agents/$agent.conf" "$fx" "$title")"
+    else
+      got="$(bash "$DIR/scripts/scan.sh" detect "$DIR/agents/$agent.conf" "$fx" "$title")"
+    fi
+    count=$((count + 1))
+    if [ "$got" = "$expected" ]; then
+      echo "ok   $base ($engine)"
+    else
+      echo "FAIL $base ($engine): expected $expected, got $got"
+      fail=1
+    fi
+  done
 done
 
 echo "$count fixtures"
@@ -56,7 +68,7 @@ case "$*" in
   "display-message -p -t %99 #{window_id}") printf '@sb\n' ;;
   "list-panes -t @sb -F x") printf 'x\n' ;;
   "display-message -p -t %99 #{session_id}") printf 's1\n' ;;
-  "list-clients -F #{client_name}") printf 'c1\n' ;;
+  "list-clients "*"-F #{client_name}") printf 'c1\n' ;;
   "display-message -p -c c1 #{window_id}") printf '@other\n' ;;
 esac
 exit 0
@@ -83,7 +95,7 @@ case "$*" in
   "display-message -p -t %99 #{window_id}") printf '@sb\n' ;;
   "list-panes -t @sb -F x") printf 'x\n' ;;
   "display-message -p -t %99 #{session_id}") printf 's1\n' ;;
-  "list-clients -F #{client_name}") printf 'c1\n' ;;
+  "list-clients "*"-F #{client_name}") printf 'c1\n' ;;
   "display-message -p -c c1 #{window_id}") printf '@sb\n' ;;
   "list-windows -t s1 -F #{window_id}\t#{window_last_flag}") printf '@sb\t0\n@last\t1\n' ;;
   "list-windows -t s1 -F #{window_id}") printf '@sb\n@last\n' ;;

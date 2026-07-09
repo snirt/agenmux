@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Hook handler: move the sidebar pane into the newly selected window.
-# Optional $1 = target pane: move the sidebar into that pane's window instead
-# of the client's — lets jump/click relocate the sidebar BEFORE switching the
-# view, so the reflow happens off-screen (no visible flash/bump).
+# Move the sidebar pane into a target window. Used by the jump path
+# (sidebar.rs/click.sh/toggle.sh) to relocate the sidebar BEFORE switching
+# the view, so the reflow happens off-screen (no visible flash/bump), and as
+# the follow-hook fallback on tmux < 3.2 (hooks.sh installs a native,
+# in-server follow on newer tmux).
+# Optional $1 = target pane; defaults to the client's active pane.
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 sb="$(tmux show-option -gqv @agents-mon-sidebar)"
@@ -22,26 +24,17 @@ sb_win="$(tmux display-message -p -t "$sb" '#{window_id}')"
 [ "$cur_win" = "$sb_win" ] && exit 0
 
 [ "$active" = "$sb" ] && exit 0
-# keep the sidebar's current width (incl. manual resizes) across moves —
-# unless it fills its window (orphaned after last real pane closed), then
-# use the last remembered width instead
-width="$(tmux display-message -p -t "$sb" '#{pane_width}')"
-win_w="$(tmux display-message -p -t "$sb" '#{window_width}')"
-if [ "$width" = "$win_w" ]; then
-  width="$(tmux show-option -gqv @agents-mon-last-width)"
-  [ -n "$width" ] || width="$(tmux show-option -gqv @agents-mon-width)"
-else
-  tmux set-option -g @agents-mon-last-width "$width"
-fi
+# ponytail: fixed width from @agents-mon-width only — the pane's current
+# width can't be trusted as user intent: window resizes (e.g. two clients
+# of different sizes, window-size latest) rescale panes proportionally, and
+# remembering that scaled width ratchets the sidebar wider on every bounce
+width="$(tmux show-option -gqv @agents-mon-width)"
 # remember this window's layout so pane sizes can be restored when the
 # sidebar leaves (tmux dumps the freed space onto one adjacent pane)
 tmux set-option -g "@agents-mon-layout-${cur_win}" "$(tmux display-message -p -t "$cur_win" '#{window_layout}')"
 tmux join-pane -hbf -d -l "${width:-30}" -s "$sb" -t "$active"
 tmux resize-pane -t "$sb" -x "${width:-30}"
+tmux set-option -g @agents-mon-sidebar-win "$cur_win"
 # ponytail: restores pre-join layout; manual resizes made while the sidebar
 # was in the window are lost on leave (fails harmlessly if panes changed)
-old_layout="$(tmux show-option -gqv "@agents-mon-layout-${sb_win}")"
-if [ -n "$old_layout" ]; then
-  tmux select-layout -t "$sb_win" "$old_layout" 2>/dev/null
-  tmux set-option -gu "@agents-mon-layout-${sb_win}"
-fi
+bash "$DIR/scripts/restore.sh" "$sb_win"

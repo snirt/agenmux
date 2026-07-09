@@ -3,10 +3,10 @@
 Monitor AI coding agents running in your tmux panes. A sidebar and a status-line
 segment show every detected agent and its state:
 
-- 🔴 **blocked** — waiting for your input (permission prompt, menu)
-- 🟡 **working** — actively running
-- ✦ badge — finished working while you were elsewhere; clears when you view it
-- 🟢 **idle** — waiting at the prompt
+- red `⣿` (blinks) — **blocked**, waiting for your input (permission prompt, menu)
+- yellow spinner `⠹` — **working**, actively running
+- green `⣿` (blinks) — **done**, finished while you were elsewhere; clears when you view it
+- green `⣿` — **idle**, waiting at the prompt
 
 Supported out of the box: **Claude Code, Codex, Hermes, OpenCode, Pi**. Adding an agent
 is one small config file — no code.
@@ -29,6 +29,17 @@ to `~/.tmux.conf`.
 
 Requirements: tmux, bash, grep, awk, ps. No build step.
 
+### Optional: Rust engine
+
+A native engine replaces the bash scan/sidebar hot path — same behavior, ~10x
+less CPU (one persistent tmux control-mode connection instead of hundreds of
+forks per refresh). If [cargo](https://rustup.rs) is installed, the plugin
+builds it automatically in the background on load/toggle and picks it up on the
+next toggle; `make build` does the same by hand. Without cargo, everything
+keeps running in bash. `@agents-mon-bin` overrides the binary path.
+Agent detection stays in `agents/*.conf` either way — adding or tuning agents
+never needs a rebuild.
+
 ## Usage
 
 - `prefix + A` — toggle the sidebar (left split, auto-refreshes every 2s);
@@ -38,9 +49,11 @@ Requirements: tmux, bash, grep, awk, ps. No build step.
 - In the sidebar: `j`/`k` or `↑`/`↓` move the `❯` cursor, `Enter` or `l` jumps to
   the selected agent, `?` shows help (statuses + keys), `q` closes the sidebar;
   the cursor snaps to whichever
-  agent pane currently has focus
+  agent pane currently has focus (instantly with the Rust engine — it reacts
+  to tmux focus events)
 - Add `#{agents_mon}` anywhere in `status-right`/`status-left` for the compact
-  summary, e.g. `🔴1 🟡2 🟢1` (empty when no agents are running)
+  summary, e.g. `⣿1 ⣾2 ⣿1` colored red/yellow/green for blocked/working/idle
+  (empty when no agents are running)
 
 ```tmux
 set -g status-right '#{agents_mon} | %H:%M'
@@ -71,6 +84,8 @@ Click-to-jump works in split mode only; keyboard jump works in both.
 scripts/scan.sh list    # pane_id  session:win.pane  agent  state  dir
 scripts/scan.sh status  # the status-line segment
 ```
+
+The Rust binary exposes the same commands: `target/release/agents-mon list|status`.
 
 ## Adding / overriding agents
 

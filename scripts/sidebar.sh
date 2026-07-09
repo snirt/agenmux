@@ -76,14 +76,7 @@ color_dot() { # sets $dot — no subshell, render runs hot
 scan_pid=""
 last_scan_start=0
 start_scan() {
-  { # remember current width so follow.sh can restore it after the sidebar
-    # gets orphaned full-width (skip popup mode and the full-width state)
-    if [ -z "${AGENTS_MON_PIN:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
-      w="$(tmux display-message -p -t "$TMUX_PANE" '#{pane_width}' 2>/dev/null)"
-      ww="$(tmux display-message -p -t "$TMUX_PANE" '#{window_width}' 2>/dev/null)"
-      [ -n "$w" ] && [ "$w" != "$ww" ] && tmux set-option -g @agents-mon-last-width "$w"
-    fi
-    bash "$DIR/scripts/scan.sh" list > "$SCAN_FILE.partial" 2>/dev/null \
+  { bash "$DIR/scripts/scan.sh" list > "$SCAN_FILE.partial" 2>/dev/null \
       && mv "$SCAN_FILE.partial" "$SCAN_FILE"; } &
   scan_pid=$!
   last_scan_start=$SECONDS
@@ -94,7 +87,7 @@ scan_tick() { # consume a finished background scan from $SCAN_FILE
   scan="$(<"$SCAN_FILE")"
   rm -f "$SCAN_FILE"
   printf '%s\n' "$scan" > "$CACHE_FILE"
-  active="$(tmux display-message -p -t "$(tmux list-clients -F '#{session_id}' | head -n 1)" '#{pane_id}' 2>/dev/null)"
+  active="$(tmux display-message -p -t "$(bash "$DIR/scripts/client.sh" '#{session_id}')" '#{pane_id}' 2>/dev/null)"
 
   # idle debounce: show idle only after 2 consecutive idle ticks (redraws
   # flash idle-looking frames mid-render — ccmanager lesson)
@@ -147,7 +140,7 @@ EOF
   # otherwise it stays where j/k left it
   # active pane of the client's current session (session id is target-safe
   # even when session names contain spaces/colons)
-  client="$(tmux list-clients -F '#{session_id}' | head -n 1)"
+  client="$(bash "$DIR/scripts/client.sh" '#{session_id}')"
   active="$(tmux display-message -p -t "$client" '#{pane_id}' 2>/dev/null)"
   if [ -n "$active" ] && [ "$active" != "$last_active" ]; then
     idx="$(printf '%s' "$debounced" | awk -F'\t' -v p="$active" '$1 == p { print NR; exit }')"
@@ -206,7 +199,7 @@ jump() {
   # join-pane reflow happens off-screen, so no flash/bump on arrival. The
   # select-window/switch-client hooks then no-op (sidebar already there).
   bash "$DIR/scripts/follow.sh" "$target"
-  client="$(tmux list-clients -F '#{client_name}' | head -n 1)"
+  client="$(bash "$DIR/scripts/client.sh")"
   [ -n "$client" ] && tmux switch-client -c "$client" -t "$target" 2>/dev/null
   tmux select-window -t "$target"
   tmux select-pane -t "$target"

@@ -15,22 +15,17 @@ tmux list-windows -a -F '#{window_id}' 2>/dev/null | while read -r w; do
   tmux set-option -wu -t "$w" @agents-mon-sidebar 2>/dev/null
 done
 
-# config reloads may clear hooks — re-install follow if a sidebar is open
+# config reloads may clear hooks — re-install them if a sidebar is open
 sb="$(tmux show-option -gqv @agents-mon-sidebar)"
 if [ -n "$sb" ] && tmux list-panes -a -F '#{pane_id}' | grep -qx "$sb"; then
-  tmux set-hook -g 'after-select-window[42]' "run-shell 'bash $CURRENT_DIR/scripts/follow.sh'"
-  tmux set-hook -g 'client-session-changed[42]' "run-shell 'bash $CURRENT_DIR/scripts/follow.sh'"
-  # pane-exited misses kill-pane; window-pane-changed catches it (guarded, so
-  # double-firing is harmless)
-  tmux set-hook -g 'pane-exited[42]' "run-shell 'bash $CURRENT_DIR/scripts/orphan.sh'"
-  tmux set-hook -g 'window-pane-changed[42]' "run-shell 'bash $CURRENT_DIR/scripts/orphan.sh'"
+  bash "$CURRENT_DIR/scripts/hooks.sh"
 fi
 
 # click a sidebar row -> jump to that agent; any other pane keeps the native
 # click behavior (mouse event stays intact — no run-shell detour)
 if [ "$(tmux show-option -gv mouse)" = "on" ]; then
   tmux bind-key -n MouseDown1Pane if-shell -F '#{==:#{pane_id},#{@agents-mon-sidebar}}' \
-    "run-shell -b \"bash '$CURRENT_DIR/scripts/click.sh' '#{pane_id}' '#{mouse_y}'\"" \
+    "run-shell -b \"bash '$CURRENT_DIR/scripts/click.sh' '#{pane_id}' '#{mouse_y}' '#{client_name}'\"" \
     'select-pane -t = ; send-keys -M'
 fi
 
@@ -47,7 +42,19 @@ elif [ -n "$(tmux show-options -gq @agents-mon-hide-windows)" ]; then
 fi
 
 # replace #{agents_mon} placeholder in status-left/right with the live segment
-seg="#(bash $CURRENT_DIR/scripts/scan.sh status)"
+# (Rust binary when built — see `make build`; bash fallback otherwise)
+BIN="$(tmux show-option -gqv @agents-mon-bin)"
+[ -n "$BIN" ] || BIN="$CURRENT_DIR/target/release/agents-mon"
+# auto-build the default binary in the background; bash fallback serves until it lands
+if [ "$BIN" = "$CURRENT_DIR/target/release/agents-mon" ] && [ ! -x "$BIN" ] \
+   && command -v cargo >/dev/null 2>&1; then
+  (cd "$CURRENT_DIR" && cargo build --release >/dev/null 2>&1 &)
+fi
+if [ -x "$BIN" ]; then
+  seg="#($BIN status)"
+else
+  seg="#(bash $CURRENT_DIR/scripts/scan.sh status)"
+fi
 for opt in status-left status-right; do
   v="$(tmux show-option -gqv "$opt")"
   case "$v" in
