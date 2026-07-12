@@ -14,9 +14,16 @@ fn fixtures_match_expected_state() {
             continue;
         }
         let stem = path.file_stem().unwrap().to_string_lossy();
-        let mut parts = stem.split('-');
-        let agent = parts.next().unwrap();
-        let expected = parts.next().unwrap();
+        let fixture = stem.as_ref();
+        let stem = match fixture.rsplit_once('-') {
+            Some((name, variant))
+                if !variant.is_empty() && variant.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                name
+            }
+            _ => fixture,
+        };
+        let (agent, expected) = stem.rsplit_once('-').unwrap();
         let conf = root.join(format!("agents/{agent}.conf"));
         let title = std::fs::read_to_string(path.with_extension("title"))
             .map(|t| t.trim_end().to_string())
@@ -29,7 +36,7 @@ fn fixtures_match_expected_state() {
             .output()
             .unwrap();
         let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        assert_eq!(got, expected, "fixture {stem}");
+        assert_eq!(got, expected, "fixture {fixture}");
         checked += 1;
     }
     assert!(checked >= 13, "only {checked} fixtures found");

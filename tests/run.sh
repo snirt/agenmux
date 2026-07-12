@@ -13,8 +13,13 @@ BIN="${AGENTS_MON_BIN:-$DIR/target/release/agents-mon}"
 for engine in $engines; do
   for fx in "$DIR"/tests/fixtures/*.txt; do
     base="$(basename "$fx" .txt)"
-    agent="${base%%-*}"
-    expected="${base#*-}"; expected="${expected%%-*}"
+    name="$base"
+    case "${name##*-}" in
+      ''|*[!0-9]*) ;;
+      *) name="${name%-*}" ;;
+    esac
+    agent="${name%-*}"
+    expected="${name##*-}"
     title=""
     [ -f "${fx%.txt}.title" ] && title="$(cat "${fx%.txt}.title")"
     if [ "$engine" = rust ]; then
