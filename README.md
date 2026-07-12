@@ -117,7 +117,7 @@ tests/run.sh
 
 Fixtures in `tests/fixtures/` are real `tmux capture-pane -p` dumps where
 possible (`claude-*`, `codex-idle`, `pi-idle`) and synthetic reconstructions for
-hard-to-trigger states (`*-blocked`, `opencode-*`, `pi-working`). To improve
+hard-to-trigger states (`*-blocked`, `oh-my-pi-blocked`, `opencode-*`, `pi-working`). To improve
 accuracy, re-capture a real screen into a fixture:
 
 ```sh
