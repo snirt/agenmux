@@ -40,8 +40,11 @@ pub fn subject(conf: &AgentConf, title: &str, screen: &str, path: &str) -> Strin
     if let Some(s) = t.strip_suffix(&format!(" - {cwd_base}")) {
         t = s.to_string();
     }
-    // blank when the title just echoes the dir or the agent name
-    if t == cwd_base || t == conf.name {
+    // blank when the title just echoes the dir or the agent name; agents
+    // truncate long dir echoes ("MX-4122-fix-volumez-l..."), so a "..."/"…"
+    // title that prefixes the dir counts too
+    let trunc = t.strip_suffix("...").or_else(|| t.strip_suffix('…'));
+    if t == cwd_base || t == conf.name || trunc.is_some_and(|p| cwd_base.starts_with(p)) {
         t.clear();
     }
     if t.is_empty() {
@@ -133,5 +136,14 @@ mod tests {
         let c = conf("TITLE_STRIP='^π - '\n");
         assert_eq!(subject(&c, "π - myproj", "", "/a/myproj"), "");
         assert_eq!(subject(&c, "π - fix bug", "", "/a/myproj"), "fix bug");
+    }
+
+    #[test]
+    fn truncated_dir_echo_blanks() {
+        let c = conf("");
+        assert_eq!(subject(&c, "MX-4122-fix-vol...", "", "/a/MX-4122-fix-volumez"), "");
+        assert_eq!(subject(&c, "MX-4122-fix-vol…", "", "/a/MX-4122-fix-volumez"), "");
+        // truncated real subject is not a dir echo — keep it
+        assert_eq!(subject(&c, "fix the logo re...", "", "/a/MX-4122-fix-volumez"), "fix the logo re...");
     }
 }

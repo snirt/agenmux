@@ -185,6 +185,10 @@ $pane	$pid	$cmd	"}"; name="${name%%
     [ -n "${A_TS[$idx]}" ] && title="$(printf '%s' "$title" | sed -E "s,${A_TS[$idx]},,")"
     title="${title% - ${path##*/}}"  # pi titles "name - dir"; drop the dir echo
     case "$title" in "${path##*/}"|"${A_NAME[$idx]}") title="" ;; esac
+    # agents truncate long dir echoes ("MX-4122-fix-volumez-l..."); a
+    # "..."/"…" title that prefixes the dir is a dir echo too
+    stem="${title%...}"; stem="${stem%…}"
+    [ "$stem" != "$title" ] && case "${path##*/}" in "$stem"*) title="" ;; esac
     # no titled subject (codex idles back to dir) — scrape it off the screen
     [ -z "$title" ] && [ -n "${A_SS[$idx]}" ] \
       && title="$(printf '%s\n' "$screen" | sed -nE "s,${A_SS[$idx]},\1,p" | tail -n 1)"
