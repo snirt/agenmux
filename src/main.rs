@@ -53,7 +53,8 @@ fn run_scan() -> Result<Vec<scan::PaneRow>, tmux::TmuxError> {
     let confs = conf::load_all(&plugin_dir());
     let mut t = tmux::Tmux::connect()?;
     let mut cache = procs::IdentCache::new();
-    scan::scan(&mut t, &confs, &mut cache, self_pane().as_deref())
+    let mut subj = scan::SubjectCache::new();
+    scan::scan(&mut t, &confs, &mut cache, &mut subj, self_pane().as_deref())
 }
 
 fn cmd_scan() -> i32 {

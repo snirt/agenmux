@@ -60,21 +60,24 @@ pub fn subject(conf: &AgentConf, title: &str, screen: &str, path: &str) -> Strin
             }
         }
     }
-    if t.is_empty() {
-        if let Some(cmd) = &conf.subject_cmd {
-            if let Ok(out) = std::process::Command::new("bash")
-                .arg("-c")
-                .arg(cmd)
-                .env("path", path)
-                .output()
-            {
-                t = String::from_utf8_lossy(&out.stdout)
-                    .trim_end_matches('\n')
-                    .to_string();
-            }
-        }
-    }
     t.replace('\t', " ")
+}
+
+/// Run SUBJECT_CMD ($path = pane cwd). One bash fork — callers must cache
+/// (scan.rs SubjectCache); forking per scan tick stalls the sidebar loop.
+pub fn subject_cmd(conf: &AgentConf, path: &str) -> Option<String> {
+    let cmd = conf.subject_cmd.as_ref()?;
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(cmd)
+        .env("path", path)
+        .output()
+        .ok()?;
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches('\n')
+            .replace('\t', " "),
+    )
 }
 
 #[cfg(test)]

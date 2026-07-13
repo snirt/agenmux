@@ -3,6 +3,14 @@
 use crate::conf::AgentConf;
 use crate::procs::{self, IdentCache, Snapshot};
 use crate::tmux::{Tmux, TmuxError};
+use std::collections::HashMap;
+
+/// pane -> (cwd, SUBJECT_CMD output). The sidebar loop must stay fork-free:
+/// entries live while the pane sits idle and drop on any state change (a new
+/// prompt flips the pane to working), so the fork re-runs only when the
+/// subject could actually have changed.
+/// ponytail: assumes new sessions always bounce through a non-idle state
+pub type SubjectCache = HashMap<String, (String, String)>;
 
 pub struct PaneRow {
     pub pane: String,
@@ -19,6 +27,7 @@ pub fn scan(
     tmux: &mut Tmux,
     confs: &[AgentConf],
     cache: &mut IdentCache,
+    subj: &mut SubjectCache,
     self_pane: Option<&str>,
 ) -> Result<Vec<PaneRow>, TmuxError> {
     tmux.sync()?;
@@ -66,7 +75,23 @@ pub fn scan(
         captured_any = true;
         let screen = std::fs::read_to_string(&cap).unwrap_or_default();
         let state = crate::detect::detect_state(&confs[idx], title, &screen);
-        let subject = crate::detect::subject(&confs[idx], title, &screen, path);
+        let mut subject = crate::detect::subject(&confs[idx], title, &screen, path);
+        if state != "idle" {
+            subj.remove(pane); // pane got a new prompt — cached subject is stale
+        } else if subject.is_empty() && confs[idx].subject_cmd.is_some() {
+            match subj.get(pane).filter(|(cwd, _)| cwd == path) {
+                Some((_, s)) => subject = s.clone(),
+                None => {
+                    let t0 = std::time::Instant::now();
+                    subject = crate::detect::subject_cmd(&confs[idx], path).unwrap_or_default();
+                    crate::tmux::debug_note(&format!(
+                        "subject_cmd {pane} {}ms",
+                        t0.elapsed().as_millis()
+                    ));
+                    subj.insert(pane.to_string(), (path.to_string(), subject.clone()));
+                }
+            }
+        }
         rows.push(PaneRow {
             pane: pane.to_string(),
             loc: loc.to_string(),
@@ -80,7 +105,8 @@ pub fn scan(
         let _ = tmux.run(&format!("delete-buffer -b '{buf}'"));
         let _ = std::fs::remove_file(&cap);
     }
-    *cache = seen; // dead panes pruned
+    subj.retain(|pane, _| seen.keys().any(|k| &k.0 == pane)); // dead panes pruned
+    *cache = seen;
     Ok(rows)
 }
 

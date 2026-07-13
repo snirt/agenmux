@@ -66,11 +66,12 @@ impl Tmux {
     /// Send one tmux command, return its output (without trailing newline
     /// handling — lines joined by \n).
     pub fn run(&mut self, cmd: &str) -> Result<String, TmuxError> {
+        let t0 = std::time::Instant::now();
         self.stdin.write_all(cmd.as_bytes())?;
         self.stdin.write_all(b"\n")?;
         self.stdin.flush()?;
         let r = self.read_block();
-        debug_log(cmd, &r);
+        debug_log(cmd, &r, t0.elapsed());
         r
     }
 
@@ -194,8 +195,18 @@ fn block_tag(rest: &str) -> &str {
     rest.split_whitespace().nth(1).unwrap_or("")
 }
 
-/// AGENTS_MON_DEBUG=<file>: trace every command/response pair.
-fn debug_log(cmd: &str, r: &Result<String, TmuxError>) {
+/// AGENTS_MON_DEBUG=<file>: free-form trace line (timings, counters).
+pub fn debug_note(msg: &str) {
+    let Ok(path) = std::env::var("AGENTS_MON_DEBUG") else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "[{}] # {msg}", std::process::id());
+    }
+}
+
+/// AGENTS_MON_DEBUG=<file>: trace every command/response pair with timing.
+fn debug_log(cmd: &str, r: &Result<String, TmuxError>, took: std::time::Duration) {
     let Ok(path) = std::env::var("AGENTS_MON_DEBUG") else {
         return;
     };
@@ -204,7 +215,14 @@ fn debug_log(cmd: &str, r: &Result<String, TmuxError>) {
         Err(e) => format!("ERR {e}"),
     };
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "[{}] {:.60} -> {}", std::process::id(), cmd, summary);
+        let _ = writeln!(
+            f,
+            "[{}] {}ms {:.60} -> {}",
+            std::process::id(),
+            took.as_millis(),
+            cmd,
+            summary
+        );
     }
 }
 

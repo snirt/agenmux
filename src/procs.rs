@@ -2,62 +2,63 @@
 // Spec: scan.sh identify_agent / agent_for_cmdline / normalize_bin.
 use crate::conf::AgentConf;
 use std::collections::HashMap;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 pub struct Snapshot {
-    // pid -> (ppid, argv)
-    procs: HashMap<u32, (u32, Vec<String>)>,
+    sys: System,
+    // ppid -> child pids, from the cheap bulk pass
+    children: HashMap<u32, Vec<u32>>,
 }
 
 impl Snapshot {
+    /// Cheap bulk pass: pids + ppids only. Reading argv is one sysctl per
+    /// process (~hundreds of ms system-wide) — deferred to descendant_argvs,
+    /// which fetches it for a single pane's subtree.
     pub fn take() -> Snapshot {
+        let t0 = std::time::Instant::now();
         let mut sys = System::new();
         sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+            ProcessRefreshKind::nothing(),
         );
-        let procs = sys
-            .processes()
-            .iter()
-            .map(|(pid, p)| {
-                let argv: Vec<String> = p
-                    .cmd()
-                    .iter()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .collect();
-                (
-                    pid.as_u32(),
-                    (p.parent().map(|pp| pp.as_u32()).unwrap_or(0), argv),
-                )
-            })
-            .collect();
-        Snapshot { procs }
+        crate::tmux::debug_note(&format!("snapshot bulk {}ms", t0.elapsed().as_millis()));
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (pid, p) in sys.processes() {
+            if let Some(pp) = p.parent() {
+                children.entry(pp.as_u32()).or_default().push(pid.as_u32());
+            }
+        }
+        Snapshot { sys, children }
     }
 
     /// BFS over the pane's process tree, root included (agent may be the
-    /// pane command itself).
-    fn descendant_argvs(&self, root: u32) -> Vec<&Vec<String>> {
-        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-        for (pid, (ppid, _)) in &self.procs {
-            children.entry(*ppid).or_default().push(*pid);
-        }
-        let mut out = Vec::new();
+    /// pane command itself); argv fetched for just this subtree.
+    fn descendant_argvs(&mut self, root: u32) -> Vec<Vec<String>> {
         let mut queue = vec![root];
         let mut i = 0;
         while i < queue.len() {
-            let pid = queue[i];
-            i += 1;
-            if let Some((_, argv)) = self.procs.get(&pid) {
-                if !argv.is_empty() {
-                    out.push(argv);
-                }
-            }
-            if let Some(kids) = children.get(&pid) {
+            if let Some(kids) = self.children.get(&queue[i]) {
                 queue.extend(kids);
             }
+            i += 1;
         }
-        out
+        let pids: Vec<Pid> = queue.iter().map(|p| Pid::from_u32(*p)).collect();
+        self.sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&pids),
+            false,
+            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+        );
+        pids.iter()
+            .filter_map(|pid| self.sys.process(*pid))
+            .map(|p| {
+                p.cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .collect::<Vec<String>>()
+            })
+            .filter(|argv| !argv.is_empty())
+            .collect()
     }
 }
 
@@ -113,7 +114,7 @@ pub fn identify(
         if let Some(i) = agent_for_bin(confs, normalize_bin(&argv[0])) {
             return Some(i);
         }
-        if let Some(i) = agent_for_argv(confs, argv) {
+        if let Some(i) = agent_for_argv(confs, &argv) {
             return Some(i);
         }
     }

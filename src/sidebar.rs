@@ -149,6 +149,7 @@ pub struct Sidebar {
     tmux: Tmux,
     confs: Vec<AgentConf>,
     ident: IdentCache,
+    subj: scan::SubjectCache,
     prev: HashMap<String, Prev>,
     rows: Vec<PaneRow>, // debounced view-model
     sel: usize,         // 1-based like the bash script
@@ -193,6 +194,7 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         tmux,
         confs,
         ident: IdentCache::new(),
+        subj: scan::SubjectCache::new(),
         prev: HashMap::new(),
         rows: Vec::new(),
         sel: 1,
@@ -216,11 +218,12 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     sb.render(true);
 
     let mut next_scan = Instant::now(); // scan immediately
+    let mut next_tick = Instant::now();
     loop {
         if QUIT.load(Ordering::Relaxed) {
             break;
         }
-        let now = Instant::now();
+        let mut now = Instant::now();
         if now >= next_scan {
             match sb.scan_tick() {
                 Ok(()) => {}
@@ -229,16 +232,26 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
                 Err(TmuxError::Exited) | Err(TmuxError::Io(_)) => break,
                 Err(TmuxError::Error(_)) => {} // e.g. pane died mid-scan
             }
-            next_scan = now + Duration::from_secs(2);
             sb.render(false);
+            // a scan takes tens of ms — with the pre-scan `now`, a tick due
+            // mid-scan is missed and the poll sleeps its full stale remainder
+            now = Instant::now();
+            next_scan = now + Duration::from_secs(2);
         }
         let animating = sb
             .rows
             .iter()
             .any(|r| matches!(r.state.as_str(), "working" | "blocked" | "done"));
+        // deadline-based tick: held keys keep poll_inputs returning early, so
+        // advancing on poll timeout would freeze the spinner during key repeat
+        if animating && now >= next_tick {
+            sb.tick = (sb.tick + 1) % 40; // divisible by 8 (spin) and 4 (blink)
+            next_tick = now + Duration::from_millis(250);
+            sb.render(false);
+        }
         // animated states need ticks; all-idle sleeps until the next scan
         let wake = if animating {
-            Duration::from_millis(250)
+            next_tick.saturating_duration_since(now)
         } else {
             next_scan.saturating_duration_since(now)
         };
@@ -272,9 +285,6 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
                 Key::Other => {}
             }
             sb.render(false);
-        } else if animating {
-            sb.tick = (sb.tick + 1) % 40; // divisible by 8 (spin) and 4 (blink)
-            sb.render(false);
         }
         if WINCH.swap(false, Ordering::Relaxed) {
             print!("{E}[2J");
@@ -299,12 +309,15 @@ fn cleanup(rows_file: &PathBuf, pin: &Option<String>) {
 
 impl Sidebar {
     fn scan_tick(&mut self) -> Result<(), TmuxError> {
+        let t0 = Instant::now();
         let scanned = scan::scan(
             &mut self.tmux,
             &self.confs,
             &mut self.ident,
+            &mut self.subj,
             Some(&self.self_pane),
         )?;
+        crate::tmux::debug_note(&format!("scan {}ms", t0.elapsed().as_millis()));
         let _ = std::fs::write(&self.cache_file, scan::to_tsv(&scanned));
         self.active = self.active_pane().unwrap_or_default();
 
