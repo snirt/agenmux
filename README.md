@@ -42,9 +42,13 @@ never needs a rebuild.
 
 GitHub Actions also builds ready-to-use plugin archives for x86_64 and ARM64 on
 Linux and macOS. The Linux binaries are statically linked for portability.
-Download the artifact for your platform from a successful **Build** workflow run
+Download the archive for your platform from the
+[latest GitHub Release](https://github.com/snirt/tmux-agents-mon/releases/latest)
 and extract it; its native engine is already installed at
 `target/release/agents-mon`.
+Each release includes `SHA256SUMS` for verification. Builds from untagged commits
+remain available as temporary artifacts on their **Build and Release** workflow
+run.
 
 ## Usage
 
