@@ -24,19 +24,25 @@ With [TPM](https://github.com/tmux-plugins/tpm):
 set -g @plugin 'snirt/tmux-agents-mon'
 ```
 
+Press `prefix + I`. That's it: the bash engine works immediately, while the
+plugin downloads and verifies the native engine for your platform in the
+background. It is used automatically on the next toggle.
+
 Or manually: clone the repo and add `run-shell /path/to/tmux-agents-mon/agents-mon.tmux`
 to `~/.tmux.conf`.
 
-Requirements: tmux, bash, grep, awk, ps. No build step.
+Requirements: tmux, bash, grep, awk, ps. `curl` and `tar` enable the automatic
+native download; without them, Cargo builds it when available and bash remains
+the fallback. No required build step.
 
 ### Optional: Rust engine
 
 A native engine replaces the bash scan/sidebar hot path — same behavior, ~10x
 less CPU (one persistent tmux control-mode connection instead of hundreds of
 forks per refresh). If [cargo](https://rustup.rs) is installed, the plugin
-builds it automatically in the background on load/toggle and picks it up on the
-next toggle; `make build` does the same by hand. Without cargo, everything
-keeps running in bash. `@agents-mon-bin` overrides the binary path.
+builds it automatically in the background when a prebuilt download is not
+available; `make build` does the same by hand. Everything keeps running in bash
+until the native engine is ready. `@agents-mon-bin` overrides the binary path.
 Agent detection stays in `agents/*.conf` either way — adding or tuning agents
 never needs a rebuild.
 

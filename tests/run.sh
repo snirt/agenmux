@@ -40,6 +40,40 @@ done
 echo "$count fixtures"
 if [ "$fail" -eq 0 ]; then
   tmp="$(mktemp -d)"
+  package="tmux-agents-mon-macos-aarch64"
+  mkdir -p "$tmp/plugin/scripts" "$tmp/downloads/$package/target/release" "$tmp/bin"
+  cp "$DIR/scripts/install-bin.sh" "$tmp/plugin/scripts/install-bin.sh"
+  printf '#!/usr/bin/env bash\nprintf "native\\n"\n' \
+    > "$tmp/downloads/$package/target/release/agents-mon"
+  chmod +x "$tmp/downloads/$package/target/release/agents-mon"
+  tar -czf "$tmp/downloads/$package.tar.gz" -C "$tmp/downloads" "$package"
+  if command -v sha256sum >/dev/null; then
+    (cd "$tmp/downloads" && sha256sum "$package.tar.gz" > SHA256SUMS)
+  else
+    (cd "$tmp/downloads" && shasum -a 256 "$package.tar.gz" > SHA256SUMS)
+  fi
+  cat > "$tmp/bin/uname" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = "-s" ] && printf 'Darwin\n' || printf 'arm64\n'
+SH
+  cat > "$tmp/bin/curl" <<'SH'
+#!/usr/bin/env bash
+url="$2"; out="$4"
+cp "$DOWNLOADS/${url##*/}" "$out"
+SH
+  chmod +x "$tmp/bin/uname" "$tmp/bin/curl"
+  if DOWNLOADS="$tmp/downloads" PATH="$tmp/bin:$PATH" \
+     bash "$tmp/plugin/scripts/install-bin.sh" \
+     && [ "$("$tmp/plugin/target/release/agents-mon")" = "native" ]; then
+    echo "ok   native-engine-auto-install"
+  else
+    echo "FAIL native-engine-auto-install: verified platform binary was not installed"
+    fail=1
+  fi
+  rm -rf "$tmp"
+fi
+if [ "$fail" -eq 0 ]; then
+  tmp="$(mktemp -d)"
   mkdir -p "$tmp/bin"
   cat > "$tmp/bin/tmux" <<'SH'
 #!/usr/bin/env bash

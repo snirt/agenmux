@@ -6,10 +6,9 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # prefer the Rust binary when built; bash sidebar otherwise
 BIN="$(tmux show-option -gqv @agents-mon-bin)"
 [ -n "$BIN" ] || BIN="$DIR/target/release/agents-mon"
-# auto-build the default binary in the background; bash sidebar serves this open
-if [ "$BIN" = "$DIR/target/release/agents-mon" ] && [ ! -x "$BIN" ] \
-   && command -v cargo >/dev/null 2>&1; then
-  (cd "$DIR" && cargo build --release >/dev/null 2>&1 &)
+# install the default binary in the background; bash sidebar serves this open
+if [ "$BIN" = "$DIR/target/release/agents-mon" ] && [ ! -x "$BIN" ]; then
+  bash "$DIR/scripts/install-bin.sh" >/dev/null 2>&1 &
 fi
 # command must start with a bare word: tmux hands it to default-shell,
 # and e.g. nushell rejects a quoted token in command position

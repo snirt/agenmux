@@ -45,10 +45,9 @@ fi
 # (Rust binary when built — see `make build`; bash fallback otherwise)
 BIN="$(tmux show-option -gqv @agents-mon-bin)"
 [ -n "$BIN" ] || BIN="$CURRENT_DIR/target/release/agents-mon"
-# auto-build the default binary in the background; bash fallback serves until it lands
-if [ "$BIN" = "$CURRENT_DIR/target/release/agents-mon" ] && [ ! -x "$BIN" ] \
-   && command -v cargo >/dev/null 2>&1; then
-  (cd "$CURRENT_DIR" && cargo build --release >/dev/null 2>&1 &)
+# install the default binary in the background; bash fallback serves until it lands
+if [ "$BIN" = "$CURRENT_DIR/target/release/agents-mon" ] && [ ! -x "$BIN" ]; then
+  bash "$CURRENT_DIR/scripts/install-bin.sh" >/dev/null 2>&1 &
 fi
 if [ -x "$BIN" ]; then
   seg="#($BIN status)"
