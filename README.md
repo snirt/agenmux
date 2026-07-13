@@ -40,6 +40,12 @@ keeps running in bash. `@agents-mon-bin` overrides the binary path.
 Agent detection stays in `agents/*.conf` either way — adding or tuning agents
 never needs a rebuild.
 
+GitHub Actions also builds ready-to-use plugin archives for x86_64 and ARM64 on
+Linux and macOS. The Linux binaries are statically linked for portability.
+Download the artifact for your platform from a successful **Build** workflow run
+and extract it; its native engine is already installed at
+`target/release/agents-mon`.
+
 ## Usage
 
 - `prefix + A` — toggle the sidebar (left split, auto-refreshes every 2s);
