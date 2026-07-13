@@ -10,6 +10,9 @@ atomically places its binary at `target/release/agents-mon`. Unsupported systems
 or download failures fall back to the existing local Cargo build. If neither is
 available, the dependency-free bash engine continues to work.
 
-No updater or startup daemon is added. Once the binary exists, startup performs
-only the existing executable check. A test serves a real local archive through
-stubbed platform/download commands and verifies the installed binary runs.
+No updater daemon is added. A two-line marker records the installed release and
+plugin revision. The helper checks immediately after a TPM revision change or
+at most daily otherwise, and atomically replaces the binary only after checksum
+verification. A failed update keeps the working binary. A test serves local
+archives through stubbed platform/download commands and verifies installation
+and replacement.

@@ -26,7 +26,8 @@ set -g @plugin 'snirt/tmux-agents-mon'
 
 Press `prefix + I`. That's it: the bash engine works immediately, while the
 plugin downloads and verifies the native engine for your platform in the
-background. It is used automatically on the next toggle.
+background. It is used automatically on the next toggle and refreshed after
+TPM updates without removing the old binary first.
 
 Or manually: clone the repo and add `run-shell /path/to/tmux-agents-mon/agents-mon.tmux`
 to `~/.tmux.conf`.

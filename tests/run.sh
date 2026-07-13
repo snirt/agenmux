@@ -58,16 +58,42 @@ if [ "$fail" -eq 0 ]; then
 SH
   cat > "$tmp/bin/curl" <<'SH'
 #!/usr/bin/env bash
-url="$2"; out="$4"
-cp "$DOWNLOADS/${url##*/}" "$out"
+url=""; out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) shift; out="$1" ;;
+    http*) url="$1" ;;
+  esac
+  shift
+done
+case "$url" in
+  */releases/latest) printf '%s/tag/%s' "$url" "$LATEST_TAG" ;;
+  *) cp "$DOWNLOADS/${url##*/}" "$out" ;;
+esac
 SH
   chmod +x "$tmp/bin/uname" "$tmp/bin/curl"
-  if DOWNLOADS="$tmp/downloads" PATH="$tmp/bin:$PATH" \
+  if DOWNLOADS="$tmp/downloads" LATEST_TAG="v0.1.0" PATH="$tmp/bin:$PATH" \
      bash "$tmp/plugin/scripts/install-bin.sh" \
-     && [ "$("$tmp/plugin/target/release/agents-mon")" = "native" ]; then
-    echo "ok   native-engine-auto-install"
+     && [ "$("$tmp/plugin/target/release/agents-mon")" = "native" ] \
+     && [ "$(sed -n '1p' "$tmp/plugin/target/release/.agents-mon-version")" = "v0.1.0" ]; then
+    printf '#!/usr/bin/env bash\nprintf "updated\\n"\n' \
+      > "$tmp/downloads/$package/target/release/agents-mon"
+    chmod +x "$tmp/downloads/$package/target/release/agents-mon"
+    tar -czf "$tmp/downloads/$package.tar.gz" -C "$tmp/downloads" "$package"
+    if command -v sha256sum >/dev/null; then
+      (cd "$tmp/downloads" && sha256sum "$package.tar.gz" > SHA256SUMS)
+    else
+      (cd "$tmp/downloads" && shasum -a 256 "$package.tar.gz" > SHA256SUMS)
+    fi
+    printf 'v0.1.0\nold-revision\n' > "$tmp/plugin/target/release/.agents-mon-version"
+    DOWNLOADS="$tmp/downloads" LATEST_TAG="v0.1.1" PATH="$tmp/bin:$PATH" \
+      bash "$tmp/plugin/scripts/install-bin.sh"
+  fi
+  if [ "$("$tmp/plugin/target/release/agents-mon" 2>/dev/null)" = "updated" ] \
+     && [ "$(sed -n '1p' "$tmp/plugin/target/release/.agents-mon-version")" = "v0.1.1" ]; then
+    echo "ok   native-engine-auto-install-update"
   else
-    echo "FAIL native-engine-auto-install: verified platform binary was not installed"
+    echo "FAIL native-engine-auto-install-update: verified binary was not installed or updated"
     fail=1
   fi
   rm -rf "$tmp"

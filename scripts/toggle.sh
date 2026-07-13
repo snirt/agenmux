@@ -7,7 +7,7 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$(tmux show-option -gqv @agents-mon-bin)"
 [ -n "$BIN" ] || BIN="$DIR/target/release/agents-mon"
 # install the default binary in the background; bash sidebar serves this open
-if [ "$BIN" = "$DIR/target/release/agents-mon" ] && [ ! -x "$BIN" ]; then
+if [ "$BIN" = "$DIR/target/release/agents-mon" ]; then
   bash "$DIR/scripts/install-bin.sh" >/dev/null 2>&1 &
 fi
 # command must start with a bare word: tmux hands it to default-shell,
