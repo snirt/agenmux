@@ -3,7 +3,7 @@ use crate::conf::{AgentConf, Check};
 
 /// Walk CHECK_ORDER against title + last 20 screen lines; first hit wins.
 pub fn detect_state(conf: &AgentConf, title: &str, screen: &str) -> &'static str {
-    let lines: Vec<&str> = screen.lines().collect();
+    let lines: Vec<&str> = screen.trim_end_matches('\n').lines().collect();
     let start = lines.len().saturating_sub(20);
     // NBSP -> space: agents pad prompt lines with U+00A0, which Rust's
     // ASCII-only [[:space:]] would miss (breaks the idle-prompt guard)
@@ -110,6 +110,13 @@ mod tests {
         let c = conf("WORKING_SCREEN='needle'\nCHECK_ORDER=\"ws\"\n");
         let screen = format!("needle\n{}", "x\n".repeat(25));
         assert_eq!(detect_state(&c, "", &screen), "idle");
+    }
+
+    #[test]
+    fn trailing_blank_rows_do_not_hide_activity() {
+        let c = conf("WORKING_SCREEN='needle'\nCHECK_ORDER=\"ws\"\n");
+        let screen = format!("needle\n{}", "\n".repeat(21));
+        assert_eq!(detect_state(&c, "", &screen), "working");
     }
 
     #[test]
