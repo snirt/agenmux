@@ -153,6 +153,7 @@ pub struct Sidebar {
     prev: HashMap<String, Prev>,
     rows: Vec<PaneRow>, // debounced view-model
     sel: usize,         // 1-based like the bash script
+    scroll: usize,      // first visible list line — follows the selection
     sel_pane: String,
     last_active: String,
     active: String,
@@ -198,6 +199,7 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         prev: HashMap::new(),
         rows: Vec::new(),
         sel: 1,
+        scroll: 0,
         sel_pane: String::new(),
         last_active: String::new(),
         active: String::new(),
@@ -513,26 +515,24 @@ impl Sidebar {
     fn render(&mut self, force: bool) {
         let (cols, trows) = term_size();
         let cap = trows.saturating_sub(1); // last row's newline would scroll
+        let space = cap.saturating_sub(2); // header + blank line
         let mut frame = format!("{E}[H{E}[1magents{E}[0m{E}[K\n{E}[K\n");
         let mut vis = String::new();
-        let mut session = "";
-        let mut used = 2usize; // header + blank line already emitted
         if self.rows.is_empty() {
             frame.push_str(&format!("{E}[2mno agents{E}[0m{E}[K\n"));
         } else {
+            // build the full list, then window it so the selection stays visible
+            let mut lines: Vec<(String, &str)> = Vec::new(); // (text, vis pane)
+            let (mut sel_top, mut sel_bot) = (0usize, 0usize);
+            let mut session = "";
             for (n, r) in self.rows.iter().enumerate() {
                 let sess = r.loc.split(':').next().unwrap_or("");
                 if sess != session {
-                    if used + 2 > cap {
-                        break; // no room for header + record
-                    }
                     session = sess;
-                    frame.push_str(&format!("{E}[1;34m{sess}{E}[0m{E}[K\n"));
-                    vis.push_str("-\n");
-                    used += 1;
+                    lines.push((format!("{E}[1;34m{sess}{E}[0m{E}[K\n"), "-"));
                 }
-                if used >= cap {
-                    break; // pane full — clip, never scroll
+                if n + 1 == self.sel {
+                    sel_top = lines.len();
                 }
                 let mark = if n + 1 == self.sel {
                     format!("{E}[1m❯{E}[0m ")
@@ -547,20 +547,38 @@ impl Sidebar {
                 if avail > 0 {
                     rest = rest.chars().take(avail).collect();
                 }
-                frame.push_str(&format!(
-                    "{mark}{dot} {E}[1m{}{E}[0m {E}[2m{rest}{E}[0m{E}[K\n",
-                    r.agent
+                lines.push((
+                    format!("{mark}{dot} {E}[1m{}{E}[0m {E}[2m{rest}{E}[0m{E}[K\n", r.agent),
+                    &r.pane,
                 ));
-                vis.push_str(&r.pane);
-                vis.push('\n');
-                used += 1;
-                if !r.title.is_empty() && used < cap {
+                if !r.title.is_empty() {
                     let t: String = r.title.chars().take(cols.saturating_sub(4)).collect();
-                    frame.push_str(&format!("    {E}[2m{t}{E}[0m{E}[K\n"));
-                    vis.push_str(&r.pane);
-                    vis.push('\n');
-                    used += 1;
+                    lines.push((format!("    {E}[2m{t}{E}[0m{E}[K\n"), &r.pane));
                 }
+                if n + 1 == self.sel {
+                    sel_bot = lines.len() - 1;
+                }
+            }
+            // selection's session header gives context — drag it into view
+            if sel_top > 0 && lines[sel_top - 1].1 == "-" {
+                sel_top -= 1;
+            }
+            if space > 0 {
+                if sel_bot + 1 > self.scroll + space {
+                    self.scroll = sel_bot + 1 - space;
+                }
+                if sel_top < self.scroll {
+                    self.scroll = sel_top; // top wins when row + title exceed space
+                }
+                self.scroll = self.scroll.min(lines.len().saturating_sub(space));
+            } else {
+                self.scroll = 0;
+            }
+            let end = (self.scroll + space).min(lines.len());
+            for (text, pane) in &lines[self.scroll..end] {
+                frame.push_str(text);
+                vis.push_str(pane);
+                vis.push('\n');
             }
         }
         frame.push_str(&format!("{E}[J"));
