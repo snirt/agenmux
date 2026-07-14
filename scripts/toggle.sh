@@ -26,6 +26,20 @@ if [ "$mode" = "popup" ] || [ "$mode" = "float" ]; then
   touch "$PIN"
   width="$(tmux show-option -gqv @agents-mon-width)"
   height="$(tmux show-option -gqv @agents-mon-height)"
+  if [ -z "$height" ]; then
+    # fit the fleet: agent row + title row each, session headers, 2 header
+    # rows, popup border; floor 15 keeps the help screen readable
+    # ponytail: sized from the last scan cache; first-ever open falls back to 15
+    cache="${TMPDIR:-/tmp}/agents-mon-scan-cache"
+    if [ -s "$cache" ]; then
+      height=$(( $(wc -l < "$cache")
+        + $(awk -F'\t' '$6 != "" {n++} END {print n+0}' "$cache")
+        + $(cut -f2 "$cache" | cut -d: -f1 | sort -u | wc -l) + 5 ))
+      max=$(( $(tmux display-message -p '#{client_height}') - 2 ))
+      [ "$height" -gt "$max" ] && height=$max
+      [ "$height" -lt 15 ] && height=15
+    fi
+  fi
   # pinned popup: Enter jumps (popup reopens over the new window), q/Esc
   # remove the pin inside sidebar.sh and end the loop
   while [ -f "$PIN" ]; do
