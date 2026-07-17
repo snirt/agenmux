@@ -53,7 +53,7 @@ download_bin() {
 
   curl -fsSL "$base/$archive" -o "$tmp/$archive" || return 1
   curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || return 1
-  expected="$(awk -v file="$archive" '$2 == file { print $1 }' "$tmp/SHA256SUMS")"
+  expected="$(awk -v file="$archive" '$2 == file || $2 == "./" file { print $1 }' "$tmp/SHA256SUMS")"
   [ "${#expected}" -eq 64 ] || return 1
   if command -v sha256sum >/dev/null; then
     actual="$(sha256sum "$tmp/$archive" | awk '{ print $1 }')"

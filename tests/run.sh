@@ -48,9 +48,9 @@ if [ "$fail" -eq 0 ]; then
   chmod +x "$tmp/downloads/$package/target/release/agents-mon"
   tar -czf "$tmp/downloads/$package.tar.gz" -C "$tmp/downloads" "$package"
   if command -v sha256sum >/dev/null; then
-    (cd "$tmp/downloads" && sha256sum "$package.tar.gz" > SHA256SUMS)
+    (cd "$tmp/downloads" && sha256sum "./$package.tar.gz" > SHA256SUMS)
   else
-    (cd "$tmp/downloads" && shasum -a 256 "$package.tar.gz" > SHA256SUMS)
+    (cd "$tmp/downloads" && shasum -a 256 "./$package.tar.gz" > SHA256SUMS)
   fi
   cat > "$tmp/bin/uname" <<'SH'
 #!/usr/bin/env bash
@@ -81,9 +81,9 @@ SH
     chmod +x "$tmp/downloads/$package/target/release/agents-mon"
     tar -czf "$tmp/downloads/$package.tar.gz" -C "$tmp/downloads" "$package"
     if command -v sha256sum >/dev/null; then
-      (cd "$tmp/downloads" && sha256sum "$package.tar.gz" > SHA256SUMS)
+      (cd "$tmp/downloads" && sha256sum "./$package.tar.gz" > SHA256SUMS)
     else
-      (cd "$tmp/downloads" && shasum -a 256 "$package.tar.gz" > SHA256SUMS)
+      (cd "$tmp/downloads" && shasum -a 256 "./$package.tar.gz" > SHA256SUMS)
     fi
     printf 'v0.1.0\nold-revision\n' > "$tmp/plugin/target/release/.agents-mon-version"
     DOWNLOADS="$tmp/downloads" LATEST_TAG="v0.1.1" PATH="$tmp/bin:$PATH" \

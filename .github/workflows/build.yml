@@ -14,6 +14,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  sanity:
+    name: Real tmux sanity
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Download, build, and test in tmux
+        run: ./tests/sanity.sh
+
   build:
     name: ${{ matrix.artifact }}
     strategy:
