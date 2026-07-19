@@ -14,6 +14,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  version:
+    name: Validate version
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: ./scripts/version.sh check-tag "$GITHUB_REF_NAME"
+
   sanity:
     name: Real tmux sanity
     runs-on: ubuntu-latest
@@ -92,7 +104,7 @@ jobs:
   release:
     name: Publish ${{ github.ref_name }}
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [version, sanity, build]
     runs-on: ubuntu-latest
     permissions:
       actions: read

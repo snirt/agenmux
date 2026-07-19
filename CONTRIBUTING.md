@@ -49,6 +49,21 @@ config format.
 - [ ] README updated if you added an option or changed behavior
 - [ ] One focused change per PR
 
+## Releasing
+
+`Cargo.toml` is the only source of truth for the project version. Update its
+`[package].version`, then let Cargo refresh the generated lockfile:
+
+```sh
+cargo check
+scripts/version.sh tag
+```
+
+Commit both manifest and lockfile changes, then create and push the tag printed
+by `scripts/version.sh tag`. GitHub Actions rejects a release tag that does not
+match the manifest and publishes only after the version, sanity, and platform
+build jobs pass.
+
 ## Reporting bugs
 
 Detection is scraping-only, so state bugs are usually a screen that didn't match

@@ -39,6 +39,18 @@ done
 
 echo "$count fixtures"
 if [ "$fail" -eq 0 ]; then
+  version="$(bash "$DIR/scripts/version.sh")"
+  tag="$(bash "$DIR/scripts/version.sh" tag)"
+  if [ "$tag" = "v$version" ] \
+     && bash "$DIR/scripts/version.sh" check-tag "$tag" \
+     && ! bash "$DIR/scripts/version.sh" check-tag "v0.0.0" 2>/dev/null; then
+    echo "ok   version-derived-from-cargo-manifest"
+  else
+    echo "FAIL version-derived-from-cargo-manifest"
+    fail=1
+  fi
+fi
+if [ "$fail" -eq 0 ]; then
   tmp="$(mktemp -d)"
   package="tmux-agents-mon-macos-aarch64"
   mkdir -p "$tmp/plugin/scripts" "$tmp/downloads/$package/target/release" "$tmp/bin"

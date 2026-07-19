@@ -115,6 +115,7 @@ The Rust binary exposes the same commands (with `scan` as an alias for `list`):
 target/release/agents-mon list
 target/release/agents-mon status
 target/release/agents-mon detect agents/codex.conf screen.txt 'pane title'
+target/release/agents-mon --version
 ```
 
 `sidebar` is an internal command used by the tmux integration.

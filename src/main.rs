@@ -11,6 +11,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let strs: Vec<&str> = args.iter().map(String::as_str).collect();
     let code = match strs.as_slice() {
+        ["--version"] | ["-V"] => {
+            println!("agents-mon {}", env!("CARGO_PKG_VERSION"));
+            0
+        }
         ["detect", conf_path, screen_file, rest @ ..] => {
             cmd_detect(conf_path, screen_file, rest.first().copied().unwrap_or(""))
         }
@@ -18,7 +22,9 @@ fn main() {
         ["status"] => cmd_status(),
         ["sidebar"] => sidebar::run(plugin_dir(), scan_cache_path()),
         _ => {
-            eprintln!("usage: agents-mon [scan|status|sidebar|detect <conf> <screen-file> [title]]");
+            eprintln!(
+                "usage: agents-mon [--version|scan|status|sidebar|detect <conf> <screen-file> [title]]"
+            );
             2
         }
     };
