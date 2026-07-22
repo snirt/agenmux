@@ -21,6 +21,9 @@ else
 fi
 tmux set-hook -g 'after-select-window[42]' "$follow"
 tmux set-hook -g 'client-session-changed[42]' "$follow"
+# new-window doesn't fire after-select-window; session-window-changed covers
+# it (and skips new-window -d, which shouldn't steal the sidebar)
+tmux set-hook -g 'session-window-changed[42]' "$follow"
 # pane-exited misses kill-pane, and window-pane-changed fires mid-teardown
 # (the dying pane still resolves, so orphan.sh takes the wrong branch);
 # window-layout-changed fires after removal and is the reliable one. All

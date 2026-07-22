@@ -275,4 +275,33 @@ SH
   fi
   rm -rf "$tmp"
 fi
+if [ "$fail" -eq 0 ] && command -v tmux >/dev/null; then
+  # real server on a private scratch socket: sidebar must follow into a NEW
+  # window (new-window fires session-window-changed, not after-select-window)
+  tmp="$(mktemp -d)"
+  T="tmux -S $tmp/sock -f /dev/null"
+  $T new-session -d -s t -x 200 -y 50
+  sb="$($T split-window -hbf -d -l 30 -P -F '#{pane_id}' -t t: 'sleep 60')"
+  $T set-option -g @agents-mon-sidebar "$sb"
+  $T set-option -g @agents-mon-sidebar-win "$($T display-message -p -t t: '#{window_id}')"
+  # hooks.sh calls bare tmux — point it at the scratch socket (absolute
+  # path: bare "tmux" would resolve back to this shim and recurse)
+  mkdir -p "$tmp/bin"
+  printf '#!/bin/sh\nexec %s -S %s "$@"\n' "$(command -v tmux)" "$tmp/sock" \
+    > "$tmp/bin/tmux"
+  chmod +x "$tmp/bin/tmux"
+  PATH="$tmp/bin:$PATH" bash "$DIR/scripts/hooks.sh"
+  $T new-window -t t
+  sleep 0.5
+  sb_win="$($T display-message -p -t "$sb" '#{window_id}')"
+  cur_win="$($T display-message -p -t t: '#{window_id}')"
+  if [ -n "$sb_win" ] && [ "$sb_win" = "$cur_win" ]; then
+    echo "ok   sidebar-follows-into-new-window"
+  else
+    echo "FAIL sidebar-follows-into-new-window: sidebar in '$sb_win', current window '$cur_win'"
+    fail=1
+  fi
+  $T kill-server 2>/dev/null || true
+  rm -rf "$tmp"
+fi
 exit $fail
