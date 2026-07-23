@@ -158,7 +158,7 @@ EOF
       if [ "${loc%%:*}" != "$session" ]; then
         [ $((used + 2)) -gt "$cap" ] && break  # no room for header + record
         session="${loc%%:*}"
-        frame="$frame$E[1;34m$session$E[0m$E[K$NL"
+        frame="$frame$E[1;34m${session:0:cols}$E[0m$E[K$NL"
         vis="$vis-$NL"
         used=$((used + 1))
       fi

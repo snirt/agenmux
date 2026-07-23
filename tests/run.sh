@@ -304,4 +304,48 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null; then
   $T kill-server 2>/dev/null || true
   rm -rf "$tmp"
 fi
+if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$DIR/target/release/agents-mon" ]; then
+  # mirror mode end to end: toggle puts a mirror pane in every window, window
+  # switches change NO layout (the whole point — no reflow bump), new windows
+  # get a mirror via hook, and q tears everything down.
+  tmp="$(mktemp -d)"
+  T="tmux -S $tmp/sock -f /dev/null"
+  mkdir -p "$tmp/bin"
+  printf '#!/bin/sh\nexec %s -S %s "$@"\n' "$(command -v tmux)" "$tmp/sock" \
+    > "$tmp/bin/tmux"
+  chmod +x "$tmp/bin/tmux"
+  TMPDIR="$tmp" $T new-session -d -s t -x 200 -y 50 'sleep 60'
+  $T new-window -t t 'sleep 60'
+  env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" \
+    bash "$DIR/scripts/toggle.sh"
+  sleep 2
+  mirrors=0
+  for w in $($T list-windows -t t -F '#{window_id}'); do
+    $T list-panes -t "$w" -F '#{pane_title}' | grep -qx agents-mon && mirrors=$((mirrors + 1))
+  done
+  before="$($T list-windows -t t -F '#{window_id} #{window_layout}')"
+  $T last-window -t t; $T last-window -t t
+  sleep 0.5
+  after="$($T list-windows -t t -F '#{window_id} #{window_layout}')"
+  $T new-window -t t 'sleep 60'
+  sleep 1.5
+  neww="$($T display-message -p -t t: '#{window_id}')"
+  new_ok=0
+  $T list-panes -t "$neww" -F '#{pane_title}' | grep -qx agents-mon && new_ok=1
+  mir="$($T list-panes -t t: -F '#{pane_id}	#{pane_title}' |
+    awk -F'\t' '$2 == "agents-mon" { print $1; exit }')"
+  $T send-keys -t "$mir" q
+  sleep 2
+  left="$($T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agents-mon)"
+  if [ "$mirrors" -eq 2 ] && [ "$before" = "$after" ] && [ "$new_ok" -eq 1 ] \
+     && [ "$left" -eq 0 ] && [ ! -f "$tmp/agents-mon-frame" ]; then
+    echo "ok   mirror-mode-no-bump-lifecycle"
+  else
+    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok left=$left"
+    fail=1
+  fi
+  $T kill-server 2>/dev/null || true
+  pkill -f 'agents-mon daemon' 2>/dev/null || true
+  rm -rf "$tmp"
+fi
 exit $fail

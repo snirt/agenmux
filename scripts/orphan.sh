@@ -4,6 +4,34 @@
 # sidebar-only window. follow.sh then pulls the sidebar into the new window and
 # the emptied window dies on its own. Do not move an unrelated active client just
 # because an orphaned sidebar exists in another window/session.
+# Mirror mode: a window whose only pane is a mirror lost its agent — move
+# stranded clients off it and kill it (the mirror pane won't die on its own).
+if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ]; then
+  tmux list-windows -a -F '#{window_id}	#{window_panes}	#{session_id}' |
+    while IFS=$'\t' read -r win npanes session; do
+      [ "$npanes" = 1 ] || continue
+      [ "$(tmux list-panes -t "$win" -F '#{pane_title}' 2>/dev/null)" = "agents-mon" ] || continue
+      target="$(tmux list-windows -t "$session" -F '#{window_id}	#{window_last_flag}' |
+        awk -v win="$win" '$1 != win && $2 == 1 { print $1; exit }')"
+      [ -n "$target" ] || target="$(tmux list-windows -t "$session" -F '#{window_id}' |
+        awk -v win="$win" '$1 != win { print $1; exit }')"
+      tmux list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_name}' |
+        while IFS= read -r client; do
+          [ -n "$client" ] || continue
+          [ "$(tmux display-message -p -c "$client" '#{window_id}' 2>/dev/null)" = "$win" ] || continue
+          if [ -n "$target" ]; then
+            tmux switch-client -c "$client" -t "$target" 2>/dev/null || true
+          else
+            tmux switch-client -c "$client" -l 2>/dev/null \
+              || tmux switch-client -c "$client" -p 2>/dev/null || true
+          fi
+        done
+      tmux set-option -gu "@agents-mon-layout-${win}" 2>/dev/null
+      tmux kill-window -t "$win" 2>/dev/null
+    done
+  exit 0
+fi
+
 sb="$(tmux show-option -gqv @agents-mon-sidebar)"
 [ -n "$sb" ] || exit 0
 win="$(tmux display-message -p -t "$sb" '#{window_id}' 2>/dev/null)"

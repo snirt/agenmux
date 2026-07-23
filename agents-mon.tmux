@@ -24,7 +24,9 @@ fi
 # click a sidebar row -> jump to that agent; any other pane keeps the native
 # click behavior (mouse event stays intact — no run-shell detour)
 if [ "$(tmux show-option -gv mouse)" = "on" ]; then
-  tmux bind-key -n MouseDown1Pane if-shell -F '#{==:#{pane_id},#{@agents-mon-sidebar}}' \
+  # match by pane title: covers the single follow-sidebar AND every mirror
+  # pane (mirror mode has no @agents-mon-sidebar option)
+  tmux bind-key -n MouseDown1Pane if-shell -F '#{==:#{pane_title},agents-mon}' \
     "run-shell -b \"bash '$CURRENT_DIR/scripts/click.sh' '#{pane_id}' '#{mouse_y}' '#{client_name}'\"" \
     'select-pane -t = ; send-keys -M'
 fi
