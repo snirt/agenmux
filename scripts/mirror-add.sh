@@ -20,4 +20,8 @@ id="$(tmux split-window -hbf -d -l "${width:-30}" -t "$win" -P -F '#{pane_id}' \
   "bash -c \"'$BIN' mirror\"")" || exit 0
 tmux set-option -p -t "$id" allow-rename off
 tmux select-pane -t "$id" -T 'agents-mon'
+# seed the size sync-width.sh compares against — without it, the first
+# manual border drag would be mistaken for a window resize and snapped back
+tmux set-option -g "@agents-mon-winsize-${win}" \
+  "$(tmux display-message -p -t "$win" '#{window_width}x#{window_height}')"
 exit 0

@@ -118,6 +118,9 @@ impl Tmux {
                 || l.starts_with("%session-window-changed")
                 || l.starts_with("%session-changed")
                 || l.starts_with("%client-session-changed")
+                // pane resize: the mirror daemon re-measures and re-renders
+                // at the new width without waiting out the 2s scan interval
+                || l.starts_with("%layout-change")
             {
                 focus = true;
             }

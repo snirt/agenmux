@@ -304,10 +304,14 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null; then
   $T kill-server 2>/dev/null || true
   rm -rf "$tmp"
 fi
-if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$DIR/target/release/agents-mon" ]; then
+if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   # mirror mode end to end: toggle puts a mirror pane in every window, window
   # switches change NO layout (the whole point — no reflow bump), new windows
   # get a mirror via hook, and q tears everything down.
+  # NOTE: must pin @agents-mon-bin to $BIN — on CI the build lives at the
+  # musl target path, and target/release/ holds the DOWNLOADED old release
+  # (auto-install test side effect) which lacks the mirror/daemon commands.
+  BIN_ABS="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
   tmp="$(mktemp -d)"
   T="tmux -S $tmp/sock -f /dev/null"
   mkdir -p "$tmp/bin"
@@ -316,6 +320,7 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$DIR/target/release/
   chmod +x "$tmp/bin/tmux"
   TMPDIR="$tmp" $T new-session -d -s t -x 200 -y 50 'sleep 60'
   $T new-window -t t 'sleep 60'
+  $T set-option -g @agents-mon-bin "$BIN_ABS"
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" \
     bash "$DIR/scripts/toggle.sh"
   sleep 2
@@ -334,14 +339,22 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$DIR/target/release/
   $T list-panes -t "$neww" -F '#{pane_title}' | grep -qx agents-mon && new_ok=1
   mir="$($T list-panes -t t: -F '#{pane_id}	#{pane_title}' |
     awk -F'\t' '$2 == "agents-mon" { print $1; exit }')"
+  # dragging one mirror's border adopts the width everywhere (sync-width.sh
+  # via window-layout-changed hook)
+  $T resize-pane -t "$mir" -x 45
+  sleep 1.5
+  widths="$($T list-panes -a -F '#{pane_title}	#{pane_width}' |
+    awk -F'\t' '$1 == "agents-mon" { print $2 }' | sort -u | tr -d '\n')"
+  optw="$($T show-option -gqv @agents-mon-width)"
   $T send-keys -t "$mir" q
   sleep 2
   left="$($T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agents-mon)"
   if [ "$mirrors" -eq 2 ] && [ "$before" = "$after" ] && [ "$new_ok" -eq 1 ] \
+     && [ "$widths" = 45 ] && [ "$optw" = 45 ] \
      && [ "$left" -eq 0 ] && [ ! -f "$tmp/agents-mon-frame" ]; then
     echo "ok   mirror-mode-no-bump-lifecycle"
   else
-    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok left=$left"
+    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok widths=$widths optw=$optw left=$left"
     fail=1
   fi
   $T kill-server 2>/dev/null || true

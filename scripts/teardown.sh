@@ -13,8 +13,9 @@ tmux list-panes -a -F '#{pane_id}	#{pane_title}	#{window_id}' 2>/dev/null |
     [ "$size" = "$(tmux display-message -p -t "$win" '#{window_width}x#{window_height}' 2>/dev/null)" ] \
       && tmux select-layout -t "$win" "$lay" 2>/dev/null
   done
-# unset every saved layout (including windows whose mirror already died)
-tmux show-options -g 2>/dev/null | sed -n 's/^\(@agents-mon-layout-@[0-9]*\) .*/\1/p' |
+# unset every saved layout/size (including windows whose mirror already died)
+tmux show-options -g 2>/dev/null |
+  sed -nE 's/^(@agents-mon-(layout|winsize)-@[0-9]+) .*/\1/p' |
   while read -r opt; do tmux set-option -gu "$opt"; done
 tmux set-option -gu @agents-mon-on 2>/dev/null
 exit 0

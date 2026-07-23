@@ -42,3 +42,7 @@ mirror_add="if -F '#{!=:#{@agents-mon-on},}' { run-shell -b 'bash $DIR/scripts/m
 tmux set-hook -g 'after-select-window[43]' "$mirror_add"
 tmux set-hook -g 'session-window-changed[43]' "$mirror_add"
 tmux set-hook -g 'client-session-changed[43]' "$mirror_add"
+# dragging a mirror's border adopts the new width everywhere; proportional
+# rescales (client resize) snap back instead — sync-width.sh tells them apart
+tmux set-hook -g 'window-layout-changed[43]' \
+  "if -F '#{!=:#{@agents-mon-on},}' { run-shell -b 'bash $DIR/scripts/sync-width.sh' }"
