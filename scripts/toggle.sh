@@ -67,7 +67,16 @@ fi
 # window keeps a permanent mirror pane, so window switches never reflow
 # ("bump") any layout. q/Esc in any mirror tears the whole thing down.
 if [ -x "$BIN" ]; then
-  if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ] && pgrep -qf 'agents-mon daemon'; then
+  # daemon-alive probe: it touches the frame file at least every 2s, and the
+  # file lives in this server's TMPDIR — unlike pgrep, this can't match a
+  # daemon belonging to another tmux server
+  frame="${TMPDIR:-/tmp}/agents-mon-frame"
+  age=999
+  if [ -f "$frame" ]; then
+    mt="$(stat -f %m "$frame" 2>/dev/null || stat -c %Y "$frame" 2>/dev/null)"
+    [ -n "$mt" ] && age=$(( $(date +%s) - mt ))
+  fi
+  if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ] && [ "$age" -lt 6 ]; then
     # already open — make sure this window has a mirror and focus it
     bash "$DIR/scripts/mirror-add.sh"
   else

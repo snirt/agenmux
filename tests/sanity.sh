@@ -80,7 +80,9 @@ run_tmux_case() {
   frame=""
   i=0
   while [ "$i" -lt 50 ]; do
-    sidebar="$(tmux -L "$socket" show-option -gqv @agents-mon-sidebar)"
+    # mirror mode marks panes by title (no @agents-mon-sidebar option)
+    sidebar="$(tmux -L "$socket" list-panes -a -F '#{pane_id}	#{pane_title}' \
+      | awk -F'\t' '$2 == "agents-mon" { print $1; exit }')"
     if [ -n "$sidebar" ]; then
       frame="$(tmux -L "$socket" capture-pane -p -t "$sidebar" 2>/dev/null || true)"
       printf '%s\n' "$frame" | grep -Fq codex && break
