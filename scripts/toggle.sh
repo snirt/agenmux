@@ -63,6 +63,31 @@ if [ "$mode" = "popup" ] || [ "$mode" = "float" ]; then
   exit 0
 fi
 
+# Rust engine present: live-mirror mode. One headless daemon renders; every
+# window keeps a permanent mirror pane, so window switches never reflow
+# ("bump") any layout. q/Esc in any mirror tears the whole thing down.
+if [ -x "$BIN" ]; then
+  if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ] && pgrep -qf 'agents-mon daemon'; then
+    # already open — make sure this window has a mirror and focus it
+    bash "$DIR/scripts/mirror-add.sh"
+  else
+    bash "$DIR/scripts/teardown.sh"   # clear any crash leftovers
+    tmux set-option -g @agents-mon-on 1
+    nohup "$BIN" daemon >/dev/null 2>&1 </dev/null &
+    while read -r win; do
+      bash "$DIR/scripts/mirror-add.sh" "$win"
+    done <<EOF
+$(tmux list-windows -a -F '#{window_id}')
+EOF
+    bash "$DIR/scripts/hooks.sh"
+  fi
+  pane="$(tmux list-panes -F '#{pane_id}	#{pane_title}' |
+    awk -F'\t' '$2 == "agents-mon" { print $1; exit }')"
+  [ -n "$pane" ] && tmux select-pane -t "$pane"
+  exit 0
+fi
+
+# bash fallback: single sidebar pane that follows the active window.
 # open if closed, focus if open — only q/Esc inside the sidebar close it
 cur="$(tmux show-option -gqv @agents-mon-sidebar)"
 if [ -n "$cur" ] && tmux list-panes -a -F '#{pane_id}' | grep -qx "$cur"; then

@@ -1,6 +1,13 @@
 // Sidebar TUI — runs inside the sidebar pane/popup. Port of sidebar.sh:
 // same keys, same frame bytes, same rows/cache/pin file protocol, but one
 // process, one tmux pipe, zero forks per tick.
+//
+// Two entry points share the engine:
+//  - run():        tty mode — popup pane, draws to stdout, keys from stdin.
+//  - run_daemon(): headless mirror mode — frame goes to a file that every
+//    window's mirror pane displays, keys arrive over a FIFO. The sidebar
+//    pane never moves between windows, so switching windows causes no
+//    join-pane reflow (the "bump").
 use crate::conf::AgentConf;
 use crate::procs::IdentCache;
 use crate::scan::{self, PaneRow};
@@ -21,13 +28,13 @@ extern "C" fn on_term(_: libc::c_int) {
     QUIT.store(true, Ordering::Relaxed);
 }
 
-const E: &str = "\x1b";
+pub(crate) const E: &str = "\x1b";
 const SPIN: [char; 8] = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
 
-struct RawMode(Option<libc::termios>);
+pub(crate) struct RawMode(Option<libc::termios>);
 
 impl RawMode {
-    fn enable() -> RawMode {
+    pub(crate) fn enable() -> RawMode {
         unsafe {
             let mut t: libc::termios = std::mem::zeroed();
             if libc::tcgetattr(0, &mut t) != 0 {
@@ -51,7 +58,7 @@ impl Drop for RawMode {
     }
 }
 
-fn term_size() -> (usize, usize) {
+pub(crate) fn term_size() -> (usize, usize) {
     unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
         if libc::ioctl(0, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
@@ -61,10 +68,10 @@ fn term_size() -> (usize, usize) {
     (30, 24)
 }
 
-/// poll stdin; returns true when readable. timeout None = wait forever.
-fn poll_stdin(timeout: Option<Duration>) -> bool {
+/// poll one fd; returns true when readable. timeout None = wait forever.
+pub(crate) fn poll_fd(fd: libc::c_int, timeout: Option<Duration>) -> bool {
     let mut fds = libc::pollfd {
-        fd: 0,
+        fd,
         events: libc::POLLIN,
         revents: 0,
     };
@@ -72,12 +79,17 @@ fn poll_stdin(timeout: Option<Duration>) -> bool {
     unsafe { libc::poll(&mut fds, 1, ms) > 0 && fds.revents & libc::POLLIN != 0 }
 }
 
-/// poll stdin + the tmux control pipe; returns (key_ready, pipe_ready).
+/// poll the key fd + the tmux control pipe; returns (key_ready, pipe_ready).
 /// pipe_buffered short-circuits the wait — data is already in the BufReader.
-fn poll_inputs(pipe_fd: libc::c_int, pipe_buffered: bool, timeout: Duration) -> (bool, bool) {
+fn poll_inputs(
+    key_fd: libc::c_int,
+    pipe_fd: libc::c_int,
+    pipe_buffered: bool,
+    timeout: Duration,
+) -> (bool, bool) {
     let mut fds = [
         libc::pollfd {
-            fd: 0,
+            fd: key_fd,
             events: libc::POLLIN,
             revents: 0,
         },
@@ -99,9 +111,9 @@ fn poll_inputs(pipe_fd: libc::c_int, pipe_buffered: bool, timeout: Duration) -> 
 }
 
 /// Read one byte; None on EOF or error.
-fn read_byte() -> Option<u8> {
+pub(crate) fn read_byte(fd: libc::c_int) -> Option<u8> {
     let mut b = [0u8; 1];
-    let n = unsafe { libc::read(0, b.as_mut_ptr().cast(), 1) };
+    let n = unsafe { libc::read(fd, b.as_mut_ptr().cast(), 1) };
     (n == 1).then_some(b[0])
 }
 
@@ -114,8 +126,8 @@ enum Key {
     Other,
 }
 
-fn read_key() -> Key {
-    let Some(b) = read_byte() else { return Key::Quit }; // EOF: explicit close
+fn read_key(fd: libc::c_int) -> Key {
+    let Some(b) = read_byte(fd) else { return Key::Quit }; // EOF: explicit close
     match b {
         b'j' => Key::Down,
         b'k' => Key::Up,
@@ -124,10 +136,10 @@ fn read_key() -> Key {
         b'?' => Key::Help,
         0x1b => {
             // arrows deliver their bytes together; only bare Esc times out
-            if !poll_stdin(Some(Duration::from_millis(50))) {
+            if !poll_fd(fd, Some(Duration::from_millis(50))) {
                 return Key::Quit;
             }
-            let (a, b2) = (read_byte(), read_byte());
+            let (a, b2) = (read_byte(fd), read_byte(fd));
             match (a, b2) {
                 (Some(b'['), Some(b'A')) => Key::Up,
                 (Some(b'['), Some(b'B')) => Key::Down,
@@ -143,6 +155,16 @@ struct Prev {
     state: String,
     ticks: u32,
     title: String,
+}
+
+/// Headless-mode state: frame → file, keys ← FIFO, size ← mirror panes.
+struct Daemon {
+    frame_file: PathBuf,
+    keys_path: PathBuf,
+    keys_fd: libc::c_int,
+    size: (usize, usize), // min mirror pane size — mirrors clip the rest
+    seen_mirror: bool,    // suicide only arms after the first mirror appears
+    started: Instant,
 }
 
 pub struct Sidebar {
@@ -164,6 +186,39 @@ pub struct Sidebar {
     rows_file: PathBuf,
     cache_file: PathBuf,
     last_frame: String,
+    daemon: Option<Daemon>,
+}
+
+fn new_sidebar(tmux: Tmux, plugin_dir: PathBuf, cache_file: PathBuf, rows_file: PathBuf) -> Sidebar {
+    let self_pane = std::env::var("TMUX_PANE").unwrap_or_default();
+    let confs = crate::conf::load_all(&plugin_dir);
+    let mut sb = Sidebar {
+        tmux,
+        confs,
+        ident: IdentCache::new(),
+        subj: scan::SubjectCache::new(),
+        prev: HashMap::new(),
+        rows: Vec::new(),
+        sel: 1,
+        scroll: 0,
+        sel_pane: String::new(),
+        last_active: String::new(),
+        active: String::new(),
+        tick: 0,
+        self_pane,
+        pin: None,
+        plugin_dir,
+        rows_file,
+        cache_file,
+        last_frame: String::new(),
+        daemon: None,
+    };
+    // seed from the previous instance's scan for an instant first frame
+    if let Ok(tsv) = std::fs::read_to_string(&sb.cache_file) {
+        sb.rows = scan::from_tsv(&tsv);
+        sb.rows.retain(|r| r.pane != sb.self_pane);
+    }
+    sb
 }
 
 pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
@@ -190,35 +245,56 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
             return 0;
         }
     };
-    let confs = crate::conf::load_all(&plugin_dir);
-    let mut sb = Sidebar {
-        tmux,
-        confs,
-        ident: IdentCache::new(),
-        subj: scan::SubjectCache::new(),
-        prev: HashMap::new(),
-        rows: Vec::new(),
-        sel: 1,
-        scroll: 0,
-        sel_pane: String::new(),
-        last_active: String::new(),
-        active: String::new(),
-        tick: 0,
-        self_pane,
-        pin,
-        plugin_dir,
-        rows_file,
-        cache_file,
-        last_frame: String::new(),
-    };
-
-    // seed from the previous instance's scan for an instant first frame
-    if let Ok(tsv) = std::fs::read_to_string(&sb.cache_file) {
-        sb.rows = scan::from_tsv(&tsv);
-        sb.rows.retain(|r| r.pane != sb.self_pane);
-    }
+    let mut sb = new_sidebar(tmux, plugin_dir, cache_file, rows_file);
+    sb.pin = pin;
     sb.render(true);
+    event_loop(&mut sb);
+    cleanup(&sb.rows_file, &sb.pin);
+    0
+}
 
+/// Headless engine for mirror mode: renders to a frame file, reads keys
+/// from a FIFO, sizes itself to the smallest mirror pane. Exits (with full
+/// teardown) when the last mirror pane disappears.
+pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
+    unsafe {
+        libc::signal(libc::SIGTERM, on_term as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_term as libc::sighandler_t);
+    }
+    let tmp = std::env::temp_dir();
+    let frame_file = tmp.join("agents-mon-frame");
+    let keys_path = tmp.join("agents-mon-keys");
+    let _ = std::fs::remove_file(&keys_path);
+    let c = std::ffi::CString::new(keys_path.as_os_str().as_encoded_bytes()).unwrap();
+    // O_RDWR: the FIFO never hits EOF as mirror writers come and go
+    let keys_fd = unsafe {
+        libc::mkfifo(c.as_ptr(), 0o600);
+        libc::open(c.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK)
+    };
+    if keys_fd < 0 {
+        return 1;
+    }
+    let tmux = match Tmux::connect() {
+        Ok(t) => t,
+        Err(_) => return 0,
+    };
+    let mut sb = new_sidebar(tmux, plugin_dir, cache_file, tmp.join("agents-mon-rows"));
+    sb.daemon = Some(Daemon {
+        frame_file,
+        keys_path,
+        keys_fd,
+        size: (30, 24),
+        seen_mirror: false,
+        started: Instant::now(),
+    });
+    sb.render(true);
+    event_loop(&mut sb);
+    sb.teardown();
+    0
+}
+
+fn event_loop(sb: &mut Sidebar) {
+    let key_fd = sb.daemon.as_ref().map_or(0, |d| d.keys_fd);
     let mut next_scan = Instant::now(); // scan immediately
     let mut next_tick = Instant::now();
     loop {
@@ -233,6 +309,9 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
                 // the pipe is desynced, restarting is the only safe move
                 Err(TmuxError::Exited) | Err(TmuxError::Io(_)) => break,
                 Err(TmuxError::Error(_)) => {} // e.g. pane died mid-scan
+            }
+            if sb.daemon.is_some() && !sb.mirror_tick() {
+                break; // all mirror panes gone — nothing left to display for
             }
             sb.render(false);
             // a scan takes tens of ms — with the pre-scan `now`, a tick due
@@ -257,7 +336,7 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         } else {
             next_scan.saturating_duration_since(now)
         };
-        let (key_ready, pipe_ready) = poll_inputs(sb.tmux.fd(), sb.tmux.buffered(), wake);
+        let (key_ready, pipe_ready) = poll_inputs(key_fd, sb.tmux.fd(), sb.tmux.buffered(), wake);
         if pipe_ready {
             // focus notification (%window-pane-changed etc.) — rescan now so
             // the cursor snaps to the newly focused pane without the 2s wait
@@ -268,7 +347,7 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
             }
         }
         if key_ready {
-            match read_key() {
+            match read_key(key_fd) {
                 Key::Down => sb.move_sel(1),
                 Key::Up => sb.move_sel(-1),
                 Key::Jump => {
@@ -288,13 +367,11 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
             }
             sb.render(false);
         }
-        if WINCH.swap(false, Ordering::Relaxed) {
+        if sb.daemon.is_none() && WINCH.swap(false, Ordering::Relaxed) {
             print!("{E}[2J");
             sb.render(true);
         }
     }
-    cleanup(&sb.rows_file, &sb.pin);
-    0
 }
 
 fn cleanup(rows_file: &PathBuf, pin: &Option<String>) {
@@ -512,8 +589,81 @@ impl Sidebar {
         }
     }
 
+    /// Refresh mirror inventory: min pane size drives the render, zero
+    /// mirrors (after at least one existed, or a 30s startup grace) = false.
+    fn mirror_tick(&mut self) -> bool {
+        let out = self
+            .tmux
+            .run("list-panes -a -f '#{==:#{pane_title},agents-mon}' -F '#{pane_width} #{pane_height}'")
+            .unwrap_or_default();
+        let (mut w, mut h, mut n) = (usize::MAX, usize::MAX, 0usize);
+        for l in out.lines() {
+            if let Some((pw, ph)) = l.split_once(' ') {
+                if let (Ok(pw), Ok(ph)) = (pw.parse(), ph.parse()) {
+                    w = w.min(pw);
+                    h = h.min(ph);
+                    n += 1;
+                }
+            }
+        }
+        let d = self.daemon.as_mut().unwrap();
+        if n > 0 {
+            d.seen_mirror = true;
+            d.size = (w, h);
+            return true;
+        }
+        !d.seen_mirror && d.started.elapsed() < Duration::from_secs(30)
+    }
+
+    /// Mirror-mode shutdown: kill mirror panes + restore layouts via a
+    /// forked script (hook run-shell echoes would desync the control pipe),
+    /// then drop the frame/keys files so any surviving mirror exits.
+    fn teardown(&mut self) {
+        let script = self.plugin_dir.join("scripts/teardown.sh");
+        let _ = std::process::Command::new("bash").arg(script).status();
+        if let Some(d) = &self.daemon {
+            let _ = std::fs::remove_file(&d.frame_file);
+            let _ = std::fs::remove_file(&d.keys_path);
+            unsafe { libc::close(d.keys_fd) };
+        }
+        let _ = std::fs::remove_file(&self.rows_file);
+    }
+
+    /// Frame sink: stdout in tty mode; atomic file write in daemon mode.
+    /// Unchanged daemon frames still touch the file — mirrors read staleness
+    /// as "daemon died".
+    fn emit(&mut self, frame: String, force: bool) {
+        let changed = force || frame != self.last_frame;
+        match &self.daemon {
+            None => {
+                if changed {
+                    print!("{frame}");
+                    let _ = std::io::stdout().flush();
+                }
+            }
+            Some(d) => {
+                if changed {
+                    let tmp = d.frame_file.with_extension("tmp");
+                    if std::fs::write(&tmp, &frame).is_ok() {
+                        let _ = std::fs::rename(&tmp, &d.frame_file);
+                    }
+                } else {
+                    let c =
+                        std::ffi::CString::new(d.frame_file.as_os_str().as_encoded_bytes()).unwrap();
+                    unsafe { libc::utimes(c.as_ptr(), std::ptr::null()) };
+                }
+            }
+        }
+        if changed {
+            self.last_frame = frame;
+        }
+    }
+
     fn render(&mut self, force: bool) {
-        let (cols, trows) = term_size();
+        let (cols, trows) = match &self.daemon {
+            Some(d) => d.size,
+            None => term_size(),
+        };
         let cap = trows.saturating_sub(1); // last row's newline would scroll
         let space = cap.saturating_sub(2); // header + blank line
         let mut frame = format!("{E}[H{E}[1magents{E}[0m{E}[K\n{E}[K\n");
@@ -529,7 +679,10 @@ impl Sidebar {
                 let sess = r.loc.split(':').next().unwrap_or("");
                 if sess != session {
                     session = sess;
-                    lines.push((format!("{E}[1;34m{sess}{E}[0m{E}[K\n"), "-"));
+                    // clip to pane width — a wrapped header shifts every row
+                    // below it and breaks the click→rows-file mapping
+                    let sess_clipped: String = sess.chars().take(cols).collect();
+                    lines.push((format!("{E}[1;34m{sess_clipped}{E}[0m{E}[K\n"), "-"));
                 }
                 if n + 1 == self.sel {
                     sel_top = lines.len();
@@ -583,15 +736,11 @@ impl Sidebar {
         }
         frame.push_str(&format!("{E}[J"));
         let _ = std::fs::write(&self.rows_file, &vis);
-        if force || frame != self.last_frame {
-            print!("{frame}");
-            let _ = std::io::stdout().flush();
-            self.last_frame = frame;
-        }
+        self.emit(frame, force);
     }
 
     fn help(&mut self) {
-        print!(
+        let text = format!(
             "{E}[2J{E}[H{E}[1magents — help{E}[0m\n\n\
 {E}[1mstatus{E}[0m\n\
  {E}[32m⣿{E}[0m  idle\n\
@@ -605,12 +754,15 @@ impl Sidebar {
  ?        this help\n\n\
 {E}[2mpress any key to return{E}[0m"
         );
-        let _ = std::io::stdout().flush();
+        let key_fd = self.daemon.as_ref().map_or(0, |d| d.keys_fd);
+        self.emit(text, true);
         // blocks until a key; animations pause meanwhile
-        if poll_stdin(None) {
-            let _ = read_byte();
+        if poll_fd(key_fd, None) {
+            let _ = read_byte(key_fd);
         }
-        print!("{E}[2J");
+        if self.daemon.is_none() {
+            print!("{E}[2J");
+        }
         self.last_frame.clear();
     }
 }

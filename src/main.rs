@@ -1,5 +1,6 @@
 mod conf;
 mod detect;
+mod mirror;
 mod procs;
 mod scan;
 mod sidebar;
@@ -21,9 +22,11 @@ fn main() {
         ["scan"] | ["list"] => cmd_scan(),
         ["status"] => cmd_status(),
         ["sidebar"] => sidebar::run(plugin_dir(), scan_cache_path()),
+        ["daemon"] => sidebar::run_daemon(plugin_dir(), scan_cache_path()),
+        ["mirror"] => mirror::run(),
         _ => {
             eprintln!(
-                "usage: agents-mon [--version|scan|status|sidebar|detect <conf> <screen-file> [title]]"
+                "usage: agents-mon [--version|scan|status|sidebar|daemon|mirror|detect <conf> <screen-file> [title]]"
             );
             2
         }

@@ -33,3 +33,12 @@ tmux set-hook -g 'window-pane-changed[42]' "run-shell 'bash $DIR/scripts/orphan.
 tmux set-hook -g 'window-layout-changed[42]' "run-shell 'bash $DIR/scripts/orphan.sh'"
 # client resizes rescale panes proportionally — snap the sidebar back
 tmux set-hook -g 'window-resized[42]' "run-shell 'bash $DIR/scripts/pin.sh'"
+
+# Mirror mode (Rust engine): windows created or first visited while on get
+# their mirror pane here. Guarded on @agents-mon-on, so these no-op in the
+# bash-fallback mode (and the [42] follow hooks no-op in mirror mode — their
+# guard is @agents-mon-sidebar, which mirror mode never sets).
+mirror_add="if -F '#{!=:#{@agents-mon-on},}' { run-shell -b 'bash $DIR/scripts/mirror-add.sh' }"
+tmux set-hook -g 'after-select-window[43]' "$mirror_add"
+tmux set-hook -g 'session-window-changed[43]' "$mirror_add"
+tmux set-hook -g 'client-session-changed[43]' "$mirror_add"
