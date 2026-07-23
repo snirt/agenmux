@@ -45,4 +45,7 @@ tmux set-hook -g 'after-select-window[43]' "$mirror_add"
 tmux set-hook -g 'session-window-changed[43]' "$mirror_add"
 tmux set-hook -g 'client-session-changed[43]' "$mirror_add"
 # border drags are detected and propagated by the daemon itself (single
-# process = no racing resize storms); no width hook needed here
+# process = no racing resize storms); no width hook needed here.
+# Servers that ran the short-lived sync-width.sh hook keep it until
+# something unsets it — it now points at a deleted file and spams 127s
+tmux set-hook -gu 'window-layout-changed[43]' 2>/dev/null
