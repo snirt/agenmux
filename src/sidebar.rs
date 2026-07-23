@@ -168,6 +168,9 @@ struct Daemon {
     // window id -> window size at the last measure: a mirror whose width
     // changed while its window size did NOT is a user border-drag
     win_sizes: HashMap<String, (usize, usize)>,
+    // session the control client is attached to: layout/focus notifications
+    // are session-scoped, so the client follows the user's active session
+    attached: String,
 }
 
 pub struct Sidebar {
@@ -182,6 +185,7 @@ pub struct Sidebar {
     sel_pane: String,
     last_active: String,
     active: String,
+    active_session: String,
     tick: u32,
     self_pane: String,
     pin: Option<String>,
@@ -207,6 +211,7 @@ fn new_sidebar(tmux: Tmux, plugin_dir: PathBuf, cache_file: PathBuf, rows_file: 
         sel_pane: String::new(),
         last_active: String::new(),
         active: String::new(),
+        active_session: String::new(),
         tick: 0,
         self_pane,
         pin: None,
@@ -290,6 +295,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         seen_mirror: false,
         started: Instant::now(),
         win_sizes: HashMap::new(),
+        attached: String::new(),
     });
     sb.render(true);
     event_loop(&mut sb);
@@ -403,6 +409,20 @@ impl Sidebar {
         crate::tmux::debug_note(&format!("scan {}ms", t0.elapsed().as_millis()));
         let _ = std::fs::write(&self.cache_file, scan::to_tsv(&scanned));
         self.active = self.active_pane().unwrap_or_default();
+        // notifications only cover the attached session — follow the user so
+        // drags and focus changes where they're looking react instantly
+        // (background sessions wait for the 2s scan, which nobody can see)
+        if self.daemon.is_some()
+            && !self.active_session.is_empty()
+            && self.daemon.as_ref().unwrap().attached != self.active_session
+        {
+            let sid = self.active_session.clone();
+            if self.tmux.run(&format!("switch-client -t '{sid}'")).is_ok() {
+                // insurance: keep pane output off the control pipe
+                let _ = self.tmux.run("refresh-client -f no-output");
+                self.daemon.as_mut().unwrap().attached = sid;
+            }
+        }
 
         // idle debounce: show idle only after 2 consecutive idle ticks
         // (redraws flash idle-looking frames mid-render)
@@ -462,19 +482,25 @@ impl Sidebar {
     }
 
     fn active_pane(&mut self) -> Option<String> {
-        // first real (non-control-mode) client's current pane
-        let sid = self
-            .tmux
-            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{session_id}'")
-            .ok()?
-            .lines()
-            .next()?
-            .to_string();
+        // most recently active real (non-control-mode) client's current pane
+        // — with several terminals attached, the first listed one may not be
+        // the one the user is looking at. Stashes the session id for the
+        // daemon's follow-the-user client switching.
         let out = self
             .tmux
-            .run(&format!("display-message -p -t '{sid}' '#{{pane_id}}'"))
+            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_activity}\t#{session_id}\t#{pane_id}'")
             .ok()?;
-        Some(out.trim().to_string())
+        let (sid, pane) = out
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split('\t');
+                let act: u64 = f.next()?.parse().ok()?;
+                Some((act, f.next()?.to_string(), f.next()?.to_string()))
+            })
+            .max_by_key(|(act, _, _)| *act)
+            .map(|(_, s, p)| (s, p))?;
+        self.active_session = sid;
+        Some(pane)
     }
 
     fn move_sel(&mut self, d: i64) {
