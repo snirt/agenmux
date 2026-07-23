@@ -342,7 +342,9 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   # dragging one mirror's border adopts the width everywhere (sync-width.sh
   # via window-layout-changed hook)
   $T resize-pane -t "$mir" -x 45
-  sleep 1.5
+  # the drag guard needs two same-window-size measures (2s scan apart) when
+  # the resized mirror lives in a window created moments ago
+  sleep 4
   widths="$($T list-panes -a -F '#{pane_title}	#{pane_width}' |
     awk -F'\t' '$1 == "agents-mon" { print $2 }' | sort -u | tr -d '\n')"
   optw="$($T show-option -gqv @agents-mon-width)"

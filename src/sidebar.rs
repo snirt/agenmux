@@ -165,6 +165,9 @@ struct Daemon {
     size: (usize, usize), // min mirror pane size — mirrors clip the rest
     seen_mirror: bool,    // suicide only arms after the first mirror appears
     started: Instant,
+    // window id -> window size at the last measure: a mirror whose width
+    // changed while its window size did NOT is a user border-drag
+    win_sizes: HashMap<String, (usize, usize)>,
 }
 
 pub struct Sidebar {
@@ -286,6 +289,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         size: (30, 24),
         seen_mirror: false,
         started: Instant::now(),
+        win_sizes: HashMap::new(),
     });
     sb.render(true);
     event_loop(&mut sb);
@@ -591,28 +595,92 @@ impl Sidebar {
 
     /// Refresh mirror inventory: min pane size drives the render, zero
     /// mirrors (after at least one existed, or a 30s startup grace) = false.
+    /// Also detects a user dragging a mirror's border — width changed while
+    /// the window size did not, in a window the user can actually see — and
+    /// adopts it as the global width. Serialization matters: one daemon
+    /// doing this (instead of racing hook scripts) means no stale
+    /// resize-pane ever fights the drag, and the dragged pane itself is
+    /// never touched — only the invisible mirrors in other windows move.
     fn mirror_tick(&mut self) -> bool {
+        struct M {
+            pane: String,
+            win: String,
+            w: usize,
+            win_size: (usize, usize),
+            active: bool,
+        }
         let out = self
             .tmux
-            .run("list-panes -a -f '#{==:#{pane_title},agents-mon}' -F '#{pane_width} #{pane_height}'")
+            .run("list-panes -a -f '#{==:#{pane_title},agents-mon}' -F '#{pane_id}\t#{window_id}\t#{pane_width}\t#{pane_height}\t#{window_width} #{window_height}\t#{window_active}'")
             .unwrap_or_default();
-        let (mut w, mut h, mut n) = (usize::MAX, usize::MAX, 0usize);
+        let (mut w, mut h) = (usize::MAX, usize::MAX);
+        let mut ms: Vec<M> = Vec::new();
         for l in out.lines() {
-            if let Some((pw, ph)) = l.split_once(' ') {
-                if let (Ok(pw), Ok(ph)) = (pw.parse(), ph.parse()) {
-                    w = w.min(pw);
-                    h = h.min(ph);
-                    n += 1;
+            let f: Vec<&str> = l.split('\t').collect();
+            let [pane, win, pw, ph, ws, act] = f.as_slice() else { continue };
+            let (Ok(pw), Ok(ph)) = (pw.parse::<usize>(), ph.parse::<usize>()) else {
+                continue;
+            };
+            let Some((ww, wh)) = ws
+                .split_once(' ')
+                .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
+            else {
+                continue;
+            };
+            w = w.min(pw);
+            h = h.min(ph);
+            ms.push(M {
+                pane: pane.to_string(),
+                win: win.to_string(),
+                w: pw,
+                win_size: (ww, wh),
+                active: *act == "1",
+            });
+        }
+        if ms.is_empty() {
+            let d = self.daemon.as_mut().unwrap();
+            return !d.seen_mirror && d.started.elapsed() < Duration::from_secs(30);
+        }
+        let wopt: usize = self
+            .tmux
+            .run("show-option -gqv @agents-mon-width")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(30);
+        let drag: Option<(String, usize)> = {
+            let d = self.daemon.as_ref().unwrap();
+            ms.iter()
+                .find(|m| {
+                    m.active && m.w != wopt && d.win_sizes.get(&m.win) == Some(&m.win_size)
+                })
+                .map(|m| (m.pane.clone(), m.w))
+        };
+        if let Some((src_pane, width)) = drag {
+            let _ = self
+                .tmux
+                .run(&format!("set-option -g @agents-mon-width {width}"));
+            // resize the OTHER mirrors via forked tmux (hook run-shell
+            // echoes on the control pipe would desync it); the dragged pane
+            // stays untouched so nothing ever fights the user's drag
+            let mut cmd = std::process::Command::new("tmux");
+            let mut any = false;
+            for m in ms.iter().filter(|m| m.pane != src_pane && m.w != width) {
+                if any {
+                    cmd.arg(";");
                 }
+                cmd.args(["resize-pane", "-t", &m.pane, "-x", &width.to_string()]);
+                any = true;
             }
+            if any {
+                let _ = cmd.status();
+            }
+            w = width; // render for the adopted width now, not the stale min
         }
         let d = self.daemon.as_mut().unwrap();
-        if n > 0 {
-            d.seen_mirror = true;
-            d.size = (w, h);
-            return true;
-        }
-        !d.seen_mirror && d.started.elapsed() < Duration::from_secs(30)
+        d.win_sizes = ms.iter().map(|m| (m.win.clone(), m.win_size)).collect();
+        d.seen_mirror = true;
+        d.size = (w, h);
+        true
     }
 
     /// Mirror-mode shutdown: kill mirror panes + restore layouts via a

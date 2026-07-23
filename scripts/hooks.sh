@@ -38,11 +38,11 @@ tmux set-hook -g 'window-resized[42]' "run-shell 'bash $DIR/scripts/pin.sh'"
 # their mirror pane here. Guarded on @agents-mon-on, so these no-op in the
 # bash-fallback mode (and the [42] follow hooks no-op in mirror mode — their
 # guard is @agents-mon-sidebar, which mirror mode never sets).
-mirror_add="if -F '#{!=:#{@agents-mon-on},}' { run-shell -b 'bash $DIR/scripts/mirror-add.sh' }"
+# the explicit #{window_id} matters: on detached sessions (and older tmux)
+# a bare display-message inside the hook script resolves ambiguously
+mirror_add="if -F '#{!=:#{@agents-mon-on},}' { run-shell -b 'bash $DIR/scripts/mirror-add.sh #{window_id}' }"
 tmux set-hook -g 'after-select-window[43]' "$mirror_add"
 tmux set-hook -g 'session-window-changed[43]' "$mirror_add"
 tmux set-hook -g 'client-session-changed[43]' "$mirror_add"
-# dragging a mirror's border adopts the new width everywhere; proportional
-# rescales (client resize) snap back instead — sync-width.sh tells them apart
-tmux set-hook -g 'window-layout-changed[43]' \
-  "if -F '#{!=:#{@agents-mon-on},}' { run-shell -b 'bash $DIR/scripts/sync-width.sh' }"
+# border drags are detected and propagated by the daemon itself (single
+# process = no racing resize storms); no width hook needed here
