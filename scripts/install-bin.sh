@@ -3,6 +3,7 @@
 # record the available releases so the sidebar can offer an update/rollback.
 #
 #   install-bin.sh              install/refresh the engine (throttled)
+#   install-bin.sh refresh      re-read the release list now, ignoring the throttle
 #   install-bin.sh fetch T DIR  download+verify release T, extract into DIR
 set -u
 
@@ -117,6 +118,13 @@ download_bin() {
   rm -rf "$scratch"
   return "$rc"
 }
+
+# Opening the version picker is an explicit "what is out there?" — answer it
+# now rather than serving a list that can be a day old.
+if [ "${1:-}" = "refresh" ]; then
+  command -v curl >/dev/null 2>&1 && record_releases
+  exit 0
+fi
 
 # "what is released" and "does the engine need installing" are separate
 # questions with separate throttles. Gating the first behind the second left an

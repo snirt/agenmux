@@ -73,7 +73,10 @@ if [ -x "$BIN" ]; then
   frame="${TMPDIR:-/tmp}/agents-mon-frame"
   age=999
   if [ -f "$frame" ]; then
-    mt="$(stat -f %m "$frame" 2>/dev/null || stat -c %Y "$frame" 2>/dev/null)"
+    # GNU first: on Linux `stat -f` is --file-system and succeeds, printing a
+    # block to stdout — the BSD-first order captured that as the mtime, so the
+    # age never parsed and every toggle tore the view down and respawned it
+    mt="$(stat -c %Y "$frame" 2>/dev/null || stat -f %m "$frame" 2>/dev/null)"
     [ -n "$mt" ] && age=$(( $(date +%s) - mt ))
   fi
   if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ] && [ "$age" -lt 6 ]; then

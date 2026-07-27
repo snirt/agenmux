@@ -166,12 +166,33 @@ fn current_tag() -> String {
 }
 
 /// Newest release, as recorded by install-bin.sh's (at most daily) check.
-/// None when it is the one already running — nothing to offer.
+/// None unless it is strictly newer than what is running: a checkout ahead of
+/// every release (master, or a just-bumped manifest) must not be told to
+/// "update" to the older tag behind it.
 fn update_available(plugin_dir: &PathBuf) -> Option<String> {
     let latest =
         std::fs::read_to_string(plugin_dir.join("target/release/.agents-mon-latest")).ok()?;
     let latest = latest.trim();
-    (is_tag(latest) && latest != current_tag()).then(|| latest.to_string())
+    (is_tag(latest) && newer_than(latest, &current_tag())).then(|| latest.to_string())
+}
+
+/// Numeric, component-wise tag compare: is `a` a later release than `b`?
+/// String order is not enough — "v0.1.10" sorts before "v0.1.9".
+fn newer_than(a: &str, b: &str) -> bool {
+    let parts = |t: &str| -> Vec<u64> {
+        t.trim_start_matches('v')
+            .split(['.', '-'])
+            .map(|s| s.parse().unwrap_or(0))
+            .collect()
+    };
+    let (x, y) = (parts(a), parts(b));
+    for i in 0..x.len().max(y.len()) {
+        let (l, r) = (x.get(i).copied().unwrap_or(0), y.get(i).copied().unwrap_or(0));
+        if l != r {
+            return l > r;
+        }
+    }
+    false
 }
 
 /// Releases install-bin.sh saw on the remote, newest first.
@@ -1015,14 +1036,19 @@ impl Sidebar {
     /// meanwhile — and a mirror treats a frame older than 10s as a dead daemon
     /// and kills its own pane (see mirror::run). Re-emitting an unchanged frame
     /// costs a utimes and keeps every mirror convinced we are alive.
-    /// Returns false only when the process is shutting down.
-    fn await_key(&mut self, text: &str) -> bool {
+    /// Returns false on shutdown, or when `max_wait` elapses with no key —
+    /// callers that redraw on a timer pass one, help passes None.
+    fn await_key(&mut self, text: &str, max_wait: Option<Duration>) -> bool {
         let key_fd = self.daemon.as_ref().map_or(0, |d| d.keys_fd);
+        let deadline = max_wait.map(|d| Instant::now() + d);
         while !QUIT.load(Ordering::Relaxed) {
             if poll_fd(key_fd, Some(Duration::from_secs(2))) {
                 return true;
             }
             self.emit(text.to_string(), false);
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return false;
+            }
         }
         false
     }
@@ -1032,24 +1058,42 @@ impl Sidebar {
     /// engine, and restarts the view.
     fn versions(&mut self) {
         let key_fd = self.daemon.as_ref().map_or(0, |d| d.keys_fd);
-        let tags = known_tags(&self.plugin_dir);
         let cur = current_tag();
-        if tags.is_empty() {
-            let text = format!(
-                "{E}[2J{E}[H{E}[1magents — versions{E}[0m\n\n\
- {E}[2mno release list yet.{E}[0m\n\
- {E}[2mthe update check runs in the background,{E}[0m\n\
- {E}[2mat most once a day — try again shortly.{E}[0m\n\n\
-{E}[2mpress any key to return{E}[0m"
-            );
-            self.emit(text.clone(), true);
-            if self.await_key(&text) {
-                let _ = read_byte(key_fd);
+        // opening the picker is an explicit "what is out there?" — ask now
+        // instead of serving a list that the daily check may have left a day
+        // old. It lands in the file and the loop below picks it up live.
+        let _ = std::process::Command::new("bash")
+            .arg(self.plugin_dir.join("scripts/install-bin.sh"))
+            .arg("refresh")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let mut sel = 0usize;
+        let mut selected: Option<String> = None;
+        loop {
+            if QUIT.load(Ordering::Relaxed) {
+                break;
             }
-        } else {
-            let mut sel = tags.iter().position(|t| *t == cur).unwrap_or(0);
-            loop {
-                let mut text = format!("{E}[2J{E}[H{E}[1magents — versions{E}[0m\n\n");
+            let tags = known_tags(&self.plugin_dir);
+            // the running version pins the cursor across a refresh that
+            // reorders or lengthens the list
+            if let Some(s) = &selected {
+                sel = tags.iter().position(|t| t == s).unwrap_or(sel);
+            } else if let Some(i) = tags.iter().position(|t| *t == cur) {
+                sel = i;
+            }
+            sel = sel.min(tags.len().saturating_sub(1));
+
+            let mut text = format!(
+                "{E}[2J{E}[H{E}[1magents — versions{E}[0m {E}[2m{cur}{E}[0m\n\n"
+            );
+            if tags.is_empty() {
+                text.push_str(&format!(
+                    " {E}[2mno releases found — checking…{E}[0m\n\n\
+                     {E}[2mq back{E}[0m"
+                ));
+            } else {
                 for (i, t) in tags.iter().enumerate() {
                     let mark = if i == sel {
                         format!("{E}[1m❯{E}[0m ")
@@ -1065,23 +1109,25 @@ impl Sidebar {
                 }
                 // fits the default 30-column sidebar without wrapping
                 text.push_str(&format!("\n{E}[2m↵ switch · j/k ↑/↓ · q back{E}[0m"));
-                self.emit(text.clone(), true);
-                if !self.await_key(&text) {
+            }
+            self.emit(text.clone(), true);
+            // wake without a key so a refresh landing mid-view shows up
+            if !self.await_key(&text, Some(Duration::from_secs(2))) {
+                continue;
+            }
+            match read_key(key_fd) {
+                Key::Down if !tags.is_empty() => sel = (sel + 1).min(tags.len() - 1),
+                Key::Up => sel = sel.saturating_sub(1),
+                Key::Jump => {
+                    if let Some(t) = tags.get(sel).filter(|t| **t != cur) {
+                        self.switch_version(t);
+                    }
                     break;
                 }
-                match read_key(key_fd) {
-                    Key::Down => sel = (sel + 1).min(tags.len() - 1),
-                    Key::Up => sel = sel.saturating_sub(1),
-                    Key::Jump => {
-                        if tags[sel] != cur {
-                            self.switch_version(&tags[sel]);
-                        }
-                        break;
-                    }
-                    Key::Quit => break,
-                    _ => {}
-                }
+                Key::Quit => break,
+                _ => {}
             }
+            selected = tags.get(sel).cloned();
         }
         if self.daemon.is_none() {
             print!("{E}[2J");
@@ -1123,7 +1169,7 @@ impl Sidebar {
         let key_fd = self.daemon.as_ref().map_or(0, |d| d.keys_fd);
         self.emit(text.clone(), true);
         // blocks until a key; animations pause meanwhile
-        if self.await_key(&text) {
+        if self.await_key(&text, None) {
             let _ = read_byte(key_fd);
         }
         if self.daemon.is_none() {
@@ -1221,6 +1267,21 @@ mod tests {
     }
 
     #[test]
+    fn tags_compare_numerically_not_as_strings() {
+        assert!(newer_than("v0.1.7", "v0.1.6"));
+        assert!(!newer_than("v0.1.6", "v0.1.7")); // the bug the user hit
+        assert!(!newer_than("v0.1.7", "v0.1.7"));
+        assert!(newer_than("v0.2.0", "v0.1.99"));
+        assert!(newer_than("v1.0.0", "v0.99.99"));
+        // string order puts v0.1.10 before v0.1.9 — numbers must not
+        assert!(newer_than("v0.1.10", "v0.1.9"));
+        assert!(!newer_than("v0.1.9", "v0.1.10"));
+        // a shorter tag is the same as trailing zeros
+        assert!(!newer_than("v0.1", "v0.1.0"));
+        assert!(newer_than("v0.1.1", "v0.1"));
+    }
+
+    #[test]
     fn bare_esc_still_quits() {
         let mut fds = [0 as libc::c_int; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
@@ -1234,7 +1295,7 @@ mod tests {
     }
 
     #[test]
-    fn update_notice_only_for_a_different_release() {
+    fn update_notice_only_for_a_newer_release() {
         let dir = std::env::temp_dir().join(format!("agents-mon-test-{}", std::process::id()));
         let file = dir.join("target/release/.agents-mon-latest");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -1247,6 +1308,10 @@ mod tests {
         // the notice rides the header: a newline would push every list line
         // down one and break the click -> pane mapping
         assert!(!update_available(&dir).unwrap().contains('\n'));
+        // the regression: any difference counted as an update, so a checkout
+        // ahead of every release advertised "↑" for the older tag behind it
+        std::fs::write(&file, "v0.0.1\n").unwrap();
+        assert_eq!(update_available(&dir), None);
         // the tag is handed to update.sh as an argument
         std::fs::write(&file, "v1.0.0; rm -rf /\n").unwrap();
         assert_eq!(update_available(&dir), None);

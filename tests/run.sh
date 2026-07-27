@@ -532,8 +532,10 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   mirrors() { $T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agents-mon; }
   frame_age() {
     local mt
-    mt="$(stat -f %m "$tmp/agents-mon-frame" 2>/dev/null ||
-          stat -c %Y "$tmp/agents-mon-frame" 2>/dev/null)"
+    # GNU first: on Linux `stat -f` means --file-system and prints a whole
+    # block to stdout, which the BSD-first order captured as the mtime
+    mt="$(stat -c %Y "$tmp/agents-mon-frame" 2>/dev/null ||
+          stat -f %m "$tmp/agents-mon-frame" 2>/dev/null)"
     [ -n "$mt" ] && printf '%s' $(( $(date +%s) - mt )) || printf '999'
   }
   mir="$($T list-panes -t t: -F '#{pane_id}	#{pane_title}' |
