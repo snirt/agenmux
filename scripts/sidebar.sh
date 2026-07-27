@@ -39,9 +39,19 @@ if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then ESC_WAIT=0.05 READ_WAIT=0.25; else ESC_
 # update notice: install-bin.sh records the newest release at most once a day
 VERSION="$(bash "$DIR/scripts/version.sh" tag 2>/dev/null)"
 LATEST="$(sed -n '1p' "$DIR/target/release/.agents-mon-latest" 2>/dev/null)"
-NOTICE=""
+NOTICE="" HINT=""
+# only a strictly newer release is an update — a checkout ahead of every tag
+# must not be told to "update" to the older one behind it
+newer() { [ "$(printf '%s\n%s\n' "${1#v}" "${2#v}" | sort -V | tail -n 1)" = "${1#v}" ] &&
+          [ "$1" != "$2" ]; }
 case "$LATEST" in
-  v[0-9]*) [ "$LATEST" != "$VERSION" ] && NOTICE=" $E[2m↑${LATEST#v}$E[0m" ;;
+  v[0-9]*)
+    if newer "$LATEST" "$VERSION"; then
+      NOTICE=" $E[2m↑${LATEST#v}$E[0m"
+      # rides the blank line already under the header — adds no row
+      HINT="$E[2mpress u to update$E[0m"
+    fi
+    ;;
 esac
 debounced=""
 nrows=0
@@ -156,7 +166,7 @@ EOF
   fi
   # notice rides the header, never a list line: an extra row would shift every
   # click's row->pane mapping by one
-  frame="$E[H$E[1magents$E[0m$NOTICE$E[K$NL$E[K$NL"
+  frame="$E[H$E[1magents$E[0m$NOTICE$E[K$NL$HINT$E[K$NL"
   # rows file mirrors visual lines from y=2 so clicks map 1:1 ("-" = header)
   local vis="" session="" used=2  # header + blank line already emitted
   if [ -z "$debounced" ]; then
