@@ -206,7 +206,9 @@ status() { # compact segment for status-line, empty when no agents
   local cache="${TMPDIR:-/tmp}/agents-mon-scan-cache" src mtime
   # sidebar already scans every ~2s and caches the result — reuse it instead
   # of running a duplicate full scan from the status line
-  mtime="$(stat -f %m "$cache" 2>/dev/null || stat -c %Y "$cache" 2>/dev/null)"
+  # GNU first: on Linux `stat -f` is --file-system and succeeds, printing a
+  # block to stdout that the BSD-first order captured as the mtime
+  mtime="$(stat -c %Y "$cache" 2>/dev/null || stat -f %m "$cache" 2>/dev/null)"
   if [ -n "$mtime" ] && [ $(( $(date +%s) - mtime )) -lt 6 ]; then
     src="$(<"$cache")"
   else
