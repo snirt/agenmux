@@ -15,9 +15,12 @@ tmux list-windows -a -F '#{window_id}' 2>/dev/null | while read -r w; do
   tmux set-option -wu -t "$w" @agents-mon-sidebar 2>/dev/null
 done
 
-# config reloads may clear hooks — re-install them if a sidebar is open
+# config reloads may clear hooks — re-install them if the plugin is open. Mirror
+# mode never sets @agents-mon-sidebar, so testing that alone left a reloaded
+# server with the daemon running and no hooks: new windows got no mirror at all.
 sb="$(tmux show-option -gqv @agents-mon-sidebar)"
-if [ -n "$sb" ] && tmux list-panes -a -F '#{pane_id}' | grep -qx "$sb"; then
+if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ] ||
+  { [ -n "$sb" ] && tmux list-panes -a -F '#{pane_id}' | grep -qx "$sb"; }; then
   bash "$CURRENT_DIR/scripts/hooks.sh"
 fi
 

@@ -24,6 +24,8 @@ trap cleanup EXIT
 mkdir -p "$plugin" "$root/home" "$root/tmp" "$root/bin"
 cp -R "$DIR/agents" "$DIR/scripts" "$plugin/"
 cp "$DIR/agents-mon.tmux" "$plugin/agents-mon.tmux"
+# install-bin.sh resolves the release to fetch from the manifest version
+cp "$DIR/Cargo.toml" "$plugin/Cargo.toml"
 export HOME="$root/home"
 export XDG_CONFIG_HOME="$root/home/.config"
 export TMPDIR="$root/tmp"
@@ -106,6 +108,9 @@ download_seconds=$((SECONDS - phase))
 downloaded="$plugin/target/release/agents-mon"
 [ -x "$downloaded" ]
 [ -s "$plugin/target/release/.agents-mon-version" ]
+# the sidebar's update notice and version picker read these
+[ -s "$plugin/target/release/.agents-mon-latest" ]
+[ -s "$plugin/target/release/.agents-mon-tags" ]
 state="$("$downloaded" detect "$plugin/agents/codex.conf" "$DIR/tests/fixtures/codex-blocked.txt")"
 [ "$state" = blocked ]
 printf 'ok   downloaded binary verified and executed\n'

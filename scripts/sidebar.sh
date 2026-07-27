@@ -36,6 +36,13 @@ NL=$'\n'
 # arrow keys deliver their bytes together; only a bare Esc hits this timeout.
 # bash >=4 can wait 50ms — old bash 3.2 is stuck with 1s (integer-only -t)
 if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then ESC_WAIT=0.05 READ_WAIT=0.25; else ESC_WAIT=1 READ_WAIT=1; fi
+# update notice: install-bin.sh records the newest release at most once a day
+VERSION="$(bash "$DIR/scripts/version.sh" tag 2>/dev/null)"
+LATEST="$(sed -n '1p' "$DIR/target/release/.agents-mon-latest" 2>/dev/null)"
+NOTICE=""
+case "$LATEST" in
+  v[0-9]*) [ "$LATEST" != "$VERSION" ] && NOTICE=" $E[2m↑${LATEST#v}$E[0m" ;;
+esac
 debounced=""
 nrows=0
 sel=1
@@ -147,7 +154,9 @@ EOF
     if [ -n "$idx" ]; then sel="$idx"; sel_pane="$active"; fi
     last_active="$active"
   fi
-  frame="$E[H$E[1magents$E[0m$E[K$NL$E[K$NL"
+  # notice rides the header, never a list line: an extra row would shift every
+  # click's row->pane mapping by one
+  frame="$E[H$E[1magents$E[0m$NOTICE$E[K$NL$E[K$NL"
   # rows file mirrors visual lines from y=2 so clicks map 1:1 ("-" = header)
   local vis="" session="" used=2  # header + blank line already emitted
   if [ -z "$debounced" ]; then
@@ -207,8 +216,13 @@ jump() {
 
 quit() { [ -n "${AGENTS_MON_PIN:-}" ] && rm -f "$AGENTS_MON_PIN"; exit 0; }
 
+# nohup: update.sh kills this pane partway through the switch. No version
+# picker here — this engine only serves until the native one lands; roll back
+# with `bash scripts/update.sh v0.1.5` from a shell.
+update() { nohup bash "$DIR/scripts/update.sh" latest >/dev/null 2>&1 & }
+
 show_help() { # blocks until a key; animations pause meanwhile
-  printf '%s' "$E[2J$E[H$E[1magents — help$E[0m$NL$NL\
+  printf '%s' "$E[2J$E[H$E[1magents — help$E[0m $E[2m$VERSION$E[0m$NL$NL\
 $E[1mstatus$E[0m$NL\
  $E[32m⣿$E[0m  idle$NL\
  $E[33m⠹$E[0m  working (spinner)$NL\
@@ -217,6 +231,7 @@ $E[1mstatus$E[0m$NL\
 $E[1mkeys$E[0m$NL\
  j/k ↑/↓  move selection$NL\
  Enter/l  jump to agent$NL\
+ u        update to the latest release$NL\
  q Esc    close sidebar$NL\
  ?        this help$NL$NL\
 $E[2mpress any key to return$E[0m"
@@ -246,14 +261,16 @@ while :; do
       "$C_C") quit ;;
       "$C_D") quit ;;
       l) jump ;;
+      u) update ;;
       '?') show_help ;;
       '') jump ;;  # Enter
       "$E")
         rest=""
         read -rsn2 -t "$ESC_WAIT" rest
         case "$rest" in
-          '[A') sel=$((sel - 1)) ;;
-          '[B') sel=$((sel + 1)) ;;
+          # CSI normally, SS3 (ESC O A) in application-cursor mode
+          '[A'|'OA') sel=$((sel - 1)) ;;
+          '[B'|'OB') sel=$((sel + 1)) ;;
           '') quit ;;  # bare Esc
         esac
         ;;

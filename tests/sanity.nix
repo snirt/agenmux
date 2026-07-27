@@ -18,6 +18,7 @@ pkgs.mkShell {
     coreutils
     curl
     gawk
+    git
     gnugrep
     gnused
     gnutar
