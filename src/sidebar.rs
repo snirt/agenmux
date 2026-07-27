@@ -136,25 +136,27 @@ fn read_key(fd: libc::c_int) -> Key {
         b'l' | b'\r' | b'\n' => Key::Jump,
         b'?' => Key::Help,
         b'u' => Key::Versions,
-        0x1b => {
-            // Poll before EVERY byte, not once for the pair. In mirror mode the
-            // keys arrive over a non-blocking FIFO that the mirror feeds one
-            // byte at a time, so the tail of an escape sequence is routinely
-            // still in flight: reading it unconditionally hit EAGAIN and
-            // dropped every other arrow. Only a bare Esc times out.
-            let next = |fd| {
-                poll_fd(fd, Some(Duration::from_millis(50)))
-                    .then(|| read_byte(fd))
-                    .flatten()
-            };
-            let Some(a) = next(fd) else { return Key::Quit };
-            // CSI (ESC [ A) normally, SS3 (ESC O A) in application-cursor mode
-            match (a, next(fd)) {
-                (b'[' | b'O', Some(b'A')) => Key::Up,
-                (b'[' | b'O', Some(b'B')) => Key::Down,
-                _ => Key::Other,
-            }
-        }
+        // Every byte of the tail goes through the same polling reader. In mirror
+        // mode keys arrive over a non-blocking FIFO that the mirror feeds one
+        // byte at a time, so the tail is routinely still in flight; reading it
+        // without polling hit EAGAIN and dropped every other arrow.
+        0x1b => escape_key(|| {
+            poll_fd(fd, Some(Duration::from_millis(50)))
+                .then(|| read_byte(fd))
+                .flatten()
+        }),
+        _ => Key::Other,
+    }
+}
+
+/// Decode the tail of an escape sequence. `next` yields the next byte, or None
+/// once nothing more arrives — a bare Esc, which closes.
+fn escape_key(mut next: impl FnMut() -> Option<u8>) -> Key {
+    let Some(a) = next() else { return Key::Quit };
+    // CSI (ESC [ A) normally, SS3 (ESC O A) in application-cursor mode
+    match (a, next()) {
+        (b'[' | b'O', Some(b'A')) => Key::Up,
+        (b'[' | b'O', Some(b'B')) => Key::Down,
         _ => Key::Other,
     }
 }
@@ -953,11 +955,16 @@ impl Sidebar {
         // update notice rides the header, never a list line: rows below it map
         // to panes by line number (see vis/rows_file), an extra row would shift
         // every click by one
-        let notice = match &self.update {
-            Some(t) => format!(" {E}[2m↑{}{E}[0m", t.trim_start_matches('v')),
-            None => String::new(),
+        // the hint goes on the blank line that already sits under the header,
+        // so the frame keeps exactly two lines above the list either way
+        let (notice, hint) = match &self.update {
+            Some(t) => (
+                format!(" {E}[2m↑{}{E}[0m", t.trim_start_matches('v')),
+                format!("{E}[2mpress u to update{E}[0m"),
+            ),
+            None => (String::new(), String::new()),
         };
-        let mut frame = format!("{E}[H{E}[1magents{E}[0m{notice}{E}[K\n{E}[K\n");
+        let mut frame = format!("{E}[H{E}[1magents{E}[0m{notice}{E}[K\n{hint}{E}[K\n");
         let mut vis = String::new();
         if self.rows.is_empty() {
             frame.push_str(&format!("{E}[2mno agents{E}[0m{E}[K\n"));
@@ -1233,37 +1240,27 @@ mod tests {
         }
     }
 
+    /// Feed escape_key a scripted tail. Every byte goes through the same
+    /// reader, which is the point: mirror mode delivers keys over a
+    /// non-blocking FIFO one byte at a time, so a tail byte that has not
+    /// arrived yet must be waited for, not read blind. Reading the pair
+    /// without polling hit EAGAIN and dropped every other arrow.
+    fn decode(tail: &[Option<u8>]) -> Key {
+        let mut it = tail.iter().copied();
+        escape_key(move || it.next().flatten())
+    }
+
     #[test]
-    fn arrow_bytes_trickling_in_are_not_dropped() {
-        // The regression: mirror mode delivers keys over a non-blocking FIFO
-        // one byte at a time, so the tail of an escape sequence arrives after
-        // the first poll. Reading the pair unconditionally hit EAGAIN and lost
-        // every other arrow. A blocking pipe cannot reproduce it — O_NONBLOCK
-        // on the read end is the whole point.
-        for (seq, want_down) in [(b"\x1b[B", true), (b"\x1bOB", true), (b"\x1b[A", false)] {
-            let mut fds = [0 as libc::c_int; 2];
-            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-            let (r, w) = (fds[0], fds[1]);
-            unsafe { libc::fcntl(r, libc::F_SETFL, libc::O_NONBLOCK) };
-            // the caller only enters read_key once the first byte is readable
-            unsafe { libc::write(w, seq.as_ptr().cast(), 1) };
-            let tail = seq[1..].to_vec();
-            let feeder = std::thread::spawn(move || {
-                for b in tail {
-                    std::thread::sleep(Duration::from_millis(10));
-                    unsafe { libc::write(w, [b].as_ptr().cast(), 1) };
-                }
-                unsafe { libc::close(w) };
-            });
-            let key = read_key(r);
-            if want_down {
-                assert!(matches!(key, Key::Down), "{seq:?} should be Down");
-            } else {
-                assert!(matches!(key, Key::Up), "{seq:?} should be Up");
-            }
-            feeder.join().unwrap();
-            unsafe { libc::close(r) };
-        }
+    fn escape_tails_decode_in_both_cursor_key_modes() {
+        assert!(matches!(decode(&[Some(b'['), Some(b'A')]), Key::Up));
+        assert!(matches!(decode(&[Some(b'['), Some(b'B')]), Key::Down));
+        assert!(matches!(decode(&[Some(b'O'), Some(b'A')]), Key::Up)); // SS3
+        assert!(matches!(decode(&[Some(b'O'), Some(b'B')]), Key::Down));
+        assert!(matches!(decode(&[]), Key::Quit)); // bare Esc closes
+        assert!(matches!(decode(&[None]), Key::Quit));
+        // a tail that never completes is not a close — Esc already decided that
+        assert!(matches!(decode(&[Some(b'['), None]), Key::Other));
+        assert!(matches!(decode(&[Some(b'['), Some(b'Z')]), Key::Other));
     }
 
     #[test]

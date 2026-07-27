@@ -64,13 +64,14 @@ run.
 
 ## Updating
 
-When a newer release exists, the sidebar header says so:
+When a newer release exists, the sidebar header says so, and says what to do:
 
 ```
-agents ↑0.1.7
+agents ↑0.1.8
+press u to update
 ```
 
-Press `u` there to open the version picker, choose a release, and press `Enter`.
+Press `u` to open the version picker, choose a release, and press `Enter`.
 The plugin switches its source *and* its native engine to that release and
 reopens itself — so the same key rolls **back** to an older release just as
 easily. The check that feeds the notice runs in the background, at most once a
