@@ -18,9 +18,9 @@ extern "C" fn on_term(_: libc::c_int) {
     QUIT.store(true, Ordering::Relaxed);
 }
 
-/// Print the frame clipped to this pane's height: the daemon renders for
-/// the smallest mirror, but panes can shrink between scans — never emit a
-/// line that would scroll us.
+/// Print the frame clipped to this pane's height: the daemon renders for the
+/// mirror the user is watching, so shorter panes elsewhere (and any pane that
+/// shrank between scans) clip here — never emit a line that would scroll us.
 fn draw(frame: &str) {
     let (_, rows) = term_size();
     let mut out = String::with_capacity(frame.len());
@@ -32,6 +32,14 @@ fn draw(frame: &str) {
     }
     print!("{out}{E}[J");
     let _ = std::io::stdout().flush();
+}
+
+/// Does a missing frame file mean the daemon is gone? Only once we have drawn
+/// a frame: the daemon opens the keys FIFO before it has a mirror to size its
+/// first frame against, so mirrors routinely start with no frame file at all.
+/// The deadline still catches a daemon that dies before ever rendering.
+fn frame_missing_is_fatal(drew_a_frame: bool, since_start: Duration) -> bool {
+    drew_a_frame || since_start >= Duration::from_secs(15)
 }
 
 pub fn run() -> i32 {
@@ -82,6 +90,10 @@ pub fn run() -> i32 {
             hot_until = Instant::now() + Duration::from_millis(300);
         }
         match std::fs::metadata(&frame_file).and_then(|m| m.modified()) {
+            Err(_) if !frame_missing_is_fatal(
+                last_mtime != SystemTime::UNIX_EPOCH,
+                start.elapsed(),
+            ) => {} // daemon has not published its first frame yet
             Err(_) => break, // frame gone — daemon quit
             Ok(mtime) => {
                 if mtime != last_mtime {
@@ -107,4 +119,21 @@ pub fn run() -> i32 {
     let _ = std::fs::remove_file(&rows_own);
     unsafe { libc::close(fifo) };
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_frame_survives_daemon_startup_but_not_death() {
+        let s = Duration::from_secs;
+        // the regression: mirrors start before the daemon has measured one to
+        // size the first frame against, and used to exit on the spot
+        assert!(!frame_missing_is_fatal(false, s(1)));
+        // a frame we already drew and that then vanished: daemon is gone
+        assert!(frame_missing_is_fatal(true, s(1)));
+        // never rendered at all — give up rather than linger forever
+        assert!(frame_missing_is_fatal(false, s(15)));
+    }
 }

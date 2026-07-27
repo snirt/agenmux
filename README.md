@@ -62,6 +62,31 @@ Each release includes `SHA256SUMS` for verification. Builds from untagged commit
 remain available as temporary artifacts on their **Build and Release** workflow
 run.
 
+## Updating
+
+When a newer release exists, the sidebar header says so:
+
+```
+agents ↑0.1.7
+```
+
+Press `u` there to open the version picker, choose a release, and press `Enter`.
+The plugin switches its source *and* its native engine to that release and
+reopens itself — so the same key rolls **back** to an older release just as
+easily. The check that feeds the notice runs in the background, at most once a
+day; nothing is downloaded or changed until you pick a version.
+
+Details worth knowing:
+
+- `Cargo.toml` is the only version source. The engine installed is always the
+  one matching the checked-out source, so the two can never drift apart.
+- On a git install (TPM or a manual clone) a switch is `git checkout <tag>`,
+  leaving the checkout detached at that tag — the normal pinned-plugin state.
+  It **refuses to run against a dirty working tree**; commit or stash first.
+- On a tarball install the verified release archive is extracted in place.
+- TPM's `prefix + U` still works and moves you to the tip of the default branch.
+- From a shell: `bash scripts/update.sh v0.1.5` (or `latest`).
+
 ## Usage
 
 - `prefix + A` — toggle the sidebar (left split, auto-refreshes every 2s);
@@ -69,7 +94,8 @@ run.
 - **Click an agent row** in the sidebar to jump to that agent's pane
   (requires `set -g mouse on`; clicks elsewhere keep default behavior)
 - In the sidebar: `j`/`k` or `↑`/`↓` move the `❯` cursor, `Enter` or `l` jumps to
-  the selected agent, `?` shows help (statuses + keys), `q` closes the sidebar;
+  the selected agent, `u` opens the [version picker](#updating), `?` shows help
+  (statuses + keys), `q` closes the sidebar;
   long lists scroll to keep the selection visible, and the cursor snaps to
   whichever agent pane currently has focus (instantly with the Rust engine —
   it reacts to tmux focus events)

@@ -53,17 +53,36 @@ fi
 if [ "$fail" -eq 0 ]; then
   tmp="$(mktemp -d)"
   package="tmux-agents-mon-macos-aarch64"
-  mkdir -p "$tmp/plugin/scripts" "$tmp/downloads/$package/target/release" "$tmp/bin"
-  cp "$DIR/scripts/install-bin.sh" "$tmp/plugin/scripts/install-bin.sh"
-  printf '#!/usr/bin/env bash\nprintf "native\\n"\n' \
-    > "$tmp/downloads/$package/target/release/agents-mon"
-  chmod +x "$tmp/downloads/$package/target/release/agents-mon"
-  tar -czf "$tmp/downloads/$package.tar.gz" -C "$tmp/downloads" "$package"
-  if command -v sha256sum >/dev/null; then
-    (cd "$tmp/downloads" && sha256sum "./$package.tar.gz" > SHA256SUMS)
-  else
-    (cd "$tmp/downloads" && shasum -a 256 "./$package.tar.gz" > SHA256SUMS)
-  fi
+  mkdir -p "$tmp/plugin/scripts" "$tmp/downloads" "$tmp/bin"
+  cp "$DIR/scripts/install-bin.sh" "$DIR/scripts/version.sh" "$tmp/plugin/scripts/"
+  # a release whose engine prints its own tag, so which one got installed is
+  # visible in the assertions below
+  mk_release() {
+    local t="$1" d="$tmp/downloads/$1"
+    mkdir -p "$d/$package/target/release"
+    printf '#!/usr/bin/env bash\nprintf "%s\\n"\n' "$t" \
+      > "$d/$package/target/release/agents-mon"
+    chmod +x "$d/$package/target/release/agents-mon"
+    tar -czf "$d/$package.tar.gz" -C "$d" "$package"
+    rm -rf "${d:?}/$package"
+    if command -v sha256sum >/dev/null; then
+      (cd "$d" && sha256sum "./$package.tar.gz" > SHA256SUMS)
+    else
+      (cd "$d" && shasum -a 256 "./$package.tar.gz" > SHA256SUMS)
+    fi
+  }
+  set_version() {
+    printf '[package]\nname = "agents-mon"\nversion = "%s"\n' "$1" \
+      > "$tmp/plugin/Cargo.toml"
+    # a stale marker forces a check past the once-a-day throttle
+    printf 'v0.0.0\nold-revision\n' > "$tmp/plugin/target/release/.agents-mon-version"
+  }
+  install_bin() {
+    DOWNLOADS="$tmp/downloads" LATEST_TAG="$1" PATH="$tmp/bin:$PATH" \
+      bash "$tmp/plugin/scripts/install-bin.sh"
+  }
+  mk_release v0.1.0
+  mk_release v0.1.1
   cat > "$tmp/bin/uname" <<'SH'
 #!/usr/bin/env bash
 [ "$1" = "-s" ] && printf 'Darwin\n' || printf 'arm64\n'
@@ -80,32 +99,145 @@ while [ "$#" -gt 0 ]; do
 done
 case "$url" in
   */releases/latest) printf '%s/tag/%s' "$url" "$LATEST_TAG" ;;
-  *) cp "$DOWNLOADS/${url##*/}" "$out" ;;
+  *)
+    file="${url##*/}"; rest="${url%/*}"; tag="${rest##*/}"
+    [ -f "$DOWNLOADS/$tag/$file" ] || exit 22   # no such release asset
+    cp "$DOWNLOADS/$tag/$file" "$out"
+    ;;
 esac
 SH
-  chmod +x "$tmp/bin/uname" "$tmp/bin/curl"
-  if DOWNLOADS="$tmp/downloads" LATEST_TAG="v0.1.0" PATH="$tmp/bin:$PATH" \
-     bash "$tmp/plugin/scripts/install-bin.sh" \
-     && [ "$("$tmp/plugin/target/release/agents-mon")" = "native" ] \
-     && [ "$(sed -n '1p' "$tmp/plugin/target/release/.agents-mon-version")" = "v0.1.0" ]; then
-    printf '#!/usr/bin/env bash\nprintf "updated\\n"\n' \
-      > "$tmp/downloads/$package/target/release/agents-mon"
-    chmod +x "$tmp/downloads/$package/target/release/agents-mon"
-    tar -czf "$tmp/downloads/$package.tar.gz" -C "$tmp/downloads" "$package"
-    if command -v sha256sum >/dev/null; then
-      (cd "$tmp/downloads" && sha256sum "./$package.tar.gz" > SHA256SUMS)
-    else
-      (cd "$tmp/downloads" && shasum -a 256 "./$package.tar.gz" > SHA256SUMS)
-    fi
-    printf 'v0.1.0\nold-revision\n' > "$tmp/plugin/target/release/.agents-mon-version"
-    DOWNLOADS="$tmp/downloads" LATEST_TAG="v0.1.1" PATH="$tmp/bin:$PATH" \
-      bash "$tmp/plugin/scripts/install-bin.sh"
-  fi
-  if [ "$("$tmp/plugin/target/release/agents-mon" 2>/dev/null)" = "updated" ] \
-     && [ "$(sed -n '1p' "$tmp/plugin/target/release/.agents-mon-version")" = "v0.1.1" ]; then
-    echo "ok   native-engine-auto-install-update"
+  # rev-parse must fail (no repo); ls-remote feeds the version picker
+  cat > "$tmp/bin/git" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *ls-remote*) printf 'aaa\trefs/tags/v0.1.1\nbbb\trefs/tags/v0.1.0\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$tmp/bin/uname" "$tmp/bin/curl" "$tmp/bin/git"
+  engine() { "$tmp/plugin/target/release/agents-mon" 2>/dev/null; }
+  marker() { sed -n '1p' "$tmp/plugin/target/release/.agents-mon-version" 2>/dev/null; }
+
+  mkdir -p "$tmp/plugin/target/release"
+  # 1. the engine follows the checkout's own version, not the newest release
+  set_version 0.1.0
+  install_bin v0.1.1
+  if [ "$(engine)" = "v0.1.0" ] && [ "$(marker)" = "v0.1.0" ] \
+     && [ "$(sed -n '1p' "$tmp/plugin/target/release/.agents-mon-latest")" = "v0.1.1" ] \
+     && [ "$(sed -n '1p' "$tmp/plugin/target/release/.agents-mon-tags")" = "v0.1.1" ]; then
+    echo "ok   native-engine-matches-checkout-version"
   else
-    echo "FAIL native-engine-auto-install-update: verified binary was not installed or updated"
+    echo "FAIL native-engine-matches-checkout-version: got $(engine)/$(marker)"
+    fail=1
+  fi
+  # 2. a checkout ahead of every release (master) falls back to the newest one
+  set_version 0.9.9
+  install_bin v0.1.1
+  if [ "$(engine)" = "v0.1.1" ] && [ "$(marker)" = "v0.1.1" ]; then
+    echo "ok   native-engine-falls-back-to-latest-release"
+  else
+    echo "FAIL native-engine-falls-back-to-latest-release: got $(engine)/$(marker)"
+    fail=1
+  fi
+  # 3. rolling the source back pins the matching engine — no extra state
+  set_version 0.1.0
+  install_bin v0.1.1
+  if [ "$(engine)" = "v0.1.0" ] && [ "$(marker)" = "v0.1.0" ]; then
+    echo "ok   native-engine-follows-rollback"
+  else
+    echo "FAIL native-engine-follows-rollback: got $(engine)/$(marker)"
+    fail=1
+  fi
+  # 4. an install with nothing to do still learns what is released. The
+  #    regression: the release check sat behind the engine check, so a healthy
+  #    up-to-date install had no notice and an empty picker for a whole day.
+  rm -f "$tmp/plugin/target/release/.agents-mon-latest" \
+        "$tmp/plugin/target/release/.agents-mon-tags"
+  printf 'v0.1.0\n-\n' > "$tmp/plugin/target/release/.agents-mon-version"
+  install_bin v0.1.1
+  if [ "$(sed -n '1p' "$tmp/plugin/target/release/.agents-mon-latest")" = "v0.1.1" ] \
+     && [ "$(sed -n '1p' "$tmp/plugin/target/release/.agents-mon-tags")" = "v0.1.1" ]; then
+    echo "ok   release-list-recorded-when-engine-is-current"
+  else
+    echo "FAIL release-list-recorded-when-engine-is-current: no release list written"
+    fail=1
+  fi
+  rm -rf "$tmp"
+fi
+if [ "$fail" -eq 0 ]; then
+  # codex subjects come from ~/.codex rollouts, not the screen. The regression:
+  # only the 20 newest rollouts were searched, so one busy worktree filled the
+  # window and every other codex pane showed no subject at all.
+  tmp="$(mktemp -d)"
+  day="$tmp/home/.codex/sessions/2026/01/01"
+  mkdir -p "$day"
+  roll() { # <name> <cwd> <first user text>
+    printf '{"cwd":"%s","id":"%s"}\n' "$2" "$1" > "$day/rollout-$1.jsonl"
+    printf '{"role":"user","content":[{"text":"<environment_context>\\n x"}]}\n' \
+      >> "$day/rollout-$1.jsonl"
+    printf '{"role":"user","content":[{"text":"%s"}]}\n' "$3" >> "$day/rollout-$1.jsonl"
+  }
+  # oldest: the only rollout for /want — 25 newer ones for a busy worktree bury it
+  roll 000-target /want "the real prompt"
+  for i in $(seq -w 1 25); do
+    roll "$i-busy" /busy "noise $i"
+  done
+  # a rollout whose first user message is codex's injected AGENTS.md preamble
+  roll 900-agentsmd /withagents "# AGENTS.md instructions for /withagents"
+  printf '{"role":"user","content":[{"text":"what the user actually asked"}]}\n' \
+    >> "$day/rollout-900-agentsmd.jsonl"
+  subj() ( . "$DIR/agents/codex.conf"; HOME="$tmp/home" path="$1" bash -c "$SUBJECT_CMD" )
+  buried="$(subj /want)"
+  agentsmd="$(subj /withagents)"
+  none="$(subj /no/such/dir)"
+  if [ "$buried" = "the real prompt" ] \
+     && [ "$agentsmd" = "what the user actually asked" ] \
+     && [ -z "$none" ]; then
+    echo "ok   codex-subject-survives-a-busy-worktree"
+  else
+    echo "FAIL codex-subject-survives-a-busy-worktree: buried=[$buried] agentsmd=[$agentsmd] none=[$none]"
+    fail=1
+  fi
+  rm -rf "$tmp"
+fi
+if [ "$fail" -eq 0 ]; then
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/bin" "$tmp/repo/scripts"
+  for s in update.sh version.sh install-bin.sh teardown.sh; do
+    cp "$DIR/scripts/$s" "$tmp/repo/scripts/"
+  done
+  # offline: no releases to fetch, no local build, no tmux server to restart
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$tmp/bin/curl"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$tmp/bin/cargo"
+  cat > "$tmp/bin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = "info" ] && exit 1   # no server: update.sh skips the restart
+exit 0
+SH
+  chmod +x "$tmp/bin/curl" "$tmp/bin/cargo" "$tmp/bin/tmux"
+  (
+    cd "$tmp/repo" || exit 1
+    git init -q . && git config user.email t@t && git config user.name t
+    printf '[package]\nname = "agents-mon"\nversion = "0.1.0"\n' > Cargo.toml
+    git add -A && git commit -qm one && git tag v0.1.0
+    printf '[package]\nname = "agents-mon"\nversion = "0.1.1"\n' > Cargo.toml
+    git commit -qam two && git tag v0.1.1
+  ) >/dev/null 2>&1
+  switch() { PATH="$tmp/bin:$PATH" bash "$tmp/repo/scripts/update.sh" "$1" >/dev/null 2>&1; }
+  at() { git -C "$tmp/repo" describe --tags --exact-match 2>/dev/null; }
+
+  switch v0.1.0
+  rolled_back="$(at)"
+  printf 'scratch\n' > "$tmp/repo/uncommitted"
+  switch v0.1.1
+  refused="$(at)"
+  rm -f "$tmp/repo/uncommitted"
+  switch v0.1.1
+  if [ "$rolled_back" = "v0.1.0" ] && [ "$refused" = "v0.1.0" ] \
+     && [ "$(at)" = "v0.1.1" ]; then
+    echo "ok   update-switches-and-guards-dirty-tree"
+  else
+    echo "FAIL update-switches-and-guards-dirty-tree: back=$rolled_back dirty=$refused now=$(at)"
     fail=1
   fi
   rm -rf "$tmp"
@@ -337,6 +469,21 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   neww="$($T display-message -p -t t: '#{window_id}')"
   new_ok=0
   $T list-panes -t "$neww" -F '#{pane_title}' | grep -qx agents-mon && new_ok=1
+  # concurrent adds must not double-split. One window switch fires two [43]
+  # hooks, so racing mirror-add.sh calls are routine, and the old
+  # check-then-split let every one of them through.
+  racew="$($T new-window -d -a -t t: -P -F '#{window_id}' 'sleep 60')"
+  $T list-panes -t "$racew" -F '#{pane_id}	#{pane_title}' |
+    awk -F'\t' '$2 == "agents-mon" { print $1 }' |
+    while read -r p; do $T kill-pane -t "$p"; done
+  for _ in 1 2 3 4 5 6 7 8; do
+    env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" \
+      bash "$DIR/scripts/mirror-add.sh" "$racew" &
+  done
+  wait
+  raced="$($T list-panes -t "$racew" -F '#{pane_title}' | grep -cx agents-mon)"
+  $T kill-window -t "$racew"
+
   mir="$($T list-panes -t t: -F '#{pane_id}	#{pane_title}' |
     awk -F'\t' '$2 == "agents-mon" { print $1; exit }')"
   # dragging one mirror's border adopts the width everywhere (sync-width.sh
@@ -352,11 +499,60 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   sleep 2
   left="$($T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agents-mon)"
   if [ "$mirrors" -eq 2 ] && [ "$before" = "$after" ] && [ "$new_ok" -eq 1 ] \
-     && [ "$widths" = 45 ] && [ "$optw" = 45 ] \
+     && [ "$raced" -eq 1 ] && [ "$widths" = 45 ] && [ "$optw" = 45 ] \
      && [ "$left" -eq 0 ] && [ ! -f "$tmp/agents-mon-frame" ]; then
     echo "ok   mirror-mode-no-bump-lifecycle"
   else
-    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok widths=$widths optw=$optw left=$left"
+    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok raced=$raced widths=$widths optw=$optw left=$left"
+    fail=1
+  fi
+  $T kill-server 2>/dev/null || true
+  pkill -f 'agents-mon daemon' 2>/dev/null || true
+  rm -rf "$tmp"
+fi
+if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
+  # A full-screen overlay blocks the daemon's event loop waiting for a key.
+  # The regression: it stopped touching the frame file, every mirror declared
+  # the daemon dead after 10s (mirror.rs) and killed its own pane, leaving
+  # @agents-mon-on set and a blocked daemon behind — the next toggle stacked
+  # another one on top.
+  BIN_ABS="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
+  tmp="$(mktemp -d)"
+  T="tmux -S $tmp/sock -f /dev/null"
+  mkdir -p "$tmp/bin"
+  printf '#!/bin/sh\nexec %s -S %s "$@"\n' "$(command -v tmux)" "$tmp/sock" \
+    > "$tmp/bin/tmux"
+  chmod +x "$tmp/bin/tmux"
+  TMPDIR="$tmp" $T new-session -d -s t -x 200 -y 50 'sleep 120'
+  $T new-window -t t 'sleep 120'
+  $T set-option -g @agents-mon-bin "$BIN_ABS"
+  env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" \
+    bash "$DIR/scripts/toggle.sh"
+  sleep 2
+  mirrors() { $T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agents-mon; }
+  frame_age() {
+    local mt
+    mt="$(stat -f %m "$tmp/agents-mon-frame" 2>/dev/null ||
+          stat -c %Y "$tmp/agents-mon-frame" 2>/dev/null)"
+    [ -n "$mt" ] && printf '%s' $(( $(date +%s) - mt )) || printf '999'
+  }
+  mir="$($T list-panes -t t: -F '#{pane_id}	#{pane_title}' |
+    awk -F'\t' '$2 == "agents-mon" { print $1; exit }')"
+  opened="$(mirrors)"
+  # 12s > the 10s staleness threshold a mirror uses to declare the daemon dead
+  $T send-keys -t "$mir" '?'
+  sleep 12
+  help_alive="$(mirrors)" help_age="$(frame_age)"
+  $T send-keys -t "$mir" Space   # dismiss help
+  sleep 1
+  $T send-keys -t "$mir" u
+  sleep 12
+  vers_alive="$(mirrors)" vers_age="$(frame_age)"
+  if [ "$opened" -eq 2 ] && [ "$help_alive" -eq 2 ] && [ "$vers_alive" -eq 2 ] \
+     && [ "$help_age" -lt 10 ] && [ "$vers_age" -lt 10 ]; then
+    echo "ok   overlays-keep-mirrors-alive"
+  else
+    echo "FAIL overlays-keep-mirrors-alive: opened=$opened help=$help_alive/${help_age}s versions=$vers_alive/${vers_age}s"
     fail=1
   fi
   $T kill-server 2>/dev/null || true

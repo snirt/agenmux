@@ -3,9 +3,10 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-package_id="$(cargo pkgid --manifest-path "$DIR/Cargo.toml")"
-version="${package_id##*@}"
-if [ "$version" = "$package_id" ] || [ -z "$version" ]; then
+# read the manifest directly: cargo is a developer tool, but install-bin.sh and
+# update.sh need the version at runtime on machines that have never seen Rust
+version="$(awk -F'"' '/^version[[:space:]]*=/ { print $2; exit }' "$DIR/Cargo.toml" 2>/dev/null)"
+if [ -z "$version" ]; then
   printf 'agents-mon: could not read package version from Cargo.toml\n' >&2
   exit 1
 fi

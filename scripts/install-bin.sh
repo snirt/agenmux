@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
-# Install the latest verified native engine for this OS/architecture.
+# Install the verified native engine matching this checkout's version, and
+# record the available releases so the sidebar can offer an update/rollback.
+#
+#   install-bin.sh              install/refresh the engine (throttled)
+#   install-bin.sh fetch T DIR  download+verify release T, extract into DIR
 set -u
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$DIR/target/release/agents-mon"
 STATE="$DIR/target/release/.agents-mon-version"
+LATEST="$DIR/target/release/.agents-mon-latest"
+TAGS="$DIR/target/release/.agents-mon-tags"
+REPO="${AGENTS_MON_REPO:-https://github.com/snirt/tmux-agents-mon}"
 tmp=""
-current_rev="$(git -C "$DIR" rev-parse HEAD 2>/dev/null || printf '-')"
-installed_tag="$(sed -n '1p' "$STATE" 2>/dev/null)"
-installed_rev="$(sed -n '2p' "$STATE" 2>/dev/null)"
-
-# Avoid a network request on every toggle. A TPM update changes current_rev and
-# forces an immediate check; otherwise checks happen at most once per day.
-if [ -x "$BIN" ] && [ "$installed_rev" = "$current_rev" ] \
-   && [ -n "$(find "$STATE" -mtime -1 -print 2>/dev/null)" ]; then
-  exit 0
-fi
 
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64)  platform="macos-aarch64" ;;
@@ -25,29 +22,20 @@ case "$(uname -s):$(uname -m)" in
   *) platform="" ;;
 esac
 
-write_state() {
-  local staged="$STATE.$$"
-  mkdir -p "$(dirname "$STATE")"
-  printf '%s\n%s\n' "$1" "$current_rev" > "$staged" && mv -f "$staged" "$STATE"
-}
-
-latest_tag() {
-  local url tag
-  url="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
-    https://github.com/snirt/tmux-agents-mon/releases/latest)" || return 1
-  tag="${url##*/}"
-  case "$tag" in v*) printf '%s\n' "$tag" ;; *) return 1 ;; esac
-}
-
-download_bin() {
+# Download the release archive for $1, verify its checksum, extract the whole
+# package into $2 (the archive carries the full plugin source, not just the
+# binary — that is what update.sh switches versions with). Prints the package
+# directory. Nothing is written outside $2 unless verification passed.
+fetch_pkg() {
+  local tag="$1" dest="$2"
+  [ -n "$tag" ] && [ -n "$dest" ] || return 1
   [ -n "$platform" ] && command -v curl >/dev/null && command -v tar >/dev/null || return 1
   command -v sha256sum >/dev/null || command -v shasum >/dev/null || return 1
 
-  local tag="$1"
   local package="tmux-agents-mon-$platform"
   local archive="$package.tar.gz"
-  local base="https://github.com/snirt/tmux-agents-mon/releases/download/$tag"
-  local expected actual staged
+  local base="$REPO/releases/download/$tag"
+  local expected actual
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/agents-mon.XXXXXX")" || return 1
   trap 'rm -rf "$tmp"' EXIT
 
@@ -62,21 +50,109 @@ download_bin() {
   fi
   [ "$actual" = "$expected" ] || return 1
 
-  tar -xzf "$tmp/$archive" -C "$tmp" "$package/target/release/agents-mon" || return 1
-  mkdir -p "$(dirname "$BIN")"
-  staged="$BIN.$$"
-  cp "$tmp/$package/target/release/agents-mon" "$staged" || return 1
-  chmod +x "$staged"
-  mv -f "$staged" "$BIN" && write_state "$tag"
+  mkdir -p "$dest" || return 1
+  tar -xzf "$tmp/$archive" -C "$dest" || return 1
+  [ -d "$dest/$package" ] || return 1
+  printf '%s\n' "$dest/$package"
 }
 
-tag=""
-if command -v curl >/dev/null 2>&1; then tag="$(latest_tag)"; fi
-if [ -n "$tag" ] && [ -x "$BIN" ] && [ "$installed_tag" = "$tag" ]; then
-  write_state "$tag"
+if [ "${1:-}" = "fetch" ]; then
+  fetch_pkg "${2:-}" "${3:-}" || exit 1
   exit 0
 fi
-if [ -n "$tag" ] && download_bin "$tag"; then exit 0; fi
+
+current_rev="$(git -C "$DIR" rev-parse HEAD 2>/dev/null || printf '-')"
+installed_tag="$(sed -n '1p' "$STATE" 2>/dev/null)"
+installed_rev="$(sed -n '2p' "$STATE" 2>/dev/null)"
+# the release this checkout's source belongs to — Cargo.toml is the sole
+# version source, so a rollback to v0.1.5 pins the v0.1.5 binary with no
+# extra state to track
+want="$(bash "$DIR/scripts/version.sh" tag 2>/dev/null)"
+
+write_state() {
+  local staged="$STATE.$$"
+  mkdir -p "$(dirname "$STATE")"
+  printf '%s\n%s\n' "$1" "$current_rev" > "$staged" && mv -f "$staged" "$STATE"
+}
+
+latest_tag() {
+  local url tag
+  url="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+    "$REPO/releases/latest")" || return 1
+  tag="${url##*/}"
+  case "$tag" in v*) printf '%s\n' "$tag" ;; *) return 1 ;; esac
+}
+
+# What is out there, for the sidebar's update notice and version picker.
+# Best effort: a failure here must never block installing the engine.
+record_releases() {
+  local tag staged
+  mkdir -p "$(dirname "$LATEST")"
+  tag="$(latest_tag)" || return 0
+  staged="$LATEST.$$"
+  printf '%s\n' "$tag" > "$staged" && mv -f "$staged" "$LATEST"
+  command -v git >/dev/null 2>&1 || return 0
+  staged="$TAGS.$$"
+  # ls-remote needs no API token and has no rate limit, unlike the releases API
+  git ls-remote --tags --refs "$REPO" 2>/dev/null |
+    awk '{ sub(/^refs\/tags\//, "", $2); if ($2 ~ /^v[0-9]/) print $2 }' |
+    sort -V -r > "$staged"
+  if [ -s "$staged" ]; then mv -f "$staged" "$TAGS"; else rm -f "$staged"; fi
+}
+
+# Install the release archive's engine for $1 (verified), atomically.
+download_bin() {
+  local tag="$1" pkg scratch staged rc=1
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/agents-mon-pkg.XXXXXX")" || return 1
+  pkg="$(fetch_pkg "$tag" "$scratch")" || { rm -rf "$scratch"; return 1; }
+  if [ -f "$pkg/target/release/agents-mon" ]; then
+    mkdir -p "$(dirname "$BIN")"
+    staged="$BIN.$$"
+    if cp "$pkg/target/release/agents-mon" "$staged"; then
+      chmod +x "$staged"
+      mv -f "$staged" "$BIN" && write_state "$tag" && rc=0
+    fi
+    [ "$rc" -eq 0 ] || rm -f "$staged"
+  fi
+  rm -rf "$scratch"
+  return "$rc"
+}
+
+# "what is released" and "does the engine need installing" are separate
+# questions with separate throttles. Gating the first behind the second left an
+# up-to-date install with no release list at all — and so no update notice and
+# an empty version picker — until its install marker aged past a day.
+if command -v curl >/dev/null 2>&1 \
+   && [ -z "$(find "$LATEST" -mtime -1 -print 2>/dev/null)" ]; then
+  record_releases
+fi
+
+# Avoid a download on every toggle. A TPM update changes current_rev and forces
+# an immediate check; otherwise the engine is re-checked at most once per day.
+if [ -x "$BIN" ] && [ "$installed_rev" = "$current_rev" ] \
+   && [ -n "$(find "$STATE" -mtime -1 -print 2>/dev/null)" ]; then
+  exit 0
+fi
+
+# 1. the engine this checkout's source expects
+if [ -n "$want" ]; then
+  if [ -x "$BIN" ] && [ "$installed_tag" = "$want" ]; then
+    write_state "$want"
+    exit 0
+  fi
+  download_bin "$want" && exit 0
+fi
+# 2. no release for this version — a checkout tracking master is ahead of every
+#    tag, so fall back to the newest release rather than leaving it on bash
+tag="$(sed -n '1p' "$LATEST" 2>/dev/null)"
+if [ -n "$tag" ] && [ "$tag" != "$want" ]; then
+  if [ -x "$BIN" ] && [ "$installed_tag" = "$tag" ]; then
+    write_state "$tag"
+    exit 0
+  fi
+  download_bin "$tag" && exit 0
+fi
+# 3. keep whatever works: existing binary, then a local build, then bash
 [ -x "$BIN" ] && exit 0
 if command -v cargo >/dev/null 2>&1; then
   (cd "$DIR" && cargo build --release)

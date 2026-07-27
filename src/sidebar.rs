@@ -12,7 +12,7 @@ use crate::conf::AgentConf;
 use crate::procs::IdentCache;
 use crate::scan::{self, PaneRow};
 use crate::tmux::{Tmux, TmuxError};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,6 +123,7 @@ enum Key {
     Jump,
     Quit,
     Help,
+    Versions,
     Other,
 }
 
@@ -134,20 +135,100 @@ fn read_key(fd: libc::c_int) -> Key {
         b'q' | 0x03 | 0x04 => Key::Quit, // q, Ctrl-C, Ctrl-D
         b'l' | b'\r' | b'\n' => Key::Jump,
         b'?' => Key::Help,
+        b'u' => Key::Versions,
         0x1b => {
-            // arrows deliver their bytes together; only bare Esc times out
-            if !poll_fd(fd, Some(Duration::from_millis(50))) {
-                return Key::Quit;
-            }
-            let (a, b2) = (read_byte(fd), read_byte(fd));
-            match (a, b2) {
-                (Some(b'['), Some(b'A')) => Key::Up,
-                (Some(b'['), Some(b'B')) => Key::Down,
+            // Poll before EVERY byte, not once for the pair. In mirror mode the
+            // keys arrive over a non-blocking FIFO that the mirror feeds one
+            // byte at a time, so the tail of an escape sequence is routinely
+            // still in flight: reading it unconditionally hit EAGAIN and
+            // dropped every other arrow. Only a bare Esc times out.
+            let next = |fd| {
+                poll_fd(fd, Some(Duration::from_millis(50)))
+                    .then(|| read_byte(fd))
+                    .flatten()
+            };
+            let Some(a) = next(fd) else { return Key::Quit };
+            // CSI (ESC [ A) normally, SS3 (ESC O A) in application-cursor mode
+            match (a, next(fd)) {
+                (b'[' | b'O', Some(b'A')) => Key::Up,
+                (b'[' | b'O', Some(b'B')) => Key::Down,
                 _ => Key::Other,
             }
         }
         _ => Key::Other,
     }
+}
+
+/// The release this engine belongs to. install-bin.sh installs the binary that
+/// matches the checkout's Cargo.toml, so this is also the plugin's version.
+fn current_tag() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Newest release, as recorded by install-bin.sh's (at most daily) check.
+/// None when it is the one already running — nothing to offer.
+fn update_available(plugin_dir: &PathBuf) -> Option<String> {
+    let latest =
+        std::fs::read_to_string(plugin_dir.join("target/release/.agents-mon-latest")).ok()?;
+    let latest = latest.trim();
+    (is_tag(latest) && latest != current_tag()).then(|| latest.to_string())
+}
+
+/// Releases install-bin.sh saw on the remote, newest first.
+fn known_tags(plugin_dir: &PathBuf) -> Vec<String> {
+    let mut tags: Vec<String> =
+        std::fs::read_to_string(plugin_dir.join("target/release/.agents-mon-tags"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|t| is_tag(t))
+            .map(String::from)
+            .collect();
+    tags.truncate(10);
+    tags
+}
+
+/// A tag is passed to update.sh as an argument — keep it boring.
+fn is_tag(t: &str) -> bool {
+    t.len() > 1
+        && t.starts_with('v')
+        && t[1..]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+}
+
+/// One mirror pane as measured by mirror_tick.
+struct M {
+    pane: String,
+    win: String,
+    sess: String,
+    w: usize,
+    h: usize,
+    win_size: (usize, usize),
+    active: bool,
+}
+
+/// Height to render the shared frame at. NOT the minimum: every mirror shows
+/// the same frame, so folding to the shortest pane let one stale 23-row window
+/// in a session nobody is looking at clip the list everywhere. Size to the
+/// mirror the user is actually watching — mirrors shorter than the frame clip
+/// themselves in mirror::draw.
+fn watched_height(ms: &[M], active_session: &str) -> usize {
+    ms.iter()
+        .find(|m| m.active && m.sess == active_session)
+        .map(|m| m.h)
+        // several clients on several sessions, or no client measured yet
+        .or_else(|| ms.iter().filter(|m| m.active).map(|m| m.h).max())
+        .or_else(|| ms.iter().map(|m| m.h).max())
+        .unwrap_or(24)
+}
+
+/// Should the daemon shut down after measuring no mirror panes? Only once
+/// mirrors existed (or the startup grace ran out) AND the emptiness repeats:
+/// a hook's run-shell block can desync the control pipe for exactly one
+/// command, and a single garbage read must not tear down the whole mirror set.
+fn suicide(seen_mirror: bool, since_start: Duration, empty_ticks: u32) -> bool {
+    (seen_mirror || since_start >= Duration::from_secs(30)) && empty_ticks >= 2
 }
 
 /// Per-pane memory across rescans (STATE_FILE equivalent).
@@ -162,8 +243,9 @@ struct Daemon {
     frame_file: PathBuf,
     keys_path: PathBuf,
     keys_fd: libc::c_int,
-    size: (usize, usize), // min mirror pane size — mirrors clip the rest
+    size: (usize, usize), // narrowest mirror x watched mirror's height
     seen_mirror: bool,    // suicide only arms after the first mirror appears
+    empty_ticks: u32,     // consecutive measurements that found no mirror
     started: Instant,
     // window id -> window size at the last measure: a mirror whose width
     // changed while its window size did NOT is a user border-drag
@@ -193,12 +275,24 @@ pub struct Sidebar {
     rows_file: PathBuf,
     cache_file: PathBuf,
     last_frame: String,
+    update: Option<String>, // newer release to advertise in the header
     daemon: Option<Daemon>,
 }
 
-fn new_sidebar(tmux: Tmux, plugin_dir: PathBuf, cache_file: PathBuf, rows_file: PathBuf) -> Sidebar {
-    let self_pane = std::env::var("TMUX_PANE").unwrap_or_default();
+/// `self_pane` is the pane the sidebar itself occupies, skipped by every scan.
+/// The daemon is headless and owns no pane, so it MUST pass "" — inheriting
+/// TMUX_PANE from whoever pressed the toggle key hid that pane's agent.
+fn new_sidebar(
+    tmux: Tmux,
+    plugin_dir: PathBuf,
+    cache_file: PathBuf,
+    rows_file: PathBuf,
+    self_pane: String,
+) -> Sidebar {
     let confs = crate::conf::load_all(&plugin_dir);
+    // read once: the check behind it runs at most daily, and switching version
+    // restarts the engine anyway
+    let update = update_available(&plugin_dir);
     let mut sb = Sidebar {
         tmux,
         confs,
@@ -219,6 +313,7 @@ fn new_sidebar(tmux: Tmux, plugin_dir: PathBuf, cache_file: PathBuf, rows_file: 
         rows_file,
         cache_file,
         last_frame: String::new(),
+        update,
         daemon: None,
     };
     // seed from the previous instance's scan for an instant first frame
@@ -253,7 +348,7 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
             return 0;
         }
     };
-    let mut sb = new_sidebar(tmux, plugin_dir, cache_file, rows_file);
+    let mut sb = new_sidebar(tmux, plugin_dir, cache_file, rows_file, self_pane);
     sb.pin = pin;
     sb.render(true);
     event_loop(&mut sb);
@@ -286,17 +381,39 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         Ok(t) => t,
         Err(_) => return 0,
     };
-    let mut sb = new_sidebar(tmux, plugin_dir, cache_file, tmp.join("agents-mon-rows"));
+    // "" not TMUX_PANE: toggle.sh launches the daemon from the pane the user
+    // pressed the key in, and adopting that pane would hide its agent
+    let mut sb = new_sidebar(
+        tmux,
+        plugin_dir,
+        cache_file,
+        tmp.join("agents-mon-rows"),
+        String::new(),
+    );
     sb.daemon = Some(Daemon {
         frame_file,
         keys_path,
         keys_fd,
         size: (30, 24),
         seen_mirror: false,
+        empty_ticks: 0,
         started: Instant::now(),
         win_sizes: HashMap::new(),
         attached: String::new(),
     });
+    // Publish nothing until the first mirror has been measured: a mirror pane's
+    // size IS the frame size, and a default-sized first frame visibly resizes
+    // once the real measurement lands. Deriving the size instead of measuring it
+    // does not work — pane-border-status silently costs a row. toggle.sh spawns
+    // the mirrors right after us, so this wait is short; mirror::run tolerates
+    // the missing frame file meanwhile.
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(3) {
+        if !sb.mirror_tick() || sb.daemon.as_ref().unwrap().seen_mirror {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     sb.render(true);
     event_loop(&mut sb);
     sb.teardown();
@@ -366,6 +483,7 @@ fn event_loop(sb: &mut Sidebar) {
                     }
                 }
                 Key::Help => sb.help(),
+                Key::Versions => sb.versions(),
                 Key::Quit => {
                     // q/Esc closes: popup pin removed so toggle.sh ends its loop
                     if let Some(p) = &sb.pin {
@@ -482,6 +600,10 @@ impl Sidebar {
     }
 
     fn active_pane(&mut self) -> Option<String> {
+        // scan() only syncs at its START; a hook's run-shell block landing
+        // during the capture loop leaves every later command paired with the
+        // wrong response. Re-barrier before reading anything we act on.
+        self.tmux.sync().ok()?;
         // most recently active real (non-control-mode) client's current pane
         // — with several terminals attached, the first listed one may not be
         // the one the user is looking at. Stashes the session id for the
@@ -628,22 +750,18 @@ impl Sidebar {
     /// resize-pane ever fights the drag, and the dragged pane itself is
     /// never touched — only the invisible mirrors in other windows move.
     fn mirror_tick(&mut self) -> bool {
-        struct M {
-            pane: String,
-            win: String,
-            w: usize,
-            win_size: (usize, usize),
-            active: bool,
-        }
+        // same barrier as active_pane: reading zero mirrors off a desynced
+        // pipe used to tear the whole mirror set down
+        let _ = self.tmux.sync();
         let out = self
             .tmux
-            .run("list-panes -a -f '#{==:#{pane_title},agents-mon}' -F '#{pane_id}\t#{window_id}\t#{pane_width}\t#{pane_height}\t#{window_width} #{window_height}\t#{window_active}'")
+            .run("list-panes -a -f '#{==:#{pane_title},agents-mon}' -F '#{pane_id}\t#{window_id}\t#{pane_width}\t#{pane_height}\t#{window_width} #{window_height}\t#{window_active}\t#{session_id}'")
             .unwrap_or_default();
-        let (mut w, mut h) = (usize::MAX, usize::MAX);
+        let mut w = usize::MAX;
         let mut ms: Vec<M> = Vec::new();
         for l in out.lines() {
             let f: Vec<&str> = l.split('\t').collect();
-            let [pane, win, pw, ph, ws, act] = f.as_slice() else { continue };
+            let [pane, win, pw, ph, ws, act, sess] = f.as_slice() else { continue };
             let (Ok(pw), Ok(ph)) = (pw.parse::<usize>(), ph.parse::<usize>()) else {
                 continue;
             };
@@ -653,26 +771,76 @@ impl Sidebar {
             else {
                 continue;
             };
-            w = w.min(pw);
-            h = h.min(ph);
             ms.push(M {
                 pane: pane.to_string(),
                 win: win.to_string(),
+                sess: sess.to_string(),
                 w: pw,
+                h: ph,
                 win_size: (ww, wh),
                 active: *act == "1",
             });
         }
         if ms.is_empty() {
             let d = self.daemon.as_mut().unwrap();
-            return !d.seen_mirror && d.started.elapsed() < Duration::from_secs(30);
+            d.empty_ticks += 1;
+            return !suicide(d.seen_mirror, d.started.elapsed(), d.empty_ticks);
         }
+        self.daemon.as_mut().unwrap().empty_ticks = 0;
         let wopt: usize = self
             .tmux
             .run("show-option -gqv @agents-mon-width")
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(30);
+        // One mirror per window. mirror-add.sh claims atomically now, but servers
+        // that ran the old racy version still carry duplicates. Keep the first —
+        // a -hbf split takes index 0, so that's the newest and the one actually at
+        // the requested width; the squeezed leftovers go. This runs before the
+        // width fold and the drag probe below, and it puts the survivor back at
+        // wopt: every extra split squeezed it, and that squeezed width would
+        // otherwise look exactly like a border drag and get adopted globally.
+        let mut seen: HashSet<String> = HashSet::new();
+        let dup: Vec<usize> = (0..ms.len())
+            .filter(|&i| !seen.insert(ms[i].win.clone()))
+            .collect();
+        if !dup.is_empty() {
+            let hit: HashSet<String> = dup.iter().map(|&i| ms[i].win.clone()).collect();
+            // forked tmux: kill-pane fires hooks whose run-shell output would
+            // desync the control pipe (same reason as the drag resize below)
+            let mut argv: Vec<String> = Vec::new();
+            for &i in &dup {
+                if !argv.is_empty() {
+                    argv.push(";".into());
+                }
+                argv.extend(["kill-pane".into(), "-t".into(), ms[i].pane.clone()]);
+            }
+            for &i in dup.iter().rev() {
+                ms.remove(i);
+            }
+            // unconditional: the survivor absorbs the columns the killed panes
+            // give back, so even one that measured wopt a moment ago ends up wide
+            for m in ms.iter_mut().filter(|m| hit.contains(&m.win)) {
+                argv.push(";".into());
+                argv.extend([
+                    "resize-pane".into(),
+                    "-t".into(),
+                    m.pane.clone(),
+                    "-x".into(),
+                    wopt.to_string(),
+                ]);
+                m.w = wopt;
+            }
+            let _ = std::process::Command::new("tmux").args(&argv).status();
+        }
+        // Width DOES fold to the minimum: mirror::draw clips rows but NOT
+        // columns, so a frame wider than some pane would wrap and shift every
+        // row below it (breaking the click -> rows-file mapping). Widths are
+        // uniform by construction anyway, so the fold costs nothing.
+        for m in &ms {
+            w = w.min(m.w);
+        }
+        let h = watched_height(&ms, &self.active_session);
         let drag: Option<(String, usize)> = {
             let d = self.daemon.as_ref().unwrap();
             ms.iter()
@@ -760,7 +928,15 @@ impl Sidebar {
         };
         let cap = trows.saturating_sub(1); // last row's newline would scroll
         let space = cap.saturating_sub(2); // header + blank line
-        let mut frame = format!("{E}[H{E}[1magents{E}[0m{E}[K\n{E}[K\n");
+
+        // update notice rides the header, never a list line: rows below it map
+        // to panes by line number (see vis/rows_file), an extra row would shift
+        // every click by one
+        let notice = match &self.update {
+            Some(t) => format!(" {E}[2m↑{}{E}[0m", t.trim_start_matches('v')),
+            None => String::new(),
+        };
+        let mut frame = format!("{E}[H{E}[1magents{E}[0m{notice}{E}[K\n{E}[K\n");
         let mut vis = String::new();
         if self.rows.is_empty() {
             frame.push_str(&format!("{E}[2mno agents{E}[0m{E}[K\n"));
@@ -833,9 +1009,103 @@ impl Sidebar {
         self.emit(frame, force);
     }
 
+    /// Block until a key is available, re-emitting `text` while waiting.
+    ///
+    /// An overlay owns the event loop, so nothing else touches the frame file
+    /// meanwhile — and a mirror treats a frame older than 10s as a dead daemon
+    /// and kills its own pane (see mirror::run). Re-emitting an unchanged frame
+    /// costs a utimes and keeps every mirror convinced we are alive.
+    /// Returns false only when the process is shutting down.
+    fn await_key(&mut self, text: &str) -> bool {
+        let key_fd = self.daemon.as_ref().map_or(0, |d| d.keys_fd);
+        while !QUIT.load(Ordering::Relaxed) {
+            if poll_fd(key_fd, Some(Duration::from_secs(2))) {
+                return true;
+            }
+            self.emit(text.to_string(), false);
+        }
+        false
+    }
+
+    /// Version picker: update or roll back to any release the last check saw.
+    /// Selecting one hands off to update.sh, which switches the source, the
+    /// engine, and restarts the view.
+    fn versions(&mut self) {
+        let key_fd = self.daemon.as_ref().map_or(0, |d| d.keys_fd);
+        let tags = known_tags(&self.plugin_dir);
+        let cur = current_tag();
+        if tags.is_empty() {
+            let text = format!(
+                "{E}[2J{E}[H{E}[1magents — versions{E}[0m\n\n\
+ {E}[2mno release list yet.{E}[0m\n\
+ {E}[2mthe update check runs in the background,{E}[0m\n\
+ {E}[2mat most once a day — try again shortly.{E}[0m\n\n\
+{E}[2mpress any key to return{E}[0m"
+            );
+            self.emit(text.clone(), true);
+            if self.await_key(&text) {
+                let _ = read_byte(key_fd);
+            }
+        } else {
+            let mut sel = tags.iter().position(|t| *t == cur).unwrap_or(0);
+            loop {
+                let mut text = format!("{E}[2J{E}[H{E}[1magents — versions{E}[0m\n\n");
+                for (i, t) in tags.iter().enumerate() {
+                    let mark = if i == sel {
+                        format!("{E}[1m❯{E}[0m ")
+                    } else {
+                        "  ".into()
+                    };
+                    let tail = if *t == cur {
+                        format!(" {E}[2m(current){E}[0m")
+                    } else {
+                        String::new()
+                    };
+                    text.push_str(&format!("{mark}{t}{tail}\n"));
+                }
+                // fits the default 30-column sidebar without wrapping
+                text.push_str(&format!("\n{E}[2m↵ switch · j/k ↑/↓ · q back{E}[0m"));
+                self.emit(text.clone(), true);
+                if !self.await_key(&text) {
+                    break;
+                }
+                match read_key(key_fd) {
+                    Key::Down => sel = (sel + 1).min(tags.len() - 1),
+                    Key::Up => sel = sel.saturating_sub(1),
+                    Key::Jump => {
+                        if tags[sel] != cur {
+                            self.switch_version(&tags[sel]);
+                        }
+                        break;
+                    }
+                    Key::Quit => break,
+                    _ => {}
+                }
+            }
+        }
+        if self.daemon.is_none() {
+            print!("{E}[2J");
+        }
+        self.last_frame.clear();
+    }
+
+    /// nohup + no wait: update.sh kills the panes this engine renders into,
+    /// and a pane kill would otherwise SIGHUP the switch halfway through.
+    fn switch_version(&mut self, tag: &str) {
+        let script = self.plugin_dir.join("scripts/update.sh");
+        let _ = std::process::Command::new("nohup")
+            .arg("bash")
+            .arg(script)
+            .arg(tag)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+
     fn help(&mut self) {
         let text = format!(
-            "{E}[2J{E}[H{E}[1magents — help{E}[0m\n\n\
+            "{E}[2J{E}[H{E}[1magents — help{E}[0m {E}[2m{}{E}[0m\n\n\
 {E}[1mstatus{E}[0m\n\
  {E}[32m⣿{E}[0m  idle\n\
  {E}[33m⠹{E}[0m  working (spinner)\n\
@@ -844,19 +1114,163 @@ impl Sidebar {
 {E}[1mkeys{E}[0m\n\
  j/k ↑/↓  move selection\n\
  Enter/l  jump to agent\n\
+ u        update / switch version\n\
  q Esc    close sidebar\n\
  ?        this help\n\n\
-{E}[2mpress any key to return{E}[0m"
+{E}[2mpress any key to return{E}[0m",
+            current_tag()
         );
         let key_fd = self.daemon.as_ref().map_or(0, |d| d.keys_fd);
-        self.emit(text, true);
+        self.emit(text.clone(), true);
         // blocks until a key; animations pause meanwhile
-        if poll_fd(key_fd, None) {
+        if self.await_key(&text) {
             let _ = read_byte(key_fd);
         }
         if self.daemon.is_none() {
             print!("{E}[2J");
         }
         self.last_frame.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(sess: &str, h: usize, active: bool) -> M {
+        M {
+            pane: "%1".into(),
+            win: "@1".into(),
+            sess: sess.into(),
+            w: 30,
+            h,
+            win_size: (200, h),
+            active,
+        }
+    }
+
+    #[test]
+    fn one_garbage_measurement_does_not_kill_the_daemon() {
+        let s = Duration::from_secs;
+        // the regression: a hook block desyncs the pipe for one command, the
+        // mirror list reads back empty, and every mirror pane got torn down
+        assert!(!suicide(true, s(60), 1));
+        assert!(suicide(true, s(60), 2)); // user really did close them all
+        // startup grace: no mirror has ever appeared yet
+        assert!(!suicide(false, s(5), 9));
+        assert!(suicide(false, s(30), 2)); // none ever came — give up
+    }
+
+    #[test]
+    fn arrows_work_in_both_cursor_key_modes() {
+        // the regression: only CSI was decoded, so arrows did nothing in panes
+        // tmux had put in application-cursor mode (it sends SS3 there)
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let feed = |b: &[u8]| unsafe { libc::write(fds[1], b.as_ptr().cast(), b.len()) };
+
+        for seq in [b"\x1b[A".as_slice(), b"\x1bOA".as_slice()] {
+            feed(seq);
+            assert!(matches!(read_key(fds[0]), Key::Up), "up: {seq:?}");
+        }
+        for seq in [b"\x1b[B".as_slice(), b"\x1bOB".as_slice()] {
+            feed(seq);
+            assert!(matches!(read_key(fds[0]), Key::Down), "down: {seq:?}");
+        }
+        feed(b"j");
+        assert!(matches!(read_key(fds[0]), Key::Down));
+        feed(b"u");
+        assert!(matches!(read_key(fds[0]), Key::Versions));
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    #[test]
+    fn arrow_bytes_trickling_in_are_not_dropped() {
+        // The regression: mirror mode delivers keys over a non-blocking FIFO
+        // one byte at a time, so the tail of an escape sequence arrives after
+        // the first poll. Reading the pair unconditionally hit EAGAIN and lost
+        // every other arrow. A blocking pipe cannot reproduce it — O_NONBLOCK
+        // on the read end is the whole point.
+        for (seq, want_down) in [(b"\x1b[B", true), (b"\x1bOB", true), (b"\x1b[A", false)] {
+            let mut fds = [0 as libc::c_int; 2];
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            let (r, w) = (fds[0], fds[1]);
+            unsafe { libc::fcntl(r, libc::F_SETFL, libc::O_NONBLOCK) };
+            // the caller only enters read_key once the first byte is readable
+            unsafe { libc::write(w, seq.as_ptr().cast(), 1) };
+            let tail = seq[1..].to_vec();
+            let feeder = std::thread::spawn(move || {
+                for b in tail {
+                    std::thread::sleep(Duration::from_millis(10));
+                    unsafe { libc::write(w, [b].as_ptr().cast(), 1) };
+                }
+                unsafe { libc::close(w) };
+            });
+            let key = read_key(r);
+            if want_down {
+                assert!(matches!(key, Key::Down), "{seq:?} should be Down");
+            } else {
+                assert!(matches!(key, Key::Up), "{seq:?} should be Up");
+            }
+            feeder.join().unwrap();
+            unsafe { libc::close(r) };
+        }
+    }
+
+    #[test]
+    fn bare_esc_still_quits() {
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) };
+        unsafe { libc::write(fds[1], [0x1bu8].as_ptr().cast(), 1) };
+        assert!(matches!(read_key(fds[0]), Key::Quit));
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    #[test]
+    fn update_notice_only_for_a_different_release() {
+        let dir = std::env::temp_dir().join(format!("agents-mon-test-{}", std::process::id()));
+        let file = dir.join("target/release/.agents-mon-latest");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+
+        assert_eq!(update_available(&dir), None); // no check has run yet
+        std::fs::write(&file, format!("{}\n", current_tag())).unwrap();
+        assert_eq!(update_available(&dir), None); // already on the newest
+        std::fs::write(&file, "v9.9.9\n").unwrap();
+        assert_eq!(update_available(&dir).as_deref(), Some("v9.9.9"));
+        // the notice rides the header: a newline would push every list line
+        // down one and break the click -> pane mapping
+        assert!(!update_available(&dir).unwrap().contains('\n'));
+        // the tag is handed to update.sh as an argument
+        std::fs::write(&file, "v1.0.0; rm -rf /\n").unwrap();
+        assert_eq!(update_available(&dir), None);
+        std::fs::write(&file, "garbage\n").unwrap();
+        assert_eq!(update_available(&dir), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn watched_height_ignores_short_unwatched_windows() {
+        // the regression: a 23-row window in a session nobody is looking at
+        // used to clip the list in the 82-row window the user is watching
+        let ms = [m("$0", 82, true), m("$1", 23, true), m("$0", 47, false)];
+        assert_eq!(watched_height(&ms, "$0"), 82);
+    }
+
+    #[test]
+    fn watched_height_falls_back_to_tallest_visible_then_tallest() {
+        // no client measured yet: tallest among the active windows
+        let ms = [m("$0", 40, true), m("$1", 23, true), m("$0", 99, false)];
+        assert_eq!(watched_height(&ms, ""), 40);
+        // nothing active at all: tallest overall
+        let ms = [m("$0", 23, false), m("$1", 60, false)];
+        assert_eq!(watched_height(&ms, "$0"), 60);
+        assert_eq!(watched_height(&[], "$0"), 24);
     }
 }
