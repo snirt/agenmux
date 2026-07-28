@@ -17,6 +17,12 @@ if [ -x "$BIN" ]; then
 else
   SIDEBAR_CMD="bash '$DIR/scripts/sidebar.sh'"
 fi
+# For a pane that lives as long as the sidebar does, exec away the shell tmux
+# wrapped the command in — bash execs its last command anyway, nu and friends
+# do not and would idle there for the pane's whole life. The popup keeps the
+# plain form: it is short-lived and its command carries an env assignment,
+# which not every shell accepts in front of exec.
+PANE_CMD="exec $SIDEBAR_CMD"
 
 # mode from arg (bound key) or @agents-mon-display; default split sidebar
 mode="${1:-$(tmux show-option -gqv @agents-mon-display)}"
@@ -63,24 +69,19 @@ if [ "$mode" = "popup" ] || [ "$mode" = "float" ]; then
   exit 0
 fi
 
-# Rust engine present: live-mirror mode. One headless daemon renders; every
-# window keeps a permanent mirror pane, so window switches never reflow
-# ("bump") any layout. q/Esc in any mirror tears the whole thing down.
+# Rust engine present: one headless daemon renders directly into processless
+# preserved panes. Window switches never reflow ("bump") any layout.
 if [ -x "$BIN" ]; then
-  # daemon-alive probe: it touches the frame file at least every 2s, and the
-  # file lives in this server's TMPDIR — unlike pgrep, this can't match a
-  # daemon belonging to another tmux server
-  frame="${TMPDIR:-/tmp}/agents-mon-frame"
-  age=999
-  if [ -f "$frame" ]; then
-    # GNU first: on Linux `stat -f` is --file-system and succeeds, printing a
-    # block to stdout — the BSD-first order captured that as the mtime, so the
-    # age never parsed and every toggle tore the view down and respawned it
-    mt="$(stat -c %Y "$frame" 2>/dev/null || stat -f %m "$frame" 2>/dev/null)"
-    [ -n "$mt" ] && age=$(( $(date +%s) - mt ))
+  # The daemon records its tmux control client. Unlike a PID or a shared temp
+  # file, this liveness check is scoped to exactly this tmux server.
+  control="$(tmux show-option -gqv @agents-mon-control-client)"
+  alive=0
+  if [ -n "$control" ] &&
+    tmux list-clients -F '#{client_name}' 2>/dev/null | grep -Fxq "$control"; then
+    alive=1
   fi
-  if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ] && [ "$age" -lt 6 ]; then
-    # already open — make sure this window has a mirror and focus it
+  if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ] && [ "$alive" = 1 ]; then
+    # already open — make sure this window has its preserved pane
     bash "$DIR/scripts/mirror-add.sh"
   else
     bash "$DIR/scripts/teardown.sh"   # clear any crash leftovers
@@ -93,9 +94,24 @@ $(tmux list-windows -a -F '#{window_id}')
 EOF
     bash "$DIR/scripts/hooks.sh"
   fi
-  pane="$(tmux list-panes -F '#{pane_id}	#{pane_title}' |
-    awk -F'\t' '$2 == "agents-mon" { print $1; exit }')"
-  [ -n "$pane" ] && tmux select-pane -t "$pane"
+  # An already-running tmux server keeps its live bindings across plugin
+  # upgrades. Refresh them once when the navigation contract changes.
+  if [ "$(tmux show-option -gqv @agents-mon-nav-version)" != 5 ]; then
+    bash "$DIR/scripts/hooks.sh"
+  fi
+  # Empty panes cannot own stdin. Keep focus in the work pane and route the
+  # invoking client through the sidebar's tmux key table instead. Discovering
+  # the client is required for old live bindings that supplied no second arg.
+  client="${2:-$(bash "$DIR/scripts/client.sh")}"
+  if [ -n "$client" ]; then
+    # Make navigation visually honest: the native tmux selection border belongs
+    # to the sidebar while its client key table owns input.
+    win="$(tmux display-message -p -c "$client" '#{window_id}')"
+    pane="$(tmux list-panes -t "$win" \
+      -f '#{==:#{pane_title},agents-mon}' -F '#{pane_id}' | head -n 1)"
+    [ -n "$pane" ] && tmux select-pane -t "$pane"
+    tmux switch-client -c "$client" -T agents-mon 2>/dev/null
+  fi
   exit 0
 fi
 
@@ -114,7 +130,7 @@ else
   # save layout so follow.sh can restore pane sizes when the sidebar leaves
   tmux set-option -g "@agents-mon-layout-$(tmux display-message -p '#{window_id}')" "$(tmux display-message -p '#{window_layout}')"
   # -hf: full-height split on the window's left edge
-  id="$(tmux split-window -hbf -d -l "${width:-30}" -P -F '#{pane_id}' "$SIDEBAR_CMD")"
+  id="$(tmux split-window -hbf -d -l "${width:-30}" -P -F '#{pane_id}' "$PANE_CMD")"
   tmux set-option -p -t "$id" allow-rename off
   tmux select-pane -t "$id" -T 'agents-mon'
   tmux set-option -g @agents-mon-sidebar "$id"

@@ -3,7 +3,8 @@
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 key="$(tmux show-option -gqv @agents-mon-key)"
-tmux bind-key "${key:-A}" run-shell -b "bash '$CURRENT_DIR/scripts/toggle.sh'"
+tmux bind-key "${key:-A}" run-shell -b \
+  "bash '$CURRENT_DIR/scripts/toggle.sh' '' '#{client_name}'"
 
 # optional dedicated popup key, e.g. set -g @agents-mon-popup-key 'e'
 popup_key="$(tmux show-option -gqv @agents-mon-popup-key)"

@@ -18,4 +18,5 @@ tmux show-options -g 2>/dev/null |
   sed -nE 's/^(@agents-mon-(layout|winsize)-@[0-9]+) .*/\1/p' |
   while read -r opt; do tmux set-option -gu "$opt"; done
 tmux set-option -gu @agents-mon-on 2>/dev/null
+tmux set-option -gu @agents-mon-control-client 2>/dev/null
 exit 0

@@ -1,1 +1,5 @@
 /target
+
+# Local README capture artifacts; the published demo is hosted on GitHub.
+/tmux-agents-mon-demo.mp4
+/tmux-agents-mon-screenshot.png

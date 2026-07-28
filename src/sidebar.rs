@@ -4,11 +4,12 @@
 //
 // Two entry points share the engine:
 //  - run():        tty mode — popup pane, draws to stdout, keys from stdin.
-//  - run_daemon(): headless mirror mode — frame goes to a file that every
-//    window's mirror pane displays, keys arrive over a FIFO. The sidebar
-//    pane never moves between windows, so switching windows causes no
-//    join-pane reflow (the "bump").
+//  - run_daemon(): headless preserved-pane mode — frames go directly to the
+//    processless panes visible in attached clients; keys arrive over a FIFO.
+//    The panes never move between windows, so switching causes no join-pane
+//    reflow (the "bump").
 use crate::conf::AgentConf;
+use crate::pane_writers::PaneWriters;
 use crate::procs::IdentCache;
 use crate::scan::{self, PaneRow};
 use crate::tmux::{Tmux, TmuxError};
@@ -30,6 +31,17 @@ extern "C" fn on_term(_: libc::c_int) {
 
 pub(crate) const E: &str = "\x1b";
 const SPIN: [char; 8] = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
+
+fn cursor_mark(selected: bool, plugin_selected: bool) -> String {
+    if !selected {
+        return "  ".into();
+    }
+    if plugin_selected {
+        format!("{E}[1;32m❯{E}[0m ")
+    } else {
+        format!("{E}[1m❯{E}[0m ")
+    }
+}
 
 pub(crate) struct RawMode(Option<libc::termios>);
 
@@ -122,6 +134,7 @@ enum Key {
     Down,
     Jump,
     Quit,
+    Close,
     Help,
     Versions,
     Other,
@@ -133,11 +146,12 @@ fn read_key(fd: libc::c_int) -> Key {
         b'j' => Key::Down,
         b'k' => Key::Up,
         b'q' | 0x03 | 0x04 => Key::Quit, // q, Ctrl-C, Ctrl-D
+        b'Q' => Key::Close,
         b'l' | b'\r' | b'\n' => Key::Jump,
         b'?' => Key::Help,
         b'u' => Key::Versions,
         // Every byte of the tail goes through the same polling reader. In mirror
-        // mode keys arrive over a non-blocking FIFO that the mirror feeds one
+        // mode keys arrive over a non-blocking FIFO that the key sender feeds one
         // byte at a time, so the tail is routinely still in flight; reading it
         // without polling hit EAGAIN and dropped every other arrow.
         0x1b => escape_key(|| {
@@ -147,6 +161,38 @@ fn read_key(fd: libc::c_int) -> Key {
         }),
         _ => Key::Other,
     }
+}
+
+/// Deliver one key-table action to the daemon without waiting for a FIFO
+/// reader. Each invocation is intentionally short-lived; the daemon remains
+/// the only persistent agents-mon process.
+pub fn send_key(name: &str) -> i32 {
+    let bytes: &[u8] = match name {
+        "up" => b"\x1b[A",
+        "down" => b"\x1b[B",
+        "enter" => b"\r",
+        "escape" => b"\x1b",
+        "space" => b" ",
+        "j" => b"j",
+        "k" => b"k",
+        "l" => b"l",
+        "q" => b"q",
+        "close" => b"Q",
+        "help" => b"?",
+        "versions" => b"u",
+        _ => return 2,
+    };
+    let path = std::env::temp_dir().join("agents-mon-keys");
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return 1;
+    };
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
+    if fd < 0 {
+        return 1;
+    }
+    let wrote = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+    unsafe { libc::close(fd) };
+    (wrote != bytes.len() as isize) as i32
 }
 
 /// Decode the tail of an escape sequence. `next` yields the next byte, or None
@@ -220,7 +266,7 @@ fn is_tag(t: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
 }
 
-/// One mirror pane as measured by mirror_tick.
+/// One preserved pane as measured by mirror_tick.
 struct M {
     pane: String,
     win: String,
@@ -232,8 +278,8 @@ struct M {
     active: bool,
 }
 
-/// Height to render the shared frame at. NOT the minimum: every mirror shows
-/// the same frame, so folding to the shortest pane let one stale 23-row window
+/// Height to render the shared frame at. NOT the minimum: every visible pane
+/// shows the same frame, so folding to the shortest let one stale 23-row window
 /// in a session nobody is looking at clip the list everywhere. Size to the
 /// mirror the user is actually watching — mirrors shorter than the frame clip
 /// themselves in mirror::draw.
@@ -247,8 +293,8 @@ fn watched_height(ms: &[M], active_session: &str) -> usize {
         .unwrap_or(24)
 }
 
-/// Should the daemon shut down after measuring no mirror panes? Only once
-/// mirrors existed (or the startup grace ran out) AND the emptiness repeats:
+/// Should the daemon shut down after measuring no preserved panes? Only once
+/// panes existed (or the startup grace ran out) AND the emptiness repeats:
 /// a hook's run-shell block can desync the control pipe for exactly one
 /// command, and a single garbage read must not tear down the whole mirror set.
 fn suicide(seen_mirror: bool, since_start: Duration, empty_ticks: u32) -> bool {
@@ -262,14 +308,14 @@ struct Prev {
     title: String,
 }
 
-/// Headless-mode state: frame → file, keys ← FIFO, size ← mirror panes.
+/// Headless-mode state: frames → visible panes, keys ← FIFO, size ← panes.
 struct Daemon {
-    frame_file: PathBuf,
     keys_path: PathBuf,
     keys_fd: libc::c_int,
-    size: (usize, usize), // narrowest mirror x watched mirror's height
-    seen_mirror: bool,    // suicide only arms after the first mirror appears
-    empty_ticks: u32,     // consecutive measurements that found no mirror
+    writers: PaneWriters,
+    size: (usize, usize), // narrowest pane x watched pane's height
+    seen_mirror: bool,    // suicide only arms after the first pane appears
+    empty_ticks: u32,     // consecutive measurements that found no pane
     started: Instant,
     // window id -> (window size, pane count) at the last measure: a mirror
     // whose width changed while both stayed put is a user border-drag. The
@@ -295,6 +341,7 @@ pub struct Sidebar {
     last_active: String,
     active: String,
     active_session: String,
+    plugin_selected: bool,
     tick: u32,
     self_pane: String,
     pin: Option<String>,
@@ -333,6 +380,7 @@ fn new_sidebar(
         last_active: String::new(),
         active: String::new(),
         active_session: String::new(),
+        plugin_selected: false,
         tick: 0,
         self_pane,
         pin: None,
@@ -377,26 +425,29 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     };
     let mut sb = new_sidebar(tmux, plugin_dir, cache_file, rows_file, self_pane);
     sb.pin = pin;
+    // tty mode is the popup: while it is visible it owns input.
+    sb.plugin_selected = true;
     sb.render(true);
     event_loop(&mut sb);
     cleanup(&sb.rows_file, &sb.pin);
     0
 }
 
-/// Headless engine for mirror mode: renders to a frame file, reads keys
-/// from a FIFO, sizes itself to the smallest mirror pane. Exits (with full
-/// teardown) when the last mirror pane disappears.
+/// Headless engine for preserved-pane mode: renders through live pane writers,
+/// reads keys from a FIFO, and sizes itself from the preserved panes. Exits
+/// (with full teardown) when the last pane disappears.
 pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     unsafe {
         libc::signal(libc::SIGTERM, on_term as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_term as libc::sighandler_t);
     }
     let tmp = std::env::temp_dir();
-    let frame_file = tmp.join("agents-mon-frame");
     let keys_path = tmp.join("agents-mon-keys");
+    // A previous mirror-based daemon used this as its liveness heartbeat.
+    let _ = std::fs::remove_file(tmp.join("agents-mon-frame"));
     let _ = std::fs::remove_file(&keys_path);
     let c = std::ffi::CString::new(keys_path.as_os_str().as_encoded_bytes()).unwrap();
-    // O_RDWR: the FIFO never hits EOF as mirror writers come and go
+    // O_RDWR: the FIFO never hits EOF as key senders come and go
     let keys_fd = unsafe {
         libc::mkfifo(c.as_ptr(), 0o600);
         libc::open(c.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK)
@@ -417,10 +468,34 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         tmp.join("agents-mon-rows"),
         String::new(),
     );
+    // `display-message '#{client_name}'` can briefly be empty when a busy
+    // server already has a focused terminal client. Match the control client
+    // tmux just spawned by PID instead; that identity is unambiguous.
+    let control_pid = sb.tmux.client_pid().to_string();
+    for _ in 0..100 {
+        let client = sb
+            .tmux
+            .run("list-clients -F '#{client_pid}\t#{client_name}'")
+            .ok()
+            .and_then(|clients| {
+                clients.lines().find_map(|line| {
+                    let (pid, name) = line.split_once('\t')?;
+                    (pid == control_pid && !name.is_empty()).then(|| name.to_string())
+                })
+            });
+        if let Some(client) = client {
+            let client = client.replace('\'', "\\'");
+            let _ = sb.tmux.run(&format!(
+                "set-option -g @agents-mon-control-client '{client}'"
+            ));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     sb.daemon = Some(Daemon {
-        frame_file,
         keys_path,
         keys_fd,
+        writers: PaneWriters::new(),
         size: (30, 24),
         seen_mirror: false,
         empty_ticks: 0,
@@ -428,12 +503,11 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         win_sizes: HashMap::new(),
         attached: String::new(),
     });
-    // Publish nothing until the first mirror has been measured: a mirror pane's
+    // Publish nothing until the first preserved pane has been measured: its
     // size IS the frame size, and a default-sized first frame visibly resizes
     // once the real measurement lands. Deriving the size instead of measuring it
-    // does not work — pane-border-status silently costs a row. toggle.sh spawns
-    // the mirrors right after us, so this wait is short; mirror::run tolerates
-    // the missing frame file meanwhile.
+    // does not work — pane-border-status silently costs a row. toggle.sh creates
+    // the panes right after us, so this wait is short.
     let t0 = Instant::now();
     while t0.elapsed() < Duration::from_secs(3) {
         if !sb.mirror_tick() || sb.daemon.as_ref().unwrap().seen_mirror {
@@ -465,7 +539,7 @@ fn event_loop(sb: &mut Sidebar) {
                 Err(TmuxError::Error(_)) => {} // e.g. pane died mid-scan
             }
             if sb.daemon.is_some() && !sb.mirror_tick() {
-                break; // all mirror panes gone — nothing left to display for
+                break; // all preserved panes gone — nothing left to display
             }
             sb.render(false);
             // a scan takes tens of ms — with the pre-scan `now`, a tick due
@@ -512,10 +586,17 @@ fn event_loop(sb: &mut Sidebar) {
                 Key::Help => sb.help(),
                 Key::Versions => sb.versions(),
                 Key::Quit => {
-                    // q/Esc closes: popup pin removed so toggle.sh ends its loop
-                    if let Some(p) = &sb.pin {
-                        let _ = std::fs::remove_file(p);
+                    if sb.daemon.is_none() {
+                        // Popup/tty mode owns stdin, so q/Esc still closes it.
+                        if let Some(p) = &sb.pin {
+                            let _ = std::fs::remove_file(p);
+                        }
+                        break;
                     }
+                    // In preserved-pane mode the key-table binding returns the
+                    // client to normal input; the always-open sidebar remains.
+                }
+                Key::Close => {
                     break;
                 }
                 Key::Other => {}
@@ -627,6 +708,9 @@ impl Sidebar {
     }
 
     fn active_pane(&mut self) -> Option<String> {
+        // Popup/tty mode owns input for its entire lifetime. Daemon mode
+        // follows the real client's active pane below.
+        self.plugin_selected = self.daemon.is_none();
         // scan() only syncs at its START; a hook's run-shell block landing
         // during the capture loop leaves every later command paired with the
         // wrong response. Re-barrier before reading anything we act on.
@@ -637,18 +721,24 @@ impl Sidebar {
         // daemon's follow-the-user client switching.
         let out = self
             .tmux
-            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_activity}\t#{session_id}\t#{pane_id}'")
+            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_activity}\t#{session_id}\t#{pane_id}\t#{pane_title}'")
             .ok()?;
-        let (sid, pane) = out
+        let (sid, pane, title) = out
             .lines()
             .filter_map(|l| {
                 let mut f = l.split('\t');
                 let act: u64 = f.next()?.parse().ok()?;
-                Some((act, f.next()?.to_string(), f.next()?.to_string()))
+                Some((
+                    act,
+                    f.next()?.to_string(),
+                    f.next()?.to_string(),
+                    f.next()?.to_string(),
+                ))
             })
-            .max_by_key(|(act, _, _)| *act)
-            .map(|(_, s, p)| (s, p))?;
+            .max_by_key(|(act, _, _, _)| *act)
+            .map(|(_, s, p, t)| (s, p, t))?;
         self.active_session = sid;
+        self.plugin_selected = title == "agents-mon";
         Some(pane)
     }
 
@@ -768,17 +858,17 @@ impl Sidebar {
         }
     }
 
-    /// Refresh mirror inventory: min pane size drives the render, zero
-    /// mirrors (after at least one existed, or a 30s startup grace) = false.
-    /// Also detects a user dragging a mirror's border — width changed while
+    /// Refresh preserved-pane inventory: min pane size drives the render, zero
+    /// panes (after at least one existed, or a 30s startup grace) = false.
+    /// Also detects a user dragging a sidebar border — width changed while
     /// the window size and pane count did not, in a window the user can
     /// actually see — and
     /// adopts it as the global width. Serialization matters: one daemon
     /// doing this (instead of racing hook scripts) means no stale
     /// resize-pane ever fights the drag, and the dragged pane itself is
-    /// never touched — only the invisible mirrors in other windows move.
+    /// never touched — only the hidden sidebars in other windows move.
     fn mirror_tick(&mut self) -> bool {
-        // same barrier as active_pane: reading zero mirrors off a desynced
+        // same barrier as active_pane: reading zero panes off a desynced
         // pipe used to tear the whole mirror set down
         let _ = self.tmux.sync();
         let out = self
@@ -824,7 +914,7 @@ impl Sidebar {
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(30);
-        // One mirror per window. mirror-add.sh claims atomically now, but servers
+        // One sidebar per window. mirror-add.sh claims atomically now, but servers
         // that ran the old racy version still carry duplicates. Keep the first —
         // a -hbf split takes index 0, so that's the newest and the one actually at
         // the requested width; the squeezed leftovers go. This runs before the
@@ -886,7 +976,7 @@ impl Sidebar {
             let _ = self
                 .tmux
                 .run(&format!("set-option -g @agents-mon-width {width}"));
-            // resize the OTHER mirrors via forked tmux (hook run-shell
+            // resize the OTHER sidebars via forked tmux (hook run-shell
             // echoes on the control pipe would desync it); the dragged pane
             // stays untouched so nothing ever fights the user's drag
             let mut cmd = std::process::Command::new("tmux");
@@ -903,7 +993,33 @@ impl Sidebar {
             }
             w = width; // render for the adopted width now, not the stale min
         }
+        let visible_sessions: HashSet<String> = self
+            .tmux
+            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{session_id}'")
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect();
+        let visible_panes = if visible_sessions.is_empty() {
+            // Detached startup and integration tests have no real client yet.
+            // Keep one session warm; the first real client notification
+            // immediately replaces this fallback with the visible set.
+            ms.iter()
+                .filter(|m| m.active)
+                .take(1)
+                .map(|m| m.pane.clone())
+                .collect::<Vec<_>>()
+        } else {
+            ms.iter()
+                .filter(|m| m.active && visible_sessions.contains(&m.sess))
+                .map(|m| m.pane.clone())
+                .collect::<Vec<_>>()
+        };
         let d = self.daemon.as_mut().unwrap();
+        if d.writers.reconcile(visible_panes) {
+            // A new empty pane has no copy of the last frame yet.
+            self.last_frame.clear();
+        }
         d.win_sizes = ms
             .iter()
             .map(|m| (m.win.clone(), (m.win_size, m.panes)))
@@ -913,26 +1029,28 @@ impl Sidebar {
         true
     }
 
-    /// Mirror-mode shutdown: kill mirror panes + restore layouts via a
+    /// Preserved-pane shutdown: close visible writers, kill empty panes and
+    /// restore layouts via a
     /// forked script (hook run-shell echoes would desync the control pipe),
-    /// then drop the frame/keys files so any surviving mirror exits.
+    /// then drop the key FIFO and row map.
     fn teardown(&mut self) {
+        if let Some(d) = &mut self.daemon {
+            d.writers.clear();
+        }
         let script = self.plugin_dir.join("scripts/teardown.sh");
         let _ = std::process::Command::new("bash").arg(script).status();
         if let Some(d) = &self.daemon {
-            let _ = std::fs::remove_file(&d.frame_file);
             let _ = std::fs::remove_file(&d.keys_path);
             unsafe { libc::close(d.keys_fd) };
         }
         let _ = std::fs::remove_file(&self.rows_file);
     }
 
-    /// Frame sink: stdout in tty mode; atomic file write in daemon mode.
-    /// Unchanged daemon frames still touch the file — mirrors read staleness
-    /// as "daemon died".
+    /// Frame sink: stdout in tty mode; direct writes to the visible empty panes
+    /// in daemon mode.
     fn emit(&mut self, frame: String, force: bool) {
         let changed = force || frame != self.last_frame;
-        match &self.daemon {
+        match &mut self.daemon {
             None => {
                 if changed {
                     print!("{frame}");
@@ -941,14 +1059,7 @@ impl Sidebar {
             }
             Some(d) => {
                 if changed {
-                    let tmp = d.frame_file.with_extension("tmp");
-                    if std::fs::write(&tmp, &frame).is_ok() {
-                        let _ = std::fs::rename(&tmp, &d.frame_file);
-                    }
-                } else {
-                    let c =
-                        std::ffi::CString::new(d.frame_file.as_os_str().as_encoded_bytes()).unwrap();
-                    unsafe { libc::utimes(c.as_ptr(), std::ptr::null()) };
+                    d.writers.emit(&frame);
                 }
             }
         }
@@ -998,11 +1109,7 @@ impl Sidebar {
                 if n + 1 == self.sel {
                     sel_top = lines.len();
                 }
-                let mark = if n + 1 == self.sel {
-                    format!("{E}[1m❯{E}[0m ")
-                } else {
-                    "  ".into()
-                };
+                let mark = cursor_mark(n + 1 == self.sel, self.plugin_selected);
                 let dot = self.dot(&r.state);
                 let win = r.loc.splitn(2, ':').nth(1).unwrap_or("");
                 let mut rest = format!("{win} {}", r.cwd);
@@ -1051,11 +1158,6 @@ impl Sidebar {
     }
 
     /// Block until a key is available, re-emitting `text` while waiting.
-    ///
-    /// An overlay owns the event loop, so nothing else touches the frame file
-    /// meanwhile — and a mirror treats a frame older than 10s as a dead daemon
-    /// and kills its own pane (see mirror::run). Re-emitting an unchanged frame
-    /// costs a utimes and keeps every mirror convinced we are alive.
     /// Returns false on shutdown, or when `max_wait` elapses with no key —
     /// callers that redraw on a timer pass one, help passes None.
     fn await_key(&mut self, text: &str, max_wait: Option<Duration>) -> bool {
@@ -1115,11 +1217,7 @@ impl Sidebar {
                 ));
             } else {
                 for (i, t) in tags.iter().enumerate() {
-                    let mark = if i == sel {
-                        format!("{E}[1m❯{E}[0m ")
-                    } else {
-                        "  ".into()
-                    };
+                    let mark = cursor_mark(i == sel, true);
                     let tail = if *t == cur {
                         format!(" {E}[2m(current){E}[0m")
                     } else {
@@ -1145,6 +1243,10 @@ impl Sidebar {
                     break;
                 }
                 Key::Quit => break,
+                Key::Close => {
+                    QUIT.store(true, Ordering::Relaxed);
+                    break;
+                }
                 _ => {}
             }
             selected = tags.get(sel).cloned();
@@ -1170,6 +1272,11 @@ impl Sidebar {
     }
 
     fn help(&mut self) {
+        let quit_keys = if self.daemon.is_some() {
+            " q Esc    leave navigation\n Q        close sidebar"
+        } else {
+            " q Esc    close sidebar"
+        };
         let text = format!(
             "{E}[2J{E}[H{E}[1magents — help{E}[0m {E}[2m{}{E}[0m\n\n\
 {E}[1mstatus{E}[0m\n\
@@ -1181,7 +1288,7 @@ impl Sidebar {
  j/k ↑/↓  move selection\n\
  Enter/l  jump to agent\n\
  u        update / switch version\n\
- q Esc    close sidebar\n\
+{quit_keys}\n\
  ?        this help\n\n\
 {E}[2mpress any key to return{E}[0m",
             current_tag()
@@ -1189,8 +1296,8 @@ impl Sidebar {
         let key_fd = self.daemon.as_ref().map_or(0, |d| d.keys_fd);
         self.emit(text.clone(), true);
         // blocks until a key; animations pause meanwhile
-        if self.await_key(&text, None) {
-            let _ = read_byte(key_fd);
+        if self.await_key(&text, None) && matches!(read_key(key_fd), Key::Close) {
+            QUIT.store(true, Ordering::Relaxed);
         }
         if self.daemon.is_none() {
             print!("{E}[2J");
@@ -1226,6 +1333,13 @@ mod tests {
         // startup grace: no mirror has ever appeared yet
         assert!(!suicide(false, s(5), 9));
         assert!(suicide(false, s(30), 2)); // none ever came — give up
+    }
+
+    #[test]
+    fn cursor_is_green_only_while_plugin_is_selected() {
+        assert_eq!(cursor_mark(true, true), format!("{E}[1;32m❯{E}[0m "));
+        assert_eq!(cursor_mark(true, false), format!("{E}[1m❯{E}[0m "));
+        assert_eq!(cursor_mark(false, true), "  ");
     }
 
     #[test]

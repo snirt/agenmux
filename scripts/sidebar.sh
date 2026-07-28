@@ -183,7 +183,15 @@ EOF
       fi
       [ "$used" -ge "$cap" ] && break  # pane full — clip, never scroll
       n=$((n + 1))
-      if [ "$n" = "$sel" ]; then mark="$E[1m❯$E[0m "; else mark="  "; fi
+      if [ "$n" = "$sel" ]; then
+        if [ -n "${AGENTS_MON_PIN:-}" ] || [ "$active" = "${TMUX_PANE:-}" ]; then
+          mark="$E[1;32m❯$E[0m "
+        else
+          mark="$E[1m❯$E[0m "
+        fi
+      else
+        mark="  "
+      fi
       color_dot "$state"
       rest="${loc#*:} $cwd"                      # window.pane + dir
       avail=$((cols - 5 - ${#agent}))            # "❯ ● name " prefix

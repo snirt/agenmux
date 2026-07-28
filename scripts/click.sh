@@ -6,6 +6,11 @@
 pane="$1" y="$2" client="$3"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ROWS_FILE="${TMPDIR:-/tmp}/agents-mon-rows-${pane#%}"
+# Processless preserved panes share the daemon's current visible-row map; no
+# per-pane mirror process exists to copy it.
+if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ]; then
+  ROWS_FILE="${TMPDIR:-/tmp}/agents-mon-rows"
+fi
 
 # sidebar layout: y0 header, y1 blank, agent rows from y2
 row=$((y - 1))

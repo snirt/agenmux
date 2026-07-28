@@ -52,6 +52,12 @@ installed, it builds the engine in the background. `make build` does the same
 by hand, and `@agents-mon-bin` overrides the binary path. Agent detection stays
 in `agents/*.conf`, so adding or tuning agents never needs a rebuild.
 
+Split mode preserves one empty tmux pane in each window, so switching windows
+never changes the layout. Those panes have no shell or `agents-mon` child
+process (`pane_pid=0`); the single daemon writes only to sidebar panes currently
+visible in attached clients. Hidden panes retain their last frame; with every
+client detached, one pane stays warm for the next attach.
+
 GitHub Actions also builds ready-to-use plugin archives for x86_64 and ARM64 on
 Linux and macOS. The Linux binaries are statically linked for portability.
 Download the archive for your platform from the
@@ -90,16 +96,19 @@ Details worth knowing:
 
 ## Usage
 
-- `prefix + A` — toggle the sidebar (left split, auto-refreshes every 2s);
-  agents are grouped under their session name, in tmux window order
+- `prefix + A` — open the sidebar, or enter its navigation mode while it is
+  already open (left split, auto-refreshes every 2s); agents are grouped under
+  their session name, in tmux window order. Navigation selects the sidebar and
+  preserves your normal tmux pane bindings; `q`/`Esc` returns to the work pane
+  and normal input, while `Q` closes the sidebar
 - **Click an agent row** in the sidebar to jump to that agent's pane
   (requires `set -g mouse on`; clicks elsewhere keep default behavior)
 - In the sidebar: `j`/`k` or `↑`/`↓` move the `❯` cursor, `Enter` or `l` jumps to
   the selected agent, `u` opens the [version picker](#updating), `?` shows help
-  (statuses + keys), `q` closes the sidebar;
-  long lists scroll to keep the selection visible, and the cursor snaps to
-  whichever agent pane currently has focus (instantly with the Rust engine —
-  it reacts to tmux focus events)
+  (statuses + keys), `q`/`Esc` leaves navigation and `Q` closes the sidebar;
+  the `❯` cursor is green while navigation is active, long lists scroll to keep
+  the selection visible, and the cursor snaps to whichever agent pane currently
+  has focus (instantly with the Rust engine — it reacts to tmux focus events)
 - Add `#{agents_mon}` anywhere in `status-right`/`status-left` for the compact
   summary, e.g. `⣿1 ⣾2 ⣿1` colored red/yellow/green for blocked/working/idle
   (empty when no agents are running)
