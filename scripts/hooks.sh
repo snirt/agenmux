@@ -34,8 +34,17 @@ tmux set-hook -g 'window-layout-changed[42]' "run-shell 'bash $DIR/scripts/orpha
 # client resizes rescale panes proportionally — snap the sidebar back
 tmux set-hook -g 'window-resized[42]' "run-shell 'bash $DIR/scripts/pin.sh'"
 
-# Mirror mode (Rust engine): windows created or first visited while on get
-# their mirror pane here. Guarded on @agents-mon-on, so these no-op in the
+# Full-screen pane modes such as the default `prefix + w` chooser use `-Z` to
+# zoom their target. When the selected target is the narrow sidebar that makes
+# the plugin suddenly fill the window. pane-mode-changed fires just before the
+# zoom is applied, so defer the format check to a background command; it keeps
+# the mode open but restores the normal layout immediately. The user's original
+# picker binding stays intact.
+tmux set-hook -g 'pane-mode-changed[44]' \
+  "run-shell -b 'tmux if-shell -t \"#{pane_id}\" -F \"#{&&:#{==:#{pane_title},agents-mon},#{window_zoomed_flag}}\" \"resize-pane -Z -t \\\"#{pane_id}\\\"\"'"
+
+# Preserved-pane mode (Rust engine): windows created or first visited while on
+# get their empty sidebar pane here. Guarded on @agents-mon-on, so these no-op in the
 # bash-fallback mode (and the [42] follow hooks no-op in mirror mode — their
 # guard is @agents-mon-sidebar, which mirror mode never sets).
 # the explicit #{window_id} matters: on detached sessions (and older tmux)
@@ -49,3 +58,48 @@ tmux set-hook -g 'client-session-changed[43]' "$mirror_add"
 # Servers that ran the short-lived sync-width.sh hook keep it until
 # something unsets it — it now points at a deleted file and spams 127s
 tmux set-hook -gu 'window-layout-changed[43]' 2>/dev/null
+
+# A processless pane cannot read stdin, but a client key table is handled before
+# pane input. Keep the real tmux selection border on the visual sidebar while
+# routing its keys to the daemon.
+sidebar_select="if -F '#{==:#{pane_title},agents-mon}' { switch-client -T agents-mon }"
+tmux set-hook -g 'after-select-pane[44]' "$sidebar_select"
+
+# Empty panes have no stdin. A dedicated client key table forwards the same
+# logical keys to the daemon's non-blocking FIFO while the work pane keeps focus.
+BIN="$(tmux show-option -gqv @agents-mon-bin)"
+[ -n "$BIN" ] || BIN="$DIR/target/release/agents-mon"
+
+# Start with the user's normal no-prefix bindings so selecting the sidebar
+# behaves like selecting any regular pane (C-h/j/k/l navigation, custom
+# bindings, etc.). list-keys emits sourceable tmux commands; plugin-specific
+# bindings below then override only the keys the sidebar owns.
+tmux unbind-key -a -T agents-mon 2>/dev/null
+tmux list-keys -T root |
+  sed 's/-T root /-T agents-mon /' |
+  tmux source-file -
+
+bind_nav() {
+  key="$1" action="$2" next="$3"
+  tmux bind-key -T agents-mon "$key" \
+    "run-shell -b \"'$BIN' key '$action'\"; switch-client -T '$next'"
+}
+bind_leave() {
+  key="$1" action="$2"
+  tmux bind-key -T agents-mon "$key" \
+    "run-shell -b \"'$BIN' key '$action'\"; select-pane -l; switch-client -T root"
+}
+bind_nav j j agents-mon
+bind_nav k k agents-mon
+bind_nav Down down agents-mon
+bind_nav Up up agents-mon
+bind_nav '?' help agents-mon
+bind_nav u versions agents-mon
+bind_nav Space space agents-mon
+bind_nav Any space agents-mon
+bind_nav Enter enter root
+bind_nav l l root
+bind_leave q q
+bind_leave Escape escape
+bind_nav Q close root
+tmux set-option -g @agents-mon-nav-version 5

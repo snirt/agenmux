@@ -416,7 +416,7 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null; then
   tmp="$(mktemp -d)"
   T="tmux -S $tmp/sock -f /dev/null"
   $T new-session -d -s t -x 200 -y 50
-  sb="$($T split-window -hbf -d -l 30 -P -F '#{pane_id}' -t t: 'sleep 60')"
+  sb="$($T split-window -hbf -d -l 30 -P -F '#{pane_id}' -t t: 'exec sleep 60')"
   $T set-option -g @agents-mon-sidebar "$sb"
   $T set-option -g @agents-mon-sidebar-win "$($T display-message -p -t t: '#{window_id}')"
   # hooks.sh calls bare tmux — point it at the scratch socket (absolute
@@ -453,21 +453,39 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   printf '#!/bin/sh\nexec %s -S %s "$@"\n' "$(command -v tmux)" "$tmp/sock" \
     > "$tmp/bin/tmux"
   chmod +x "$tmp/bin/tmux"
-  TMPDIR="$tmp" $T new-session -d -s t -x 200 -y 50 'sleep 60'
-  $T new-window -t t 'sleep 60'
+  TMPDIR="$tmp" $T new-session -d -s t -x 200 -y 50 'exec sleep 60'
+  $T new-window -t t: 'exec sleep 60'
   $T set-option -g @agents-mon-bin "$BIN_ABS"
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" \
     bash "$DIR/scripts/toggle.sh"
   sleep 2
   mirrors=0
+  processless=0
   for w in $($T list-windows -t t -F '#{window_id}'); do
-    $T list-panes -t "$w" -F '#{pane_title}' | grep -qx agents-mon && mirrors=$((mirrors + 1))
+    pane_info="$($T list-panes -t "$w" -F '#{pane_title} #{pane_pid}' |
+      awk '$1 == "agents-mon" { print; exit }')"
+    if [ -n "$pane_info" ]; then
+      mirrors=$((mirrors + 1))
+      [ "${pane_info##* }" = 0 ] && processless=$((processless + 1))
+    fi
   done
+  focus_kept=0
+  [ "$($T display-message -p -t t: '#{pane_title}')" != agents-mon ] && focus_kept=1
+  keys_ok=0
+  $T list-keys -T agents-mon | grep -Fq "key 'close'" && keys_ok=1
+  control="$($T show-option -gqv @agents-mon-control-client)"
+  control_ok=0
+  [ -n "$control" ] &&
+    $T list-clients -F '#{client_name}' | grep -Fxq "$control" &&
+    control_ok=1
   before="$($T list-windows -t t -F '#{window_id} #{window_layout}')"
   $T last-window -t t; $T last-window -t t
   sleep 0.5
   after="$($T list-windows -t t -F '#{window_id} #{window_layout}')"
-  $T new-window -t t 'sleep 60'
+  live_sidebar="$($T list-panes -t t: -F '#{pane_id}	#{pane_title}' |
+    awk -F'\t' '$2 == "agents-mon" { print $1; exit }')"
+  live_frame="$($T capture-pane -p -t "$live_sidebar")"
+  $T new-window -t t: 'exec sleep 60'
   sleep 1.5
   neww="$($T display-message -p -t t: '#{window_id}')"
   new_ok=0
@@ -475,7 +493,7 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   # concurrent adds must not double-split. One window switch fires two [43]
   # hooks, so racing mirror-add.sh calls are routine, and the old
   # check-then-split let every one of them through.
-  racew="$($T new-window -d -a -t t: -P -F '#{window_id}' 'sleep 60')"
+  racew="$($T new-window -d -a -t t: -P -F '#{window_id}' 'exec sleep 60')"
   $T list-panes -t "$racew" -F '#{pane_id}	#{pane_title}' |
     awk -F'\t' '$2 == "agents-mon" { print $1 }' |
     while read -r p; do $T kill-pane -t "$p"; done
@@ -501,7 +519,7 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   # closing the last real pane hands all its columns to the mirror without
   # changing the window size — that must NOT read as a border drag (the pane
   # count changed), or the full window width gets adopted globally
-  $T new-window -t t: 'sleep 60'
+  $T new-window -t t: 'exec sleep 60'
   sleep 4  # mirror via hook + a daemon baseline measure with both panes open
   closew="$($T display-message -p -t t: '#{window_id}')"
   agentp="$($T list-panes -t "$closew" -F '#{pane_id}	#{pane_title}' |
@@ -509,28 +527,31 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   $T kill-pane -t "$agentp"
   sleep 4
   optw2="$($T show-option -gqv @agents-mon-width)"
-  $T send-keys -t "$mir" q
+  env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key q
+  sleep 0.2
+  stayed="$($T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agents-mon)"
+  env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key close
   sleep 2
   left="$($T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agents-mon)"
-  if [ "$mirrors" -eq 2 ] && [ "$before" = "$after" ] && [ "$new_ok" -eq 1 ] \
+  if [ "$mirrors" -eq 2 ] && [ "$processless" -eq 2 ] && [ "$focus_kept" -eq 1 ] \
+     && [ "$keys_ok" -eq 1 ] && [ "$control_ok" -eq 1 ] && [ "$stayed" -gt 0 ] \
+     && printf '%s\n' "$live_frame" | grep -Fq agents \
+     && [ "$before" = "$after" ] && [ "$new_ok" -eq 1 ] \
      && [ "$raced" -eq 1 ] && [ "$widths" = 45 ] && [ "$optw" = 45 ] \
      && [ "$optw2" = 45 ] \
      && [ "$left" -eq 0 ] && [ ! -f "$tmp/agents-mon-frame" ]; then
     echo "ok   mirror-mode-no-bump-lifecycle"
   else
-    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok raced=$raced widths=$widths optw=$optw optw2=$optw2 left=$left"
+    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors processless=$processless focus=$focus_kept keys=$keys_ok control=$control_ok stayed=$stayed live=$([ -n "$live_frame" ] && echo y || echo n) layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok raced=$raced widths=$widths optw=$optw optw2=$optw2 left=$left"
     fail=1
   fi
   $T kill-server 2>/dev/null || true
-  pkill -f 'agents-mon daemon' 2>/dev/null || true
   rm -rf "$tmp"
 fi
 if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
-  # A full-screen overlay blocks the daemon's event loop waiting for a key.
-  # The regression: it stopped touching the frame file, every mirror declared
-  # the daemon dead after 10s (mirror.rs) and killed its own pane, leaving
-  # @agents-mon-on set and a blocked daemon behind — the next toggle stacked
-  # another one on top.
+  # Full-screen overlays block the normal scan loop while waiting for a key.
+  # They must still render through the visible pane writer and accept keys
+  # through the daemon FIFO.
   BIN_ABS="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
   tmp="$(mktemp -d)"
   T="tmux -S $tmp/sock -f /dev/null"
@@ -538,42 +559,38 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   printf '#!/bin/sh\nexec %s -S %s "$@"\n' "$(command -v tmux)" "$tmp/sock" \
     > "$tmp/bin/tmux"
   chmod +x "$tmp/bin/tmux"
-  TMPDIR="$tmp" $T new-session -d -s t -x 200 -y 50 'sleep 120'
-  $T new-window -t t 'sleep 120'
+  TMPDIR="$tmp" $T new-session -d -s t -x 200 -y 50 'exec sleep 120'
+  $T new-window -t t: 'exec sleep 120'
   $T set-option -g @agents-mon-bin "$BIN_ABS"
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" \
     bash "$DIR/scripts/toggle.sh"
   sleep 2
   mirrors() { $T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agents-mon; }
-  frame_age() {
-    local mt
-    # GNU first: on Linux `stat -f` means --file-system and prints a whole
-    # block to stdout, which the BSD-first order captured as the mtime
-    mt="$(stat -c %Y "$tmp/agents-mon-frame" 2>/dev/null ||
-          stat -f %m "$tmp/agents-mon-frame" 2>/dev/null)"
-    [ -n "$mt" ] && printf '%s' $(( $(date +%s) - mt )) || printf '999'
-  }
   mir="$($T list-panes -t t: -F '#{pane_id}	#{pane_title}' |
     awk -F'\t' '$2 == "agents-mon" { print $1; exit }')"
   opened="$(mirrors)"
-  # 12s > the 10s staleness threshold a mirror uses to declare the daemon dead
-  $T send-keys -t "$mir" '?'
-  sleep 12
-  help_alive="$(mirrors)" help_age="$(frame_age)"
-  $T send-keys -t "$mir" Space   # dismiss help
+  env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key help
   sleep 1
-  $T send-keys -t "$mir" u
-  sleep 12
-  vers_alive="$(mirrors)" vers_age="$(frame_age)"
+  help_alive="$(mirrors)"
+  help_frame="$($T capture-pane -p -t "$mir")"
+  env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key space
+  sleep 1
+  env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key versions
+  sleep 1
+  vers_alive="$(mirrors)"
+  vers_frame="$($T capture-pane -p -t "$mir")"
   if [ "$opened" -eq 2 ] && [ "$help_alive" -eq 2 ] && [ "$vers_alive" -eq 2 ] \
-     && [ "$help_age" -lt 10 ] && [ "$vers_age" -lt 10 ]; then
-    echo "ok   overlays-keep-mirrors-alive"
+     && printf '%s\n' "$help_frame" | grep -Fq 'agents — help' \
+     && printf '%s\n' "$vers_frame" | grep -Fq 'agents — versions'; then
+    echo "ok   overlays-render-in-processless-panes"
   else
-    echo "FAIL overlays-keep-mirrors-alive: opened=$opened help=$help_alive/${help_age}s versions=$vers_alive/${vers_age}s"
+    echo "FAIL overlays-render-in-processless-panes: opened=$opened help=$help_alive versions=$vers_alive"
     fail=1
   fi
   $T kill-server 2>/dev/null || true
-  pkill -f 'agents-mon daemon' 2>/dev/null || true
   rm -rf "$tmp"
+fi
+if [ "$fail" -eq 0 ]; then
+  AGENTS_MON_BIN="$BIN" bash "$DIR/tests/navigation.sh" || fail=1
 fi
 exit $fail

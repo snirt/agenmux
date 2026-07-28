@@ -94,6 +94,11 @@ impl Tmux {
         self.rdr.get_ref().as_raw_fd()
     }
 
+    /// PID tmux publishes as `#{client_pid}` for this control client.
+    pub fn client_pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Data already sitting in the BufReader — poll on fd() alone would miss it.
     pub fn buffered(&self) -> bool {
         !self.rdr.buffer().is_empty()
