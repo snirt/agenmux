@@ -495,15 +495,27 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   widths="$($T list-panes -a -F '#{pane_title}	#{pane_width}' |
     awk -F'\t' '$1 == "agents-mon" { print $2 }' | sort -u | tr -d '\n')"
   optw="$($T show-option -gqv @agents-mon-width)"
+  # closing the last real pane hands all its columns to the mirror without
+  # changing the window size — that must NOT read as a border drag (the pane
+  # count changed), or the full window width gets adopted globally
+  $T new-window -t t: 'sleep 60'
+  sleep 4  # mirror via hook + a daemon baseline measure with both panes open
+  closew="$($T display-message -p -t t: '#{window_id}')"
+  agentp="$($T list-panes -t "$closew" -F '#{pane_id}	#{pane_title}' |
+    awk -F'\t' '$2 != "agents-mon" { print $1; exit }')"
+  $T kill-pane -t "$agentp"
+  sleep 4
+  optw2="$($T show-option -gqv @agents-mon-width)"
   $T send-keys -t "$mir" q
   sleep 2
   left="$($T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agents-mon)"
   if [ "$mirrors" -eq 2 ] && [ "$before" = "$after" ] && [ "$new_ok" -eq 1 ] \
      && [ "$raced" -eq 1 ] && [ "$widths" = 45 ] && [ "$optw" = 45 ] \
+     && [ "$optw2" = 45 ] \
      && [ "$left" -eq 0 ] && [ ! -f "$tmp/agents-mon-frame" ]; then
     echo "ok   mirror-mode-no-bump-lifecycle"
   else
-    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok raced=$raced widths=$widths optw=$optw left=$left"
+    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok raced=$raced widths=$widths optw=$optw optw2=$optw2 left=$left"
     fail=1
   fi
   $T kill-server 2>/dev/null || true
