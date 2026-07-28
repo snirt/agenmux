@@ -7,8 +7,8 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${AGENTS_MON_BIN:-$DIR/target/release/agents-mon}"
 [ -x "$BIN" ] || exit 0
-command -v tmux >/dev/null
-command -v expect >/dev/null
+command -v tmux >/dev/null || exit 0
+command -v expect >/dev/null || exit 0
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/agents-mon-navigation.XXXXXX")"
 sock="$tmp/sock"
