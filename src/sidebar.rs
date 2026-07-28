@@ -228,6 +228,7 @@ struct M {
     w: usize,
     h: usize,
     win_size: (usize, usize),
+    panes: usize,
     active: bool,
 }
 
@@ -270,9 +271,12 @@ struct Daemon {
     seen_mirror: bool,    // suicide only arms after the first mirror appears
     empty_ticks: u32,     // consecutive measurements that found no mirror
     started: Instant,
-    // window id -> window size at the last measure: a mirror whose width
-    // changed while its window size did NOT is a user border-drag
-    win_sizes: HashMap<String, (usize, usize)>,
+    // window id -> (window size, pane count) at the last measure: a mirror
+    // whose width changed while both stayed put is a user border-drag. The
+    // pane count matters: a closing pane hands its columns to the mirror
+    // (all of them, when the mirror is the last pane left) without changing
+    // the window size — width-only would adopt that as the global width
+    win_sizes: HashMap<String, ((usize, usize), usize)>,
     // session the control client is attached to: layout/focus notifications
     // are session-scoped, so the client follows the user's active session
     attached: String,
@@ -767,7 +771,8 @@ impl Sidebar {
     /// Refresh mirror inventory: min pane size drives the render, zero
     /// mirrors (after at least one existed, or a 30s startup grace) = false.
     /// Also detects a user dragging a mirror's border — width changed while
-    /// the window size did not, in a window the user can actually see — and
+    /// the window size and pane count did not, in a window the user can
+    /// actually see — and
     /// adopts it as the global width. Serialization matters: one daemon
     /// doing this (instead of racing hook scripts) means no stale
     /// resize-pane ever fights the drag, and the dragged pane itself is
@@ -778,14 +783,16 @@ impl Sidebar {
         let _ = self.tmux.sync();
         let out = self
             .tmux
-            .run("list-panes -a -f '#{==:#{pane_title},agents-mon}' -F '#{pane_id}\t#{window_id}\t#{pane_width}\t#{pane_height}\t#{window_width} #{window_height}\t#{window_active}\t#{session_id}'")
+            .run("list-panes -a -f '#{==:#{pane_title},agents-mon}' -F '#{pane_id}\t#{window_id}\t#{pane_width}\t#{pane_height}\t#{window_width} #{window_height}\t#{window_panes}\t#{window_active}\t#{session_id}'")
             .unwrap_or_default();
         let mut w = usize::MAX;
         let mut ms: Vec<M> = Vec::new();
         for l in out.lines() {
             let f: Vec<&str> = l.split('\t').collect();
-            let [pane, win, pw, ph, ws, act, sess] = f.as_slice() else { continue };
-            let (Ok(pw), Ok(ph)) = (pw.parse::<usize>(), ph.parse::<usize>()) else {
+            let [pane, win, pw, ph, ws, wp, act, sess] = f.as_slice() else { continue };
+            let (Ok(pw), Ok(ph), Ok(wp)) =
+                (pw.parse::<usize>(), ph.parse::<usize>(), wp.parse::<usize>())
+            else {
                 continue;
             };
             let Some((ww, wh)) = ws
@@ -801,6 +808,7 @@ impl Sidebar {
                 w: pw,
                 h: ph,
                 win_size: (ww, wh),
+                panes: wp,
                 active: *act == "1",
             });
         }
@@ -868,7 +876,9 @@ impl Sidebar {
             let d = self.daemon.as_ref().unwrap();
             ms.iter()
                 .find(|m| {
-                    m.active && m.w != wopt && d.win_sizes.get(&m.win) == Some(&m.win_size)
+                    m.active
+                        && m.w != wopt
+                        && d.win_sizes.get(&m.win) == Some(&(m.win_size, m.panes))
                 })
                 .map(|m| (m.pane.clone(), m.w))
         };
@@ -894,7 +904,10 @@ impl Sidebar {
             w = width; // render for the adopted width now, not the stale min
         }
         let d = self.daemon.as_mut().unwrap();
-        d.win_sizes = ms.iter().map(|m| (m.win.clone(), m.win_size)).collect();
+        d.win_sizes = ms
+            .iter()
+            .map(|m| (m.win.clone(), (m.win_size, m.panes)))
+            .collect();
         d.seen_mirror = true;
         d.size = (w, h);
         true
