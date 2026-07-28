@@ -1211,6 +1211,7 @@ mod tests {
             w: 30,
             h,
             win_size: (200, h),
+            panes: 2,
             active,
         }
     }
