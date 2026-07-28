@@ -130,8 +130,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # draft until every asset is up: /releases/latest (what the sidebar's
+          # update notice keys on) must never name a release whose binaries
+          # are still uploading
           gh release create "$GITHUB_REF_NAME" \
             dist/*.tar.gz dist/SHA256SUMS \
+            --draft \
             --verify-tag \
             --generate-notes \
             --title "tmux-agents-mon $GITHUB_REF_NAME"
+          gh release edit "$GITHUB_REF_NAME" --draft=false

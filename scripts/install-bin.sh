@@ -94,10 +94,14 @@ record_releases() {
   printf '%s\n' "$tag" > "$staged" && mv -f "$staged" "$LATEST"
   command -v git >/dev/null 2>&1 || return 0
   staged="$TAGS.$$"
-  # ls-remote needs no API token and has no rate limit, unlike the releases API
+  # ls-remote needs no API token and has no rate limit, unlike the releases API.
+  # A pushed tag has no binaries until its release publishes — minutes later,
+  # or never when the build fails — so offer nothing newer than the published
+  # latest: everything at or below it went through the same release pipeline.
   git ls-remote --tags --refs "$REPO" 2>/dev/null |
     awk '{ sub(/^refs\/tags\//, "", $2); if ($2 ~ /^v[0-9]/) print $2 }' |
-    sort -V -r > "$staged"
+    sort -V -r |
+    awk -v top="$tag" 'seen || $0 == top { seen = 1 } seen' > "$staged"
   if [ -s "$staged" ]; then mv -f "$staged" "$TAGS"; else rm -f "$staged"; fi
 }
 

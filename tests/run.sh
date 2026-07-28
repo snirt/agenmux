@@ -106,11 +106,14 @@ case "$url" in
     ;;
 esac
 SH
-  # rev-parse must fail (no repo); ls-remote feeds the version picker
+  # rev-parse must fail (no repo); ls-remote feeds the version picker.
+  # v0.1.2 is a tag with no release behind it (build still running, or failed):
+  # it must never reach the recorded list, or the picker offers a version
+  # whose binaries do not exist.
   cat > "$tmp/bin/git" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  *ls-remote*) printf 'aaa\trefs/tags/v0.1.1\nbbb\trefs/tags/v0.1.0\n' ;;
+  *ls-remote*) printf 'ccc\trefs/tags/v0.1.2\naaa\trefs/tags/v0.1.1\nbbb\trefs/tags/v0.1.0\n' ;;
   *) exit 1 ;;
 esac
 SH
