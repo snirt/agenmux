@@ -102,7 +102,8 @@ Details worth knowing:
   preserves your normal tmux pane bindings; `q`/`Esc` returns to the work pane
   and normal input, while `Q` closes the sidebar
 - **Click an agent row** in the sidebar to jump to that agent's pane
-  (requires `set -g mouse on`; clicks elsewhere keep default behavior)
+  (requires `set -g mouse on`); clicking anywhere else in the sidebar enters
+  navigation, while clicks in regular panes keep tmux's default behavior
 - In the sidebar: `j`/`k` or `↑`/`↓` move the `❯` cursor, `Enter` or `l` jumps to
   the selected agent, `u` opens the [version picker](#updating), `?` shows help
   (statuses + keys), `q`/`Esc` leaves navigation and `Q` closes the sidebar;

@@ -40,10 +40,14 @@ return focus to the previous work pane and restore the root table; `Q` closes
 the sidebar. The `❯` cursor is green only while navigation is active.
 
 Mouse clicks read the daemon's shared visible-row map, which matches the one
-currently rendered frame. Teardown closes writers, kills empty panes, restores
-saved layouts, removes key/liveness state, and leaves the user's active work
-pane selected. `q`/`Escape` leave navigation while keeping the preserved
-sidebar open; `Q` explicitly closes it.
+currently rendered frame. Clicking a live agent record jumps directly to that
+pane. Header, separator, open-space, missing-map, malformed, and stale-record
+clicks select the sidebar and enter navigation for only the clicking client.
+If that client has vanished before the background handler runs, the click
+becomes a no-op instead of guessing another viewer. Teardown closes writers,
+kills empty panes, restores saved layouts, removes key/liveness state, and
+leaves the user's active work pane selected. `q`/`Escape` leave navigation
+while keeping the preserved sidebar open; `Q` explicitly closes it.
 
 ## Verification
 
