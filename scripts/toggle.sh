@@ -96,7 +96,7 @@ EOF
   fi
   # An already-running tmux server keeps its live bindings across plugin
   # upgrades. Refresh them once when the navigation contract changes.
-  if [ "$(tmux show-option -gqv @agents-mon-nav-version)" != 5 ]; then
+  if [ "$(tmux show-option -gqv @agents-mon-nav-version)" != 6 ]; then
     bash "$DIR/scripts/hooks.sh"
   fi
   # Empty panes cannot own stdin. Keep focus in the work pane and route the

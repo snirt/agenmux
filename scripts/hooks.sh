@@ -84,11 +84,6 @@ bind_nav() {
   tmux bind-key -T agents-mon "$key" \
     "run-shell -b \"'$BIN' key '$action'\"; switch-client -T '$next'"
 }
-bind_leave() {
-  key="$1" action="$2"
-  tmux bind-key -T agents-mon "$key" \
-    "run-shell -b \"'$BIN' key '$action'\"; select-pane -l; switch-client -T root"
-}
 bind_nav j j agents-mon
 bind_nav k k agents-mon
 bind_nav Down down agents-mon
@@ -99,7 +94,7 @@ bind_nav Space space agents-mon
 bind_nav Any space agents-mon
 bind_nav Enter enter root
 bind_nav l l root
-bind_leave q q
-bind_leave Escape escape
+bind_nav q close root
+bind_nav Escape close root
 bind_nav Q close root
-tmux set-option -g @agents-mon-nav-version 5
+tmux set-option -g @agents-mon-nav-version 6
