@@ -88,9 +88,14 @@ fn agent_for_argv(confs: &[AgentConf], argv: &[String]) -> Option<usize> {
                 if let Some(i) = agent_for_bin(confs, normalize_bin(t)) {
                     return Some(i);
                 }
-                return confs
-                    .iter()
-                    .position(|c| c.path_hints.iter().any(|h| t.contains(h.as_str())));
+                // hint must be a full path segment (optionally an npm scope):
+                // "omp" matches ".../omp/cli.js" and "@omp/x", not "components"
+                let t = format!("/{t}/");
+                return confs.iter().position(|c| {
+                    c.path_hints
+                        .iter()
+                        .any(|h| t.contains(&format!("/{h}/")) || t.contains(&format!("/@{h}/")))
+                });
                 // only the first script arg counts
             }
         }
@@ -158,5 +163,43 @@ mod tests {
         assert_eq!(agent_for_argv(&cs, &payload), None);
         let direct = vec!["sh".into(), "/usr/bin/pi".into()];
         assert_eq!(agent_for_argv(&cs, &direct), Some(0));
+    }
+
+    // conf order mirrors the real load: alphabetical, oh-my-pi before pi
+    fn pi_confs() -> Vec<AgentConf> {
+        let dir = std::env::temp_dir().join(format!("am-procs2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("oh-my-pi.conf"),
+            "AGENT_BINS=\"omp\"\nAGENT_PATH_HINTS=\"oh-my-pi omp\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("pi.conf"),
+            "AGENT_BINS=\"pi\"\nAGENT_PATH_HINTS=\"pi-coding-agent\"\n",
+        )
+        .unwrap();
+        let c = vec![
+            crate::conf::load_conf(&dir.join("oh-my-pi.conf")).unwrap(),
+            crate::conf::load_conf(&dir.join("pi.conf")).unwrap(),
+        ];
+        let _ = std::fs::remove_dir_all(&dir);
+        c
+    }
+
+    #[test]
+    fn hints_anchor_to_path_segments() {
+        let cs = pi_confs();
+        // "omp" inside "components" must not match oh-my-pi
+        let comp = vec!["node".into(), "/x/components/cli.js".into()];
+        assert_eq!(agent_for_argv(&cs, &comp), None);
+        // real install paths still resolve to the right agent
+        let pi = vec![
+            "node".into(),
+            "/n/@earendil-works/pi-coding-agent/dist/cli.js".into(),
+        ];
+        assert_eq!(agent_for_argv(&cs, &pi), Some(1));
+        let omp = vec!["bun".into(), "/n/@oh-my-pi/pi-coding-agent/dist/cli.js".into()];
+        assert_eq!(agent_for_argv(&cs, &omp), Some(0));
     }
 }
