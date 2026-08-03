@@ -79,7 +79,8 @@ agent_for_cmdline() { # $1=full command line of a wrapped process
     i=0
     while [ "$i" -lt "$N" ]; do
       for h in ${A_HINTS[$i]}; do
-        case "$tok" in *"$h"*) printf '%s' "$i"; return 0 ;; esac
+        # hint must be a full path segment (optionally an npm scope) — procs.rs
+        case "/$tok/" in */"$h"/*|*/"@$h"/*) printf '%s' "$i"; return 0 ;; esac
       done
       i=$((i + 1))
     done
