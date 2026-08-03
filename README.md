@@ -99,14 +99,13 @@ Details worth knowing:
 - `prefix + A` — open the sidebar, or enter its navigation mode while it is
   already open (left split, auto-refreshes every 2s); agents are grouped under
   their session name, in tmux window order. Navigation selects the sidebar and
-  preserves your normal tmux pane bindings; `q`/`Esc` returns to the work pane
-  and normal input, while `Q` closes the sidebar
+  preserves your normal tmux pane bindings; `q`/`Esc` closes the sidebar
 - **Click an agent row** in the sidebar to jump to that agent's pane
   (requires `set -g mouse on`); clicking anywhere else in the sidebar enters
   navigation, while clicks in regular panes keep tmux's default behavior
 - In the sidebar: `j`/`k` or `↑`/`↓` move the `❯` cursor, `Enter` or `l` jumps to
   the selected agent, `u` opens the [version picker](#updating), `?` shows help
-  (statuses + keys), `q`/`Esc` leaves navigation and `Q` closes the sidebar;
+  (statuses + keys), `q`/`Esc` closes the sidebar;
   the `❯` cursor is green while navigation is active, long lists scroll to keep
   the selection visible, and the cursor snaps to whichever agent pane currently
   has focus (instantly with the Rust engine — it reacts to tmux focus events)

@@ -593,8 +593,9 @@ fn event_loop(sb: &mut Sidebar) {
                         }
                         break;
                     }
-                    // In preserved-pane mode the key-table binding returns the
-                    // client to normal input; the always-open sidebar remains.
+                    // In preserved-pane mode close arrives as Key::Close from
+                    // the key table; Quit also covers FIFO EOF, which must not
+                    // kill the sidebar.
                 }
                 Key::Close => {
                     break;
@@ -1272,11 +1273,7 @@ impl Sidebar {
     }
 
     fn help(&mut self) {
-        let quit_keys = if self.daemon.is_some() {
-            " q Esc    leave navigation\n Q        close sidebar"
-        } else {
-            " q Esc    close sidebar"
-        };
+        let quit_keys = " q Esc    close sidebar";
         let text = format!(
             "{E}[2J{E}[H{E}[1magents — help{E}[0m {E}[2m{}{E}[0m\n\n\
 {E}[1mstatus{E}[0m\n\

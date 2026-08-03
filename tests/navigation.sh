@@ -439,16 +439,15 @@ for _ in $(seq 1 20); do
   sidebar_count="$(tmux -S "$sock" list-panes -a -F '#{pane_title}' \
     2>/dev/null | awk '$0 == "agents-mon" { n++ } END { print n+0 }')"
   if [ "$exit_table" = root ] && [ "$exit_focus" != agents-mon ] \
-    && [ "$sidebar_count" -gt 0 ]; then
+    && [ "$sidebar_count" -eq 0 ]; then
     q_left=1
     break
   fi
   sleep 0.05
 done
 
-# Escape also leaves navigation without closing the preserved sidebars. Reopen
-# once and drive a literal escape byte through the attached client so this is
-# not only a binding snapshot.
+# Escape also closes the sidebar. Reopen once and drive a literal escape byte
+# through the attached client so this is not only a binding snapshot.
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" bash "$DIR/scripts/toggle.sh"
 escape_ready=0
 for _ in $(seq 1 40); do
@@ -472,14 +471,14 @@ for _ in $(seq 1 20); do
   sidebar_count="$(tmux -S "$sock" list-panes -a -F '#{pane_title}' \
     2>/dev/null | awk '$0 == "agents-mon" { n++ } END { print n+0 }')"
   if [ "$escape_table" = root ] && [ "$escape_focus" != agents-mon ] \
-    && [ "$sidebar_count" -gt 0 ]; then
+    && [ "$sidebar_count" -eq 0 ]; then
     escape_left=1
     break
   fi
   sleep 0.05
 done
 
-# Uppercase Q is the explicit close action.
+# Uppercase Q closes too (alias of q).
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" bash "$DIR/scripts/toggle.sh"
 close_ready=0
 for _ in $(seq 1 40); do
