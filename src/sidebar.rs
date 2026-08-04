@@ -1243,11 +1243,8 @@ impl Sidebar {
                     }
                     break;
                 }
-                Key::Quit => break,
-                Key::Close => {
-                    QUIT.store(true, Ordering::Relaxed);
-                    break;
-                }
+                // q/Esc back out to the main list; only the main loop closes
+                Key::Quit | Key::Close => break,
                 _ => {}
             }
             selected = tags.get(sel).cloned();
@@ -1292,9 +1289,9 @@ impl Sidebar {
         );
         let key_fd = self.daemon.as_ref().map_or(0, |d| d.keys_fd);
         self.emit(text.clone(), true);
-        // blocks until a key; animations pause meanwhile
-        if self.await_key(&text, None) && matches!(read_key(key_fd), Key::Close) {
-            QUIT.store(true, Ordering::Relaxed);
+        // blocks until a key; any key (incl. q/Esc) returns to the main list
+        if self.await_key(&text, None) {
+            let _ = read_key(key_fd);
         }
         if self.daemon.is_none() {
             print!("{E}[2J");
