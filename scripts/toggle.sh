@@ -20,13 +20,13 @@ fi
 # For a pane that lives as long as the sidebar does, exec away the shell tmux
 # wrapped the command in — bash execs its last command anyway, nu and friends
 # do not and would idle there for the pane's whole life. The popup keeps the
-# plain form: it is short-lived and its command carries an env assignment,
-# which not every shell accepts in front of exec.
+# plain form: display-popup -E owns its short-lived child lifecycle.
 PANE_CMD="exec $SIDEBAR_CMD"
 
 # mode from arg (bound key) or @agents-mon-display; default split sidebar
 mode="${1:-$(tmux show-option -gqv @agents-mon-display)}"
 if [ "$mode" = "popup" ] || [ "$mode" = "float" ]; then
+  client="${2:-$(bash "$DIR/scripts/client.sh")}" # stable popup owner
   PIN="${TMPDIR:-/tmp}/agents-mon-pin"
   if [ -f "$PIN" ]; then rm -f "$PIN"; exit 0; fi
   touch "$PIN"
@@ -49,8 +49,11 @@ if [ "$mode" = "popup" ] || [ "$mode" = "float" ]; then
   # pinned popup: Enter jumps (popup reopens over the new window), q/Esc
   # remove the pin inside sidebar.sh and end the loop
   while [ -f "$PIN" ]; do
-    tmux display-popup -E -w "${width:-40}" -h "${height:-15}" \
-      "AGENTS_MON_PIN='$PIN' $SIDEBAR_CMD"
+    popup_args=(-E -w "${width:-40}" -h "${height:-15}" -e "AGENTS_MON_PIN=$PIN")
+    if [ -n "$client" ]; then
+      popup_args+=(-c "$client" -e "AGENTS_MON_POPUP_CLIENT=$client")
+    fi
+    tmux display-popup "${popup_args[@]}" "$SIDEBAR_CMD"
     # popup closed for a jump — the client is free now, actually switch
     if [ -f "$PIN.jump" ]; then
       target="$(cat "$PIN.jump")"; rm -f "$PIN.jump"

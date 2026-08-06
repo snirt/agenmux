@@ -127,6 +127,7 @@ set -g @agents-mon-display 'popup'  # make the main key open a popup (default: l
 set -g @agents-mon-height '15'      # fixed popup height (otherwise sized to the agent list, min. 15)
 set -g @agents-mon-hide-windows 'agents*'  # hide matching windows from the prefix+w picker
                                     # (one fnmatch pattern; set to '' to restore the default picker)
+set -g @agents-mon-notifications 'off'  # disable desktop notifications (default: on)
 ```
 
 With both keys set (e.g. `@agents-mon-key 'E'`, `@agents-mon-popup-key 'e'`)
@@ -136,6 +137,55 @@ In popup mode the same keybinding opens a floating window; close it with
 `q` or `Esc` inside (there is no outside toggle — the popup grabs the client).
 Click-to-jump works in split mode only; keyboard jump works in both, and the
 popup reopens over the selected agent after a jump.
+
+### Desktop notifications
+
+The Rust engine sends a native desktop notification when an agent finishes or
+needs attention while its pane is not focused. The title identifies the agent
+and outcome; the body includes the remembered subject, directory, and tmux
+target when available. Existing blocked/idle agents are a silent baseline when
+the monitor starts, and unchanged states do not repeat notifications.
+
+For complete focus detection, including a pane selected in Ghostty, Kitty, or
+another terminal while that application is in the background, enable tmux
+focus events:
+
+```tmux
+set -g focus-events on
+```
+
+The [tmux manual](https://man.openbsd.org/tmux.1#focus-events) notes that clients
+may need to detach and attach again after this option changes. With focus events
+off, agents-mon conservatively suppresses a notification whenever any real tmux
+client has the pane selected. With them on, it suppresses only when at least one
+real client both selects the pane and reports itself focused; control-mode
+clients are ignored.
+
+Notifications are enabled by default. Disable them with:
+
+```tmux
+set -g @agents-mon-notifications off
+```
+
+On macOS, agents-mon prefers `terminal-notifier` and falls back to the built-in
+`osascript`. When `terminal-notifier` is installed, clicking a notification
+jumps the most recently active real tmux client to the exact pane and activates
+known terminal applications such as Ghostty, Kitty, iTerm2, WezTerm, Apple
+Terminal, and Alacritty. The AppleScript fallback displays notifications but
+cannot handle clicks.
+
+On Linux, agents-mon uses the optional `notify-send` command when a `DISPLAY`
+or `WAYLAND_DISPLAY` session is available; Linux notifications are
+display-only. Without it, delivery is silently skipped—the rest of the plugin
+has no additional runtime requirement. Delivery is best effort and never
+interrupts the sidebar if a notifier is unavailable or permission is denied.
+The operating system may require notification permission for the sender it
+displays.
+
+The sidebar or popup must remain open while the state transition occurs because
+notifications use the existing monitor process; no extra daemon is installed.
+The Bash fallback does not send notifications. A transition suppressed while
+focused is not delivered later merely because focus moves away.
 
 ### CLI
 
@@ -211,4 +261,6 @@ tmux capture-pane -p -t <pane> > tests/fixtures/claude-blocked.txt
 - State is inferred from what's on screen; transient redraws can flicker
   (the sidebar debounces transitions to idle by one tick).
 - Pane titles are only used when the agent's OSC title escapes reach tmux.
+- Desktop notifications are local to the tmux host; headless and remote hosts
+  without a desktop notification service silently skip delivery.
 - No Windows support.
