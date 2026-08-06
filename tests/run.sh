@@ -62,7 +62,10 @@ if [ "$fail" -eq 0 ]; then
     mkdir -p "$d/$package/target/release"
     printf '#!/usr/bin/env bash\nprintf "%s\\n"\n' "$t" \
       > "$d/$package/target/release/agents-mon"
-    chmod +x "$d/$package/target/release/agents-mon"
+    printf '#!/usr/bin/env bash\nexit 0\n' \
+      > "$d/$package/target/release/agents-mon-notifier"
+    chmod +x "$d/$package/target/release/agents-mon" \
+      "$d/$package/target/release/agents-mon-notifier"
     tar -czf "$d/$package.tar.gz" -C "$d" "$package"
     rm -rf "${d:?}/$package"
     if command -v sha256sum >/dev/null; then
@@ -126,6 +129,7 @@ SH
   set_version 0.1.0
   install_bin v0.1.1
   if [ "$(engine)" = "v0.1.0" ] && [ "$(marker)" = "v0.1.0" ] \
+     && [ -x "$tmp/plugin/target/release/agents-mon-notifier" ] \
      && [ "$(sed -n '1p' "$tmp/plugin/target/release/.agents-mon-latest")" = "v0.1.1" ] \
      && [ "$(sed -n '1p' "$tmp/plugin/target/release/.agents-mon-tags")" = "v0.1.1" ]; then
     echo "ok   native-engine-matches-checkout-version"

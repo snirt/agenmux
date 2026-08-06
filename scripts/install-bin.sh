@@ -118,6 +118,14 @@ download_bin() {
       mv -f "$staged" "$BIN" && write_state "$tag" && rc=0
     fi
     [ "$rc" -eq 0 ] || rm -f "$staged"
+    # macOS packages also carry the notification helper (see install-app.sh)
+    if [ "$rc" -eq 0 ] && [ -f "$pkg/target/release/agents-mon-notifier" ]; then
+      staged="$(dirname "$BIN")/agents-mon-notifier.$$"
+      if cp "$pkg/target/release/agents-mon-notifier" "$staged"; then
+        chmod +x "$staged"
+        mv -f "$staged" "$(dirname "$BIN")/agents-mon-notifier" || rm -f "$staged"
+      fi
+    fi
   fi
   rm -rf "$scratch"
   return "$rc"
