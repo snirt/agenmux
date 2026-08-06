@@ -23,9 +23,9 @@ notifications module formats and sanitizes that event, reads the default-on
 `@agents-mon-notifications` option, and delegates to platform adapters.
 
 macOS tries `terminal-notifier`, then a fixed AppleScript whose title and body
-arrive only as arguments. Linux uses `notify-send` when a graphical session is
-available. Failures are best effort and visible only through
-`AGENTS_MON_DEBUG`.
+arrive only as arguments and which requests the audible `Glass` alert sound.
+Linux uses `notify-send` when a graphical session is available. Failures are
+best effort and visible only through `AGENTS_MON_DEBUG`.
 
 When `terminal-notifier` is available, its click command invokes an internal
 binary command with shell-quoted executable, socket, pane, and terminal bundle

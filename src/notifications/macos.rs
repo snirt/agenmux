@@ -28,7 +28,7 @@ pub(super) fn deliver<R: Runner>(
         args: vec!["-".into(), payload.title.clone(), payload.body.clone()],
         stdin: Some(
             "on run argv\n\
-             display notification (item 2 of argv) with title (item 1 of argv)\n\
+             display notification (item 2 of argv) with title (item 1 of argv) sound name \"Glass\"\n\
              end run\n"
                 .into(),
         ),

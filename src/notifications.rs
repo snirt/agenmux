@@ -419,6 +419,11 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("on run argv"));
+        assert!(commands[1]
+            .stdin
+            .as_deref()
+            .unwrap()
+            .contains("sound name \"Glass\""));
         assert!(!commands[1].stdin.as_deref().unwrap().contains("Codex"));
     }
 
