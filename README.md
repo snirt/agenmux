@@ -50,7 +50,8 @@ CPU than the bash fallback. The plugin downloads and verifies a prebuilt binary
 automatically; if one is unavailable and [cargo](https://rustup.rs) is
 installed, it builds the engine in the background. `make build` does the same
 by hand, and `@agents-mon-bin` overrides the binary path. Agent detection stays
-in `agents/*.conf`, so adding or tuning agents never needs a rebuild.
+in `agents/*.conf`, so adding or tuning agents never needs a rebuild. Building
+on macOS needs rustc 1.90 or newer (for the native notification helper).
 
 Split mode preserves one empty tmux pane in each window, so switching windows
 never changes the layout. Those panes have no shell or `agents-mon` child
@@ -167,13 +168,34 @@ Notifications are enabled by default. Disable them with:
 set -g @agents-mon-notifications off
 ```
 
-On macOS, agents-mon prefers `terminal-notifier` and falls back to the built-in
-`osascript`. When `terminal-notifier` is installed, clicking a notification
-jumps the most recently active real tmux client to the exact pane and activates
-known terminal applications such as Ghostty, Kitty, iTerm2, WezTerm, Apple
-Terminal, and Alacritty. Both delivery paths request macOS's built-in `Glass`
-alert sound. The AppleScript fallback displays notifications but cannot handle
-clicks.
+On macOS, agents-mon sends notifications natively through
+`UNUserNotificationCenter` via a small helper app built from this repo — no
+Homebrew or other runtime dependency. Install it once:
+
+```sh
+make install-app
+```
+
+This builds the Rust engine, assembles `AgentsMon.app` into `~/Applications`
+(pass a different directory to `scripts/install-app.sh` to override), ad-hoc
+signs it, and posts a first notification so macOS shows the permission prompt.
+Allow **AgentsMon** when prompted, or later under System Settings →
+Notifications → AgentsMon. The app is background-only; it never appears in the
+Dock.
+
+Clicking a notification body activates your terminal (Ghostty, Kitty, iTerm2,
+WezTerm, Apple Terminal, and Alacritty are recognized) and jumps the most
+recently active real tmux client to the exact pane. Panes that no longer exist
+are safe no-ops. Notifications play macOS's built-in `Glass` alert sound.
+
+Without the installed app, agents-mon falls back to the built-in `osascript`,
+which displays notifications with the `Glass` sound but cannot handle clicks.
+
+Each notification keeps a small helper process waiting for its click; after 24
+hours the notification is closed and the helper exits, so clicks on older
+entries do nothing. If several notifications are pending at once, macOS may
+route a click to the newest helper only — the click is then ignored rather
+than jumping to the wrong pane.
 
 On Linux, agents-mon uses the optional `notify-send` command when a `DISPLAY`
 or `WAYLAND_DISPLAY` session is available; Linux notifications are

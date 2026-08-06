@@ -602,6 +602,24 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   $T kill-server 2>/dev/null || true
   rm -rf "$tmp"
 fi
+if [ "$fail" -eq 0 ] && [ "$(uname -s)" = Darwin ] \
+   && [ -x "$DIR/target/release/agents-mon-notifier" ]; then
+  # install-app.sh must assemble a signed AgentsMon.app around the notifier
+  tmp="$(mktemp -d)"
+  plist="$tmp/apps/AgentsMon.app/Contents/Info.plist"
+  if AGENTS_MON_NOTIFIER_BIN="$DIR/target/release/agents-mon-notifier" \
+       bash "$DIR/scripts/install-app.sh" "$tmp/apps" >/dev/null 2>&1 \
+     && [ -x "$tmp/apps/AgentsMon.app/Contents/MacOS/agents-mon-notifier" ] \
+     && grep -q 'io.github.snirt.agents-mon' "$plist" \
+     && grep -q 'LSUIElement' "$plist" \
+     && codesign --verify "$tmp/apps/AgentsMon.app" 2>/dev/null; then
+    echo "ok   install-app-assembles-signed-bundle"
+  else
+    echo "FAIL install-app-assembles-signed-bundle"
+    fail=1
+  fi
+  rm -rf "$tmp"
+fi
 if [ "$fail" -eq 0 ]; then
   AGENTS_MON_BIN="$BIN" bash "$DIR/tests/navigation.sh" || fail=1
 fi

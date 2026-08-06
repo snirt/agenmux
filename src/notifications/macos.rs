@@ -1,30 +1,42 @@
 use super::{CommandSpec, DeliveryOutcome, Payload, Runner};
 
+/// Locate the installed AgentsMon.app helper. Resolved on every delivery so
+/// installing the app takes effect without restarting the sidebar.
+pub(super) fn helper_program() -> Option<String> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    const IN_APP: &str = "Applications/AgentsMon.app/Contents/MacOS/agents-mon-notifier";
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(std::path::Path::new(&home).join(IN_APP));
+    }
+    candidates.push(std::path::Path::new("/").join(IN_APP));
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .and_then(|path| path.to_str().map(String::from))
+}
+
 pub(super) fn deliver<R: Runner>(
     runner: &R,
     payload: &Payload,
     click_command: Option<String>,
+    helper: Option<String>,
 ) -> DeliveryOutcome {
-    let mut args = vec![
-        "-title".into(),
-        payload.title.clone(),
-        "-message".into(),
-        payload.body.clone(),
-        "-sound".into(),
-        "Glass".into(),
-    ];
-    if let Some(command) = click_command {
-        args.extend(["-execute".into(), command]);
-    }
-    let terminal_notifier = CommandSpec {
-        program: "terminal-notifier".into(),
-        args,
-        stdin: None,
-    };
-    if matches!(runner.run(&terminal_notifier), Ok(true)) {
-        return DeliveryOutcome::Delivered;
+    if let Some(helper) = helper {
+        // The helper detaches itself and posts through UNUserNotificationCenter
+        // with the Glass sound; the click command runs when the body is clicked.
+        let mut args = vec![payload.title.clone(), payload.body.clone()];
+        args.extend(click_command);
+        let native = CommandSpec {
+            program: helper,
+            args,
+            stdin: None,
+        };
+        if matches!(runner.run(&native), Ok(true)) {
+            return DeliveryOutcome::Delivered;
+        }
     }
 
+    // display-only fallback for installs without the app bundle
     let applescript = CommandSpec {
         program: "/usr/bin/osascript".into(),
         args: vec!["-".into(), payload.title.clone(), payload.body.clone()],
