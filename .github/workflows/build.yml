@@ -91,6 +91,12 @@ jobs:
           mkdir -p "dist/$package/target/release"
           git archive HEAD | tar -x -C "dist/$package"
           cp "${{ matrix.binary }}" "dist/$package/target/release/agents-mon"
+          # macOS packages also ship the notification helper so
+          # `make install-app` works without cargo
+          if [ "$RUNNER_OS" = macOS ]; then
+            cp "target/${{ matrix.target }}/release/agents-mon-notifier" \
+              "dist/$package/target/release/agents-mon-notifier"
+          fi
           tar -czf "dist/$package.tar.gz" -C dist "$package"
 
       - name: Upload artifact
