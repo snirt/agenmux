@@ -283,6 +283,13 @@ pub fn open_pane(socket: &str, pane: &str, bundle: &str) -> i32 {
         return 0;
     };
 
+    #[cfg(target_os = "macos")]
+    if let Some(command) = activation_command(bundle) {
+        let _ = SystemRunner.run(&command);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = bundle;
+
     let mut jump = tmux_command(socket);
     let Ok(status) = jump
         .args([
@@ -307,13 +314,6 @@ pub fn open_pane(socket: &str, pane: &str, bundle: &str) -> i32 {
     if !status.success() {
         return 0;
     }
-
-    #[cfg(target_os = "macos")]
-    if let Some(command) = activation_command(bundle) {
-        let _ = SystemRunner.run(&command);
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = bundle;
     0
 }
 
