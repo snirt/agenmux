@@ -10,6 +10,8 @@ pub(super) fn deliver<R: Runner>(
         payload.title.clone(),
         "-message".into(),
         payload.body.clone(),
+        "-sound".into(),
+        "Glass".into(),
     ];
     if let Some(command) = click_command {
         args.extend(["-execute".into(), command]);

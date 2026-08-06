@@ -171,8 +171,9 @@ On macOS, agents-mon prefers `terminal-notifier` and falls back to the built-in
 `osascript`. When `terminal-notifier` is installed, clicking a notification
 jumps the most recently active real tmux client to the exact pane and activates
 known terminal applications such as Ghostty, Kitty, iTerm2, WezTerm, Apple
-Terminal, and Alacritty. The AppleScript fallback displays notifications but
-cannot handle clicks; it requests macOS's `Glass` alert sound.
+Terminal, and Alacritty. Both delivery paths request macOS's built-in `Glass`
+alert sound. The AppleScript fallback displays notifications but cannot handle
+clicks.
 
 On Linux, agents-mon uses the optional `notify-send` command when a `DISPLAY`
 or `WAYLAND_DISPLAY` session is available; Linux notifications are
