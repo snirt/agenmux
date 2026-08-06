@@ -394,6 +394,25 @@ mod tests {
     }
 
     #[test]
+    fn macos_terminal_notifier_requests_glass_sound() {
+        let runner = FakeRunner::new(vec![Ok(true)]);
+        let outcome = macos::deliver(
+            &runner,
+            &payload(&event(AttentionKind::Finished)),
+            Some("'agents-mon' 'notification-open'".into()),
+        );
+
+        assert_eq!(outcome, DeliveryOutcome::Delivered);
+        let commands = runner.commands.borrow();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].program, "terminal-notifier");
+        assert!(commands[0]
+            .args
+            .windows(2)
+            .any(|pair| pair == ["-sound", "Glass"]));
+    }
+
+    #[test]
     fn macos_falls_back_to_argument_safe_applescript() {
         let runner = FakeRunner::new(vec![
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
