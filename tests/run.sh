@@ -331,6 +331,7 @@ if [ "$fail" -eq 0 ]; then
   mkdir -p "$tmp/bin"
   cat > "$tmp/bin/tmux" <<'SH'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
 case "$1" in
   show-option) exit 0 ;;
   display-popup) exit 0 ;;
@@ -338,17 +339,28 @@ case "$1" in
 esac
 SH
   chmod +x "$tmp/bin/tmux"
-  TMPDIR="$tmp" PATH="$tmp/bin:$PATH" bash "$DIR/scripts/toggle.sh" popup &
+  TMUX_STUB_LOG="$tmp/tmux.log" TMPDIR="$tmp" PATH="$tmp/bin:$PATH" \
+    bash "$DIR/scripts/toggle.sh" popup popup-client &
   pid=$!
   waited=0
   while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 20 ]; do
     sleep 0.05
     waited=$((waited + 1))
   done
+  owner_ok=0
+  if grep -Fq -- '-c popup-client' "$tmp/tmux.log" \
+     && grep -Fq -- '-e AGENTS_MON_POPUP_CLIENT=popup-client' "$tmp/tmux.log"; then
+    owner_ok=1
+  fi
   if kill -0 "$pid" 2>/dev/null; then
     echo "FAIL popup-exits-when-helper-exits: toggle loop kept stale pin"
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
+    fail=1
+  elif [ "$owner_ok" -ne 1 ]; then
+    echo "FAIL popup-exits-when-helper-exits: popup owner was not propagated"
+    cat "$tmp/tmux.log"
+    wait "$pid"
     fail=1
   else
     wait "$pid"

@@ -1,6 +1,9 @@
+mod attention;
 mod conf;
 mod detect;
+mod focus;
 mod mirror;
+mod notifications;
 mod pane_writers;
 mod procs;
 mod scan;
@@ -26,6 +29,9 @@ fn main() {
         ["daemon"] => sidebar::run_daemon(plugin_dir(), scan_cache_path()),
         ["mirror"] => mirror::run(),
         ["key", key] => sidebar::send_key(key),
+        ["notification-open", socket, pane, bundle] => {
+            notifications::open_pane(socket, pane, bundle)
+        }
         _ => {
             eprintln!(
                 "usage: agents-mon [--version|scan|status|sidebar|daemon|mirror|key <name>|detect <conf> <screen-file> [title]]"

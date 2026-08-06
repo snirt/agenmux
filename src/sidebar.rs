@@ -8,6 +8,7 @@
 //    processless panes visible in attached clients; keys arrive over a FIFO.
 //    The panes never move between windows, so switching causes no join-pane
 //    reflow (the "bump").
+use crate::attention::Tracker;
 use crate::conf::AgentConf;
 use crate::pane_writers::PaneWriters;
 use crate::procs::IdentCache;
@@ -301,13 +302,6 @@ fn suicide(seen_mirror: bool, since_start: Duration, empty_ticks: u32) -> bool {
     (seen_mirror || since_start >= Duration::from_secs(30)) && empty_ticks >= 2
 }
 
-/// Per-pane memory across rescans (STATE_FILE equivalent).
-struct Prev {
-    state: String,
-    ticks: u32,
-    title: String,
-}
-
 /// Headless-mode state: frames → visible panes, keys ← FIFO, size ← panes.
 struct Daemon {
     keys_path: PathBuf,
@@ -333,7 +327,7 @@ pub struct Sidebar {
     confs: Vec<AgentConf>,
     ident: IdentCache,
     subj: scan::SubjectCache,
-    prev: HashMap<String, Prev>,
+    tracker: Tracker,
     rows: Vec<PaneRow>, // debounced view-model
     sel: usize,         // 1-based like the bash script
     scroll: usize,      // first visible list line — follows the selection
@@ -345,6 +339,7 @@ pub struct Sidebar {
     tick: u32,
     self_pane: String,
     pin: Option<String>,
+    popup_client: String,
     plugin_dir: PathBuf,
     rows_file: PathBuf,
     cache_file: PathBuf,
@@ -372,7 +367,7 @@ fn new_sidebar(
         confs,
         ident: IdentCache::new(),
         subj: scan::SubjectCache::new(),
-        prev: HashMap::new(),
+        tracker: Tracker::default(),
         rows: Vec::new(),
         sel: 1,
         scroll: 0,
@@ -384,6 +379,7 @@ fn new_sidebar(
         tick: 0,
         self_pane,
         pin: None,
+        popup_client: std::env::var("AGENTS_MON_POPUP_CLIENT").unwrap_or_default(),
         plugin_dir,
         rows_file,
         cache_file,
@@ -635,7 +631,17 @@ impl Sidebar {
         )?;
         crate::tmux::debug_note(&format!("scan {}ms", t0.elapsed().as_millis()));
         let _ = std::fs::write(&self.cache_file, scan::to_tsv(&scanned));
-        self.active = self.active_pane().unwrap_or_default();
+        let mut focus = self.client_focus().unwrap_or_default();
+        // A popup owns the terminal's input even though tmux still reports the
+        // pane underneath it as selected. That underlying agent is not being
+        // viewed while the popup is open.
+        if self.daemon.is_none() {
+            focus.discount_client(&self.popup_client);
+            focus.plugin_selected = true;
+        }
+        self.active = focus.active_pane;
+        self.active_session = focus.active_session;
+        self.plugin_selected = focus.plugin_selected;
         // notifications only cover the attached session — follow the user so
         // drags and focus changes where they're looking react instantly
         // (background sessions wait for the 2s scan, which nobody can see)
@@ -651,50 +657,11 @@ impl Sidebar {
             }
         }
 
-        // idle debounce: show idle only after 2 consecutive idle ticks
-        // (redraws flash idle-looking frames mid-render)
-        let mut new_prev = HashMap::new();
-        let mut rows = Vec::new();
-        for mut r in scanned {
-            let p = self.prev.get(&r.pane);
-            let prev_state = p.map(|p| p.state.as_str()).unwrap_or("");
-            let ticks = p.map(|p| p.ticks).unwrap_or(0);
-            // agents like codex only title the pane while working
-            if r.title.is_empty() {
-                if let Some(p) = p {
-                    r.title = p.title.clone();
-                }
-            }
-            let (show, store, nticks) = if r.state == "idle"
-                && !prev_state.is_empty()
-                && prev_state != "idle"
-                && prev_state != "done"
-                && ticks < 1
-            {
-                // hold the previous state one tick before trusting idle
-                (prev_state.to_string(), prev_state.to_string(), ticks + 1)
-            } else if r.state == "idle"
-                && r.pane != self.active
-                && (prev_state == "working" || prev_state == "done")
-            {
-                // finished while unfocused — flag as done until viewed
-                ("done".into(), "done".into(), 0)
-            } else {
-                (r.state.clone(), r.state.clone(), 0)
-            };
-            new_prev.insert(
-                r.pane.clone(),
-                Prev {
-                    state: store,
-                    ticks: nticks,
-                    title: r.title.clone(),
-                },
-            );
-            r.state = show;
-            rows.push(r);
+        let update = self.tracker.update(scanned, &focus.focused_panes);
+        self.rows = update.rows;
+        for event in &update.events {
+            let _ = crate::notifications::deliver(&mut self.tmux, event);
         }
-        self.prev = new_prev;
-        self.rows = rows;
         self.clamp_sel();
         self.restore_sel();
         // single cursor: focus landing on an agent pane snaps selection to it
@@ -708,39 +675,21 @@ impl Sidebar {
         Ok(())
     }
 
-    fn active_pane(&mut self) -> Option<String> {
-        // Popup/tty mode owns input for its entire lifetime. Daemon mode
-        // follows the real client's active pane below.
-        self.plugin_selected = self.daemon.is_none();
+    fn client_focus(&mut self) -> Option<crate::focus::ClientFocus> {
         // scan() only syncs at its START; a hook's run-shell block landing
         // during the capture loop leaves every later command paired with the
         // wrong response. Re-barrier before reading anything we act on.
         self.tmux.sync().ok()?;
-        // most recently active real (non-control-mode) client's current pane
-        // — with several terminals attached, the first listed one may not be
-        // the one the user is looking at. Stashes the session id for the
-        // daemon's follow-the-user client switching.
+        let focus_events = self
+            .tmux
+            .run("show-option -gqv focus-events")
+            .ok()
+            .is_some_and(|value| value.trim() == "on");
         let out = self
             .tmux
-            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_activity}\t#{session_id}\t#{pane_id}\t#{pane_title}'")
+            .run("list-clients -F '#{client_activity}\t#{client_name}\t#{session_id}\t#{pane_id}\t#{pane_title}\t#{client_flags}'")
             .ok()?;
-        let (sid, pane, title) = out
-            .lines()
-            .filter_map(|l| {
-                let mut f = l.split('\t');
-                let act: u64 = f.next()?.parse().ok()?;
-                Some((
-                    act,
-                    f.next()?.to_string(),
-                    f.next()?.to_string(),
-                    f.next()?.to_string(),
-                ))
-            })
-            .max_by_key(|(act, _, _, _)| *act)
-            .map(|(_, s, p, t)| (s, p, t))?;
-        self.active_session = sid;
-        self.plugin_selected = title == "agents-mon";
-        Some(pane)
+        Some(crate::focus::parse_clients(&out, focus_events))
     }
 
     fn move_sel(&mut self, d: i64) {

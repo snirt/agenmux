@@ -8,7 +8,8 @@ tmux bind-key "${key:-A}" run-shell -b \
 
 # optional dedicated popup key, e.g. set -g @agents-mon-popup-key 'e'
 popup_key="$(tmux show-option -gqv @agents-mon-popup-key)"
-[ -n "$popup_key" ] && tmux bind-key "$popup_key" run-shell -b "bash '$CURRENT_DIR/scripts/toggle.sh' popup"
+[ -n "$popup_key" ] && tmux bind-key "$popup_key" run-shell -b \
+  "bash '$CURRENT_DIR/scripts/toggle.sh' popup '#{client_name}'"
 
 # window-scoped leftovers (pre-1.0) shadow the global option in the mouse
 # binding's format comparison — purge them
