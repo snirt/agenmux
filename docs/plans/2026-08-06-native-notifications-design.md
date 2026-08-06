@@ -22,18 +22,28 @@ the outcome, agent, subject, directory, pane ID, and tmux location. A separate
 notifications module formats and sanitizes that event, reads the default-on
 `@agents-mon-notifications` option, and delegates to platform adapters.
 
-macOS tries `terminal-notifier`, then a fixed AppleScript whose title and body
-arrive only as arguments. Both delivery paths request the built-in `Glass`
-alert sound. Linux uses `notify-send` when a graphical session is available.
-Failures are best effort and visible only through `AGENTS_MON_DEBUG`.
+macOS delivers through a bundled helper app, `AgentsMon.app`, assembled and
+ad-hoc signed by `scripts/install-app.sh` (`make install-app`) into
+`~/Applications` — a registered location, since temporary directories cannot
+register notification permission on macOS 26. The helper binary
+(`agents-mon-notifier`, built from this crate with `mac-usernotifications`)
+owns the notification permission, is background-only (`LSUIElement`), posts
+through `UNUserNotificationCenter` with the built-in `Glass` sound, and
+detaches itself so the sidebar never blocks. The detached instance keeps the
+main run loop alive awaiting the body click for up to 24 hours, then closes
+the notification and exits.
 
-When `terminal-notifier` is available, its click command invokes an internal
-binary command with shell-quoted executable, socket, pane, and terminal bundle
-arguments. The helper revalidates the pane, chooses the most recently active
-real client, performs the existing exact-pane navigation sequence, and then
-activates the terminal. Stale targets are silent no-ops. AppleScript and Linux
-notifications are display-only so delivery never leaves a waiting helper.
+The click command invokes the internal `notification-open` command with
+shell-quoted executable, socket, pane, and terminal bundle arguments. That
+command revalidates the pane, chooses the most recently active real client,
+activates the terminal first, and then performs the exact-pane navigation
+sequence (activation must precede the jump). Stale targets are silent no-ops.
+Without the installed app a fixed AppleScript whose title and body arrive only
+as arguments displays the notification (display-only, `Glass` sound). Linux
+uses `notify-send` when a graphical session is available and is display-only.
+Other platforms degrade silently. Failures are best effort and visible only
+through `AGENTS_MON_DEBUG`.
 
-No additional daemon, Rust dependency, OSC notification, tmux status message,
-or Bash fallback implementation is introduced. Closing the sidebar or popup
-therefore stops notification monitoring.
+No Homebrew or other runtime dependency, OSC notification, tmux status
+message, or Bash fallback implementation is introduced. Closing the sidebar or
+popup therefore stops notification monitoring.

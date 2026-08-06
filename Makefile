@@ -1,4 +1,4 @@
-.PHONY: test build bump
+.PHONY: test build bump install-app
 
 test:
 	./tests/run.sh
@@ -6,6 +6,10 @@ test:
 # optional: Rust engine (~10x less CPU); plugin works without it
 build:
 	cargo build --release
+
+# macOS: build, sign, and install the AgentsMon.app notification helper
+install-app:
+	./scripts/install-app.sh
 
 # patch-bump Cargo.toml, run both suites, commit + tag (no push)
 bump:

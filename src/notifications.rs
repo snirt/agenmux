@@ -176,7 +176,12 @@ pub fn deliver(tmux: &mut crate::tmux::Tmux, event: &AttentionEvent) -> Delivery
         .unwrap_or_default();
     let outcome = deliver_if_enabled(&option, event, |payload| {
         #[cfg(target_os = "macos")]
-        return macos::deliver(&SystemRunner, payload, click_command(event));
+        return macos::deliver(
+            &SystemRunner,
+            payload,
+            click_command(event),
+            macos::helper_program(),
+        );
         #[cfg(target_os = "linux")]
         return linux::deliver(
             &SystemRunner,
@@ -394,26 +399,60 @@ mod tests {
     }
 
     #[test]
-    fn macos_terminal_notifier_requests_glass_sound() {
+    fn macos_helper_receives_title_body_and_click_command() {
         let runner = FakeRunner::new(vec![Ok(true)]);
+        let helper = "/Users/me/Applications/AgentsMon.app/Contents/MacOS/agents-mon-notifier";
         let outcome = macos::deliver(
             &runner,
             &payload(&event(AttentionKind::Finished)),
             Some("'agents-mon' 'notification-open'".into()),
+            Some(helper.into()),
         );
 
         assert_eq!(outcome, DeliveryOutcome::Delivered);
         let commands = runner.commands.borrow();
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].program, "terminal-notifier");
-        assert!(commands[0]
-            .args
-            .windows(2)
-            .any(|pair| pair == ["-sound", "Glass"]));
+        assert_eq!(commands[0].program, helper);
+        assert_eq!(
+            commands[0].args,
+            vec![
+                "Codex finished".to_string(),
+                "Implement notifications now · tmux-agents-mon · DOTFILES:3.2".to_string(),
+                "'agents-mon' 'notification-open'".to_string(),
+            ]
+        );
     }
 
     #[test]
-    fn macos_falls_back_to_argument_safe_applescript() {
+    fn macos_without_installed_helper_uses_argument_safe_applescript() {
+        let runner = FakeRunner::new(vec![Ok(true)]);
+        let outcome = macos::deliver(
+            &runner,
+            &payload(&event(AttentionKind::Finished)),
+            Some("'agents-mon' 'notification-open'".into()),
+            None,
+        );
+
+        assert_eq!(outcome, DeliveryOutcome::Delivered);
+        let commands = runner.commands.borrow();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].program, "/usr/bin/osascript");
+        assert_eq!(commands[0].args[0], "-");
+        assert!(commands[0]
+            .stdin
+            .as_deref()
+            .unwrap()
+            .contains("on run argv"));
+        assert!(commands[0]
+            .stdin
+            .as_deref()
+            .unwrap()
+            .contains("sound name \"Glass\""));
+        assert!(!commands[0].stdin.as_deref().unwrap().contains("Codex"));
+    }
+
+    #[test]
+    fn macos_helper_failure_falls_back_to_applescript() {
         let runner = FakeRunner::new(vec![
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
             Ok(true),
@@ -422,28 +461,20 @@ mod tests {
             &runner,
             &payload(&event(AttentionKind::Finished)),
             Some("'agents-mon' 'notification-open'".into()),
+            Some("/removed/AgentsMon.app/Contents/MacOS/agents-mon-notifier".into()),
         );
 
         assert_eq!(outcome, DeliveryOutcome::Delivered);
         let commands = runner.commands.borrow();
-        assert_eq!(commands[0].program, "terminal-notifier");
-        assert!(commands[0]
-            .args
-            .windows(2)
-            .any(|pair| { pair == ["-execute", "'agents-mon' 'notification-open'"] }));
+        assert_eq!(commands.len(), 2);
         assert_eq!(commands[1].program, "/usr/bin/osascript");
-        assert_eq!(commands[1].args[0], "-");
-        assert!(commands[1]
-            .stdin
-            .as_deref()
-            .unwrap()
-            .contains("on run argv"));
-        assert!(commands[1]
-            .stdin
-            .as_deref()
-            .unwrap()
-            .contains("sound name \"Glass\""));
-        assert!(!commands[1].stdin.as_deref().unwrap().contains("Codex"));
+    }
+
+    #[test]
+    fn helper_resolution_only_returns_an_existing_binary_path() {
+        if let Some(path) = macos::helper_program() {
+            assert!(std::path::Path::new(&path).is_file());
+        }
     }
 
     #[test]

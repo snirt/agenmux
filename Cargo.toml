@@ -8,6 +8,10 @@ regex = "1"
 libc = "0.2"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
+# native notifications for the AgentsMon.app helper (src/bin/agents-mon-notifier.rs)
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-usernotifications = "0.3.1"
+
 [profile.release]
 strip = true
 lto = true
