@@ -49,8 +49,10 @@ cp -f "$bin" "$app/Contents/MacOS/agents-mon-notifier"
 codesign --force --sign - "$app"
 
 echo "installed $app"
-# first run registers the bundle with LaunchServices and triggers the
-# notification permission prompt
-"$app/Contents/MacOS/agents-mon-notifier" "AgentsMon" \
-  "Notifications are set up. Allow AgentsMon if macOS asks." || true
-echo "If no prompt appeared, enable it under System Settings → Notifications → AgentsMon."
+# --setup registers the bundle, asks for permission, waits for the user's
+# answer, and posts a test notification when granted
+if "$app/Contents/MacOS/agents-mon-notifier" --setup; then
+  echo "✓ notifications enabled"
+else
+  echo "Notifications are off. Enable: System Settings → Notifications → AgentsMon."
+fi

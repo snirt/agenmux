@@ -24,6 +24,8 @@ pub(super) fn deliver<R: Runner>(
     if let Some(helper) = helper {
         // The helper detaches itself and posts through UNUserNotificationCenter
         // with the Glass sound; the click command runs when the body is clicked.
+        // An installed helper is authoritative: a failure (typically denied
+        // permission) means silence, never an AppleScript end-run.
         let mut args = vec![payload.title.clone(), payload.body.clone()];
         args.extend(click_command);
         let native = CommandSpec {
@@ -31,9 +33,10 @@ pub(super) fn deliver<R: Runner>(
             args,
             stdin: None,
         };
-        if matches!(runner.run(&native), Ok(true)) {
-            return DeliveryOutcome::Delivered;
-        }
+        return match runner.run(&native) {
+            Ok(true) => DeliveryOutcome::Delivered,
+            _ => DeliveryOutcome::Failed,
+        };
     }
 
     // display-only fallback for installs without the app bundle

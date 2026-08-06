@@ -38,6 +38,9 @@ shell-quoted executable, socket, pane, and terminal bundle arguments. That
 command revalidates the pane, chooses the most recently active real client,
 activates the terminal first, and then performs the exact-pane navigation
 sequence (activation must precede the jump). Stale targets are silent no-ops.
+Install-time `--setup` waits for the user's permission answer and reports it.
+Denial is respected: an installed helper is authoritative, so a denied
+permission means silence — the AppleScript path never runs as an end-run.
 Without the installed app a fixed AppleScript whose title and body arrive only
 as arguments displays the notification (display-only, `Glass` sound). Linux
 uses `notify-send` when a graphical session is available and is display-only.

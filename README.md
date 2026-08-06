@@ -178,9 +178,11 @@ make install-app
 
 This builds the Rust engine, assembles `AgentsMon.app` into `~/Applications`
 (pass a different directory to `scripts/install-app.sh` to override), ad-hoc
-signs it, and posts a first notification so macOS shows the permission prompt.
-Allow **AgentsMon** when prompted, or later under System Settings →
-Notifications → AgentsMon. The app is background-only; it never appears in the
+signs it, shows the macOS permission prompt, and waits for your answer: a test
+notification confirms it works, or the command tells you notifications are off
+and where to enable them. Allow **AgentsMon** when prompted, or later under
+System Settings → Notifications → AgentsMon. Denying keeps notifications
+fully silent — there is no fallback around your choice. The app is background-only; it never appears in the
 Dock. Once installed, plugin updates refresh the app automatically; the
 permission survives updates.
 

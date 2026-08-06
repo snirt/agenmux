@@ -4,11 +4,17 @@
 //! (see scripts/install-app.sh); macOS refuses notifications otherwise.
 //!
 //! usage: agents-mon-notifier [--spawned] <title> <body> [click-command]
+//!        agents-mon-notifier --setup
 //!
 //! Without --spawned it re-executes itself detached and returns immediately,
 //! so the caller (the sidebar) never blocks on the click window. The spawned
 //! instance keeps the main run loop alive until the notification is clicked,
-//! dismissed, or the click window elapses.
+//! dismissed, or the click window elapses. Denied permission exits 4 without
+//! posting — denial means silence, never a fallback.
+//!
+//! --setup is the install-time flow: it requests permission, waits for the
+//! user's answer to the prompt, and posts a test notification when granted;
+//! exit 0 = granted, 4 = denied.
 
 type Parsed = (bool, String, String, Option<String>);
 
@@ -26,11 +32,42 @@ fn parse(args: &[String]) -> Option<Parsed> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["--setup"] {
+        std::process::exit(setup());
+    }
     let Some(parsed) = parse(&args) else {
-        eprintln!("usage: agents-mon-notifier [--spawned] <title> <body> [click-command]");
+        eprintln!("usage: agents-mon-notifier [--setup] [--spawned] <title> <body> [click-command]");
         std::process::exit(2);
     };
     std::process::exit(run(parsed));
+}
+
+#[cfg(target_os = "macos")]
+fn setup() -> i32 {
+    use mac_usernotifications as noti;
+
+    if noti::check_bundle().is_err() {
+        return 3;
+    }
+    match noti::blocking::request_auth() {
+        Ok(true) => {}
+        Ok(false) | Err(_) => return 4,
+    }
+    match noti::Notification::new()
+        .title("AgentsMon")
+        .message("Notifications are ready.")
+        .sound(noti::sound::GLASS)
+        .send_blocking()
+    {
+        Ok(_) => 0,
+        Err(_) => 5,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn setup() -> i32 {
+    eprintln!("agents-mon-notifier is macOS-only");
+    2
 }
 
 #[cfg(target_os = "macos")]
@@ -38,6 +75,13 @@ fn run((spawned, title, body, click): Parsed) -> i32 {
     use std::process::{Command, Stdio};
 
     if !spawned {
+        // denied permission means silence: report failure, spawn nothing —
+        // NotDetermined still spawns so the first delivery can prompt
+        if let Ok(settings) = noti::blocking::get_notification_settings() {
+            if settings.authorization_status == noti::AuthorizationStatus::Denied {
+                return 4;
+            }
+        }
         let Ok(exe) = std::env::current_exe() else {
             return 1;
         };
