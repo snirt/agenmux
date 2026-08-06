@@ -181,7 +181,8 @@ This builds the Rust engine, assembles `AgentsMon.app` into `~/Applications`
 signs it, and posts a first notification so macOS shows the permission prompt.
 Allow **AgentsMon** when prompted, or later under System Settings →
 Notifications → AgentsMon. The app is background-only; it never appears in the
-Dock.
+Dock. Once installed, plugin updates refresh the app automatically; the
+permission survives updates.
 
 Clicking a notification body activates your terminal (Ghostty, Kitty, iTerm2,
 WezTerm, Apple Terminal, and Alacritty are recognized) and jumps the most

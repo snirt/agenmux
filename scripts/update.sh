@@ -67,6 +67,12 @@ fi
 rm -f "$DIR/target/release/.agents-mon-version"
 bash "$DIR/scripts/install-bin.sh" >/dev/null 2>&1
 
+# refresh the installed macOS notification helper app, if any
+if [ "$(uname -s)" = Darwin ] && [ -d "$HOME/Applications/AgentsMon.app" ] &&
+   [ -x "$DIR/target/release/agents-mon-notifier" ]; then
+  bash "$DIR/scripts/install-app.sh" >/dev/null 2>&1 || true
+fi
+
 # restart against the new code: drop the running view, re-run the entry point
 # for the new key bindings and hooks, then reopen if it was open
 if command -v tmux >/dev/null 2>&1 && tmux info >/dev/null 2>&1; then
