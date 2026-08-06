@@ -452,22 +452,17 @@ mod tests {
     }
 
     #[test]
-    fn macos_helper_failure_falls_back_to_applescript() {
-        let runner = FakeRunner::new(vec![
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
-            Ok(true),
-        ]);
+    fn macos_helper_failure_stays_silent_instead_of_applescript() {
+        let runner = FakeRunner::new(vec![Ok(false)]);
         let outcome = macos::deliver(
             &runner,
             &payload(&event(AttentionKind::Finished)),
             Some("'agents-mon' 'notification-open'".into()),
-            Some("/removed/AgentsMon.app/Contents/MacOS/agents-mon-notifier".into()),
+            Some("/Users/me/Applications/AgentsMon.app/Contents/MacOS/agents-mon-notifier".into()),
         );
 
-        assert_eq!(outcome, DeliveryOutcome::Delivered);
-        let commands = runner.commands.borrow();
-        assert_eq!(commands.len(), 2);
-        assert_eq!(commands[1].program, "/usr/bin/osascript");
+        assert_eq!(outcome, DeliveryOutcome::Failed);
+        assert_eq!(runner.commands.borrow().len(), 1);
     }
 
     #[test]
