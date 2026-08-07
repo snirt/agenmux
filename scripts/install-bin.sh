@@ -138,6 +138,21 @@ if [ "${1:-}" = "refresh" ]; then
   exit 0
 fi
 
+# macOS: keep the AgentsMon.app notification helper installed and current, on
+# every engine install path below. Quiet: notification permission is requested
+# by the first real notification, not here.
+sync_app() {
+  local notifier="$DIR/target/release/agents-mon-notifier"
+  local app_bin="$HOME/Applications/AgentsMon.app/Contents/MacOS/agents-mon-notifier"
+  [ "$(uname -s)" = Darwin ] && [ -x "$notifier" ] || return 0
+  cmp -s "$notifier" "$app_bin" 2>/dev/null && return 0
+  case "$(tmux show-option -gqv @agents-mon-notifications 2>/dev/null)" in
+    off | false | 0) return 0 ;;
+  esac
+  bash "$DIR/scripts/install-app.sh" --quiet >/dev/null 2>&1 || true
+}
+trap sync_app EXIT
+
 # "what is released" and "does the engine need installing" are separate
 # questions with separate throttles. Gating the first behind the second left an
 # up-to-date install with no release list at all — and so no update notice and

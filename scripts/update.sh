@@ -63,15 +63,10 @@ else
   cp -R "$pkg/." "$DIR/" || fail "could not write to $DIR"
 fi
 
-# clear the install marker so the daily throttle cannot skip the engine swap
+# clear the install marker so the daily throttle cannot skip the engine swap;
+# install-bin.sh also keeps the macOS notification helper app current
 rm -f "$DIR/target/release/.agents-mon-version"
 bash "$DIR/scripts/install-bin.sh" >/dev/null 2>&1
-
-# refresh the installed macOS notification helper app, if any
-if [ "$(uname -s)" = Darwin ] && [ -d "$HOME/Applications/AgentsMon.app" ] &&
-   [ -x "$DIR/target/release/agents-mon-notifier" ]; then
-  bash "$DIR/scripts/install-app.sh" >/dev/null 2>&1 || true
-fi
 
 # restart against the new code: drop the running view, re-run the entry point
 # for the new key bindings and hooks, then reopen if it was open

@@ -23,9 +23,12 @@ notifications module formats and sanitizes that event, reads the default-on
 `@agents-mon-notifications` option, and delegates to platform adapters.
 
 macOS delivers through a bundled helper app, `AgentsMon.app`, assembled and
-ad-hoc signed by `scripts/install-app.sh` (`make install-app`) into
-`~/Applications` — a registered location, since temporary directories cannot
-register notification permission on macOS 26. The helper binary
+ad-hoc signed by `scripts/install-app.sh` into `~/Applications` — a registered
+location, since temporary directories cannot register notification permission
+on macOS 26. `install-bin.sh` keeps the app installed and current
+automatically on every engine install or update (quiet, skipped while
+notifications are off); permission is requested by the first real
+notification. `make install-app` remains the explicit setup path. The helper binary
 (`agents-mon-notifier`, built from this crate with `mac-usernotifications`)
 owns the notification permission, is background-only (`LSUIElement`), posts
 through `UNUserNotificationCenter` with the built-in `Glass` sound, and

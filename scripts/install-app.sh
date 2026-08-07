@@ -4,12 +4,20 @@
 # signing is enough for local builds, but the bundle must live in a real
 # Applications folder (temporary directories cannot register on macOS 26).
 #
-# usage: install-app.sh [dest-dir]   (default: ~/Applications)
+# usage: install-app.sh [--quiet] [dest-dir]   (default: ~/Applications)
+#
+# --quiet installs/refreshes the app without requesting permission — used by
+# the automatic install; macOS then asks with the first real notification.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 [ "$(uname -s)" = Darwin ] || { echo "agents-mon: install-app is macOS-only" >&2; exit 1; }
 
+quiet=0
+if [ "${1:-}" = "--quiet" ]; then
+  quiet=1
+  shift
+fi
 dest="${1:-$HOME/Applications}"
 
 bin="${AGENTS_MON_NOTIFIER_BIN:-$DIR/target/release/agents-mon-notifier}"
@@ -49,6 +57,7 @@ cp -f "$bin" "$app/Contents/MacOS/agents-mon-notifier"
 codesign --force --sign - "$app"
 
 echo "installed $app"
+[ "$quiet" = 1 ] && exit 0
 # --setup registers the bundle, asks for permission, waits for the user's
 # answer, and posts a test notification when granted
 if "$app/Contents/MacOS/agents-mon-notifier" --setup; then
