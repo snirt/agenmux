@@ -81,8 +81,9 @@ if [ "$fail" -eq 0 ]; then
     printf 'v0.0.0\nold-revision\n' > "$tmp/plugin/target/release/.agents-mon-version"
   }
   install_bin() {
+    # HOME sandbox: sync_app must never touch the real ~/Applications
     DOWNLOADS="$tmp/downloads" LATEST_TAG="$1" PATH="$tmp/bin:$PATH" \
-      bash "$tmp/plugin/scripts/install-bin.sh"
+      HOME="$tmp/home" bash "$tmp/plugin/scripts/install-bin.sh"
   }
   mk_release v0.1.0
   mk_release v0.1.1

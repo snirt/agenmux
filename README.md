@@ -170,21 +170,24 @@ set -g @agents-mon-notifications off
 
 On macOS, agents-mon sends notifications natively through
 `UNUserNotificationCenter` via a small helper app built from this repo — no
-Homebrew or other runtime dependency. Install it once:
+Homebrew or other runtime dependency, and no setup: installing or updating
+the plugin automatically places a signed, background-only `AgentsMon.app`
+into `~/Applications` (skipped while `@agents-mon-notifications` is off).
+macOS asks for permission with the first notification; allow **AgentsMon**
+when prompted, or later under System Settings → Notifications → AgentsMon.
+Denying keeps notifications fully silent — there is no fallback around your
+choice. Plugin updates refresh the app automatically and the permission
+survives.
+
+To set up (or verify) permission right now instead of on first use:
 
 ```sh
 make install-app
 ```
 
-This builds the Rust engine, assembles `AgentsMon.app` into `~/Applications`
-(pass a different directory to `scripts/install-app.sh` to override), ad-hoc
-signs it, shows the macOS permission prompt, and waits for your answer: a test
-notification confirms it works, or the command tells you notifications are off
-and where to enable them. Allow **AgentsMon** when prompted, or later under
-System Settings → Notifications → AgentsMon. Denying keeps notifications
-fully silent — there is no fallback around your choice. The app is background-only; it never appears in the
-Dock. Once installed, plugin updates refresh the app automatically; the
-permission survives updates.
+This assembles and installs the app, shows the permission prompt, waits for
+your answer, and confirms with a test notification — or tells you
+notifications are off and where to enable them.
 
 Clicking a notification body activates your terminal (Ghostty, Kitty, iTerm2,
 WezTerm, Apple Terminal, and Alacritty are recognized) and jumps the most
