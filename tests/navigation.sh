@@ -431,7 +431,8 @@ done
 printf 'q' >&9
 exit_table=agents-mon
 q_left=0
-for _ in $(seq 1 20); do
+# teardown (kill pane + restore layout) is the slowest step: allow 3s
+for _ in $(seq 1 60); do
   exit_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   exit_focus="$(tmux -S "$sock" display-message -p -c "$client" \
