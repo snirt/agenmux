@@ -104,6 +104,11 @@ Details worth knowing:
 - **Click an agent row** in the sidebar to jump to that agent's pane
   (requires `set -g mouse on`); clicking anywhere else in the sidebar enters
   navigation, while clicks in regular panes keep tmux's default behavior
+- **Scroll the wheel** over the sidebar to move the cursor one row per tick,
+  the same as `↑`/`↓` (also needs `set -g mouse on`); shortly after you stop
+  scrolling it jumps to the selected agent, so a fast scroll costs one window
+  switch rather than one per row. The wheel in regular panes keeps tmux's
+  default scrollback behavior
 - In the sidebar: `j`/`k` or `↑`/`↓` move the `❯` cursor, `Enter` or `l` jumps to
   the selected agent, `u` opens the [version picker](#updating), `?` shows help
   (statuses + keys), `q`/`Esc` closes the sidebar;
@@ -129,6 +134,8 @@ set -g @agents-mon-height '15'      # fixed popup height (otherwise sized to the
 set -g @agents-mon-hide-windows 'agents*'  # hide matching windows from the prefix+w picker
                                     # (one fnmatch pattern; set to '' to restore the default picker)
 set -g @agents-mon-notifications 'off'  # disable desktop notifications (default: on)
+set -g @agents-mon-wheel-jump '0.3' # seconds of stillness before a wheel scroll jumps
+                                    # to the selected agent ('off' = move the cursor only)
 ```
 
 With both keys set (e.g. `@agents-mon-key 'E'`, `@agents-mon-popup-key 'e'`)
@@ -136,8 +143,9 @@ you get `prefix+E` for the split sidebar and `prefix+e` for the floating popup.
 
 In popup mode the same keybinding opens a floating window; close it with
 `q` or `Esc` inside (there is no outside toggle — the popup grabs the client).
-Click-to-jump works in split mode only; keyboard jump works in both, and the
-popup reopens over the selected agent after a jump.
+Click-to-jump and wheel scrolling work in split mode only (tmux does not
+forward mouse events into a popup); keyboard jump works in both, and the popup
+reopens over the selected agent after a jump.
 
 ### Desktop notifications
 
