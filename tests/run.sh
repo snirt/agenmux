@@ -54,7 +54,8 @@ if [ "$fail" -eq 0 ]; then
   tmp="$(mktemp -d)"
   package="tmux-agents-mon-macos-aarch64"
   mkdir -p "$tmp/plugin/scripts" "$tmp/downloads" "$tmp/bin"
-  cp "$DIR/scripts/install-bin.sh" "$DIR/scripts/version.sh" "$tmp/plugin/scripts/"
+  cp "$DIR/scripts/install-bin.sh" "$DIR/scripts/version.sh" \
+    "$DIR/scripts/install-app.sh" "$tmp/plugin/scripts/"
   # a release whose engine prints its own tag, so which one got installed is
   # visible in the assertions below
   mk_release() {
@@ -131,6 +132,7 @@ SH
   install_bin v0.1.1
   if [ "$(engine)" = "v0.1.0" ] && [ "$(marker)" = "v0.1.0" ] \
      && [ -x "$tmp/plugin/target/release/agents-mon-notifier" ] \
+     && [ -f "$tmp/home/Applications/AgentsMon.app/Contents/MacOS/agents-mon-notifier" ] \
      && [ "$(sed -n '1p' "$tmp/plugin/target/release/.agents-mon-latest")" = "v0.1.1" ] \
      && [ "$(sed -n '1p' "$tmp/plugin/target/release/.agents-mon-tags")" = "v0.1.1" ]; then
     echo "ok   native-engine-matches-checkout-version"
