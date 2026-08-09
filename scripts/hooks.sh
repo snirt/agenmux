@@ -97,4 +97,20 @@ bind_nav l l root
 bind_nav q close root
 bind_nav Escape close root
 bind_nav Q close root
-tmux set-option -g @agents-mon-nav-version 6
+
+# Wheel events reach this table too, where `Any` would swallow them as space.
+# Bind them explicitly: over the sidebar a tick moves the selection one row and
+# navigation stays active; anywhere else tmux's native wheel behavior applies
+# (WheelDownPane has no default binding, so forwarding the event is all of it).
+# Unconditional — a harmless no-op while `mouse off`.
+bind_wheel() {
+  key="$1" dir="$2" native="$3"
+  tmux bind-key -T agents-mon "$key" \
+    if-shell -F '#{==:#{pane_title},agents-mon}' \
+    "run-shell -b \"bash '$DIR/scripts/scroll.sh' '#{pane_id}' $dir\" ; switch-client -T agents-mon" \
+    "$native"
+}
+bind_wheel WheelUpPane up \
+  'if -Ft= "#{||:#{pane_in_mode},#{mouse_any_flag}}" "send-keys -M" "copy-mode -e; send-keys -M"'
+bind_wheel WheelDownPane down 'send-keys -M'
+tmux set-option -g @agents-mon-nav-version 7

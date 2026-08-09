@@ -34,6 +34,16 @@ if [ "$(tmux show-option -gv mouse)" = "on" ]; then
   tmux bind-key -n MouseDown1Pane if-shell -F '#{==:#{pane_title},agents-mon}' \
     "run-shell -b \"bash '$CURRENT_DIR/scripts/click.sh' '#{pane_id}' '#{mouse_y}' '#{client_name}'\"" \
     'select-pane -t = ; send-keys -M'
+
+  # wheel over the sidebar moves the selection one row per tick; elsewhere the
+  # else-branches reproduce tmux's own defaults (WheelDown has no default
+  # binding at all, so forwarding the event is the whole native behavior)
+  tmux bind-key -n WheelUpPane if-shell -F '#{==:#{pane_title},agents-mon}' \
+    "run-shell -b \"bash '$CURRENT_DIR/scripts/scroll.sh' '#{pane_id}' up\"" \
+    'if -Ft= "#{||:#{pane_in_mode},#{mouse_any_flag}}" "send-keys -M" "copy-mode -e; send-keys -M"'
+  tmux bind-key -n WheelDownPane if-shell -F '#{==:#{pane_title},agents-mon}' \
+    "run-shell -b \"bash '$CURRENT_DIR/scripts/scroll.sh' '#{pane_id}' down\"" \
+    'send-keys -M'
 fi
 
 # hide windows matching a name pattern from the prefix+w picker,
