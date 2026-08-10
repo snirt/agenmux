@@ -393,12 +393,43 @@ for _ in $(seq 1 20); do
   printf '%s' "$control_flags" | grep -Fq control-mode && break
   sleep 0.05
 done
+printf 'k' >&9
+for _ in $(seq 1 20); do
+  picker_reset="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+    sed -n '/❯/p' | head -n 1)"
+  [ "$picker_reset" = "$first" ] && break
+  sleep 0.1
+done
+picker_before="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+  sed -n '/❯/p' | head -n 1)"
+printf 'u' >&9
+picker_open=0
+for _ in $(seq 1 40); do
+  picker_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+  printf '%s\n' "$picker_frame" | grep -Fq 'agents — versions' \
+    && { picker_open=1; break; }
+  sleep 0.05
+done
+printf 'q' >&9
+picker_reclaimed=0
+picker_return=''
+for _ in $(seq 1 40); do
+  picker_table="$(tmux -S "$sock" display-message -p -c "$client" \
+    '#{client_key_table}')"
+  picker_return="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+    sed -n '/❯/p' | head -n 1)"
+  if [ "$picker_table" = agents-mon ] && [ -n "$picker_return" ]; then
+    picker_reclaimed=1
+    break
+  fi
+  sleep 0.05
+done
 printf 'j' >&9
-second="$first"
+second="$picker_return"
 for _ in $(seq 1 20); do
   second="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
-  [ -n "$second" ] && [ "$second" != "$first" ] && break
+  [ -n "$second" ] && [ "$second" != "$picker_return" ] && break
   sleep 0.1
 done
 table_after_j="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
@@ -408,14 +439,12 @@ third="$second"
 for _ in $(seq 1 20); do
   third="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
-  [ "$third" = "$first" ] && break
+  [ "$third" = "$picker_before" ] && break
   sleep 0.1
 done
 
-# A wheel tick is arrow-key equivalent: one row down, then back up. In this
-# preserved-pane mode the pane has no stdin, so the handler must reach the
-# daemon through its key FIFO. The settle-jump is off here so this measures
-# cursor movement alone; the fallback check below covers the jump.
+# Preserved-pane mode: the pane has no stdin, so the handler must reach the
+# daemon through its key FIFO. Settle-jump off — cursor movement alone here.
 tmux -S "$sock" set-option -g @agents-mon-wheel-jump off
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
   bash "$DIR/scripts/scroll.sh" "$sidebar" down
@@ -533,11 +562,8 @@ for _ in $(seq 1 20); do
   sleep 0.05
 done
 
-# Without the daemon the sidebar is an ordinary pane that owns its stdin, so
-# the same wheel tick must arrive as a keystroke instead of a FIFO write. Three
-# rapid ticks must also coalesce into exactly one settle-jump, proving a fast
-# scroll cannot drag the client through every window it passes over: the pane
-# should read 'jjj' followed by a single 'l'.
+# Without the daemon the sidebar owns its stdin, so the tick must arrive as a
+# keystroke instead of a FIFO write, and rapid ticks coalesce into one jump.
 cat >"$tmp/wheel-reader" <<EOF
 #!/usr/bin/env bash
 : >"$tmp/wheel-ready"
@@ -602,9 +628,10 @@ if [ "$table" = agents-mon ] && [ "$initial_focus" = agents-mon ] \
   && [ "$agent_missing_client_noop" -eq 1 ] \
   && [ "$vanished_sidebar_noop" -eq 1 ] \
   && [ "$valid_click_works" -eq 1 ] \
+  && [ "$picker_open" -eq 1 ] && [ "$picker_reclaimed" -eq 1 ] \
   && [ "$table_after_j" = agents-mon ] \
   && printf '%s' "$control_flags" | grep -Fq control-mode \
-  && [ "$second" != "$first" ] && [ "$third" = "$first" ] \
+  && [ "$second" != "$picker_return" ] && [ "$third" = "$picker_before" ] \
   && [ "$wheel_down" != "$third" ] && [ "$wheel_up" = "$third" ] \
   && [ "$wheel_fallback_works" -eq 1 ] \
   && [ "$return_table" = agents-mon ] && [ "$return_focus" = agents-mon ] \
@@ -616,6 +643,6 @@ if [ "$table" = agents-mon ] && [ "$initial_focus" = agents-mon ] \
   && [ "$notification_stale_noop" -eq 1 ]; then
   echo "ok   attached-client-jk-navigation"
 else
-  echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/fallback=$wheel_fallback_works/keys=$wheel_keys] return=[$return_table/$return_focus] fourth=[$fourth] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_left/$escape_table/$escape_focus] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
+  echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/fallback=$wheel_fallback_works/keys=$wheel_keys] return=[$return_table/$return_focus] fourth=[$fourth] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_left/$escape_table/$escape_focus] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
   exit 1
 fi

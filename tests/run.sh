@@ -254,6 +254,66 @@ SH
 fi
 if [ "$fail" -eq 0 ]; then
   tmp="$(mktemp -d)"
+  mkdir -p "$tmp/bin" "$tmp/repo/scripts"
+  for s in update.sh version.sh install-bin.sh teardown.sh; do
+    cp "$DIR/scripts/$s" "$tmp/repo/scripts/"
+  done
+  cat >"$tmp/repo/agents-mon.tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'agents-mon.tmux\n' >>"$RESTART_LOG"
+SH
+  cat >"$tmp/repo/scripts/toggle.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'toggle.sh\n' >>"$RESTART_LOG"
+SH
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$tmp/bin/curl"
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$tmp/bin/cargo"
+  cat >"$tmp/bin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux %s\n' "$*" >>"$RESTART_LOG"
+case "$*" in
+  info) exit 0 ;;
+  "show-option -gqv @agents-mon-on") printf '1\n' ;;
+  "show-option -gqv @agents-mon-control-client") printf 'old-control\n' ;;
+  "list-clients -F #{client_name}")
+    n="$(cat "$CLIENT_POLLS" 2>/dev/null || printf 0)"
+    n=$((n + 1))
+    printf '%s\n' "$n" >"$CLIENT_POLLS"
+    [ "$n" -lt 3 ] && printf 'old-control\n'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$tmp/bin/curl" "$tmp/bin/cargo" "$tmp/bin/tmux" \
+    "$tmp/repo/agents-mon.tmux" "$tmp/repo/scripts/toggle.sh"
+  (
+    cd "$tmp/repo" || exit 1
+    git init -q . && git config user.email t@t && git config user.name t
+    printf '[package]\nname = "agents-mon"\nversion = "0.1.0"\n' >Cargo.toml
+    git add -A && git commit -qm one && git tag v0.1.0
+    printf '[package]\nname = "agents-mon"\nversion = "0.1.1"\n' >Cargo.toml
+    git commit -qam two && git tag v0.1.1
+  ) >/dev/null 2>&1
+  RESTART_LOG="$tmp/restart.log" CLIENT_POLLS="$tmp/polls" \
+    PATH="$tmp/bin:$PATH" bash "$tmp/repo/scripts/update.sh" v0.1.0 \
+    >/dev/null 2>&1
+  last_poll="$(grep -n '^tmux list-clients -F #{client_name}$' \
+    "$tmp/restart.log" | tail -n 1 | cut -d: -f1)"
+  entry="$(grep -n '^agents-mon.tmux$' "$tmp/restart.log" |
+    head -n 1 | cut -d: -f1)"
+  if [ "$(cat "$tmp/polls" 2>/dev/null)" = 3 ] \
+     && [ -n "$last_poll" ] && [ -n "$entry" ] \
+     && [ "$last_poll" -lt "$entry" ]; then
+    echo "ok   update-waits-for-old-daemon-before-restart"
+  else
+    echo "FAIL update-waits-for-old-daemon-before-restart: polls=$(cat "$tmp/polls" 2>/dev/null) last=$last_poll entry=$entry"
+    cat "$tmp/restart.log"
+    fail=1
+  fi
+  rm -rf "$tmp"
+fi
+if [ "$fail" -eq 0 ]; then
+  tmp="$(mktemp -d)"
   mkdir -p "$tmp/bin"
   cat > "$tmp/bin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -578,8 +638,10 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   printf '#!/bin/sh\nexec %s -S %s "$@"\n' "$(command -v tmux)" "$tmp/sock" \
     > "$tmp/bin/tmux"
   chmod +x "$tmp/bin/tmux"
-  TMPDIR="$tmp" $T new-session -d -s t -x 200 -y 50 'exec sleep 120'
-  $T new-window -t t: 'exec sleep 120'
+  printf '#!/bin/sh\nwhile :; do sleep 10; done\n' >"$tmp/codex"
+  chmod +x "$tmp/codex"
+  TMPDIR="$tmp" $T new-session -d -s t -x 200 -y 50 "$tmp/codex"
+  $T new-window -t t: "$tmp/codex"
   $T set-option -g @agents-mon-bin "$BIN_ABS"
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" \
     bash "$DIR/scripts/toggle.sh"
@@ -594,16 +656,25 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   help_frame="$($T capture-pane -p -t "$mir")"
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key space
   sleep 1
+  list_before="$($T capture-pane -p -t "$mir" | sed -n '/❯/p' | head -n 1)"
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key versions
-  sleep 1
+  sleep 3
   vers_alive="$(mirrors)"
   vers_frame="$($T capture-pane -p -t "$mir")"
+  env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key close
+  sleep 1
+  list_after="$($T capture-pane -p -t "$mir" | sed -n '/❯/p' | head -n 1)"
+  env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key j
+  sleep 1
+  list_moved="$($T capture-pane -p -t "$mir" | sed -n '/❯/p' | head -n 1)"
   if [ "$opened" -eq 2 ] && [ "$help_alive" -eq 2 ] && [ "$vers_alive" -eq 2 ] \
      && printf '%s\n' "$help_frame" | grep -Fq 'agents — help' \
-     && printf '%s\n' "$vers_frame" | grep -Fq 'agents — versions'; then
+     && printf '%s\n' "$vers_frame" | grep -Fq 'agents — versions' \
+     && [ -n "$list_before" ] && [ "$list_after" = "$list_before" ] \
+     && [ -n "$list_moved" ] && [ "$list_moved" != "$list_after" ]; then
     echo "ok   overlays-render-in-processless-panes"
   else
-    echo "FAIL overlays-render-in-processless-panes: opened=$opened help=$help_alive versions=$vers_alive"
+    echo "FAIL overlays-render-in-processless-panes: opened=$opened help=$help_alive versions=$vers_alive list=[$list_before/$list_after/$list_moved]"
     fail=1
   fi
   $T kill-server 2>/dev/null || true
@@ -629,5 +700,8 @@ if [ "$fail" -eq 0 ] && [ "$(uname -s)" = Darwin ] \
 fi
 if [ "$fail" -eq 0 ]; then
   AGENTS_MON_BIN="$BIN" bash "$DIR/tests/navigation.sh" || fail=1
+fi
+if [ "$fail" -eq 0 ]; then
+  AGENTS_MON_BIN="$BIN" bash "$DIR/tests/daemon-orphan.sh" || fail=1
 fi
 exit $fail

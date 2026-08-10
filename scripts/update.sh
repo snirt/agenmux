@@ -71,7 +71,15 @@ bash "$DIR/scripts/install-bin.sh" >/dev/null 2>&1
 # restart against the new code: drop the running view, re-run the entry point
 # for the new key bindings and hooks, then reopen if it was open
 if command -v tmux >/dev/null 2>&1 && tmux info >/dev/null 2>&1; then
+  control="$(tmux show-option -gqv @agents-mon-control-client)"
   bash "$DIR/scripts/teardown.sh"
+  if [ -n "$control" ]; then
+    for _ in $(seq 1 80); do
+      tmux list-clients -F '#{client_name}' 2>/dev/null |
+        grep -Fxq "$control" || break
+      sleep 0.1
+    done
+  fi
   bash "$DIR/agents-mon.tmux"
   [ -n "$was_open" ] && bash "$DIR/scripts/toggle.sh"
 fi
