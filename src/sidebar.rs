@@ -869,6 +869,11 @@ impl Sidebar {
         let Some(mine) = self.daemon.as_ref().map(|d| d.client.clone()) else {
             return false;
         };
+        // Ownership decides whether we abandon every pane without teardown.
+        // A stale hook response must not look like a newer daemon's claim.
+        if self.tmux.sync().is_err() {
+            return false;
+        }
         match self.tmux.run("show-option -gqv @agents-mon-control-client") {
             Ok(current) => superseded(&mine, &current),
             Err(_) => false, // a broken pipe is not a takeover; the loop exits elsewhere
