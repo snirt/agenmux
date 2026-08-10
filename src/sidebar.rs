@@ -119,7 +119,10 @@ fn poll_inputs(
     };
     let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, ms) };
     let key = n > 0 && fds[0].revents & libc::POLLIN != 0;
-    let pipe = pipe_buffered || (n > 0 && fds[1].revents & libc::POLLIN != 0);
+    // a dead pipe sets only HUP/ERR/NVAL — POLLIN alone never reports it, and
+    // the loop then sleeps forever instead of reading its way to EOF
+    let dead = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+    let pipe = pipe_buffered || (n > 0 && fds[1].revents & (libc::POLLIN | dead) != 0);
     (key, pipe)
 }
 
@@ -139,6 +142,14 @@ enum Key {
     Help,
     Versions,
     Other,
+}
+
+enum Overlay {
+    Help,
+    Versions {
+        sel: usize,
+        chosen: Option<String>,
+    },
 }
 
 fn read_key(fd: libc::c_int) -> Key {
@@ -258,6 +269,14 @@ fn known_tags(plugin_dir: &PathBuf) -> Vec<String> {
     tags
 }
 
+fn picker_sel(tags: &[String], cur: &str, chosen: Option<&str>, sel: usize) -> usize {
+    let selected = chosen
+        .and_then(|tag| tags.iter().position(|t| t == tag))
+        .or_else(|| chosen.is_none().then(|| tags.iter().position(|t| t == cur)).flatten())
+        .unwrap_or(sel);
+    selected.min(tags.len().saturating_sub(1))
+}
+
 /// A tag is passed to update.sh as an argument — keep it boring.
 fn is_tag(t: &str) -> bool {
     t.len() > 1
@@ -302,6 +321,14 @@ fn suicide(seen_mirror: bool, since_start: Duration, empty_ticks: u32) -> bool {
     (seen_mirror || since_start >= Duration::from_secs(30)) && empty_ticks >= 2
 }
 
+/// Has `@agents-mon-control-client` named someone else? Only a claim counts:
+/// teardown.sh's unset can land after the next daemon claimed it, and treating
+/// empty as "replaced" makes a reopened sidebar kill its own daemon.
+fn superseded(mine: &str, current: &str) -> bool {
+    let current = current.trim();
+    !mine.is_empty() && !current.is_empty() && current != mine
+}
+
 /// Headless-mode state: frames → visible panes, keys ← FIFO, size ← panes.
 struct Daemon {
     keys_path: PathBuf,
@@ -310,6 +337,7 @@ struct Daemon {
     size: (usize, usize), // narrowest pane x watched pane's height
     seen_mirror: bool,    // suicide only arms after the first pane appears
     empty_ticks: u32,     // consecutive measurements that found no pane
+    client: String, // our control client, as published in the option
     started: Instant,
     // window id -> (window size, pane count) at the last measure: a mirror
     // whose width changed while both stayed put is a user border-drag. The
@@ -346,6 +374,7 @@ pub struct Sidebar {
     last_frame: String,
     update: Option<String>, // newer release to advertise in the header
     daemon: Option<Daemon>,
+    overlay: Option<Overlay>,
 }
 
 /// `self_pane` is the pane the sidebar itself occupies, skipped by every scan.
@@ -386,6 +415,7 @@ fn new_sidebar(
         last_frame: String::new(),
         update,
         daemon: None,
+        overlay: None,
     };
     // seed from the previous instance's scan for an instant first frame
     if let Ok(tsv) = std::fs::read_to_string(&sb.cache_file) {
@@ -468,6 +498,8 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     // server already has a focused terminal client. Match the control client
     // tmux just spawned by PID instead; that identity is unambiguous.
     let control_pid = sb.tmux.client_pid().to_string();
+    // unescaped: show-option hands the value back unescaped too
+    let mut control_client = String::new();
     for _ in 0..100 {
         let client = sb
             .tmux
@@ -480,10 +512,11 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
                 })
             });
         if let Some(client) = client {
-            let client = client.replace('\'', "\\'");
+            let quoted = client.replace('\'', "\\'");
             let _ = sb.tmux.run(&format!(
-                "set-option -g @agents-mon-control-client '{client}'"
+                "set-option -g @agents-mon-control-client '{quoted}'"
             ));
+            control_client = client;
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -495,6 +528,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         size: (30, 24),
         seen_mirror: false,
         empty_ticks: 0,
+        client: control_client,
         started: Instant::now(),
         win_sizes: HashMap::new(),
         attached: String::new(),
@@ -512,12 +546,16 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         std::thread::sleep(Duration::from_millis(50));
     }
     sb.render(true);
-    event_loop(&mut sb);
-    sb.teardown();
+    if event_loop(&mut sb) {
+        sb.quiet_exit();
+    } else {
+        sb.teardown();
+    }
     0
 }
 
-fn event_loop(sb: &mut Sidebar) {
+/// Returns true when the loop ended because another daemon took ownership.
+fn event_loop(sb: &mut Sidebar) -> bool {
     let key_fd = sb.daemon.as_ref().map_or(0, |d| d.keys_fd);
     let mut next_scan = Instant::now(); // scan immediately
     let mut next_tick = Instant::now();
@@ -533,6 +571,9 @@ fn event_loop(sb: &mut Sidebar) {
                 // the pipe is desynced, restarting is the only safe move
                 Err(TmuxError::Exited) | Err(TmuxError::Io(_)) => break,
                 Err(TmuxError::Error(_)) => {} // e.g. pane died mid-scan
+            }
+            if sb.daemon.is_some() && sb.superseded() {
+                return true; // a newer daemon owns the panes now
             }
             if sb.daemon.is_some() && !sb.mirror_tick() {
                 break; // all preserved panes gone — nothing left to display
@@ -571,7 +612,13 @@ fn event_loop(sb: &mut Sidebar) {
             }
         }
         if key_ready {
-            match read_key(key_fd) {
+            let key = read_key(key_fd);
+            if sb.overlay.is_some() {
+                sb.overlay_key(key);
+                sb.render(false);
+                continue;
+            }
+            match key {
                 Key::Down => sb.move_sel(1),
                 Key::Up => sb.move_sel(-1),
                 Key::Jump => {
@@ -605,6 +652,7 @@ fn event_loop(sb: &mut Sidebar) {
             sb.render(true);
         }
     }
+    false // every other exit is a real close: the caller tears down
 }
 
 fn cleanup(rows_file: &PathBuf, pin: &Option<String>) {
@@ -817,6 +865,16 @@ impl Sidebar {
     /// doing this (instead of racing hook scripts) means no stale
     /// resize-pane ever fights the drag, and the dragged pane itself is
     /// never touched — only the hidden sidebars in other windows move.
+    fn superseded(&mut self) -> bool {
+        let Some(mine) = self.daemon.as_ref().map(|d| d.client.clone()) else {
+            return false;
+        };
+        match self.tmux.run("show-option -gqv @agents-mon-control-client") {
+            Ok(current) => superseded(&mine, &current),
+            Err(_) => false, // a broken pipe is not a takeover; the loop exits elsewhere
+        }
+    }
+
     fn mirror_tick(&mut self) -> bool {
         // same barrier as active_pane: reading zero panes off a desynced
         // pipe used to tear the whole mirror set down
@@ -983,6 +1041,17 @@ impl Sidebar {
     /// restore layouts via a
     /// forked script (hook run-shell echoes would desync the control pipe),
     /// then drop the key FIFO and row map.
+    /// Drop only what is ours. The panes, the FIFO path and the rows file
+    /// belong to the daemon that replaced us — teardown() would delete them.
+    fn quiet_exit(&mut self) {
+        if let Some(d) = &mut self.daemon {
+            d.writers.clear();
+        }
+        if let Some(d) = &self.daemon {
+            unsafe { libc::close(d.keys_fd) };
+        }
+    }
+
     fn teardown(&mut self) {
         if let Some(d) = &mut self.daemon {
             d.writers.clear();
@@ -1019,6 +1088,10 @@ impl Sidebar {
     }
 
     fn render(&mut self, force: bool) {
+        if self.overlay.is_some() {
+            self.render_overlay(force);
+            return;
+        }
         let (cols, trows) = match &self.daemon {
             Some(d) => d.size,
             None => term_size(),
@@ -1107,33 +1180,13 @@ impl Sidebar {
         self.emit(frame, force);
     }
 
-    /// Block until a key is available, re-emitting `text` while waiting.
-    /// Returns false on shutdown, or when `max_wait` elapses with no key —
-    /// callers that redraw on a timer pass one, help passes None.
-    fn await_key(&mut self, text: &str, max_wait: Option<Duration>) -> bool {
-        let key_fd = self.daemon.as_ref().map_or(0, |d| d.keys_fd);
-        let deadline = max_wait.map(|d| Instant::now() + d);
-        while !QUIT.load(Ordering::Relaxed) {
-            if poll_fd(key_fd, Some(Duration::from_secs(2))) {
-                return true;
-            }
-            self.emit(text.to_string(), false);
-            if deadline.is_some_and(|d| Instant::now() >= d) {
-                return false;
-            }
-        }
-        false
-    }
-
     /// Version picker: update or roll back to any release the last check saw.
     /// Selecting one hands off to update.sh, which switches the source, the
     /// engine, and restarts the view.
     fn versions(&mut self) {
-        let key_fd = self.daemon.as_ref().map_or(0, |d| d.keys_fd);
-        let cur = current_tag();
         // opening the picker is an explicit "what is out there?" — ask now
         // instead of serving a list that the daily check may have left a day
-        // old. It lands in the file and the loop below picks it up live.
+        // old. It lands in the file and normal scan renders pick it up live.
         let _ = std::process::Command::new("bash")
             .arg(self.plugin_dir.join("scripts/install-bin.sh"))
             .arg("refresh")
@@ -1141,67 +1194,123 @@ impl Sidebar {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn();
-        let mut sel = 0usize;
-        let mut selected: Option<String> = None;
-        loop {
-            if QUIT.load(Ordering::Relaxed) {
-                break;
-            }
-            let tags = known_tags(&self.plugin_dir);
-            // the running version pins the cursor across a refresh that
-            // reorders or lengthens the list
-            if let Some(s) = &selected {
-                sel = tags.iter().position(|t| t == s).unwrap_or(sel);
-            } else if let Some(i) = tags.iter().position(|t| *t == cur) {
-                sel = i;
-            }
-            sel = sel.min(tags.len().saturating_sub(1));
+        self.overlay = Some(Overlay::Versions {
+            sel: 0,
+            chosen: None,
+        });
+        self.last_frame.clear();
+    }
 
-            let mut text = format!(
-                "{E}[2J{E}[H{E}[1magents — versions{E}[0m {E}[2m{cur}{E}[0m\n\n"
-            );
-            if tags.is_empty() {
-                text.push_str(&format!(
-                    " {E}[2mno releases found — checking…{E}[0m\n\n\
-                     {E}[2mq back{E}[0m"
-                ));
-            } else {
-                for (i, t) in tags.iter().enumerate() {
-                    let mark = cursor_mark(i == sel, true);
-                    let tail = if *t == cur {
-                        format!(" {E}[2m(current){E}[0m")
-                    } else {
-                        String::new()
-                    };
-                    text.push_str(&format!("{mark}{t}{tail}\n"));
-                }
-                // fits the default 30-column sidebar without wrapping
-                text.push_str(&format!("\n{E}[2m↵ switch · j/k ↑/↓ · q back{E}[0m"));
+    fn render_overlay(&mut self, force: bool) {
+        let text = match &mut self.overlay {
+            Some(Overlay::Help) => {
+                let quit_keys = " q Esc    close sidebar";
+                format!(
+                    "{E}[2J{E}[H{E}[1magents — help{E}[0m {E}[2m{}{E}[0m\n\n\
+{E}[1mstatus{E}[0m\n\
+ {E}[32m⣿{E}[0m  idle\n\
+ {E}[33m⠹{E}[0m  working (spinner)\n\
+ {E}[31m⣿{E}[0m  blocked, waiting for input (blinks)\n\
+ {E}[32m⣿{E}[0m  done, not viewed yet (blinks)\n\n\
+{E}[1mkeys{E}[0m\n\
+ j/k ↑/↓  move selection\n\
+ Enter/l  jump to agent\n\
+ u        update / switch version\n\
+{quit_keys}\n\
+ ?        this help\n\n\
+{E}[2mpress any key to return{E}[0m",
+                    current_tag()
+                )
             }
-            self.emit(text.clone(), true);
-            // wake without a key so a refresh landing mid-view shows up
-            if !self.await_key(&text, Some(Duration::from_secs(2))) {
-                continue;
-            }
-            match read_key(key_fd) {
-                Key::Down if !tags.is_empty() => sel = (sel + 1).min(tags.len() - 1),
-                Key::Up => sel = sel.saturating_sub(1),
-                Key::Jump => {
-                    if let Some(t) = tags.get(sel).filter(|t| **t != cur) {
-                        self.switch_version(t);
+            Some(Overlay::Versions { sel, chosen }) => {
+                let cur = current_tag();
+                let tags = known_tags(&self.plugin_dir);
+                *sel = picker_sel(&tags, &cur, chosen.as_deref(), *sel);
+                let mut text = format!(
+                    "{E}[2J{E}[H{E}[1magents — versions{E}[0m {E}[2m{cur}{E}[0m\n\n"
+                );
+                if tags.is_empty() {
+                    text.push_str(&format!(
+                        " {E}[2mno releases found — checking…{E}[0m\n\n\
+                         {E}[2mq back{E}[0m"
+                    ));
+                } else {
+                    for (i, t) in tags.iter().enumerate() {
+                        let mark = cursor_mark(i == *sel, true);
+                        let tail = if *t == cur {
+                            format!(" {E}[2m(current){E}[0m")
+                        } else {
+                            String::new()
+                        };
+                        text.push_str(&format!("{mark}{t}{tail}\n"));
                     }
-                    break;
+                    text.push_str(&format!("\n{E}[2m↵ switch · j/k ↑/↓ · q back{E}[0m"));
                 }
-                // q/Esc back out to the main list; only the main loop closes
-                Key::Quit | Key::Close => break,
+                text
+            }
+            None => return,
+        };
+        self.emit(text, force);
+    }
+
+    fn overlay_key(&mut self, key: Key) {
+        if matches!(self.overlay, Some(Overlay::Help)) {
+            self.close_overlay();
+            return;
+        }
+        let tags = known_tags(&self.plugin_dir);
+        let cur = current_tag();
+        let mut switch = None;
+        let mut close = false;
+        if let Some(Overlay::Versions { sel, chosen }) = &mut self.overlay {
+            *sel = picker_sel(&tags, &cur, chosen.as_deref(), *sel);
+            match key {
+                Key::Down if !tags.is_empty() => *sel = (*sel + 1).min(tags.len() - 1),
+                Key::Up => *sel = sel.saturating_sub(1),
+                Key::Jump => {
+                    switch = tags.get(*sel).filter(|t| **t != cur).cloned();
+                    close = true;
+                }
+                Key::Quit | Key::Close => close = true,
                 _ => {}
             }
-            selected = tags.get(sel).cloned();
+            *chosen = tags.get(*sel).cloned();
         }
+        if let Some(tag) = switch {
+            self.switch_version(&tag);
+            self.close_overlay();
+        } else if close {
+            self.close_overlay();
+        }
+    }
+
+    fn close_overlay(&mut self) {
+        self.overlay = None;
         if self.daemon.is_none() {
             print!("{E}[2J");
         }
         self.last_frame.clear();
+        self.reclaim_key_table();
+    }
+
+    fn reclaim_key_table(&mut self) {
+        if self.daemon.is_none() {
+            return;
+        }
+        let clients = self
+            .tmux
+            .run("list-clients -F '#{client_name}\t#{pane_title}'")
+            .unwrap_or_default();
+        for line in clients.lines() {
+            let Some((client, title)) = line.split_once('\t') else {
+                continue;
+            };
+            if title == "agents-mon" {
+                let _ = std::process::Command::new("tmux")
+                    .args(["switch-client", "-c", client, "-T", "agents-mon"])
+                    .spawn();
+            }
+        }
     }
 
     /// nohup + no wait: update.sh kills the panes this engine renders into,
@@ -1219,32 +1328,7 @@ impl Sidebar {
     }
 
     fn help(&mut self) {
-        let quit_keys = " q Esc    close sidebar";
-        let text = format!(
-            "{E}[2J{E}[H{E}[1magents — help{E}[0m {E}[2m{}{E}[0m\n\n\
-{E}[1mstatus{E}[0m\n\
- {E}[32m⣿{E}[0m  idle\n\
- {E}[33m⠹{E}[0m  working (spinner)\n\
- {E}[31m⣿{E}[0m  blocked, waiting for input (blinks)\n\
- {E}[32m⣿{E}[0m  done, not viewed yet (blinks)\n\n\
-{E}[1mkeys{E}[0m\n\
- j/k ↑/↓  move selection\n\
- Enter/l  jump to agent\n\
- u        update / switch version\n\
-{quit_keys}\n\
- ?        this help\n\n\
-{E}[2mpress any key to return{E}[0m",
-            current_tag()
-        );
-        let key_fd = self.daemon.as_ref().map_or(0, |d| d.keys_fd);
-        self.emit(text.clone(), true);
-        // blocks until a key; any key (incl. q/Esc) returns to the main list
-        if self.await_key(&text, None) {
-            let _ = read_key(key_fd);
-        }
-        if self.daemon.is_none() {
-            print!("{E}[2J");
-        }
+        self.overlay = Some(Overlay::Help);
         self.last_frame.clear();
     }
 }
@@ -1276,6 +1360,16 @@ mod tests {
         // startup grace: no mirror has ever appeared yet
         assert!(!suicide(false, s(5), 9));
         assert!(suicide(false, s(30), 2)); // none ever came — give up
+    }
+
+    #[test]
+    fn a_replaced_daemon_stops_owning_the_panes() {
+        assert!(!superseded("client-7", "client-7"));
+        assert!(!superseded("client-7", "client-7\n")); // show-option keeps the newline
+        assert!(superseded("client-7", "client-9"));
+        assert!(!superseded("client-7", "")); // unset is not a claim
+        assert!(!superseded("", "client-9")); // we never published a name
+        assert!(!superseded("", ""));
     }
 
     #[test]
@@ -1347,6 +1441,20 @@ mod tests {
         // a shorter tag is the same as trailing zeros
         assert!(!newer_than("v0.1", "v0.1.0"));
         assert!(newer_than("v0.1.1", "v0.1"));
+    }
+
+    #[test]
+    fn picker_selection_survives_refreshes() {
+        let tags = vec!["v3".into(), "v2".into(), "v1".into()];
+        assert_eq!(picker_sel(&tags, "v2", None, 0), 1);
+
+        let reordered = vec!["v4".into(), "v3".into(), "v1".into(), "v2".into()];
+        assert_eq!(picker_sel(&reordered, "v2", Some("v1"), 2), 2);
+        assert_eq!(picker_sel(&reordered, "v2", Some("missing"), 1), 1);
+
+        let shrunk = vec!["v3".into()];
+        assert_eq!(picker_sel(&shrunk, "v2", Some("missing"), 9), 0);
+        assert_eq!(picker_sel(&[], "v2", None, 9), 0);
     }
 
     #[test]
