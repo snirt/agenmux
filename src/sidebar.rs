@@ -303,6 +303,18 @@ struct M {
 /// in a session nobody is looking at clip the list everywhere. Size to the
 /// mirror the user is actually watching — mirrors shorter than the frame clip
 /// themselves in mirror::draw.
+fn cursor_row(
+    rows: &[PaneRow],
+    selected: usize,
+    plugin_selected: bool,
+    active: &str,
+) -> Option<usize> {
+    if plugin_selected {
+        return selected.checked_sub(1).filter(|&i| i < rows.len());
+    }
+    rows.iter().position(|r| r.pane == active)
+}
+
 fn watched_height(ms: &[M], active_session: &str) -> usize {
     ms.iter()
         .find(|m| m.active && m.sess == active_session)
@@ -1118,6 +1130,7 @@ impl Sidebar {
         };
         let mut frame = format!("{E}[H{E}[1magents{E}[0m{notice}{E}[K\n{hint}{E}[K\n");
         let mut vis = String::new();
+        let cursor = cursor_row(&self.rows, self.sel, self.plugin_selected, &self.active);
         if self.rows.is_empty() {
             frame.push_str(&format!("{E}[2mno agents{E}[0m{E}[K\n"));
         } else {
@@ -1134,10 +1147,10 @@ impl Sidebar {
                     let sess_clipped: String = sess.chars().take(cols).collect();
                     lines.push((format!("{E}[1;34m{sess_clipped}{E}[0m{E}[K\n"), "-"));
                 }
-                if n + 1 == self.sel {
+                if Some(n) == cursor {
                     sel_top = lines.len();
                 }
-                let mark = cursor_mark(n + 1 == self.sel, self.plugin_selected);
+                let mark = cursor_mark(Some(n) == cursor, self.plugin_selected);
                 let dot = self.dot(&r.state);
                 let win = r.loc.splitn(2, ':').nth(1).unwrap_or("");
                 let mut rest = format!("{win} {}", r.cwd);
@@ -1154,21 +1167,25 @@ impl Sidebar {
                     let t: String = r.title.chars().take(cols.saturating_sub(4)).collect();
                     lines.push((format!("    {E}[2m{t}{E}[0m{E}[K\n"), &r.pane));
                 }
-                if n + 1 == self.sel {
+                if Some(n) == cursor {
                     sel_bot = lines.len() - 1;
                 }
             }
-            // selection's session header gives context — drag it into view
-            if sel_top > 0 && lines[sel_top - 1].1 == "-" {
-                sel_top -= 1;
+            // cursor's session header gives context — drag it into view
+            if cursor.is_some() {
+                if sel_top > 0 && lines[sel_top - 1].1 == "-" {
+                    sel_top -= 1;
+                }
+                if space > 0 {
+                    if sel_bot + 1 > self.scroll + space {
+                        self.scroll = sel_bot + 1 - space;
+                    }
+                    if sel_top < self.scroll {
+                        self.scroll = sel_top; // top wins when row + title exceed space
+                    }
+                }
             }
             if space > 0 {
-                if sel_bot + 1 > self.scroll + space {
-                    self.scroll = sel_bot + 1 - space;
-                }
-                if sel_top < self.scroll {
-                    self.scroll = sel_top; // top wins when row + title exceed space
-                }
                 self.scroll = self.scroll.min(lines.len().saturating_sub(space));
             } else {
                 self.scroll = 0;
@@ -1342,6 +1359,17 @@ impl Sidebar {
 mod tests {
     use super::*;
 
+    fn row(pane: &str) -> PaneRow {
+        PaneRow {
+            pane: pane.into(),
+            loc: "s:1.1".into(),
+            agent: "pi".into(),
+            state: "idle".into(),
+            cwd: "repo".into(),
+            title: String::new(),
+        }
+    }
+
     fn m(sess: &str, h: usize, active: bool) -> M {
         M {
             pane: "%1".into(),
@@ -1382,6 +1410,14 @@ mod tests {
         assert_eq!(cursor_mark(true, true), format!("{E}[1;32m❯{E}[0m "));
         assert_eq!(cursor_mark(true, false), format!("{E}[1m❯{E}[0m "));
         assert_eq!(cursor_mark(false, true), "  ");
+    }
+
+    #[test]
+    fn cursor_follows_focus_outside_navigation() {
+        let rows = [row("%1"), row("%2")];
+        assert_eq!(cursor_row(&rows, 1, false, "%2"), Some(1));
+        assert_eq!(cursor_row(&rows, 2, false, "%9"), None);
+        assert_eq!(cursor_row(&rows, 2, true, "%1"), Some(1));
     }
 
     #[test]

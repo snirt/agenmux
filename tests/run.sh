@@ -656,22 +656,23 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   help_frame="$($T capture-pane -p -t "$mir")"
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key space
   sleep 1
-  list_before="$($T capture-pane -p -t "$mir" | sed -n '/❯/p' | head -n 1)"
+  list_before="$($T capture-pane -p -t "$mir")"
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key versions
   sleep 3
   vers_alive="$(mirrors)"
   vers_frame="$($T capture-pane -p -t "$mir")"
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key close
   sleep 1
-  list_after="$($T capture-pane -p -t "$mir" | sed -n '/❯/p' | head -n 1)"
+  list_after="$($T capture-pane -p -t "$mir")"
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key j
   sleep 1
-  list_moved="$($T capture-pane -p -t "$mir" | sed -n '/❯/p' | head -n 1)"
+  list_moved="$($T capture-pane -p -t "$mir")"
   if [ "$opened" -eq 2 ] && [ "$help_alive" -eq 2 ] && [ "$vers_alive" -eq 2 ] \
      && printf '%s\n' "$help_frame" | grep -Fq 'agents — help' \
      && printf '%s\n' "$vers_frame" | grep -Fq 'agents — versions' \
-     && [ -n "$list_before" ] && [ "$list_after" = "$list_before" ] \
-     && [ -n "$list_moved" ] && [ "$list_moved" != "$list_after" ]; then
+     && printf '%s\n' "$list_before" | grep -Fq codex \
+     && [ "$list_after" = "$list_before" ] \
+     && ! printf '%s\n' "$list_moved" | grep -Fq '❯'; then
     echo "ok   overlays-render-in-processless-panes"
   else
     echo "FAIL overlays-render-in-processless-panes: opened=$opened help=$help_alive versions=$vers_alive list=[$list_before/$list_after/$list_moved]"
