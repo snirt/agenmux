@@ -33,6 +33,16 @@ case "$target" in
 esac
 case "$target" in
   %*)
+    # Clear navigator state before this persistent sidebar follows the click
+    # target, using its native FIFO or pane stdin.
+    if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ]; then
+      BIN="$(tmux show-option -gqv @agents-mon-bin)"
+      [ -n "$BIN" ] || BIN="$DIR/target/release/agents-mon"
+      [ ! -x "$BIN" ] || "$BIN" key all >/dev/null 2>&1
+    else
+      # private clear-and-blur control understood in both fallback input modes
+      tmux send-keys -t "$pane" C-l
+    fi
     # relocate the sidebar off-screen first — no visible reflow after switch
     bash "$DIR/scripts/follow.sh" "$target"
     tmux switch-client -c "$client" -t "$target" 2>/dev/null

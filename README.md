@@ -75,7 +75,7 @@ When a newer release exists, the sidebar header says so, and says what to do:
 
 ```
 agents ↑0.1.8
-press u to update
+u update · / search
 ```
 
 Press `u` to open the version picker, choose a release, and press `Enter`.
@@ -110,9 +110,15 @@ Details worth knowing:
   switch rather than one per row. The wheel in regular panes keeps tmux's
   default scrollback behavior
 - In the sidebar: `j`/`k` or `↑`/`↓` move the `❯` cursor, `Enter` or `l` jumps to
-  the selected agent, `u` opens the [version picker](#updating), `?` shows help
-  (statuses + keys), `q`/`Esc` closes the sidebar;
-  the `❯` cursor is green while navigation is active, long lists scroll to keep
+  the selected agent, and sidebar filtering uses `/` for live text search,
+  `b`/`w`/`i`/`d` for blocked/working/idle/done, and `a` for all agents. During
+  search, type normally, use `↑`/`↓` or `Ctrl-N`/`Ctrl-P` to move, `Ctrl-U` to
+  clear, and `Esc` to return while keeping the query. State and text filters are
+  mutually exclusive. `u` opens the [version picker](#updating), `?` shows help
+  (statuses + keys), and `q`/`Esc` closes the sidebar;
+  matching a session keeps all its agent rows as context, active filters and
+  matching/total counts appear in the header, the `❯` cursor is green while
+  navigation is active, long lists scroll to keep
   the selection visible, and the cursor snaps to whichever agent pane currently
   has focus (instantly with the Rust engine — it reacts to tmux focus events)
 - Add `#{agents_mon}` anywhere in `status-right`/`status-left` for the compact
