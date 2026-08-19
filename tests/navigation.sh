@@ -242,7 +242,9 @@ for _ in $(seq 1 40); do
   empty_click_cursor="$(tmux -S "$sock" capture-pane -e -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
   case "$empty_click_cursor" in
-    *$'\033['*'32m❯'*) empty_click_green=1 ;;
+    # the cursor row also carries a state background, so the green may sit a
+    # sequence away from the mark
+    *$'\033['*'32m'*'❯'*) empty_click_green=1 ;;
   esac
   if [ "$empty_click_table" = agents-mon ] \
     && [ "$empty_click_focus" = "$sidebar" ] \

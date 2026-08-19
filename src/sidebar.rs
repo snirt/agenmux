@@ -31,16 +31,42 @@ extern "C" fn on_term(_: libc::c_int) {
 }
 
 pub(crate) const E: &str = "\x1b";
+/// Focused-sidebar title bar: one step lighter than a dark terminal background.
+const BAR_BG: &str = "\x1b[48;5;236m";
 const SPIN: [char; 8] = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
 
-fn cursor_mark(selected: bool, plugin_selected: bool) -> String {
+fn state_bg(state: &str, focused: bool) -> &'static str {
+    match (state, focused) {
+        ("blocked", true) => "\x1b[48;2;42;16;16m",
+        ("blocked", false) => "\x1b[48;2;32;12;12m",
+        ("working", true) => "\x1b[48;2;38;32;16m",
+        ("working", false) => "\x1b[48;2;29;24;12m",
+        (_, true) => "\x1b[48;2;15;36;16m",
+        (_, false) => "\x1b[48;2;11;27;12m",
+    }
+}
+
+fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
+    if bg.is_empty() {
+        return line.into();
+    }
+    let body = line.replace(&format!("{E}[0m"), &format!("{E}[0m{bg}"));
+    format!("{bg}{body}{}{E}[0m", " ".repeat(cols.saturating_sub(width)))
+}
+
+fn cursor_mark(selected: bool, plugin_selected: bool, state: &str) -> String {
     if !selected {
         return "  ".into();
     }
+    let fg = match state {
+        "blocked" => 31,
+        "working" => 33,
+        _ => 32,
+    };
     if plugin_selected {
-        format!("{E}[1;32m❯{E}[0m ")
+        format!("{E}[1;{fg}m❯{E}[0m ")
     } else {
-        format!("{E}[1m❯{E}[0m ")
+        format!("{E}[{fg}m❯{E}[0m ")
     }
 }
 
@@ -1437,8 +1463,14 @@ impl Sidebar {
         let hint: String = hint.chars().take(cols).collect();
         let has_hint = !hint.is_empty();
         let space = cap.saturating_sub(1 + usize::from(has_hint));
+        let (hdr, hdr_pad) = if self.plugin_selected {
+            let used = 6 + filter.chars().count() + notice_len;
+            (BAR_BG, " ".repeat(cols.saturating_sub(used)))
+        } else {
+            ("", String::new())
+        };
         let mut frame = format!(
-            "{E}[H{E}[1magents{E}[0m{E}[2m{filter}{E}[0m{notice}{E}[K\n"
+            "{E}[H{hdr}{E}[1magents{E}[22m{E}[2m{filter}{E}[22m{notice}{hdr_pad}{E}[0m{E}[K\n"
         );
         let mut vis = String::new();
         if has_hint {
@@ -1474,22 +1506,35 @@ impl Sidebar {
                 if Some(n) == cursor {
                     sel_top = lines.len();
                 }
-                let mark = cursor_mark(Some(n) == cursor, self.plugin_selected);
+                let selected = Some(n) == cursor;
+                let mark = cursor_mark(selected, self.plugin_selected, &r.state);
                 let dot = self.dot(&r.state);
                 let win = r.loc.splitn(2, ':').nth(1).unwrap_or("");
                 let mut rest = format!("{win} {}", r.cwd);
                 let agent_len = r.agent.chars().count();
-                let avail = cols.saturating_sub(5 + agent_len);
+                let avail = cols.saturating_sub(6 + agent_len);
                 if avail > 0 {
                     rest = rest.chars().take(avail).collect();
                 }
+                let row_bg = if selected {
+                    state_bg(&r.state, self.plugin_selected)
+                } else {
+                    ""
+                };
+                let row = format!(" {mark}{dot} {E}[1m{}{E}[0m {E}[2m{rest}{E}[0m", r.agent);
+                let width = 6 + agent_len + rest.chars().count();
                 lines.push((
-                    format!("{mark}{dot} {E}[1m{}{E}[0m {E}[2m{rest}{E}[0m{E}[K\n", r.agent),
+                    format!("{}{E}[K\n", bar(&row, row_bg, cols, width)),
                     &r.pane,
                 ));
                 if !r.title.is_empty() {
-                    let t: String = r.title.chars().take(cols.saturating_sub(4)).collect();
-                    lines.push((format!("    {E}[2m{t}{E}[0m{E}[K\n"), &r.pane));
+                    let t: String = r.title.chars().take(cols.saturating_sub(5)).collect();
+                    let line = format!("     {E}[2m{t}{E}[0m");
+                    let width = 5 + t.chars().count();
+                    lines.push((
+                        format!("{}{E}[K\n", bar(&line, row_bg, cols, width)),
+                        &r.pane,
+                    ));
                 }
                 if Some(n) == cursor {
                     sel_bot = lines.len() - 1;
@@ -1585,7 +1630,7 @@ impl Sidebar {
                     ));
                 } else {
                     for (i, t) in tags.iter().enumerate() {
-                        let mark = cursor_mark(i == *sel, true);
+                        let mark = cursor_mark(i == *sel, true, "idle");
                         let tail = if *t == cur {
                             format!(" {E}[2m(current){E}[0m")
                         } else {
@@ -1733,10 +1778,11 @@ mod tests {
     }
 
     #[test]
-    fn cursor_is_green_only_while_plugin_is_selected() {
-        assert_eq!(cursor_mark(true, true), format!("{E}[1;32m❯{E}[0m "));
-        assert_eq!(cursor_mark(true, false), format!("{E}[1m❯{E}[0m "));
-        assert_eq!(cursor_mark(false, true), "  ");
+    fn cursor_uses_state_hue_and_focus_bold() {
+        assert_eq!(cursor_mark(true, true, "idle"), format!("{E}[1;32m❯{E}[0m "));
+        assert_eq!(cursor_mark(true, false, "idle"), format!("{E}[32m❯{E}[0m "));
+        assert_eq!(cursor_mark(true, true, "working"), format!("{E}[1;33m❯{E}[0m "));
+        assert_eq!(cursor_mark(false, true, "blocked"), "  ");
     }
 
     #[test]
@@ -1866,6 +1912,19 @@ mod tests {
         std::fs::write(&file, "garbage\n").unwrap();
         assert_eq!(update_available(&dir), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bar_reasserts_the_background_after_every_reset() {
+        let line = format!("{E}[1mcodex{E}[0m {E}[2mwork{E}[0m");
+        let painted = bar(&line, BAR_BG, 14, 10);
+        assert!(!painted.split(&format!("{E}[0m")).any(|part| {
+            !part.is_empty() && !part.starts_with(BAR_BG)
+        }));
+        assert!(painted.ends_with(&format!("    {E}[0m")));
+        assert_eq!(bar(&line, "", 14, 10), line);
+        assert_eq!(state_bg("blocked", true), "\x1b[48;2;42;16;16m");
+        assert_eq!(state_bg("blocked", false), "\x1b[48;2;32;12;12m");
     }
 
     #[test]

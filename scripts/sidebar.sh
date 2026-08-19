@@ -30,6 +30,9 @@ printf '\033[?25l\033[2J'
 : > "$STATE_FILE"
 
 E=$'\033'
+# Focused-sidebar title bar: one step lighter than a dark terminal background.
+# 234-239 walk the same greyscale if this reads too heavy.
+BAR_BG=$'\033[48;5;236m'
 C_C=$'\003'
 C_D=$'\004'
 C_L=$'\014'
@@ -52,7 +55,7 @@ newer() { [ "$(printf '%s\n%s\n' "${1#v}" "${2#v}" | sort -V | tail -n 1)" = "${
 case "$LATEST" in
   v[0-9]*)
     if newer "$LATEST" "$VERSION"; then
-      NOTICE=" $E[2m↑${LATEST#v}$E[0m"
+      NOTICE=" $E[2m↑${LATEST#v}$E[22m"
       NOTICE_LEN=$((2 + ${#LATEST} - 1))
       # shown as a contextual row when no search/status filter is active
       HINT="$E[2mpress u to update$E[0m"
@@ -144,6 +147,27 @@ clear_filter() {
   apply_filters
 }
 
+# Paint a selected row with a state-colored background, reasserting it after
+# embedded resets and padding it to the pane edge.
+state_bg() {
+  case "$1${2:+-focused}" in
+    blocked-focused) row_bg=$'\033[48;2;42;16;16m' ;;
+    blocked) row_bg=$'\033[48;2;32;12;12m' ;;
+    working-focused) row_bg=$'\033[48;2;38;32;16m' ;;
+    working) row_bg=$'\033[48;2;29;24;12m' ;;
+    *-focused) row_bg=$'\033[48;2;15;36;16m' ;;
+    *) row_bg=$'\033[48;2;11;27;12m' ;;
+  esac
+}
+
+bar() {
+  [ -n "$3" ] || return 0
+  local body="${1//"$E[0m"/"$E[0m$3"}" width=$((cols - $2))
+  line="$3$body"
+  [ "$width" -gt 0 ] && line="$line$(printf '%*s' "$width" '')"
+  line="$line$E[0m"
+}
+
 color_dot() { # sets $dot — no subshell, render runs hot
   case "$1" in
     blocked) # blink on/off every 2 ticks (~0.5s)
@@ -209,7 +233,8 @@ EOF
 
 render() {
   local frame n=0 pane loc agent state cwd title mark cols rows cap used rest avail
-  local client active idx filter_info="" header_hint room
+  local client active idx filter_info="" header_hint room fg row_bg line clipped
+  local hdr="" pad="" width
   # tput can report the client size, not the pane's — ask tmux directly
   IFS=' ' read -r cols rows <<EOF
 $(tmux display-message -p -t "${TMUX_PANE:-}" '#{pane_width} #{pane_height}' 2>/dev/null)
@@ -251,7 +276,14 @@ EOF
     header_hint=''
   fi
   header_hint="${header_hint:0:cols}"
-  frame="$E[H$E[1magents$E[0m$E[2m$filter_info$E[0m$NOTICE$E[K$NL"
+  # focused sidebar wears a title bar; pad it because $E[K clears to the
+  # default background instead of carrying this one to the pane edge.
+  if [ -n "${AGENTS_MON_PIN:-}" ] || [ "$active" = "${TMUX_PANE:-}" ]; then
+    hdr="$BAR_BG"
+    width=$((cols - 6 - ${#filter_info} - NOTICE_LEN))
+    [ "$width" -gt 0 ] && pad="$(printf '%*s' "$width" '')"
+  fi
+  frame="$E[H$hdr$E[1magents$E[22m$E[2m$filter_info$E[22m$NOTICE$pad$E[0m$E[K$NL"
   # rows file mirrors visual lines below y=0; "-" marks non-agent rows.
   local vis="" session="" used=1
   if [ -n "$header_hint" ]; then
@@ -267,32 +299,41 @@ EOF
     while IFS=$'\t' read -r pane loc agent state cwd title; do
       [ -n "$pane" ] || continue
       if [ "${loc%%:*}" != "$session" ]; then
-        [ $((used + 2)) -gt "$cap" ] && break  # no room for header + record
+        [ $((used + 2)) -gt "$cap" ] && break
         session="${loc%%:*}"
         frame="$frame$E[1;34m${session:0:cols}$E[0m$E[K$NL"
         vis="$vis-$NL"
         used=$((used + 1))
       fi
-      [ "$used" -ge "$cap" ] && break  # pane full — clip, never scroll
+      [ "$used" -ge "$cap" ] && break
       n=$((n + 1))
       if [ "$n" = "$sel" ]; then
+        case "$state" in blocked) fg=31 ;; working) fg=33 ;; *) fg=32 ;; esac
         if [ -n "${AGENTS_MON_PIN:-}" ] || [ "$active" = "${TMUX_PANE:-}" ]; then
-          mark="$E[1;32m❯$E[0m "
+          mark="$E[1;${fg}m❯$E[0m "
+          state_bg "$state" focused
         else
-          mark="$E[1m❯$E[0m "
+          mark="$E[${fg}m❯$E[0m "
+          state_bg "$state"
         fi
       else
         mark="  "
+        row_bg=""
       fi
       color_dot "$state"
-      rest="${loc#*:} $cwd"                      # window.pane + dir
-      avail=$((cols - 5 - ${#agent}))            # "❯ ● name " prefix
+      rest="${loc#*:} $cwd"
+      avail=$((cols - 6 - ${#agent}))
       [ "$avail" -gt 0 ] && rest="${rest:0:$avail}"
-      frame="$frame$mark$dot $E[1m$agent$E[0m $E[2m$rest$E[0m$E[K$NL"
+      line=" $mark$dot $E[1m$agent$E[0m $E[2m$rest$E[0m"
+      bar "$line" $((6 + ${#agent} + ${#rest})) "$row_bg"
+      frame="$frame$line$E[K$NL"
       vis="$vis$pane$NL"
       used=$((used + 1))
-      if [ -n "$title" ] && [ "$used" -lt "$cap" ]; then  # subject line under the record
-        frame="$frame    $E[2m${title:0:cols - 4}$E[0m$E[K$NL"
+      if [ -n "$title" ] && [ "$used" -lt "$cap" ]; then
+        clipped="${title:0:cols-5}"
+        line="     $E[2m$clipped$E[0m"
+        bar "$line" $((5 + ${#clipped})) "$row_bg"
+        frame="$frame$line$E[K$NL"
         vis="$vis$pane$NL"
         used=$((used + 1))
       fi
