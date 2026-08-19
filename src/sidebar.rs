@@ -133,6 +133,35 @@ pub(crate) fn read_byte(fd: libc::c_int) -> Option<u8> {
     (n == 1).then_some(b[0])
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StateFilter {
+    Blocked,
+    Working,
+    Idle,
+    Done,
+}
+
+impl StateFilter {
+    fn label(self) -> &'static str {
+        match self {
+            StateFilter::Blocked => "blocked",
+            StateFilter::Working => "working",
+            StateFilter::Idle => "idle",
+            StateFilter::Done => "done",
+        }
+    }
+
+    fn cycle(current: Option<Self>) -> Option<Self> {
+        match current {
+            None => Some(Self::Blocked),
+            Some(Self::Blocked) => Some(Self::Working),
+            Some(Self::Working) => Some(Self::Idle),
+            Some(Self::Idle) => Some(Self::Done),
+            Some(Self::Done) => None,
+        }
+    }
+}
+
 enum Key {
     Up,
     Down,
@@ -141,6 +170,12 @@ enum Key {
     Close,
     Help,
     Versions,
+    Search,
+    Backspace,
+    ClearSearch,
+    CycleState,
+    AllStates,
+    Text(String),
     Other,
 }
 
@@ -162,6 +197,19 @@ fn read_key(fd: libc::c_int) -> Key {
         b'l' | b'\r' | b'\n' => Key::Jump,
         b'?' => Key::Help,
         b'u' => Key::Versions,
+        b'/' => Key::Search,
+        b'f' => Key::CycleState,
+        0x0c => Key::AllStates, // private clear packet used by tmux/click helpers
+        0x08 | 0x7f => Key::Backspace,
+        0x15 => Key::ClearSearch,
+        // Search-table printable keys use a NUL-prefixed packet so normal-mode
+        // actions such as `j`, `q`, and `f` remain query text while typing.
+        0x00 => poll_fd(fd, Some(Duration::from_millis(50)))
+            .then(|| read_byte(fd))
+            .flatten()
+            .filter(|b| (0x20..=0x7e).contains(b))
+            .map(|b| Key::Text(char::from(b).to_string()))
+            .unwrap_or(Key::Other),
         // Every byte of the tail goes through the same polling reader. In mirror
         // mode keys arrive over a non-blocking FIFO that the key sender feeds one
         // byte at a time, so the tail is routinely still in flight; reading it
@@ -175,24 +223,83 @@ fn read_key(fd: libc::c_int) -> Key {
     }
 }
 
+/// Popup/tty search owns printable input. Daemon search receives printable
+/// bytes through NUL-prefixed packets decoded by read_key instead.
+fn read_search_key(fd: libc::c_int) -> Key {
+    let Some(first) = read_byte(fd) else { return Key::Quit };
+    match first {
+        b'\r' | b'\n' => Key::Jump,
+        0x03 | 0x04 => Key::Quit,
+        0x08 | 0x7f => Key::Backspace,
+        0x15 => Key::ClearSearch,
+        0x0e => Key::Down, // Ctrl-N
+        0x10 => Key::Up,   // Ctrl-P
+        0x1b => escape_key(|| {
+            poll_fd(fd, Some(Duration::from_millis(50)))
+                .then(|| read_byte(fd))
+                .flatten()
+        }),
+        b if b >= 0x20 => {
+            let len = if b < 0x80 {
+                1
+            } else if b & 0xe0 == 0xc0 {
+                2
+            } else if b & 0xf0 == 0xe0 {
+                3
+            } else if b & 0xf8 == 0xf0 {
+                4
+            } else {
+                return Key::Other;
+            };
+            let mut bytes = vec![b];
+            for _ in 1..len {
+                let Some(next) = poll_fd(fd, Some(Duration::from_millis(50)))
+                    .then(|| read_byte(fd))
+                    .flatten()
+                else {
+                    return Key::Other;
+                };
+                bytes.push(next);
+            }
+            String::from_utf8(bytes).map(Key::Text).unwrap_or(Key::Other)
+        }
+        _ => Key::Other,
+    }
+}
+
 /// Deliver one key-table action to the daemon without waiting for a FIFO
 /// reader. Each invocation is intentionally short-lived; the daemon remains
 /// the only persistent agents-mon process.
 pub fn send_key(name: &str) -> i32 {
-    let bytes: &[u8] = match name {
-        "up" => b"\x1b[A",
-        "down" => b"\x1b[B",
-        "enter" => b"\r",
-        "escape" => b"\x1b",
-        "space" => b" ",
-        "j" => b"j",
-        "k" => b"k",
-        "l" => b"l",
-        "q" => b"q",
-        "close" => b"Q",
-        "help" => b"?",
-        "versions" => b"u",
-        _ => return 2,
+    let bytes: Vec<u8> = if let Some(hex) = name.strip_prefix("text-") {
+        let Ok(byte) = u8::from_str_radix(hex, 16) else {
+            return 2;
+        };
+        if !(0x20..=0x7e).contains(&byte) {
+            return 2;
+        }
+        vec![0, byte]
+    } else {
+        match name {
+            "up" => b"\x1b[A".to_vec(),
+            "down" => b"\x1b[B".to_vec(),
+            "enter" => b"\r".to_vec(),
+            "escape" => b"\x1b".to_vec(),
+            "backspace" => vec![0x7f],
+            "clear-search" => vec![0x15],
+            "search" => b"/".to_vec(),
+            "filter" => b"f".to_vec(),
+            "all" => vec![0x0c],
+            "space" => b" ".to_vec(),
+            "j" => b"j".to_vec(),
+            "k" => b"k".to_vec(),
+            "l" => b"l".to_vec(),
+            "q" => b"q".to_vec(),
+            "close" => b"Q".to_vec(),
+            "help" => b"?".to_vec(),
+            "versions" => b"u".to_vec(),
+            _ => return 2,
+        }
     };
     let path = std::env::temp_dir().join("agents-mon-keys");
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
@@ -208,9 +315,9 @@ pub fn send_key(name: &str) -> i32 {
 }
 
 /// Decode the tail of an escape sequence. `next` yields the next byte, or None
-/// once nothing more arrives — a bare Esc, which closes.
+/// once nothing more arrives — a bare Esc, which clears filtering.
 fn escape_key(mut next: impl FnMut() -> Option<u8>) -> Key {
-    let Some(a) = next() else { return Key::Quit };
+    let Some(a) = next() else { return Key::AllStates };
     // CSI (ESC [ A) normally, SS3 (ESC O A) in application-cursor mode
     match (a, next()) {
         (b'[' | b'O', Some(b'A')) => Key::Up,
@@ -303,16 +410,62 @@ struct M {
 /// in a session nobody is looking at clip the list everywhere. Size to the
 /// mirror the user is actually watching — mirrors shorter than the frame clip
 /// themselves in mirror::draw.
+fn row_filter_text(row: &PaneRow) -> String {
+    format!(
+        "{} {} {} {} {}",
+        row.agent, row.loc, row.cwd, row.title, row.state
+    )
+    .to_lowercase()
+}
+
+/// Filter projection: status matching is exact and separate from text search.
+/// Matching a session keeps its whole agent subtree as context;
+/// matching an agent keeps that session's header through normal rendering.
+fn filtered_indices(
+    rows: &[PaneRow],
+    query: &str,
+    state_filter: Option<StateFilter>,
+) -> Vec<usize> {
+    if let Some(filter) = state_filter {
+        return rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.state == filter.label())
+            .map(|(i, _)| i)
+            .collect();
+    }
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return (0..rows.len()).collect();
+    }
+    let matching_sessions: HashSet<&str> = rows
+        .iter()
+        .filter_map(|row| {
+            let session = row.loc.split(':').next().unwrap_or("");
+            session.to_lowercase().contains(&query).then_some(session)
+        })
+        .collect();
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            let session = row.loc.split(':').next().unwrap_or("");
+            matching_sessions.contains(session) || row_filter_text(row).contains(&query)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 fn cursor_row(
     rows: &[PaneRow],
+    visible: &[usize],
     selected: usize,
     plugin_selected: bool,
     active: &str,
 ) -> Option<usize> {
     if plugin_selected {
-        return selected.checked_sub(1).filter(|&i| i < rows.len());
+        return selected.checked_sub(1).filter(|&i| i < visible.len());
     }
-    rows.iter().position(|r| r.pane == active)
+    visible.iter().position(|&i| rows[i].pane == active)
 }
 
 fn watched_height(ms: &[M], active_session: &str) -> usize {
@@ -368,8 +521,12 @@ pub struct Sidebar {
     ident: IdentCache,
     subj: scan::SubjectCache,
     tracker: Tracker,
-    rows: Vec<PaneRow>, // debounced view-model
-    sel: usize,         // 1-based like the bash script
+    rows: Vec<PaneRow>,   // complete debounced view-model; never filter cache/status
+    visible: Vec<usize>,  // filtered indexes used by render/navigation/clicks
+    query: String,
+    state_filter: Option<StateFilter>,
+    search_focused: bool,
+    sel: usize,           // 1-based index into visible, like the bash script
     scroll: usize,      // first visible list line — follows the selection
     sel_pane: String,
     last_active: String,
@@ -410,6 +567,10 @@ fn new_sidebar(
         subj: scan::SubjectCache::new(),
         tracker: Tracker::default(),
         rows: Vec::new(),
+        visible: Vec::new(),
+        query: String::new(),
+        state_filter: None,
+        search_focused: false,
         sel: 1,
         scroll: 0,
         sel_pane: String::new(),
@@ -434,6 +595,7 @@ fn new_sidebar(
         sb.rows = scan::from_tsv(&tsv);
         sb.rows.retain(|r| r.pane != sb.self_pane);
     }
+    sb.rebuild_visible(false);
     sb
 }
 
@@ -596,10 +758,12 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             now = Instant::now();
             next_scan = now + Duration::from_secs(2);
         }
-        let animating = sb
-            .rows
-            .iter()
-            .any(|r| matches!(r.state.as_str(), "working" | "blocked" | "done"));
+        let animating = sb.visible.iter().any(|&i| {
+            matches!(
+                sb.rows[i].state.as_str(),
+                "working" | "blocked" | "done"
+            )
+        });
         // deadline-based tick: held keys keep poll_inputs returning early, so
         // advancing on poll timeout would freeze the spinner during key repeat
         if animating && now >= next_tick {
@@ -624,9 +788,18 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             }
         }
         if key_ready {
-            let key = read_key(key_fd);
+            let key = if sb.search_focused && sb.daemon.is_none() {
+                read_search_key(key_fd)
+            } else {
+                read_key(key_fd)
+            };
             if sb.overlay.is_some() {
                 sb.overlay_key(key);
+                sb.render(false);
+                continue;
+            }
+            if sb.search_focused {
+                sb.search_key(key);
                 sb.render(false);
                 continue;
             }
@@ -640,9 +813,12 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 }
                 Key::Help => sb.help(),
                 Key::Versions => sb.versions(),
+                Key::Search => sb.focus_search(),
+                Key::CycleState => sb.cycle_state_filter(),
+                Key::AllStates => sb.clear_filter(),
                 Key::Quit => {
                     if sb.daemon.is_none() {
-                        // Popup/tty mode owns stdin, so q/Esc still closes it.
+                        // Popup/tty mode owns stdin, so q/Ctrl-C/Ctrl-D closes it.
                         if let Some(p) = &sb.pin {
                             let _ = std::fs::remove_file(p);
                         }
@@ -655,7 +831,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 Key::Close => {
                     break;
                 }
-                Key::Other => {}
+                Key::Backspace | Key::ClearSearch | Key::Text(_) | Key::Other => {}
             }
             sb.render(false);
         }
@@ -722,11 +898,15 @@ impl Sidebar {
         for event in &update.events {
             let _ = crate::notifications::deliver(&mut self.tmux, event);
         }
-        self.clamp_sel();
-        self.restore_sel();
-        // single cursor: focus landing on an agent pane snaps selection to it
+        self.rebuild_visible(false);
+        // single cursor: focus landing on a visible agent pane snaps selection
+        // to it; active filters never select a row they intentionally hid
         if !self.active.is_empty() && self.active != self.last_active {
-            if let Some(i) = self.rows.iter().position(|r| r.pane == self.active) {
+            if let Some(i) = self
+                .visible
+                .iter()
+                .position(|&i| self.rows[i].pane == self.active)
+            {
                 self.sel = i + 1;
                 self.sel_pane = self.active.clone();
             }
@@ -759,8 +939,8 @@ impl Sidebar {
     }
 
     fn clamp_sel(&mut self) {
-        if self.sel > self.rows.len() {
-            self.sel = self.rows.len();
+        if self.sel > self.visible.len() {
+            self.sel = self.visible.len();
         }
         if self.sel < 1 {
             self.sel = 1;
@@ -769,19 +949,25 @@ impl Sidebar {
 
     fn sync_sel_pane(&mut self) {
         self.sel_pane = self
-            .rows
+            .visible
             .get(self.sel.wrapping_sub(1))
+            .and_then(|&i| self.rows.get(i))
             .map(|r| r.pane.clone())
             .unwrap_or_default();
     }
 
     fn restore_sel(&mut self) {
-        // after a rescan, follow the remembered pane's new position
+        // after a rescan/filter, follow the remembered pane when it remains
+        // visible; otherwise keep the nearest valid result
         if self.sel_pane.is_empty() {
             self.sync_sel_pane();
             return;
         }
-        match self.rows.iter().position(|r| r.pane == self.sel_pane) {
+        match self
+            .visible
+            .iter()
+            .position(|&i| self.rows[i].pane == self.sel_pane)
+        {
             Some(i) => self.sel = i + 1,
             None => {
                 self.clamp_sel();
@@ -790,11 +976,84 @@ impl Sidebar {
         }
     }
 
+    fn rebuild_visible(&mut self, select_first: bool) {
+        self.visible = filtered_indices(&self.rows, &self.query, self.state_filter);
+        if select_first {
+            self.sel = 1;
+            self.sync_sel_pane();
+        } else {
+            self.clamp_sel();
+            self.restore_sel();
+        }
+        if self.visible.is_empty() {
+            self.sel_pane.clear();
+        }
+        self.scroll = 0;
+    }
+
+    fn focus_search(&mut self) {
+        self.state_filter = None;
+        self.search_focused = true;
+        self.rebuild_visible(false);
+    }
+
+    fn cycle_state_filter(&mut self) {
+        self.query.clear();
+        self.state_filter = StateFilter::cycle(self.state_filter);
+        self.search_focused = false;
+        self.rebuild_visible(true);
+    }
+
+    fn clear_filter(&mut self) {
+        self.query.clear();
+        self.state_filter = None;
+        self.search_focused = false;
+        self.rebuild_visible(false);
+    }
+
+    fn search_key(&mut self, key: Key) {
+        match key {
+            Key::Quit | Key::Close => self.clear_filter(),
+            // First Enter accepts query and hands j/k back to filtered
+            // navigation. Enter in normal mode then jumps to selection.
+            Key::Jump => self.search_focused = false,
+            Key::Down => self.move_sel(1),
+            Key::Up => self.move_sel(-1),
+            Key::Backspace => {
+                self.state_filter = None;
+                self.query.pop();
+                self.rebuild_visible(true);
+            }
+            Key::ClearSearch => {
+                self.query.clear();
+                self.state_filter = None;
+                self.rebuild_visible(false);
+            }
+            Key::Text(text) => {
+                self.state_filter = None;
+                let room = 256usize.saturating_sub(self.query.chars().count());
+                self.query.extend(
+                    text.chars()
+                        .filter(|c| !c.is_control())
+                        .take(room),
+                );
+                self.rebuild_visible(true);
+            }
+            Key::AllStates => self.clear_filter(),
+            Key::Search
+            | Key::CycleState
+            | Key::Help
+            | Key::Versions
+            | Key::Other => {}
+        }
+    }
+
     /// true = exit the loop (popup jump hands off to toggle.sh)
     fn jump(&mut self) -> bool {
         let Some(target) = self
-            .rows
+            .visible
             .get(self.sel.wrapping_sub(1))
+            .and_then(|&i| self.rows.get(i))
             .map(|r| r.pane.clone())
         else {
             return false;
@@ -802,6 +1061,9 @@ impl Sidebar {
         if !target.starts_with('%') {
             return false;
         }
+        // This sidebar stays mounted after a jump, so clear its transient
+        // navigator state before leaving.
+        self.clear_filter();
         if let Some(pin) = &self.pin {
             // popup holds the client — hand the target to toggle.sh, which
             // jumps after the popup closes
@@ -838,7 +1100,20 @@ impl Sidebar {
             });
         let mut cmd = std::process::Command::new("tmux");
         if let Some(client) = &client {
-            cmd.args(["switch-client", "-c", client, "-t", &target, ";"]);
+            cmd.args([
+                "switch-client",
+                "-c",
+                client,
+                "-t",
+                &target,
+                ";",
+                "switch-client",
+                "-c",
+                client,
+                "-T",
+                "root",
+                ";",
+            ]);
         }
         let _ = cmd
             .args(["select-window", "-t", &target, ";", "select-pane", "-t", &target])
@@ -1114,31 +1389,80 @@ impl Sidebar {
             None => term_size(),
         };
         let cap = trows.saturating_sub(1); // last row's newline would scroll
-        let space = cap.saturating_sub(2); // header + blank line
 
-        // update notice rides the header, never a list line: rows below it map
-        // to panes by line number (see vis/rows_file), an extra row would shift
-        // every click by one
-        // the hint goes on the blank line that already sits under the header,
-        // so the frame keeps exactly two lines above the list either way
-        let (notice, hint) = match &self.update {
-            Some(t) => (
-                format!(" {E}[2m↑{}{E}[0m", t.trim_start_matches('v')),
-                format!("{E}[2mpress u to update{E}[0m"),
-            ),
-            None => (String::new(), String::new()),
+        // Update notice rides the header. Nonempty contextual/update hints add
+        // one row; vis records it so mouse coordinates stay exact.
+        let (notice, notice_len, update_hint) = match &self.update {
+            Some(t) => {
+                let plain = format!(" ↑{}", t.trim_start_matches('v'));
+                (
+                    format!(" {E}[2m↑{}{E}[0m", t.trim_start_matches('v')),
+                    plain.chars().count(),
+                    "u update · / search".to_string(),
+                )
+            }
+            None => (String::new(), 0, String::new()),
         };
-        let mut frame = format!("{E}[H{E}[1magents{E}[0m{notice}{E}[K\n{hint}{E}[K\n");
+        let filtering = self.state_filter.is_some() || !self.query.trim().is_empty();
+        let mut filter = match self.state_filter {
+            Some(state) => format!(" [{}]", state.label()),
+            None if self.search_focused || !self.query.is_empty() => {
+                let query: String = self
+                    .query
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .collect();
+                format!(" /{query}")
+            }
+            None => String::new(),
+        };
+        if filtering {
+            filter.push_str(&format!(" {}/{}", self.visible.len(), self.rows.len()));
+        }
+        let filter: String = filter
+            .chars()
+            .take(cols.saturating_sub(6 + notice_len))
+            .collect();
+        let hint = if self.search_focused {
+            "↵ nav · ^u clear · esc clear"
+        } else if self.state_filter.is_some() {
+            "f status · j/k · esc clear"
+        } else if !self.query.trim().is_empty() {
+            "j/k · ↵ open · esc clear"
+        } else if !update_hint.is_empty() {
+            &update_hint
+        } else {
+            ""
+        };
+        let hint: String = hint.chars().take(cols).collect();
+        let has_hint = !hint.is_empty();
+        let space = cap.saturating_sub(1 + usize::from(has_hint));
+        let mut frame = format!(
+            "{E}[H{E}[1magents{E}[0m{E}[2m{filter}{E}[0m{notice}{E}[K\n"
+        );
         let mut vis = String::new();
-        let cursor = cursor_row(&self.rows, self.sel, self.plugin_selected, &self.active);
+        if has_hint {
+            frame.push_str(&format!("{E}[2m{hint}{E}[0m{E}[K\n"));
+            vis.push_str("-\n");
+        }
+        let cursor = cursor_row(
+            &self.rows,
+            &self.visible,
+            self.sel,
+            self.plugin_selected,
+            &self.active,
+        );
         if self.rows.is_empty() {
             frame.push_str(&format!("{E}[2mno agents{E}[0m{E}[K\n"));
+        } else if self.visible.is_empty() {
+            frame.push_str(&format!("{E}[2mno matches · Esc shows all{E}[0m{E}[K\n"));
         } else {
-            // build the full list, then window it so the selection stays visible
+            // build filtered agents plus their session context, then window it
             let mut lines: Vec<(String, &str)> = Vec::new(); // (text, vis pane)
             let (mut sel_top, mut sel_bot) = (0usize, 0usize);
             let mut session = "";
-            for (n, r) in self.rows.iter().enumerate() {
+            for (n, &row_i) in self.visible.iter().enumerate() {
+                let r = &self.rows[row_i];
                 let sess = r.loc.split(':').next().unwrap_or("");
                 if sess != session {
                     session = sess;
@@ -1226,7 +1550,7 @@ impl Sidebar {
     fn render_overlay(&mut self, force: bool) {
         let text = match &mut self.overlay {
             Some(Overlay::Help) => {
-                let quit_keys = " q Esc    close sidebar";
+                let quit_keys = " q        close sidebar";
                 format!(
                     "{E}[2J{E}[H{E}[1magents — help{E}[0m {E}[2m{}{E}[0m\n\n\
 {E}[1mstatus{E}[0m\n\
@@ -1237,6 +1561,9 @@ impl Sidebar {
 {E}[1mkeys{E}[0m\n\
  j/k ↑/↓  move selection\n\
  Enter/l  jump to agent\n\
+ /        live search; Enter enables j/k\n\
+ f        select next state filter\n\
+ Esc      clear filters / show all\n\
  u        update / switch version\n\
 {quit_keys}\n\
  ?        this help\n\n\
@@ -1415,9 +1742,11 @@ mod tests {
     #[test]
     fn cursor_follows_focus_outside_navigation() {
         let rows = [row("%1"), row("%2")];
-        assert_eq!(cursor_row(&rows, 1, false, "%2"), Some(1));
-        assert_eq!(cursor_row(&rows, 2, false, "%9"), None);
-        assert_eq!(cursor_row(&rows, 2, true, "%1"), Some(1));
+        let visible = [0, 1];
+        assert_eq!(cursor_row(&rows, &visible, 1, false, "%2"), Some(1));
+        assert_eq!(cursor_row(&rows, &visible, 2, false, "%9"), None);
+        assert_eq!(cursor_row(&rows, &visible, 2, true, "%1"), Some(1));
+        assert_eq!(cursor_row(&rows, &[1], 1, false, "%2"), Some(0));
     }
 
     #[test]
@@ -1440,6 +1769,8 @@ mod tests {
         assert!(matches!(read_key(fds[0]), Key::Down));
         feed(b"u");
         assert!(matches!(read_key(fds[0]), Key::Versions));
+        feed(&[0, b'q']);
+        assert!(matches!(read_key(fds[0]), Key::Text(s) if s == "q"));
         unsafe {
             libc::close(fds[0]);
             libc::close(fds[1]);
@@ -1462,8 +1793,8 @@ mod tests {
         assert!(matches!(decode(&[Some(b'['), Some(b'B')]), Key::Down));
         assert!(matches!(decode(&[Some(b'O'), Some(b'A')]), Key::Up)); // SS3
         assert!(matches!(decode(&[Some(b'O'), Some(b'B')]), Key::Down));
-        assert!(matches!(decode(&[]), Key::Quit)); // bare Esc closes
-        assert!(matches!(decode(&[None]), Key::Quit));
+        assert!(matches!(decode(&[]), Key::AllStates)); // bare Esc resets
+        assert!(matches!(decode(&[None]), Key::AllStates));
         // a tail that never completes is not a close — Esc already decided that
         assert!(matches!(decode(&[Some(b'['), None]), Key::Other));
         assert!(matches!(decode(&[Some(b'['), Some(b'Z')]), Key::Other));
@@ -1499,12 +1830,12 @@ mod tests {
     }
 
     #[test]
-    fn bare_esc_still_quits() {
+    fn bare_esc_clears_filters() {
         let mut fds = [0 as libc::c_int; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) };
         unsafe { libc::write(fds[1], [0x1bu8].as_ptr().cast(), 1) };
-        assert!(matches!(read_key(fds[0]), Key::Quit));
+        assert!(matches!(read_key(fds[0]), Key::AllStates));
         unsafe {
             libc::close(fds[0]);
             libc::close(fds[1]);
@@ -1554,5 +1885,71 @@ mod tests {
         let ms = [m("$0", 23, false), m("$1", 60, false)];
         assert_eq!(watched_height(&ms, "$0"), 60);
         assert_eq!(watched_height(&[], "$0"), 24);
+    }
+
+    fn filter_row(pane: &str, loc: &str, state: &str, title: &str) -> PaneRow {
+        PaneRow {
+            pane: pane.into(),
+            loc: loc.into(),
+            agent: "codex".into(),
+            state: state.into(),
+            cwd: "auth-service".into(),
+            title: title.into(),
+        }
+    }
+
+    #[test]
+    fn text_search_matches_visible_fields_case_insensitively() {
+        let rows = [filter_row("%1", "work:1.0", "idle", "Fix Login Race")];
+        for query in ["CODEX", "work:1", "AUTH", "login", "idle"] {
+            assert_eq!(filtered_indices(&rows, query, None), vec![0], "{query}");
+        }
+        assert!(filtered_indices(&rows, "payments", None).is_empty());
+    }
+
+    #[test]
+    fn matching_session_keeps_its_agent_subtree() {
+        let rows = [
+            filter_row("%1", "api:1.0", "idle", "unrelated"),
+            filter_row("%2", "api:2.0", "working", "also unrelated"),
+            filter_row("%3", "web:1.0", "idle", "unrelated"),
+        ];
+        assert_eq!(filtered_indices(&rows, "api", None), vec![0, 1]);
+    }
+
+    #[test]
+    fn state_filter_cycles_in_display_order() {
+        let mut filter = None;
+        for expected in [
+            Some(StateFilter::Blocked),
+            Some(StateFilter::Working),
+            Some(StateFilter::Idle),
+            Some(StateFilter::Done),
+            None,
+        ] {
+            filter = StateFilter::cycle(filter);
+            assert_eq!(filter, expected);
+        }
+    }
+
+    #[test]
+    fn state_filters_are_exact_and_separate_from_text() {
+        let rows = [
+            filter_row("%1", "s:1.0", "blocked", "working notes"),
+            filter_row("%2", "s:2.0", "working", "blocked notes"),
+            filter_row("%3", "s:3.0", "done", "done"),
+        ];
+        assert_eq!(
+            filtered_indices(&rows, "ignored", Some(StateFilter::Blocked)),
+            vec![0]
+        );
+        assert_eq!(
+            filtered_indices(&rows, "", Some(StateFilter::Working)),
+            vec![1]
+        );
+        assert_eq!(
+            filtered_indices(&rows, "", Some(StateFilter::Done)),
+            vec![2]
+        );
     }
 }

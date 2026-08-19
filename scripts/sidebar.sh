@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sidebar — runs inside the sidebar pane.
-# Keys: j/k or arrows move selection, Enter jumps to agent, ? help, q closes.
+# Vim-style navigator: / searches; f selects next status; Esc clears filters.
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 STATE_FILE="${TMPDIR:-/tmp}/agents-mon-$$.state"
 export AGENTS_MON_SELF="${TMUX_PANE:-}"
@@ -32,6 +32,11 @@ printf '\033[?25l\033[2J'
 E=$'\033'
 C_C=$'\003'
 C_D=$'\004'
+C_L=$'\014'
+C_N=$'\016'
+C_P=$'\020'
+C_U=$'\025'
+BS=$'\177'
 NL=$'\n'
 # arrow keys deliver their bytes together; only a bare Esc hits this timeout.
 # bash >=4 can wait 50ms — old bash 3.2 is stuck with 1s (integer-only -t)
@@ -39,7 +44,7 @@ if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then ESC_WAIT=0.05 READ_WAIT=0.25; else ESC_
 # update notice: install-bin.sh records the newest release at most once a day
 VERSION="$(bash "$DIR/scripts/version.sh" tag 2>/dev/null)"
 LATEST="$(sed -n '1p' "$DIR/target/release/.agents-mon-latest" 2>/dev/null)"
-NOTICE="" HINT=""
+NOTICE="" HINT="" NOTICE_LEN=0
 # only a strictly newer release is an update — a checkout ahead of every tag
 # must not be told to "update" to the older one behind it
 newer() { [ "$(printf '%s\n%s\n' "${1#v}" "${2#v}" | sort -V | tail -n 1)" = "${1#v}" ] &&
@@ -48,12 +53,18 @@ case "$LATEST" in
   v[0-9]*)
     if newer "$LATEST" "$VERSION"; then
       NOTICE=" $E[2m↑${LATEST#v}$E[0m"
-      # rides the blank line already under the header — adds no row
+      NOTICE_LEN=$((2 + ${#LATEST} - 1))
+      # shown as a contextual row when no search/status filter is active
       HINT="$E[2mpress u to update$E[0m"
     fi
     ;;
 esac
-debounced=""
+debounced=""  # complete scan; cache/status stay unfiltered
+visible=""    # filtered rows used by render/navigation/clicks
+query=""
+state_filter=""
+search_focused=""
+total_rows=0
 nrows=0
 sel=1
 SPIN='⠹⢸⣰⣤⣆⡇⠏⠛'   # 4-dot snake, clockwise; done = ⣿ (spinner complete)
@@ -61,14 +72,14 @@ tick=0
 sel_pane=""  # selection sticks to this pane across rescans until moved
 last_active=""
 
-sync_sel_pane() { # remember which pane the cursor is on
-  sel_pane="$(printf '%s' "$debounced" | awk -F'\t' -v n="$sel" 'NR == n { print $1 }')"
+sync_sel_pane() { # remember which visible pane the cursor is on
+  sel_pane="$(printf '%s' "$visible" | awk -F'\t' -v n="$sel" 'NR == n { print $1 }')"
 }
 
-restore_sel() { # after a rescan, follow the remembered pane's new position
+restore_sel() { # after a rescan/filter, follow pane if it remains visible
   local idx
   [ -n "$sel_pane" ] || { sync_sel_pane; return; }
-  idx="$(printf '%s' "$debounced" | awk -F'\t' -v p="$sel_pane" '$1 == p { print NR; exit }')"
+  idx="$(printf '%s' "$visible" | awk -F'\t' -v p="$sel_pane" '$1 == p { print NR; exit }')"
   if [ -n "$idx" ]; then
     sel="$idx"
   else
@@ -76,6 +87,61 @@ restore_sel() { # after a rescan, follow the remembered pane's new position
     [ "$sel" -lt 1 ] && sel=1
     sync_sel_pane
   fi
+}
+
+# Status filter and text query are separate. Session-name hits keep every child
+# agent as context; row hits keep only matching agents.
+apply_filters() {
+  visible="$(printf '%s' "$debounced" | AGENTS_MON_QUERY="$query" \
+    awk -F'\t' -v st="$state_filter" '
+      BEGIN { q = tolower(ENVIRON["AGENTS_MON_QUERY"]); gsub(/^[[:space:]]+|[[:space:]]+$/, "", q) }
+      NF >= 4 {
+        line[NR] = $0; state[NR] = $4
+        split($2, loc, ":"); session[NR] = loc[1]
+        if (q != "" && index(tolower(loc[1]), q)) session_match[loc[1]] = 1
+      }
+      END {
+        for (i = 1; i <= NR; i++) {
+          if (st != "") hit = state[i] == st
+          else hit = q == "" || session_match[session[i]] || index(tolower(line[i]), q)
+          if (hit) print line[i]
+        }
+      }
+    ')"
+  nrows="$(printf '%s\n' "$visible" | awk 'NF { n++ } END { print n+0 }')"
+  [ "$sel" -gt "$nrows" ] && sel=$nrows
+  [ "$sel" -lt 1 ] && sel=1
+  restore_sel
+}
+
+select_first_match() {
+  sel=1
+  sync_sel_pane
+}
+
+focus_search() {
+  state_filter=""
+  search_focused=1
+  apply_filters
+}
+
+cycle_state_filter() {
+  query=""
+  search_focused=""
+  case "$state_filter" in
+    '') state_filter=blocked ;;
+    blocked) state_filter=working ;;
+    working) state_filter=idle ;;
+    idle) state_filter=done ;;
+    done) state_filter="" ;;
+  esac
+  apply_filters
+  select_first_match
+}
+
+clear_filter() {
+  query="" state_filter="" search_focused=""
+  apply_filters
 }
 
 color_dot() { # sets $dot — no subshell, render runs hot
@@ -110,7 +176,7 @@ scan_tick() { # consume a finished background scan from $SCAN_FILE
   # flash idle-looking frames mid-render — ccmanager lesson)
   debounced=""
   new_state_file=""
-  nrows=0
+  total_rows=0
   while IFS=$'\t' read -r pane loc agent state cwd title; do
     [ -n "$pane" ] || continue
     prev="$(grep "^$pane " "$STATE_FILE" 2>/dev/null)"
@@ -133,19 +199,17 @@ scan_tick() { # consume a finished background scan from $SCAN_FILE
       new_state_file="$new_state_file$pane $state 0 $title$NL"
     fi
     debounced="$debounced$pane	$loc	$agent	$show	$cwd	$title$NL"
-    nrows=$((nrows + 1))
+    total_rows=$((total_rows + 1))
   done <<EOF
 $scan
 EOF
   printf '%s' "$new_state_file" > "$STATE_FILE"
-  [ "$sel" -gt "$nrows" ] && sel=$nrows
-  [ "$sel" -lt 1 ] && sel=1
-  restore_sel
+  apply_filters
 }
 
 render() {
   local frame n=0 pane loc agent state cwd title mark cols rows cap used rest avail
-  local client active idx
+  local client active idx filter_info="" header_hint room
   # tput can report the client size, not the pane's — ask tmux directly
   IFS=' ' read -r cols rows <<EOF
 $(tmux display-message -p -t "${TMUX_PANE:-}" '#{pane_width} #{pane_height}' 2>/dev/null)
@@ -160,17 +224,45 @@ EOF
   client="$(bash "$DIR/scripts/client.sh" '#{session_id}')"
   active="$(tmux display-message -p -t "$client" '#{pane_id}' 2>/dev/null)"
   if [ -n "$active" ] && [ "$active" != "$last_active" ]; then
-    idx="$(printf '%s' "$debounced" | awk -F'\t' -v p="$active" '$1 == p { print NR; exit }')"
+    idx="$(printf '%s' "$visible" | awk -F'\t' -v p="$active" '$1 == p { print NR; exit }')"
     if [ -n "$idx" ]; then sel="$idx"; sel_pane="$active"; fi
     last_active="$active"
   fi
-  # notice rides the header, never a list line: an extra row would shift every
-  # click's row->pane mapping by one
-  frame="$E[H$E[1magents$E[0m$NOTICE$E[K$NL$HINT$E[K$NL"
-  # rows file mirrors visual lines from y=2 so clicks map 1:1 ("-" = header)
-  local vis="" session="" used=2  # header + blank line already emitted
+  # Filters ride header; nonempty contextual/update hints add one mapped row.
+  if [ -n "$state_filter" ]; then
+    filter_info=" [$state_filter]"
+  elif [ -n "$query" ] || [ -n "$search_focused" ]; then
+    filter_info=" /$query"
+  fi
+  if [ -n "$query" ] || [ -n "$state_filter" ]; then
+    filter_info="$filter_info $nrows/$total_rows"
+  fi
+  room=$((cols - 6 - NOTICE_LEN)); [ "$room" -lt 0 ] && room=0
+  filter_info="${filter_info:0:room}"
+  if [ -n "$search_focused" ]; then
+    header_hint='↵ nav · ^u clear · esc clear'
+  elif [ -n "$state_filter" ]; then
+    header_hint='f status · j/k · esc clear'
+  elif [ -n "$query" ]; then
+    header_hint='j/k · ↵ open · esc clear'
+  elif [ -n "$HINT" ]; then
+    header_hint='u update · / search'
+  else
+    header_hint=''
+  fi
+  header_hint="${header_hint:0:cols}"
+  frame="$E[H$E[1magents$E[0m$E[2m$filter_info$E[0m$NOTICE$E[K$NL"
+  # rows file mirrors visual lines below y=0; "-" marks non-agent rows.
+  local vis="" session="" used=1
+  if [ -n "$header_hint" ]; then
+    frame="$frame$E[2m$header_hint$E[0m$E[K$NL"
+    vis="-$NL"
+    used=2
+  fi
   if [ -z "$debounced" ]; then
     frame="$frame$E[2mno agents$E[0m$E[K$NL"
+  elif [ -z "$visible" ]; then
+    frame="$frame$E[2mno matches · Esc shows all$E[0m$E[K$NL"
   else
     while IFS=$'\t' read -r pane loc agent state cwd title; do
       [ -n "$pane" ] || continue
@@ -205,7 +297,7 @@ EOF
         used=$((used + 1))
       fi
     done <<EOF
-$debounced
+$visible
 EOF
   fi
   printf '%s' "$vis" > "$ROWS_FILE"
@@ -214,8 +306,10 @@ EOF
 
 jump() {
   local target client
-  target="$(printf '%s' "$debounced" | awk -F'\t' -v n="$sel" 'NR == n { print $1 }')"
+  target="$(printf '%s' "$visible" | awk -F'\t' -v n="$sel" 'NR == n { print $1 }')"
   case "$target" in %*) ;; *) return ;; esac
+  # Clear navigator state on switch; restore full persistent sidebar.
+  clear_filter
   if [ -n "${AGENTS_MON_PIN:-}" ]; then
     # popup holds the client — switch-client would fail cross-session.
     # Hand the target to toggle.sh, which jumps after the popup closes.
@@ -249,8 +343,12 @@ $E[1mstatus$E[0m$NL\
 $E[1mkeys$E[0m$NL\
  j/k ↑/↓  move selection$NL\
  Enter/l  jump to agent$NL\
+ /        live search; Enter enables j/k$NL\
+ f        select next state filter$NL\
+ Esc      clear filters / show all$NL\
  u        update to the latest release$NL\
- q Esc    close sidebar$NL\
+ q        close sidebar$NL\
+ Esc      clear filters$NL\
  ?        this help$NL$NL\
 $E[2mpress any key to return$E[0m"
   IFS= read -rsn1
@@ -264,21 +362,62 @@ while :; do
   tick=$(( (tick + 1) % 40 ))  # divisible by 8 (spin) and 4 (blink)
   [ -f "$SCAN_FILE" ] && { scan_tick; force_render=1; }
   # animated states need every tick; all-idle only redraws on scan/key/resize
-  case "$debounced" in *working*|*blocked*|*done*) force_render=1 ;; esac
+  case "$visible" in *working*|*blocked*|*done*) force_render=1 ;; esac
   if [ -n "$force_render" ]; then render; force_render=""; fi
   # relaunch a scan every ~2s once the previous one finished
   if ! kill -0 "$scan_pid" 2>/dev/null && [ ! -f "$SCAN_FILE" ] \
      && [ $((SECONDS - last_scan_start)) -ge 2 ]; then
     start_scan
   fi
+  if [ -n "$search_focused" ]; then
+    if IFS= read -rsn1 -t "$READ_WAIT" key; then
+      case "$key" in
+        '') search_focused="" ;; # Enter enables filtered j/k navigation
+        "$C_C"|"$C_D") search_focused="" ;;
+        "$C_L") clear_filter ;;
+        "$BS"|$'\010') query="${query%?}"; apply_filters; select_first_match ;;
+        "$C_U") query=""; state_filter=""; apply_filters ;;
+        "$C_N") sel=$((sel + 1)) ;;
+        "$C_P") sel=$((sel - 1)) ;;
+        "$E")
+          rest=""
+          read -rsn2 -t "$ESC_WAIT" rest
+          case "$rest" in
+            '[A'|'OA') sel=$((sel - 1)) ;;
+            '[B'|'OB') sel=$((sel + 1)) ;;
+            '') clear_filter ;; # clear query and return to navigator
+          esac
+          ;;
+        *)
+          if [ "${#query}" -lt 256 ]; then
+            state_filter=""
+            query="$query$key"
+            apply_filters
+            select_first_match
+          fi
+          ;;
+      esac
+      [ "$sel" -lt 1 ] && sel=1
+      [ "$sel" -gt "$nrows" ] && sel=$nrows
+      [ "$sel" -lt 1 ] && sel=1
+      sync_sel_pane
+      force_render=1
+    else
+      [ "$?" -eq 1 ] && quit
+    fi
+    continue
+  fi
   if IFS= read -rsn1 -t "$READ_WAIT" key; then
     case "$key" in
       j) sel=$((sel + 1)) ;;
       k) sel=$((sel - 1)) ;;
-      q) quit ;;
+      q|Q) quit ;;
       "$C_C") quit ;;
       "$C_D") quit ;;
+      "$C_L") clear_filter ;;
       l) jump ;;
+      /) focus_search ;;
+      f) cycle_state_filter ;;
       u) update ;;
       '?') show_help ;;
       '') jump ;;  # Enter
@@ -289,7 +428,7 @@ while :; do
           # CSI normally, SS3 (ESC O A) in application-cursor mode
           '[A'|'OA') sel=$((sel - 1)) ;;
           '[B'|'OB') sel=$((sel + 1)) ;;
-          '') quit ;;  # bare Esc
+          '') clear_filter ;;  # bare Esc resets filters
         esac
         ;;
     esac

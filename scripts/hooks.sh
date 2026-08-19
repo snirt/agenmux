@@ -90,27 +90,69 @@ bind_nav Down down agents-mon
 bind_nav Up up agents-mon
 bind_nav '?' help agents-mon
 bind_nav u versions agents-mon
+# `/` enters text mode; `f` selects the next exact status; Esc clears filters.
+# Search entry, status changes, and text delivery are synchronous: background
+# run-shell jobs can reorder fast keystrokes and skip statuses/scramble query.
+tmux bind-key -T agents-mon / \
+  "run-shell \"'$BIN' key 'search'\"; switch-client -T agents-mon-search"
+tmux bind-key -T agents-mon f \
+  "run-shell \"'$BIN' key 'filter'\"; switch-client -T agents-mon"
 bind_nav Space space agents-mon
 bind_nav Any space agents-mon
 bind_nav Enter enter root
 bind_nav l l root
 bind_nav q close root
-bind_nav Escape close root
+tmux bind-key -T agents-mon Escape \
+  "run-shell \"'$BIN' key 'all'\"; switch-client -T agents-mon"
 bind_nav Q close root
 
-# Wheel events reach this table too, where `Any` would swallow them as space.
-# Bind them explicitly: over the sidebar a tick moves the selection one row and
-# navigation stays active; anywhere else tmux's native wheel behavior applies
-# (WheelDownPane has no default binding, so forwarding the event is all of it).
-# Unconditional — a harmless no-op while `mouse off`.
+# Search table sends printable ASCII as framed text packets. Framing makes
+# normal-mode action keys (`j`, `q`, `f`, ...) literal query text while typing.
+tmux unbind-key -a -T agents-mon-search 2>/dev/null
+tmux list-keys -T root |
+  sed 's/-T root /-T agents-mon-search /' |
+  tmux source-file -
+code=32
+while [ "$code" -le 126 ]; do
+  char="$(printf "\\$(printf '%03o' "$code")")"
+  key="$char"
+  [ "$char" = ' ' ] && key=Space
+  [ "$char" = ';' ] && key='\;'
+  hex="$(printf '%02X' "$code")"
+  tmux bind-key -T agents-mon-search "$key" \
+    "run-shell \"'$BIN' key 'text-$hex'\"; switch-client -T agents-mon-search"
+  code=$((code + 1))
+done
+bind_search() {
+  key="$1" action="$2" next="$3"
+  tmux bind-key -T agents-mon-search "$key" \
+    "run-shell \"'$BIN' key '$action'\"; switch-client -T '$next'"
+}
+bind_search Up up agents-mon-search
+bind_search Down down agents-mon-search
+bind_search C-p up agents-mon-search
+bind_search C-n down agents-mon-search
+bind_search BSpace backspace agents-mon-search
+bind_search C-u clear-search agents-mon-search
+bind_search Escape escape agents-mon
+bind_search C-c escape agents-mon
+# Enter accepts query and hands j/k back to filtered navigation. A second Enter
+# in the normal table jumps to selected result.
+bind_search Enter enter agents-mon
+tmux bind-key -T agents-mon-search Any 'switch-client -T agents-mon-search'
+
+# Wheel events reach both plugin tables. Over sidebar they move selection;
+# elsewhere native wheel behavior remains unchanged.
 bind_wheel() {
-  key="$1" dir="$2" native="$3"
-  tmux bind-key -T agents-mon "$key" \
+  table="$1" key="$2" dir="$3" native="$4"
+  tmux bind-key -T "$table" "$key" \
     if-shell -F '#{==:#{pane_title},agents-mon}' \
-    "run-shell -b \"bash '$DIR/scripts/scroll.sh' '#{pane_id}' $dir\" ; switch-client -T agents-mon" \
+    "run-shell -b \"bash '$DIR/scripts/scroll.sh' '#{pane_id}' $dir\" ; switch-client -T $table" \
     "$native"
 }
-bind_wheel WheelUpPane up \
-  'if -Ft= "#{||:#{pane_in_mode},#{mouse_any_flag}}" "send-keys -M" "copy-mode -e; send-keys -M"'
-bind_wheel WheelDownPane down 'send-keys -M'
-tmux set-option -g @agents-mon-nav-version 7
+for table in agents-mon agents-mon-search; do
+  bind_wheel "$table" WheelUpPane up \
+    'if -Ft= "#{||:#{pane_in_mode},#{mouse_any_flag}}" "send-keys -M" "copy-mode -e; send-keys -M"'
+  bind_wheel "$table" WheelDownPane down 'send-keys -M'
+done
+tmux set-option -g @agents-mon-nav-version 12

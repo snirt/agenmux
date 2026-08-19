@@ -22,8 +22,9 @@ if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ]; then
   ROWS_FILE="${TMPDIR:-/tmp}/agents-mon-rows"
 fi
 
-# sidebar layout: y0 header, y1 blank, agent rows from y2
-row=$((y - 1))
+# y0 is header. Rows file maps every visual line below it, including optional
+# contextual hints and session separators, so variable header height is safe.
+row="$y"
 target="$(awk -v n="$row" 'NR == n { print $1 }' "$ROWS_FILE" 2>/dev/null)"
 case "$target" in
   %*)
@@ -33,6 +34,16 @@ case "$target" in
 esac
 case "$target" in
   %*)
+    # Clear navigator state before this persistent sidebar follows the click
+    # target, using its native FIFO or pane stdin.
+    if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ]; then
+      BIN="$(tmux show-option -gqv @agents-mon-bin)"
+      [ -n "$BIN" ] || BIN="$DIR/target/release/agents-mon"
+      [ ! -x "$BIN" ] || "$BIN" key all >/dev/null 2>&1
+    else
+      # private clear-and-blur control understood in both fallback input modes
+      tmux send-keys -t "$pane" C-l
+    fi
     # relocate the sidebar off-screen first — no visible reflow after switch
     bash "$DIR/scripts/follow.sh" "$target"
     tmux switch-client -c "$client" -t "$target" 2>/dev/null
