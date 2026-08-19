@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Toggle the agents view: left-split sidebar (follows window switches)
-# or floating popup (set -g @agents-mon-display 'popup'; stays until q/Esc).
+# or floating popup (set -g @agents-mon-display 'popup'; stays until closed).
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # prefer the Rust binary when built; bash sidebar otherwise
@@ -33,8 +33,8 @@ if [ "$mode" = "popup" ] || [ "$mode" = "float" ]; then
   width="$(tmux show-option -gqv @agents-mon-width)"
   height="$(tmux show-option -gqv @agents-mon-height)"
   if [ -z "$height" ]; then
-    # fit the fleet: agent row + title row each, session headers, 2 header
-    # rows, popup border; floor 15 keeps the help screen readable
+    # fit the fleet: agent row + title row each, session headers, up to 2
+    # header rows, popup border; floor 15 keeps the help screen readable
     # ponytail: sized from the last scan cache; first-ever open falls back to 15
     cache="${TMPDIR:-/tmp}/agents-mon-scan-cache"
     if [ -s "$cache" ]; then
@@ -46,8 +46,8 @@ if [ "$mode" = "popup" ] || [ "$mode" = "float" ]; then
       [ "$height" -lt 15 ] && height=15
     fi
   fi
-  # pinned popup: Enter jumps (popup reopens over the new window), q/Esc
-  # remove the pin inside sidebar.sh and end the loop
+  # Navigation Enter jumps (popup reopens over the new window); explicit close
+  # removes the pin inside sidebar.sh and ends the loop.
   while [ -f "$PIN" ]; do
     popup_args=(-E -w "${width:-40}" -h "${height:-15}" -e "AGENTS_MON_PIN=$PIN")
     if [ -n "$client" ]; then
@@ -99,7 +99,7 @@ EOF
   fi
   # An already-running tmux server keeps its live bindings across plugin
   # upgrades. Refresh them once when the navigation contract changes.
-  if [ "$(tmux show-option -gqv @agents-mon-nav-version)" != 8 ]; then
+  if [ "$(tmux show-option -gqv @agents-mon-nav-version)" != 12 ]; then
     bash "$DIR/scripts/hooks.sh"
   fi
   # Empty panes cannot own stdin. Keep focus in the work pane and route the
@@ -119,7 +119,7 @@ EOF
 fi
 
 # bash fallback: single sidebar pane that follows the active window.
-# open if closed, focus if open — only q/Esc inside the sidebar close it
+# open if closed, focus if open — close keys inside the sidebar tear it down
 cur="$(tmux show-option -gqv @agents-mon-sidebar)"
 if [ -n "$cur" ] && tmux list-panes -a -F '#{pane_id}' | grep -qx "$cur"; then
   if [ "$(tmux display-message -p -t "$cur" '#{window_id}')" != "$(tmux display-message -p '#{window_id}')" ]; then

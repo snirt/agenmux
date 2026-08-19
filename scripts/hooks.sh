@@ -90,28 +90,24 @@ bind_nav Down down agents-mon
 bind_nav Up up agents-mon
 bind_nav '?' help agents-mon
 bind_nav u versions agents-mon
-# `/` enters text mode; state keys are direct and mutually exclusive with text
-# search; `a` returns all agents, while Backspace clears the state filter.
-# Search entry and text delivery are synchronous: background run-shell jobs can
-# reorder fast keystrokes and scramble/lose query bytes.
+# `/` enters text mode; `f` selects the next exact status; Esc clears filters.
+# Search entry, status changes, and text delivery are synchronous: background
+# run-shell jobs can reorder fast keystrokes and skip statuses/scramble query.
 tmux bind-key -T agents-mon / \
   "run-shell \"'$BIN' key 'search'\"; switch-client -T agents-mon-search"
-bind_nav b blocked agents-mon
-bind_nav w working agents-mon
-bind_nav i idle agents-mon
-bind_nav d done agents-mon
-bind_nav a all agents-mon
-bind_nav BSpace backspace agents-mon
+tmux bind-key -T agents-mon f \
+  "run-shell \"'$BIN' key 'filter'\"; switch-client -T agents-mon"
 bind_nav Space space agents-mon
 bind_nav Any space agents-mon
 bind_nav Enter enter root
 bind_nav l l root
 bind_nav q close root
-bind_nav Escape close root
+tmux bind-key -T agents-mon Escape \
+  "run-shell \"'$BIN' key 'all'\"; switch-client -T agents-mon"
 bind_nav Q close root
 
-# Search table sends printable ASCII as framed text packets. Framing keeps
-# navigation letters (`j`, `q`, `b`, ...) literal while search owns input.
+# Search table sends printable ASCII as framed text packets. Framing makes
+# normal-mode action keys (`j`, `q`, `f`, ...) literal query text while typing.
 tmux unbind-key -a -T agents-mon-search 2>/dev/null
 tmux list-keys -T root |
   sed 's/-T root /-T agents-mon-search /' |
@@ -140,9 +136,9 @@ bind_search BSpace backspace agents-mon-search
 bind_search C-u clear-search agents-mon-search
 bind_search Escape escape agents-mon
 bind_search C-c escape agents-mon
-# Stay in search when Enter has no match; a successful jump explicitly restores
-# root table in Sidebar::jump.
-bind_search Enter enter agents-mon-search
+# Enter accepts query and hands j/k back to filtered navigation. A second Enter
+# in the normal table jumps to selected result.
+bind_search Enter enter agents-mon
 tmux bind-key -T agents-mon-search Any 'switch-client -T agents-mon-search'
 
 # Wheel events reach both plugin tables. Over sidebar they move selection;
@@ -159,4 +155,4 @@ for table in agents-mon agents-mon-search; do
     'if -Ft= "#{||:#{pane_in_mode},#{mouse_any_flag}}" "send-keys -M" "copy-mode -e; send-keys -M"'
   bind_wheel "$table" WheelDownPane down 'send-keys -M'
 done
-tmux set-option -g @agents-mon-nav-version 8
+tmux set-option -g @agents-mon-nav-version 12

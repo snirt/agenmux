@@ -36,7 +36,7 @@ sb="$(tmux show-option -gqv @agents-mon-sidebar)"
 [ -n "$sb" ] || exit 0
 win="$(tmux display-message -p -t "$sb" '#{window_id}' 2>/dev/null)"
 if [ -z "$win" ]; then
-  # sidebar died (q/Esc) — without this, the freed width lands on one
+  # sidebar closed — without this, the freed width lands on one
   # neighbor and the skewed sizes get re-saved as "clean" on the next visit
   tmux show-options -g 2>/dev/null | sed -n 's/^\(@agents-mon-layout-@[0-9]*\) .*/\1/p' |
     while read -r opt; do

@@ -100,7 +100,8 @@ Details worth knowing:
 - `prefix + A` — open the sidebar, or enter its navigation mode while it is
   already open (left split, auto-refreshes every 2s); agents are grouped under
   their session name, in tmux window order. Navigation selects the sidebar and
-  preserves your normal tmux pane bindings; `q`/`Esc` closes the sidebar
+  preserves your normal tmux pane bindings; `q`/`Q` closes the sidebar, while
+  `Esc` clears filters
 - **Click an agent row** in the sidebar to jump to that agent's pane
   (requires `set -g mouse on`); clicking anywhere else in the sidebar enters
   navigation, while clicks in regular panes keep tmux's default behavior
@@ -110,14 +111,19 @@ Details worth knowing:
   switch rather than one per row. The wheel in regular panes keeps tmux's
   default scrollback behavior
 - In the sidebar: `j`/`k` or `↑`/`↓` move the `❯` cursor, `Enter` or `l` jumps to
-  the selected agent, and sidebar filtering uses `/` for live text search,
-  `b`/`w`/`i`/`d` for blocked/working/idle/done, and `a` for all agents. During
-  search, type normally, use `↑`/`↓` or `Ctrl-N`/`Ctrl-P` to move, `Ctrl-U` to
-  clear, and `Esc` to return while keeping the query. State and text filters are
-  mutually exclusive. `u` opens the [version picker](#updating), `?` shows help
-  (statuses + keys), and `q`/`Esc` closes the sidebar;
-  matching a session keeps all its agent rows as context, active filters and
-  matching/total counts appear in the header, the `❯` cursor is green while
+  the selected agent, and sidebar filtering uses `/` for live text search, `f`
+  to select the next state in `all → blocked → working → idle → done → all`.
+  `Esc` clears all filters. During search, type normally (`j` and `k` are query text), then press
+  `Enter` to accept the query and enable `j`/`k` navigation across filtered
+  results; press `Enter` again to jump. `↑`/`↓` or `Ctrl-N`/`Ctrl-P` can move
+  while typing, and `Ctrl-U` clears while staying in search. `Esc` exits search
+  or filtered navigation, clears every filter, and restores the full list. State
+  and text filters are mutually exclusive. `u` opens the [version picker](#updating),
+  `?` shows help (statuses + keys), and `q`/`Q` closes the sidebar;
+  matching a session keeps all its agent rows as context, active filters,
+  matching/total counts, and contextual controls appear in the header only
+  while searching or filtering; otherwise the list starts directly below the
+  header with no spacer row. The `❯` cursor is green while
   navigation is active, long lists scroll to keep
   the selection visible, and the cursor snaps to whichever agent pane currently
   has focus (instantly with the Rust engine — it reacts to tmux focus events)

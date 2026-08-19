@@ -31,57 +31,42 @@ extern "C" fn on_term(_: libc::c_int) {
 }
 
 pub(crate) const E: &str = "\x1b";
-/// Focused-sidebar title bar: one step lighter than a dark terminal
-/// background. 234-239 walk the same greyscale if this reads too heavy.
+/// Focused-sidebar title bar: one step lighter than a dark terminal background.
 const BAR_BG: &str = "\x1b[48;5;236m";
+const SPIN: [char; 8] = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
 
-/// Cursor row: the state's own hue, dark enough to sit just off the terminal
-/// background — 24-bit because the 256-colour cube bottoms out far brighter
-/// than this. Terminals without RGB downsample to the nearest cube entry.
-/// A shade down while the sidebar is not the focused pane — enough to read as
-/// "not here", not so much that the cursor row stops standing out.
 fn state_bg(state: &str, focused: bool) -> &'static str {
     match (state, focused) {
-        ("blocked", true) => "\x1b[48;2;42;16;16m", // red
+        ("blocked", true) => "\x1b[48;2;42;16;16m",
         ("blocked", false) => "\x1b[48;2;32;12;12m",
-        ("working", true) => "\x1b[48;2;38;32;16m", // yellow
+        ("working", true) => "\x1b[48;2;38;32;16m",
         ("working", false) => "\x1b[48;2;29;24;12m",
-        (_, true) => "\x1b[48;2;15;36;16m", // green: idle and done
+        (_, true) => "\x1b[48;2;15;36;16m",
         (_, false) => "\x1b[48;2;11;27;12m",
     }
 }
-const SPIN: [char; 8] = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
 
-/// Paint a rendered line as the selected bar: the background has to be
-/// re-asserted after every reset the line already carries, and padded to the
-/// pane edge — [K clears to the default background, not this one.
 fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
     if bg.is_empty() {
         return line.into();
     }
     let body = line.replace(&format!("{E}[0m"), &format!("{E}[0m{bg}"));
-    let pad = " ".repeat(cols.saturating_sub(width));
-    format!("{bg}{body}{pad}{E}[0m")
+    format!("{bg}{body}{}{E}[0m", " ".repeat(cols.saturating_sub(width)))
 }
 
-/// Cursor mark: the state's hue, bold only while the sidebar holds focus.
 fn cursor_mark(selected: bool, plugin_selected: bool, state: &str) -> String {
     if !selected {
         return "  ".into();
     }
-    let fg = state_fg(state);
+    let fg = match state {
+        "blocked" => 31,
+        "working" => 33,
+        _ => 32,
+    };
     if plugin_selected {
         format!("{E}[1;{fg}m❯{E}[0m ")
     } else {
         format!("{E}[{fg}m❯{E}[0m ")
-    }
-}
-
-fn state_fg(state: &str) -> &'static str {
-    match state {
-        "blocked" => "31",
-        "working" => "33",
-        _ => "32", // idle and done
     }
 }
 
@@ -191,6 +176,16 @@ impl StateFilter {
             StateFilter::Done => "done",
         }
     }
+
+    fn cycle(current: Option<Self>) -> Option<Self> {
+        match current {
+            None => Some(Self::Blocked),
+            Some(Self::Blocked) => Some(Self::Working),
+            Some(Self::Working) => Some(Self::Idle),
+            Some(Self::Idle) => Some(Self::Done),
+            Some(Self::Done) => None,
+        }
+    }
 }
 
 enum Key {
@@ -204,21 +199,22 @@ enum Key {
     Search,
     Backspace,
     ClearSearch,
+    CycleState,
     AllStates,
-    State(StateFilter),
     Text(String),
     Other,
 }
 
 enum Overlay {
     Help,
-    Versions { sel: usize, chosen: Option<String> },
+    Versions {
+        sel: usize,
+        chosen: Option<String>,
+    },
 }
 
 fn read_key(fd: libc::c_int) -> Key {
-    let Some(b) = read_byte(fd) else {
-        return Key::Quit;
-    }; // EOF: explicit close
+    let Some(b) = read_byte(fd) else { return Key::Quit }; // EOF: explicit close
     match b {
         b'j' => Key::Down,
         b'k' => Key::Up,
@@ -228,15 +224,12 @@ fn read_key(fd: libc::c_int) -> Key {
         b'?' => Key::Help,
         b'u' => Key::Versions,
         b'/' => Key::Search,
-        b'b' => Key::State(StateFilter::Blocked),
-        b'w' => Key::State(StateFilter::Working),
-        b'i' => Key::State(StateFilter::Idle),
-        b'd' => Key::State(StateFilter::Done),
-        b'a' => Key::AllStates,
+        b'f' => Key::CycleState,
+        0x0c => Key::AllStates, // private clear packet used by tmux/click helpers
         0x08 | 0x7f => Key::Backspace,
         0x15 => Key::ClearSearch,
-        // Search-table printable keys use a NUL-prefixed packet so `j`, `q`,
-        // and other navigation bytes remain text while search owns input.
+        // Search-table printable keys use a NUL-prefixed packet so normal-mode
+        // actions such as `j`, `q`, and `f` remain query text while typing.
         0x00 => poll_fd(fd, Some(Duration::from_millis(50)))
             .then(|| read_byte(fd))
             .flatten()
@@ -259,9 +252,7 @@ fn read_key(fd: libc::c_int) -> Key {
 /// Popup/tty search owns printable input. Daemon search receives printable
 /// bytes through NUL-prefixed packets decoded by read_key instead.
 fn read_search_key(fd: libc::c_int) -> Key {
-    let Some(first) = read_byte(fd) else {
-        return Key::Quit;
-    };
+    let Some(first) = read_byte(fd) else { return Key::Quit };
     match first {
         b'\r' | b'\n' => Key::Jump,
         0x03 | 0x04 => Key::Quit,
@@ -296,9 +287,7 @@ fn read_search_key(fd: libc::c_int) -> Key {
                 };
                 bytes.push(next);
             }
-            String::from_utf8(bytes)
-                .map(Key::Text)
-                .unwrap_or(Key::Other)
+            String::from_utf8(bytes).map(Key::Text).unwrap_or(Key::Other)
         }
         _ => Key::Other,
     }
@@ -325,11 +314,8 @@ pub fn send_key(name: &str) -> i32 {
             "backspace" => vec![0x7f],
             "clear-search" => vec![0x15],
             "search" => b"/".to_vec(),
-            "all" => b"a".to_vec(),
-            "blocked" => b"b".to_vec(),
-            "working" => b"w".to_vec(),
-            "idle" => b"i".to_vec(),
-            "done" => b"d".to_vec(),
+            "filter" => b"f".to_vec(),
+            "all" => vec![0x0c],
             "space" => b" ".to_vec(),
             "j" => b"j".to_vec(),
             "k" => b"k".to_vec(),
@@ -355,9 +341,9 @@ pub fn send_key(name: &str) -> i32 {
 }
 
 /// Decode the tail of an escape sequence. `next` yields the next byte, or None
-/// once nothing more arrives — a bare Esc, which closes.
+/// once nothing more arrives — a bare Esc, which clears filtering.
 fn escape_key(mut next: impl FnMut() -> Option<u8>) -> Key {
-    let Some(a) = next() else { return Key::Quit };
+    let Some(a) = next() else { return Key::AllStates };
     // CSI (ESC [ A) normally, SS3 (ESC O A) in application-cursor mode
     match (a, next()) {
         (b'[' | b'O', Some(b'A')) => Key::Up,
@@ -394,10 +380,7 @@ fn newer_than(a: &str, b: &str) -> bool {
     };
     let (x, y) = (parts(a), parts(b));
     for i in 0..x.len().max(y.len()) {
-        let (l, r) = (
-            x.get(i).copied().unwrap_or(0),
-            y.get(i).copied().unwrap_or(0),
-        );
+        let (l, r) = (x.get(i).copied().unwrap_or(0), y.get(i).copied().unwrap_or(0));
         if l != r {
             return l > r;
         }
@@ -422,12 +405,7 @@ fn known_tags(plugin_dir: &PathBuf) -> Vec<String> {
 fn picker_sel(tags: &[String], cur: &str, chosen: Option<&str>, sel: usize) -> usize {
     let selected = chosen
         .and_then(|tag| tags.iter().position(|t| t == tag))
-        .or_else(|| {
-            chosen
-                .is_none()
-                .then(|| tags.iter().position(|t| t == cur))
-                .flatten()
-        })
+        .or_else(|| chosen.is_none().then(|| tags.iter().position(|t| t == cur)).flatten())
         .unwrap_or(sel);
     selected.min(tags.len().saturating_sub(1))
 }
@@ -466,7 +444,7 @@ fn row_filter_text(row: &PaneRow) -> String {
     .to_lowercase()
 }
 
-/// Filter projection: state chips are exact and separate from text search.
+/// Filter projection: status matching is exact and separate from text search.
 /// Matching a session keeps its whole agent subtree as context;
 /// matching an agent keeps that session's header through normal rendering.
 fn filtered_indices(
@@ -550,7 +528,7 @@ struct Daemon {
     size: (usize, usize), // narrowest pane x watched pane's height
     seen_mirror: bool,    // suicide only arms after the first pane appears
     empty_ticks: u32,     // consecutive measurements that found no pane
-    client: String,       // our control client, as published in the option
+    client: String, // our control client, as published in the option
     started: Instant,
     // window id -> (window size, pane count) at the last measure: a mirror
     // whose width changed while both stayed put is a user border-drag. The
@@ -569,13 +547,13 @@ pub struct Sidebar {
     ident: IdentCache,
     subj: scan::SubjectCache,
     tracker: Tracker,
-    rows: Vec<PaneRow>, // complete debounced view-model; never filter cache/status
-    visible: Vec<usize>, // filtered indexes used by render/navigation/clicks
+    rows: Vec<PaneRow>,   // complete debounced view-model; never filter cache/status
+    visible: Vec<usize>,  // filtered indexes used by render/navigation/clicks
     query: String,
     state_filter: Option<StateFilter>,
     search_focused: bool,
-    sel: usize,    // 1-based index into visible, like the bash script
-    scroll: usize, // first visible list line — follows the selection
+    sel: usize,           // 1-based index into visible, like the bash script
+    scroll: usize,      // first visible list line — follows the selection
     sel_pane: String,
     last_active: String,
     active: String,
@@ -649,9 +627,7 @@ fn new_sidebar(
 
 pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     let self_pane = std::env::var("TMUX_PANE").unwrap_or_default();
-    let pin = std::env::var("AGENTS_MON_PIN")
-        .ok()
-        .filter(|p| !p.is_empty());
+    let pin = std::env::var("AGENTS_MON_PIN").ok().filter(|p| !p.is_empty());
     let rows_file = std::env::temp_dir().join(format!(
         "agents-mon-rows-{}",
         self_pane.trim_start_matches('%')
@@ -808,10 +784,12 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             now = Instant::now();
             next_scan = now + Duration::from_secs(2);
         }
-        let animating = sb
-            .visible
-            .iter()
-            .any(|&i| matches!(sb.rows[i].state.as_str(), "working" | "blocked" | "done"));
+        let animating = sb.visible.iter().any(|&i| {
+            matches!(
+                sb.rows[i].state.as_str(),
+                "working" | "blocked" | "done"
+            )
+        });
         // deadline-based tick: held keys keep poll_inputs returning early, so
         // advancing on poll timeout would freeze the spinner during key repeat
         if animating && now >= next_tick {
@@ -847,9 +825,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 continue;
             }
             if sb.search_focused {
-                if sb.search_key(key) {
-                    break;
-                }
+                sb.search_key(key);
                 sb.render(false);
                 continue;
             }
@@ -864,12 +840,11 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 Key::Help => sb.help(),
                 Key::Versions => sb.versions(),
                 Key::Search => sb.focus_search(),
-                Key::State(filter) => sb.set_state_filter(filter),
+                Key::CycleState => sb.cycle_state_filter(),
                 Key::AllStates => sb.clear_filter(),
-                Key::Backspace if sb.state_filter.is_some() => sb.clear_filter(),
                 Key::Quit => {
                     if sb.daemon.is_none() {
-                        // Popup/tty mode owns stdin, so q/Esc still closes it.
+                        // Popup/tty mode owns stdin, so q/Ctrl-C/Ctrl-D closes it.
                         if let Some(p) = &sb.pin {
                             let _ = std::fs::remove_file(p);
                         }
@@ -1048,9 +1023,9 @@ impl Sidebar {
         self.rebuild_visible(false);
     }
 
-    fn set_state_filter(&mut self, filter: StateFilter) {
+    fn cycle_state_filter(&mut self) {
         self.query.clear();
-        self.state_filter = Some(filter);
+        self.state_filter = StateFilter::cycle(self.state_filter);
         self.search_focused = false;
         self.rebuild_visible(true);
     }
@@ -1062,11 +1037,12 @@ impl Sidebar {
         self.rebuild_visible(false);
     }
 
-    /// true = exit the loop (popup jump hands off to toggle.sh)
-    fn search_key(&mut self, key: Key) -> bool {
+    fn search_key(&mut self, key: Key) {
         match key {
-            Key::Quit | Key::Close => self.search_focused = false,
-            Key::Jump => return self.jump(),
+            Key::Quit | Key::Close => self.clear_filter(),
+            // First Enter accepts query and hands j/k back to filtered
+            // navigation. Enter in normal mode then jumps to selection.
+            Key::Jump => self.search_focused = false,
             Key::Down => self.move_sel(1),
             Key::Up => self.move_sel(-1),
             Key::Backspace => {
@@ -1082,14 +1058,20 @@ impl Sidebar {
             Key::Text(text) => {
                 self.state_filter = None;
                 let room = 256usize.saturating_sub(self.query.chars().count());
-                self.query
-                    .extend(text.chars().filter(|c| !c.is_control()).take(room));
+                self.query.extend(
+                    text.chars()
+                        .filter(|c| !c.is_control())
+                        .take(room),
+                );
                 self.rebuild_visible(true);
             }
             Key::AllStates => self.clear_filter(),
-            Key::Search | Key::State(_) | Key::Help | Key::Versions | Key::Other => {}
+            Key::Search
+            | Key::CycleState
+            | Key::Help
+            | Key::Versions
+            | Key::Other => {}
         }
-        false
     }
 
     /// true = exit the loop (popup jump hands off to toggle.sh)
@@ -1160,15 +1142,7 @@ impl Sidebar {
             ]);
         }
         let _ = cmd
-            .args([
-                "select-window",
-                "-t",
-                &target,
-                ";",
-                "select-pane",
-                "-t",
-                &target,
-            ])
+            .args(["select-window", "-t", &target, ";", "select-pane", "-t", &target])
             .status();
         false
     }
@@ -1231,14 +1205,10 @@ impl Sidebar {
         let mut ms: Vec<M> = Vec::new();
         for l in out.lines() {
             let f: Vec<&str> = l.split('\t').collect();
-            let [pane, win, pw, ph, ws, wp, act, sess] = f.as_slice() else {
-                continue;
-            };
-            let (Ok(pw), Ok(ph), Ok(wp)) = (
-                pw.parse::<usize>(),
-                ph.parse::<usize>(),
-                wp.parse::<usize>(),
-            ) else {
+            let [pane, win, pw, ph, ws, wp, act, sess] = f.as_slice() else { continue };
+            let (Ok(pw), Ok(ph), Ok(wp)) =
+                (pw.parse::<usize>(), ph.parse::<usize>(), wp.parse::<usize>())
+            else {
                 continue;
             };
             let Some((ww, wh)) = ws
@@ -1445,18 +1415,14 @@ impl Sidebar {
             None => term_size(),
         };
         let cap = trows.saturating_sub(1); // last row's newline would scroll
-        let space = cap.saturating_sub(2); // header + blank line
 
-        // update notice rides the header, never a list line: rows below it map
-        // to panes by line number (see vis/rows_file), an extra row would shift
-        // every click by one
-        // the hint goes on the blank line that already sits under the header,
-        // so the frame keeps exactly two lines above the list either way
+        // Update notice rides the header. Nonempty contextual/update hints add
+        // one row; vis records it so mouse coordinates stay exact.
         let (notice, notice_len, update_hint) = match &self.update {
             Some(t) => {
                 let plain = format!(" ↑{}", t.trim_start_matches('v'));
                 (
-                    format!(" {E}[2m↑{}{E}[22m", t.trim_start_matches('v')),
+                    format!(" {E}[2m↑{}{E}[0m", t.trim_start_matches('v')),
                     plain.chars().count(),
                     "u update · / search".to_string(),
                 )
@@ -1467,7 +1433,11 @@ impl Sidebar {
         let mut filter = match self.state_filter {
             Some(state) => format!(" [{}]", state.label()),
             None if self.search_focused || !self.query.is_empty() => {
-                let query: String = self.query.chars().filter(|c| !c.is_control()).collect();
+                let query: String = self
+                    .query
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .collect();
                 format!(" /{query}")
             }
             None => String::new(),
@@ -1480,27 +1450,33 @@ impl Sidebar {
             .take(cols.saturating_sub(6 + notice_len))
             .collect();
         let hint = if self.search_focused {
-            "↑↓/^n/^p move · ^u clear · esc back"
+            "↵ nav · ^u clear · esc clear"
+        } else if self.state_filter.is_some() {
+            "f status · j/k · esc clear"
+        } else if !self.query.trim().is_empty() {
+            "j/k · ↵ open · esc clear"
         } else if !update_hint.is_empty() {
             &update_hint
         } else {
-            "/ search · b/w/i/d/a states"
+            ""
         };
         let hint: String = hint.chars().take(cols).collect();
-        // focused sidebar wears a title bar: bright-black background comes
-        // from the terminal palette, so it tracks the theme. Padded spaces
-        // carry it to the pane edge — [K would clear to the default
-        // background instead. Inner resets are [22m so the bar survives them
+        let has_hint = !hint.is_empty();
+        let space = cap.saturating_sub(1 + usize::from(has_hint));
         let (hdr, hdr_pad) = if self.plugin_selected {
-            let used = 6 + filter.chars().count() + notice_len; // "agents" + extras
-            (BAR_BG.to_string(), " ".repeat(cols.saturating_sub(used)))
+            let used = 6 + filter.chars().count() + notice_len;
+            (BAR_BG, " ".repeat(cols.saturating_sub(used)))
         } else {
-            (String::new(), String::new())
+            ("", String::new())
         };
         let mut frame = format!(
-            "{E}[H{hdr}{E}[1magents{E}[22m{E}[2m{filter}{E}[22m{notice}{hdr_pad}{E}[0m{E}[K\n{E}[2m{hint}{E}[0m{E}[K\n"
+            "{E}[H{hdr}{E}[1magents{E}[22m{E}[2m{filter}{E}[22m{notice}{hdr_pad}{E}[0m{E}[K\n"
         );
         let mut vis = String::new();
+        if has_hint {
+            frame.push_str(&format!("{E}[2m{hint}{E}[0m{E}[K\n"));
+            vis.push_str("-\n");
+        }
         let cursor = cursor_row(
             &self.rows,
             &self.visible,
@@ -1511,7 +1487,7 @@ impl Sidebar {
         if self.rows.is_empty() {
             frame.push_str(&format!("{E}[2mno agents{E}[0m{E}[K\n"));
         } else if self.visible.is_empty() {
-            frame.push_str(&format!("{E}[2mno matches · a shows all{E}[0m{E}[K\n"));
+            frame.push_str(&format!("{E}[2mno matches · Esc shows all{E}[0m{E}[K\n"));
         } else {
             // build filtered agents plus their session context, then window it
             let mut lines: Vec<(String, &str)> = Vec::new(); // (text, vis pane)
@@ -1530,29 +1506,31 @@ impl Sidebar {
                 if Some(n) == cursor {
                     sel_top = lines.len();
                 }
-                let mark = cursor_mark(Some(n) == cursor, self.plugin_selected, &r.state);
+                let selected = Some(n) == cursor;
+                let mark = cursor_mark(selected, self.plugin_selected, &r.state);
                 let dot = self.dot(&r.state);
                 let win = r.loc.splitn(2, ':').nth(1).unwrap_or("");
                 let mut rest = format!("{win} {}", r.cwd);
                 let agent_len = r.agent.chars().count();
-                let avail = cols.saturating_sub(6 + agent_len); // leading pad too
+                let avail = cols.saturating_sub(6 + agent_len);
                 if avail > 0 {
                     rest = rest.chars().take(avail).collect();
                 }
-                let row_bg = match Some(n) == cursor {
-                    true => state_bg(&r.state, self.plugin_selected),
-                    false => "",
+                let row_bg = if selected {
+                    state_bg(&r.state, self.plugin_selected)
+                } else {
+                    ""
                 };
                 let row = format!(" {mark}{dot} {E}[1m{}{E}[0m {E}[2m{rest}{E}[0m", r.agent);
-                let width = 6 + agent_len + rest.chars().count(); // marks and spaces
+                let width = 6 + agent_len + rest.chars().count();
                 lines.push((
                     format!("{}{E}[K\n", bar(&row, row_bg, cols, width)),
                     &r.pane,
                 ));
                 if !r.title.is_empty() {
                     let t: String = r.title.chars().take(cols.saturating_sub(5)).collect();
-                    let width = 5 + t.chars().count();
                     let line = format!("     {E}[2m{t}{E}[0m");
+                    let width = 5 + t.chars().count();
                     lines.push((
                         format!("{}{E}[K\n", bar(&line, row_bg, cols, width)),
                         &r.pane,
@@ -1617,7 +1595,7 @@ impl Sidebar {
     fn render_overlay(&mut self, force: bool) {
         let text = match &mut self.overlay {
             Some(Overlay::Help) => {
-                let quit_keys = " q Esc    close sidebar";
+                let quit_keys = " q        close sidebar";
                 format!(
                     "{E}[2J{E}[H{E}[1magents — help{E}[0m {E}[2m{}{E}[0m\n\n\
 {E}[1mstatus{E}[0m\n\
@@ -1628,9 +1606,9 @@ impl Sidebar {
 {E}[1mkeys{E}[0m\n\
  j/k ↑/↓  move selection\n\
  Enter/l  jump to agent\n\
- /        live text search\n\
- b/w/i/d  blocked/working/idle/done\n\
- a        show all agents\n\
+ /        live search; Enter enables j/k\n\
+ f        select next state filter\n\
+ Esc      clear filters / show all\n\
  u        update / switch version\n\
 {quit_keys}\n\
  ?        this help\n\n\
@@ -1642,8 +1620,9 @@ impl Sidebar {
                 let cur = current_tag();
                 let tags = known_tags(&self.plugin_dir);
                 *sel = picker_sel(&tags, &cur, chosen.as_deref(), *sel);
-                let mut text =
-                    format!("{E}[2J{E}[H{E}[1magents — versions{E}[0m {E}[2m{cur}{E}[0m\n\n");
+                let mut text = format!(
+                    "{E}[2J{E}[H{E}[1magents — versions{E}[0m {E}[2m{cur}{E}[0m\n\n"
+                );
                 if tags.is_empty() {
                     text.push_str(&format!(
                         " {E}[2mno releases found — checking…{E}[0m\n\n\
@@ -1651,7 +1630,7 @@ impl Sidebar {
                     ));
                 } else {
                     for (i, t) in tags.iter().enumerate() {
-                        let mark = cursor_mark(i == *sel, true, "");
+                        let mark = cursor_mark(i == *sel, true, "idle");
                         let tail = if *t == cur {
                             format!(" {E}[2m(current){E}[0m")
                         } else {
@@ -1783,7 +1762,7 @@ mod tests {
         // mirror list reads back empty, and every mirror pane got torn down
         assert!(!suicide(true, s(60), 1));
         assert!(suicide(true, s(60), 2)); // user really did close them all
-                                          // startup grace: no mirror has ever appeared yet
+        // startup grace: no mirror has ever appeared yet
         assert!(!suicide(false, s(5), 9));
         assert!(suicide(false, s(30), 2)); // none ever came — give up
     }
@@ -1799,16 +1778,10 @@ mod tests {
     }
 
     #[test]
-    fn cursor_takes_the_state_hue_and_bolds_only_when_selected() {
+    fn cursor_uses_state_hue_and_focus_bold() {
         assert_eq!(cursor_mark(true, true, "idle"), format!("{E}[1;32m❯{E}[0m "));
-        assert_eq!(
-            cursor_mark(true, true, "blocked"),
-            format!("{E}[1;31m❯{E}[0m ")
-        );
-        assert_eq!(
-            cursor_mark(true, false, "working"),
-            format!("{E}[33m❯{E}[0m ")
-        );
+        assert_eq!(cursor_mark(true, false, "idle"), format!("{E}[32m❯{E}[0m "));
+        assert_eq!(cursor_mark(true, true, "working"), format!("{E}[1;33m❯{E}[0m "));
         assert_eq!(cursor_mark(false, true, "blocked"), "  ");
     }
 
@@ -1866,8 +1839,8 @@ mod tests {
         assert!(matches!(decode(&[Some(b'['), Some(b'B')]), Key::Down));
         assert!(matches!(decode(&[Some(b'O'), Some(b'A')]), Key::Up)); // SS3
         assert!(matches!(decode(&[Some(b'O'), Some(b'B')]), Key::Down));
-        assert!(matches!(decode(&[]), Key::Quit)); // bare Esc closes
-        assert!(matches!(decode(&[None]), Key::Quit));
+        assert!(matches!(decode(&[]), Key::AllStates)); // bare Esc resets
+        assert!(matches!(decode(&[None]), Key::AllStates));
         // a tail that never completes is not a close — Esc already decided that
         assert!(matches!(decode(&[Some(b'['), None]), Key::Other));
         assert!(matches!(decode(&[Some(b'['), Some(b'Z')]), Key::Other));
@@ -1903,12 +1876,12 @@ mod tests {
     }
 
     #[test]
-    fn bare_esc_still_quits() {
+    fn bare_esc_clears_filters() {
         let mut fds = [0 as libc::c_int; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) };
         unsafe { libc::write(fds[1], [0x1bu8].as_ptr().cast(), 1) };
-        assert!(matches!(read_key(fds[0]), Key::Quit));
+        assert!(matches!(read_key(fds[0]), Key::AllStates));
         unsafe {
             libc::close(fds[0]);
             libc::close(fds[1]);
@@ -1945,8 +1918,6 @@ mod tests {
     fn bar_reasserts_the_background_after_every_reset() {
         let line = format!("{E}[1mcodex{E}[0m {E}[2mwork{E}[0m");
         let painted = bar(&line, BAR_BG, 14, 10);
-        // every reset is followed by the background again, and the pad closes
-        // the gap to the pane edge
         assert!(!painted.split(&format!("{E}[0m")).any(|part| {
             !part.is_empty() && !part.starts_with(BAR_BG)
         }));
@@ -2003,6 +1974,21 @@ mod tests {
             filter_row("%3", "web:1.0", "idle", "unrelated"),
         ];
         assert_eq!(filtered_indices(&rows, "api", None), vec![0, 1]);
+    }
+
+    #[test]
+    fn state_filter_cycles_in_display_order() {
+        let mut filter = None;
+        for expected in [
+            Some(StateFilter::Blocked),
+            Some(StateFilter::Working),
+            Some(StateFilter::Idle),
+            Some(StateFilter::Done),
+            None,
+        ] {
+            filter = StateFilter::cycle(filter);
+            assert_eq!(filter, expected);
+        }
     }
 
     #[test]

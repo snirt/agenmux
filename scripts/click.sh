@@ -22,8 +22,9 @@ if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ]; then
   ROWS_FILE="${TMPDIR:-/tmp}/agents-mon-rows"
 fi
 
-# sidebar layout: y0 header, y1 blank, agent rows from y2
-row=$((y - 1))
+# y0 is header. Rows file maps every visual line below it, including optional
+# contextual hints and session separators, so variable header height is safe.
+row="$y"
 target="$(awk -v n="$row" 'NR == n { print $1 }' "$ROWS_FILE" 2>/dev/null)"
 case "$target" in
   %*)
