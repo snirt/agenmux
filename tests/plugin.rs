@@ -377,6 +377,122 @@ fn stale_click_origin_is_a_noop() {
 }
 
 #[test]
+fn setup_preserves_root_bindings_and_installs_plugin_tables() {
+    let tmux = TestTmux::new("setup");
+    let bin = env!("CARGO_BIN_EXE_agents-mon");
+    tmux.assert_tmux(&[
+        "bind-key",
+        "-T",
+        "root",
+        "C-g",
+        "display-message",
+        "custom-root",
+    ]);
+    tmux.assert_tmux(&["set-option", "-g", "mouse", "off"]);
+    tmux.assert_tmux(&["set-option", "-g", "@agents-mon-bin", bin]);
+    tmux.assert_tmux(&["set-option", "-g", "@agents-mon-key", "A"]);
+    tmux.assert_tmux(&["set-option", "-g", "@agents-mon-popup-key", "e"]);
+    tmux.assert_tmux(&["set-option", "-g", "@agents-mon-hide-windows", "agents*"]);
+    tmux.assert_tmux(&["set-option", "-g", "status-right", "#{agents_mon} | %H:%M"]);
+
+    assert_success(tmux.bin(&["setup"]), "agents-mon setup with mouse off");
+
+    let root_mouse = tmux.text(&["list-keys", "-T", "root"]);
+    assert!(!root_mouse.contains(" click '#{pane_id}'"), "{root_mouse}");
+    for (hook, expected) in [
+        ("pane-exited", "pane-exited[42]"),
+        ("window-pane-changed", "window-pane-changed[42]"),
+        ("window-layout-changed", "window-layout-changed[42]"),
+        ("window-resized", "window-resized[42]"),
+        ("after-select-window", "after-select-window[43]"),
+        ("session-window-changed", "session-window-changed[43]"),
+        ("client-session-changed", "client-session-changed[43]"),
+        ("pane-mode-changed", "pane-mode-changed[44]"),
+        ("after-select-pane", "after-select-pane[44]"),
+    ] {
+        let installed = tmux.text(&["show-hooks", "-g", hook]);
+        assert!(
+            installed.contains(expected),
+            "missing {expected}: {installed}"
+        );
+    }
+    let normal = tmux.text(&["list-keys", "-T", "agents-mon"]);
+    assert!(
+        normal.contains("C-g") && normal.contains("custom-root"),
+        "{normal}"
+    );
+    assert!(
+        normal.contains("run-shell -b") && normal.contains(" key \'j\'"),
+        "{normal}"
+    );
+    let search_action = normal
+        .lines()
+        .find(|line| line.contains(" key \'search\'"))
+        .unwrap();
+    let filter_action = normal
+        .lines()
+        .find(|line| line.contains(" key \'filter\'"))
+        .unwrap();
+    assert!(
+        search_action.contains("agents-mon-search"),
+        "{search_action}"
+    );
+    assert!(!search_action.contains("run-shell -b"), "{search_action}");
+    assert!(!filter_action.contains("run-shell -b"), "{filter_action}");
+    assert!(
+        normal.contains("WheelUpPane")
+            && normal.contains("copy-mode -e; send-keys -M")
+            && normal.contains("WheelDownPane"),
+        "{normal}"
+    );
+    let search = tmux.text(&["list-keys", "-T", "agents-mon-search"]);
+    for code in 32u8..=126 {
+        assert!(
+            search.contains(&format!("text-{code:02X}")),
+            "missing {code:02X}"
+        );
+    }
+    let text_action = search
+        .lines()
+        .find(|line| line.contains("text-6A"))
+        .unwrap();
+    assert!(!text_action.contains("run-shell -b"), "{text_action}");
+    assert_eq!(
+        tmux.text(&["show-option", "-gqv", "@agents-mon-nav-version"]),
+        "12"
+    );
+    assert_eq!(
+        tmux.text(&["show-option", "-gqv", "status-right"]),
+        format!("#({bin} status) | %H:%M")
+    );
+    let prefix = tmux.text(&["list-keys", "-T", "prefix"]);
+    assert!(
+        prefix.contains(" w ") && prefix.contains("agents*"),
+        "{prefix}"
+    );
+
+    tmux.assert_tmux(&["set-option", "-g", "mouse", "on"]);
+    tmux.assert_tmux(&["set-option", "-g", "@agents-mon-hide-windows", ""]);
+    assert_success(tmux.bin(&["setup"]), "agents-mon setup with mouse on");
+    let root_mouse = tmux.text(&["list-keys", "-T", "root"]);
+    assert!(root_mouse.contains(" click '#{pane_id}'"), "{root_mouse}");
+    let prefix = tmux.text(&["list-keys", "-T", "prefix"]);
+    let picker = prefix
+        .lines()
+        .find(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            fields
+                .iter()
+                .position(|field| *field == "prefix")
+                .and_then(|i| fields.get(i + 1))
+                == Some(&"w")
+        })
+        .unwrap();
+    assert!(picker.contains("choose-tree -Zw"), "{picker}");
+    assert!(!picker.contains("agents*"), "{picker}");
+}
+
+#[test]
 fn binary_helper_uses_private_server() {
     let tmux = TestTmux::new("binary-helper");
     assert_success(tmux.bin(&["status"]), "agents-mon status");

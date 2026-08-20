@@ -8,6 +8,7 @@ mod pane_writers;
 mod panes;
 mod procs;
 mod scan;
+mod setup;
 mod sidebar;
 mod tmux;
 
@@ -37,12 +38,13 @@ fn main() {
         ["pane-orphan"] => panes::pane_orphan(),
         ["pane-pin"] => panes::pane_pin(),
         ["teardown"] => panes::teardown(),
+        ["setup"] => setup::run(&plugin_dir()),
         ["notification-open", socket, pane, bundle] => {
             notifications::open_pane(socket, pane, bundle)
         }
         _ => {
             eprintln!(
-                "usage: agents-mon [--version|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
+                "usage: agents-mon [--version|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|setup|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
             );
             2
         }

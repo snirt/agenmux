@@ -103,6 +103,18 @@ server_pid="$(tmux -S "$sock" display-message -p '#{pid}')"
 # No client argument is the compatibility case that regressed in production.
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" bash "$DIR/scripts/toggle.sh"
 
+# toggle invokes the compatibility hooks path; native setup must preserve the
+# user's root binding and install synchronous search delivery before use.
+normal_keys="$(tmux -S "$sock" list-keys -T agents-mon)"
+search_keys="$(tmux -S "$sock" list-keys -T agents-mon-search)"
+[ "$(tmux -S "$sock" show-option -gqv @agents-mon-nav-version)" = 12 ] \
+  && printf '%s' "$normal_keys" | grep -Fq 'C-l' \
+  && printf '%s' "$normal_keys" | grep -Fq " key 'search'" \
+  && printf '%s' "$search_keys" | grep -Fq 'text-6A' || {
+    echo "FAIL navigation-key-table: native setup contract missing"
+    exit 1
+  }
+
 sidebar=''
 first=''
 for _ in $(seq 1 40); do
