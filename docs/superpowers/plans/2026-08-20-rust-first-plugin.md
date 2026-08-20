@@ -166,7 +166,13 @@ After the gate passes:
 - remove no-binary and single-sidebar branches from `toggle.sh`, `click.sh`, `hooks.sh`, and `orphan.sh`;
 - delete `follow.sh` and `restore.sh`;
 - remove the no-op `follow.sh` spawn from `Sidebar::jump` (popup returns before it; processless native panes do not relocate);
-- remove old tmux `<3.2` follow hooks tied to `@agents-mon-sidebar`;
+- remove the **entire** moving-sidebar follow hook from `hooks.sh` — both branches of
+  `after-select-window[42]`, `client-session-changed[42]`, and `session-window-changed[42]`.
+  The tmux `>=3.2` native-join branch is the one that spawns `restore.sh` (`hooks.sh:17`);
+  the `<3.2` branch is the one that spawns `follow.sh`. Both are guarded on
+  `@agents-mon-sidebar`, which native mode never sets, so both are dead — but deleting
+  either script while keeping its branch leaves live tmux servers holding a hook that
+  spawns a missing file across the upgrade;
 - change status fallback to install-or-empty rather than invoke `scan.sh`.
 
 - [ ] **Step 5: Delete the dead mirror process**
@@ -180,9 +186,20 @@ Remove `mod mirror`, `src/mirror.rs`, and only the `main.rs` `mirror` arm. Keep 
 
 Update usage text and tests accordingly.
 
-- [ ] **Step 6: Remove Bash/Rust parity tests, not Rust behavior tests**
+- [ ] **Step 6: Delete parity tests; reroute behavior tests that merely used the Bash engine**
 
-Delete shell-fixture comparisons whose only purpose was dual-engine parity. Keep `tests/parity.rs`, which verifies all detection fixtures against Rust, plus navigation, lifecycle, and CLI tests.
+Delete shell-fixture comparisons whose only purpose was dual-engine parity — notably the
+`scan.sh detect` fixture loop at `tests/run.sh:28`. Keep `tests/parity.rs`, which already runs
+`agents-mon detect` against every fixture (no Bash involved), plus navigation, lifecycle,
+and CLI tests.
+
+Do **not** delete the two popup-pin tests at `tests/run.sh:440-490`
+(`popup-sidebar-signal-removes-pin`, `popup-sidebar-ctrl-d-removes-pin`). They are behavior
+tests, not parity tests: they assert that SIGTERM and Ctrl-D each clear `AGENTS_MON_PIN`
+without creating a real pane. Reroute them from `bash scripts/sidebar.sh` to
+`agents-mon sidebar` — the Rust engine honors the same `AGENTS_MON_PIN` contract, so the
+tmux stub, env, and assertions stay as they are. Without this, pin-cleanup has no coverage
+until Task 7 adds it.
 
 - [ ] **Step 7: Run the gate again after deletion**
 
@@ -336,7 +353,7 @@ git commit -m "feat: handle mouse input in Rust"
 - Create: `src/panes.rs`
 - Modify: `src/main.rs`
 - Modify: `src/sidebar.rs`
-- Modify: `scripts/client.sh`
+- Delete: `scripts/client.sh`
 - Modify: `scripts/mirror-add.sh`
 - Modify: `scripts/teardown.sh`
 - Modify: `scripts/orphan.sh`
@@ -388,7 +405,10 @@ Replace `src/sidebar.rs` teardown-script execution with `panes::teardown()`. Pre
 
 - [ ] **Step 6: Reduce scripts to compatibility execs**
 
-Map each filename to its native command. `client.sh` may call a hidden `agents-mon client [format]` compatibility command until Task 9; runtime Rust code must call `newest_real_client()` directly.
+Map each filename to its native command. `client.sh` gets no wrapper and no compatibility
+command — delete it here. Its only callers were `sidebar.sh` (gone in Task 2) and
+`toggle.sh` (an exec wrapper after Task 7); no tmux binding or hook ever invoked it
+directly, so nothing outside the tree can call it. `newest_real_client()` stays internal.
 
 - [ ] **Step 7: Run lifecycle tests**
 
@@ -603,7 +623,6 @@ git commit -m "feat: switch plugin releases from Rust"
 
 **Files:**
 - Modify: `agents-mon.tmux`
-- Delete: `scripts/client.sh`
 - Delete: `scripts/click.sh`
 - Delete: `scripts/scroll.sh`
 - Delete: `scripts/hooks.sh`
