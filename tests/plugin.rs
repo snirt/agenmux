@@ -386,14 +386,19 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
         "root",
         "C-g",
         "display-message",
-        "custom-root",
+        "custom-root -T root body",
     ]);
     tmux.assert_tmux(&["set-option", "-g", "mouse", "off"]);
     tmux.assert_tmux(&["set-option", "-g", "@agents-mon-bin", bin]);
     tmux.assert_tmux(&["set-option", "-g", "@agents-mon-key", "A"]);
     tmux.assert_tmux(&["set-option", "-g", "@agents-mon-popup-key", "e"]);
     tmux.assert_tmux(&["set-option", "-g", "@agents-mon-hide-windows", "agents*"]);
-    tmux.assert_tmux(&["set-option", "-g", "status-right", "#{agents_mon} | %H:%M"]);
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "status-right",
+        "#{agents_mon} | %H:%M \t  ",
+    ]);
 
     assert_success(tmux.bin(&["setup"]), "agents-mon setup with mouse off");
 
@@ -418,7 +423,11 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
     }
     let normal = tmux.text(&["list-keys", "-T", "agents-mon"]);
     assert!(
-        normal.contains("C-g") && normal.contains("custom-root"),
+        normal.contains("C-g") && normal.contains("custom-root -T root body"),
+        "{normal}"
+    );
+    assert!(
+        !normal.contains("custom-root -T agents-mon body"),
         "{normal}"
     );
     assert!(
@@ -461,9 +470,13 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
         tmux.text(&["show-option", "-gqv", "@agents-mon-nav-version"]),
         "12"
     );
+    let status = tmux.tmux(&["show-option", "-gqv", "status-right"]);
+    assert_success(status.clone(), "show status-right");
     assert_eq!(
-        tmux.text(&["show-option", "-gqv", "status-right"]),
-        format!("#({bin} status) | %H:%M")
+        String::from_utf8(status.stdout)
+            .unwrap()
+            .trim_end_matches(['\r', '\n']),
+        format!("#({bin} status) | %H:%M \t  ")
     );
     let prefix = tmux.text(&["list-keys", "-T", "prefix"]);
     assert!(
@@ -476,6 +489,11 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
     assert_success(tmux.bin(&["setup"]), "agents-mon setup with mouse on");
     let root_mouse = tmux.text(&["list-keys", "-T", "root"]);
     assert!(root_mouse.contains(" click '#{pane_id}'"), "{root_mouse}");
+    for table in ["agents-mon", "agents-mon-search"] {
+        let keys = tmux.text(&["list-keys", "-T", table]);
+        assert!(keys.contains("MouseDown1Pane"), "{table}: {keys}");
+        assert!(keys.contains(" click '#{pane_id}'"), "{table}: {keys}");
+    }
     let prefix = tmux.text(&["list-keys", "-T", "prefix"]);
     let picker = prefix
         .lines()

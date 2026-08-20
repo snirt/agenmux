@@ -28,12 +28,14 @@ fn setup(plugin_dir: &Path) -> Result<(), TmuxError> {
 
     clear_legacy_options_and_hooks()?;
     install_hooks(&dir)?;
+    // Mouse keys live in root (`bind-key -n`). Install them before cloning so
+    // the plugin tables keep click behavior after tmux switches key tables.
+    install_mouse(&bin)?;
     clone_root_table(NORMAL_TABLE)?;
     clone_root_table(SEARCH_TABLE)?;
     install_normal_keys(&bin)?;
     install_search_keys(&bin)?;
     install_wheel_keys(&dir)?;
-    install_mouse(&bin)?;
     install_picker_filter()?;
     install_status(&bin)?;
     tmux::command_status(&["set-option", "-g", "@agents-mon-nav-version", "12"])
@@ -102,8 +104,15 @@ fn install_hooks(dir: &str) -> Result<(), TmuxError> {
 
 fn clone_root_table(table: &str) -> Result<(), TmuxError> {
     let _ = tmux::command_status(&["unbind-key", "-a", "-T", table]);
-    let source =
-        tmux::command(&["list-keys", "-T", "root"])?.replace("-T root ", &format!("-T {table} "));
+    let replacement = format!("-T {table} ");
+    let source = tmux::command(&["list-keys", "-T", "root"])?
+        .lines()
+        // list-keys emits one leading table marker per binding. A command body
+        // may also contain the literal text `-T root`; rewrite only the marker.
+        .map(|line| line.replacen("-T root ", &replacement, 1))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
     let mut child = Command::new("tmux")
         .args(["source-file", "-"])
         .stdin(Stdio::piped())
@@ -286,12 +295,13 @@ fn install_status(bin: &str) -> Result<(), TmuxError> {
     let segment = format!("#({bin} status)");
     for option in ["status-left", "status-right"] {
         let value = tmux::command(&["show-option", "-gqv", option])?;
+        let value = value.trim_end_matches(['\r', '\n']);
         if value.contains("#{agents_mon}") {
             tmux::command_status(&[
                 "set-option",
                 "-g",
                 option,
-                &value.trim_end().replace("#{agents_mon}", &segment),
+                &value.replace("#{agents_mon}", &segment),
             ])?;
         }
     }
