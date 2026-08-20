@@ -77,6 +77,25 @@ fn pad_cells(text: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(width.saturating_sub(cell_width(text))))
 }
 
+fn session_heading(name: &str, count: usize, cols: usize) -> String {
+    let suffix = format!(" {count}");
+    let name_room = cols.saturating_sub(cell_width(&suffix) + 1);
+    let name = clip_cells(name, name_room);
+    let rule = "─".repeat(cols.saturating_sub(cell_width(&name) + cell_width(&suffix) + 1));
+    format!("{name} {rule}{suffix}")
+}
+
+fn agent_column_width(rows: &[PaneRow], visible: &[usize], cols: usize) -> Option<usize> {
+    (cols >= 40).then(|| {
+        visible
+            .iter()
+            .map(|&i| cell_width(&rows[i].agent))
+            .max()
+            .unwrap_or(0)
+            .min(10)
+    })
+}
+
 fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
     if bg.is_empty() {
         return line.into();
@@ -1475,11 +1494,13 @@ impl Sidebar {
         };
         if filtering {
             filter.push_str(&format!(" {}/{}", self.visible.len(), self.rows.len()));
+        } else {
+            filter = format!(" · {}", self.rows.len());
         }
-        let filter: String = filter
-            .chars()
-            .take(cols.saturating_sub(6 + notice_len))
-            .collect();
+        let filter = clip_cells(
+            &filter,
+            cols.saturating_sub(cell_width("agents") + notice_len),
+        );
         let hint = if self.search_focused {
             "↵ nav · ^u clear · esc clear"
         } else if self.state_filter.is_some() {
@@ -1495,7 +1516,7 @@ impl Sidebar {
         let has_hint = !hint.is_empty();
         let space = cap.saturating_sub(1 + usize::from(has_hint));
         let (hdr, hdr_pad) = if self.plugin_selected {
-            let used = 6 + filter.chars().count() + notice_len;
+            let used = cell_width("agents") + cell_width(&filter) + notice_len;
             (BAR_BG, " ".repeat(cols.saturating_sub(used)))
         } else {
             ("", String::new())
@@ -1523,16 +1544,20 @@ impl Sidebar {
             // build filtered agents plus their session context, then window it
             let mut lines: Vec<(String, &str)> = Vec::new(); // (text, vis pane)
             let (mut sel_top, mut sel_bot) = (0usize, 0usize);
+            let mut session_counts = HashMap::new();
+            for &row_i in &self.visible {
+                let session = self.rows[row_i].loc.split(':').next().unwrap_or("");
+                *session_counts.entry(session.to_string()).or_insert(0) += 1;
+            }
+            let agent_col = agent_column_width(&self.rows, &self.visible, cols);
             let mut session = "";
             for (n, &row_i) in self.visible.iter().enumerate() {
                 let r = &self.rows[row_i];
                 let sess = r.loc.split(':').next().unwrap_or("");
                 if sess != session {
                     session = sess;
-                    // clip to pane width — a wrapped header shifts every row
-                    // below it and breaks the click→rows-file mapping
-                    let sess_clipped: String = sess.chars().take(cols).collect();
-                    lines.push((format!("{E}[1;34m{sess_clipped}{E}[0m{E}[K\n"), "-"));
+                    let heading = session_heading(session, session_counts[session], cols);
+                    lines.push((format!("{E}[1;34m{heading}{E}[0m{E}[K\n"), "-"));
                 }
                 if Some(n) == cursor {
                     sel_top = lines.len();
@@ -1541,27 +1566,32 @@ impl Sidebar {
                 let mark = cursor_mark(selected, self.plugin_selected, &r.state);
                 let dot = self.dot(&r.state);
                 let win = r.loc.splitn(2, ':').nth(1).unwrap_or("");
-                let mut rest = format!("{win} {}", r.cwd);
-                let agent_len = r.agent.chars().count();
-                let avail = cols.saturating_sub(6 + agent_len);
-                if avail > 0 {
-                    rest = rest.chars().take(avail).collect();
-                }
+                let agent_width = agent_col.unwrap_or_else(|| cell_width(&r.agent));
+                let agent = clip_cells(&r.agent, agent_width);
+                let agent = if agent_col.is_some() {
+                    pad_cells(&agent, agent_width)
+                } else {
+                    agent
+                };
+                let rest = clip_cells(
+                    &format!("{win} {}", r.cwd),
+                    cols.saturating_sub(6 + agent_width),
+                );
                 let row_bg = if selected {
                     state_bg(&r.state, self.plugin_selected)
                 } else {
                     ""
                 };
-                let row = format!(" {mark}{dot} {E}[1m{}{E}[0m {E}[2m{rest}{E}[0m", r.agent);
-                let width = 6 + agent_len + rest.chars().count();
+                let row = format!(" {mark}{dot} {E}[1m{agent}{E}[0m {E}[2m{rest}{E}[0m");
+                let width = 6 + cell_width(&agent) + cell_width(&rest);
                 lines.push((
                     format!("{}{E}[K\n", bar(&row, row_bg, cols, width)),
                     &r.pane,
                 ));
                 if !r.title.is_empty() {
-                    let t: String = r.title.chars().take(cols.saturating_sub(5)).collect();
+                    let t = clip_cells(&r.title, cols.saturating_sub(5));
                     let line = format!("     {E}[2m{t}{E}[0m");
-                    let width = 5 + t.chars().count();
+                    let width = 5 + cell_width(&t);
                     lines.push((
                         format!("{}{E}[K\n", bar(&line, row_bg, cols, width)),
                         &r.pane,
@@ -1964,6 +1994,31 @@ mod tests {
         assert_eq!(pad_cells("pi", 6), "pi    ");
         assert_eq!(pad_cells("矩阵", 6), "矩阵  ");
         assert_eq!(UnicodeWidthStr::width(pad_cells("矩阵", 6).as_str()), 6);
+    }
+
+    #[test]
+    fn session_heading_fills_one_line_and_keeps_the_count() {
+        assert_eq!(session_heading("MATRIX", 3, 20), "MATRIX ─────────── 3");
+        assert_eq!(cell_width(&session_heading("很长的会话", 12, 12)), 12);
+        assert!(session_heading("很长的会话", 12, 12).ends_with(" 12"));
+    }
+
+    #[test]
+    fn agent_names_align_only_when_the_sidebar_is_wide() {
+        let rows = [
+            filter_row("%1", "s:1.0", "idle", ""),
+            PaneRow {
+                pane: "%2".into(),
+                loc: "s:2.0".into(),
+                agent: "pi".into(),
+                state: "idle".into(),
+                cwd: "repo".into(),
+                title: String::new(),
+            },
+        ];
+        let visible = [0, 1];
+        assert_eq!(agent_column_width(&rows, &visible, 30), None);
+        assert_eq!(agent_column_width(&rows, &visible, 50), Some(5));
     }
 
     #[test]
