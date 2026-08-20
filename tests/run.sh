@@ -405,7 +405,7 @@ esac
 exit 0
 SH
   chmod +x "$tmp/bin/tmux"
-  TMUX_STUB_LOG="$tmp/tmux.log" PATH="$tmp/bin:$PATH" bash "$DIR/scripts/orphan.sh"
+  TMUX_STUB_LOG="$tmp/tmux.log" PATH="$tmp/bin:$PATH" "$BIN" pane-orphan
   if grep -Eq '^(switch-client|last-window|next-window)' "$tmp/tmux.log"; then
     echo "FAIL orphan-does-not-move-unstranded-client: moved focus from another window"
     cat "$tmp/tmux.log"
@@ -433,7 +433,7 @@ esac
 exit 0
 SH
   chmod +x "$tmp/bin/tmux"
-  TMUX_STUB_LOG="$tmp/tmux.log" PATH="$tmp/bin:$PATH" bash "$DIR/scripts/orphan.sh"
+  TMUX_STUB_LOG="$tmp/tmux.log" PATH="$tmp/bin:$PATH" "$BIN" pane-orphan
   if grep -q '^switch-client -c c1 -t @last$' "$tmp/tmux.log" &&
     ! grep -Eq '^(last-window|next-window|switch-client -l|switch-client -p)' "$tmp/tmux.log"; then
     echo "ok   orphan-moves-only-stranded-client"
@@ -601,7 +601,7 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
     while read -r p; do $T kill-pane -t "$p"; done
   for _ in 1 2 3 4 5 6 7 8; do
     env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" \
-      bash "$DIR/scripts/mirror-add.sh" "$racew" &
+      "$BIN_ABS" pane-add "$racew" &
   done
   wait
   raced="$($T list-panes -t "$racew" -F '#{pane_title}' | grep -cx agents-mon)"

@@ -11,6 +11,7 @@
 use crate::attention::Tracker;
 use crate::conf::AgentConf;
 use crate::pane_writers::PaneWriters;
+use crate::panes;
 use crate::procs::IdentCache;
 use crate::scan::{self, PaneRow};
 use crate::tmux::{command_spawn, command_status, Tmux, TmuxError};
@@ -1418,9 +1419,8 @@ impl Sidebar {
     }
 
     /// Preserved-pane shutdown: close visible writers, kill empty panes and
-    /// restore layouts via a
-    /// forked script (hook run-shell echoes would desync the control pipe),
-    /// then drop the key FIFO and row map.
+    /// restore layouts through the native pane lifecycle, then drop the key
+    /// FIFO and row map.
     /// Drop only what is ours. The panes, the FIFO path and the rows file
     /// belong to the daemon that replaced us — teardown() would delete them.
     fn quiet_exit(&mut self) {
@@ -1436,8 +1436,7 @@ impl Sidebar {
         if let Some(d) = &mut self.daemon {
             d.writers.clear();
         }
-        let script = self.plugin_dir.join("scripts/teardown.sh");
-        let _ = std::process::Command::new("bash").arg(script).status();
+        let _ = panes::teardown();
         if let Some(d) = &self.daemon {
             let _ = std::fs::remove_file(&d.keys_path);
             unsafe { libc::close(d.keys_fd) };

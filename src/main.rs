@@ -5,6 +5,7 @@ mod focus;
 mod input;
 mod notifications;
 mod pane_writers;
+mod panes;
 mod procs;
 mod scan;
 mod sidebar;
@@ -31,12 +32,17 @@ fn main() {
         ["click", pane, y, client] => y.parse().map_or(2, |y| input::click(pane, y, client)),
         ["wheel", pane, "up"] => input::wheel(pane, input::Direction::Up),
         ["wheel", pane, "down"] => input::wheel(pane, input::Direction::Down),
+        ["pane-add"] => panes::pane_add(None),
+        ["pane-add", window] => panes::pane_add(Some(window)),
+        ["pane-orphan"] => panes::pane_orphan(),
+        ["pane-pin"] => panes::pane_pin(),
+        ["teardown"] => panes::teardown(),
         ["notification-open", socket, pane, bundle] => {
             notifications::open_pane(socket, pane, bundle)
         }
         _ => {
             eprintln!(
-                "usage: agents-mon [--version|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
+                "usage: agents-mon [--version|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
             );
             2
         }

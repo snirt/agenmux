@@ -59,13 +59,17 @@ impl TestTmux {
     }
 
     fn bin(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_agents-mon"))
+        self.bin_command(args).output().unwrap()
+    }
+
+    fn bin_command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agents-mon"));
+        command
             .args(args)
             .env("TMPDIR", &self.tmp)
             .env("TMUX", self.tmux_env())
-            .env("AGENTS_MON_DIR", env!("CARGO_MANIFEST_DIR"))
-            .output()
-            .unwrap()
+            .env("AGENTS_MON_DIR", env!("CARGO_MANIFEST_DIR"));
+        command
     }
 
     fn script_command(&self, name: &str, args: &[&str]) -> Command {
@@ -163,7 +167,7 @@ fn teardown_discards_a_layout_after_window_size_changes() {
     let resized = tmux.text(&["display-message", "-p", "-t", &window, "#{window_layout}"]);
     assert_ne!(saved, resized);
 
-    assert_success(tmux.script("teardown.sh", &[]), "teardown.sh");
+    assert_success(tmux.bin(&["teardown"]), "agents-mon teardown");
 
     assert_eq!(
         tmux.text(&["display-message", "-p", "-t", &window, "#{window_layout}"]),
@@ -184,11 +188,7 @@ fn mirror_add_is_idempotent_under_concurrent_calls() {
         .count();
 
     let mut children = (0..8)
-        .map(|_| {
-            tmux.script_command("mirror-add.sh", &[&window])
-                .spawn()
-                .unwrap()
-        })
+        .map(|_| tmux.bin_command(&["pane-add", &window]).spawn().unwrap())
         .collect::<Vec<_>>();
     for child in &mut children {
         assert!(child.wait().unwrap().success());
@@ -208,6 +208,19 @@ fn mirror_add_is_idempotent_under_concurrent_calls() {
         .collect::<Vec<_>>();
     assert_eq!(mirrors.len(), 1, "{panes}");
     assert_eq!(mirrors[0], "agents-mon\t0\t30");
+}
+
+#[test]
+fn pane_lifecycle_wrappers_dispatch_native_cli() {
+    let tmux = TestTmux::new("pane-wrappers");
+    for (script, args) in [
+        ("mirror-add.sh", vec!["@missing"]),
+        ("orphan.sh", vec![]),
+        ("pin.sh", vec![]),
+        ("teardown.sh", vec![]),
+    ] {
+        assert_success(tmux.script(script, &args), script);
+    }
 }
 
 #[test]
