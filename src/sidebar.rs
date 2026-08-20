@@ -96,6 +96,10 @@ fn agent_column_width(rows: &[PaneRow], visible: &[usize], cols: usize) -> Optio
     })
 }
 
+fn agent_name_width(agent: &str, column: Option<usize>, cols: usize) -> usize {
+    column.unwrap_or_else(|| cell_width(agent).min(cols.saturating_sub(6)))
+}
+
 fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
     if bg.is_empty() {
         return line.into();
@@ -1566,7 +1570,7 @@ impl Sidebar {
                 let mark = cursor_mark(selected, self.plugin_selected, &r.state);
                 let dot = self.dot(&r.state);
                 let win = r.loc.splitn(2, ':').nth(1).unwrap_or("");
-                let agent_width = agent_col.unwrap_or_else(|| cell_width(&r.agent));
+                let agent_width = agent_name_width(&r.agent, agent_col, cols);
                 let agent = clip_cells(&r.agent, agent_width);
                 let agent = if agent_col.is_some() {
                     pad_cells(&agent, agent_width)
@@ -2019,6 +2023,17 @@ mod tests {
         let visible = [0, 1];
         assert_eq!(agent_column_width(&rows, &visible, 30), None);
         assert_eq!(agent_column_width(&rows, &visible, 50), Some(5));
+    }
+
+    #[test]
+    fn narrow_agent_names_fit_one_physical_row() {
+        let name = "custom-agent-name-that-is-too-long";
+        let width = agent_name_width(name, None, 30);
+        let agent = clip_cells(name, width);
+
+        assert_eq!(width, 24);
+        assert_eq!(6 + cell_width(&agent), 30);
+        assert!(agent.ends_with('…'));
     }
 
     #[test]
