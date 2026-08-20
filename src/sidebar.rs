@@ -13,7 +13,7 @@ use crate::conf::AgentConf;
 use crate::pane_writers::PaneWriters;
 use crate::procs::IdentCache;
 use crate::scan::{self, PaneRow};
-use crate::tmux::{command_status, Tmux, TmuxError};
+use crate::tmux::{command_spawn, command_status, Tmux, TmuxError};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
@@ -1706,7 +1706,7 @@ impl Sidebar {
                 continue;
             };
             if title == "agents-mon" {
-                let _ = command_status(&["switch-client", "-c", client, "-T", "agents-mon"]);
+                let _ = command_spawn(&["switch-client", "-c", client, "-T", "agents-mon"]);
             }
         }
     }

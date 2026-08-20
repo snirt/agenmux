@@ -44,6 +44,11 @@ pub fn command_status(args: &[&str]) -> Result<(), TmuxError> {
     command(args).map(drop)
 }
 
+pub fn command_spawn(args: &[&str]) -> Result<(), TmuxError> {
+    Command::new("tmux").args(args).spawn()?;
+    Ok(())
+}
+
 #[allow(dead_code)] // setup/pane commands added in the next migration tasks consume this
 pub fn lines(args: &[&str]) -> Result<Vec<String>, TmuxError> {
     command(args).map(|output| output.lines().map(str::to_string).collect())
@@ -293,5 +298,27 @@ mod tests {
         assert!(format_truth("off"));
         assert!(format_truth("00"));
         assert!(format_truth("\t\n"));
+    }
+
+    #[test]
+    fn spawned_tmux_command_does_not_wait_for_completion() {
+        let socket = format!("agents-mon-spawn-test-{}", std::process::id());
+        let Ok(status) = Command::new("tmux")
+            .args(["-L", &socket, "new-session", "-d"])
+            .status()
+        else {
+            panic!("could not start private tmux server");
+        };
+        assert!(status.success());
+
+        let start = std::time::Instant::now();
+        let result = command_spawn(&["-L", &socket, "run-shell", "sleep 3"]);
+        let elapsed = start.elapsed();
+        let _ = Command::new("tmux")
+            .args(["-L", &socket, "kill-server"])
+            .status();
+
+        assert!(result.is_ok());
+        assert!(elapsed < std::time::Duration::from_millis(1500), "{elapsed:?}");
     }
 }
