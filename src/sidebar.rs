@@ -19,6 +19,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 static WINCH: AtomicBool = AtomicBool::new(false);
 static QUIT: AtomicBool = AtomicBool::new(false);
@@ -44,6 +45,36 @@ fn state_bg(state: &str, focused: bool) -> &'static str {
         (_, true) => "\x1b[48;2;15;36;16m",
         (_, false) => "\x1b[48;2;11;27;12m",
     }
+}
+
+fn cell_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+fn clip_cells(text: &str, max: usize) -> String {
+    if cell_width(text) <= max {
+        return text.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + width > max - 1 {
+            break;
+        }
+        out.push(ch);
+        used += width;
+    }
+    out.push('…');
+    out
+}
+
+fn pad_cells(text: &str, width: usize) -> String {
+    format!("{text}{}", " ".repeat(width.saturating_sub(cell_width(text))))
 }
 
 fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
@@ -1730,6 +1761,7 @@ impl Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthStr;
 
     fn row(pane: &str) -> PaneRow {
         PaneRow {
@@ -1912,6 +1944,26 @@ mod tests {
         std::fs::write(&file, "garbage\n").unwrap();
         assert_eq!(update_available(&dir), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn clipping_uses_terminal_cells_and_marks_truncation() {
+        assert_eq!(cell_width("matrix"), 6);
+        assert_eq!(cell_width("矩阵"), 4);
+        assert_eq!(cell_width("x\u{301}"), 1);
+
+        assert_eq!(clip_cells("matrix", 6), "matrix");
+        assert_eq!(clip_cells("matrix", 5), "matr…");
+        assert_eq!(clip_cells("矩阵-agent", 6), "矩阵-…");
+        assert_eq!(clip_cells("abc", 1), "…");
+        assert_eq!(clip_cells("abc", 0), "");
+    }
+
+    #[test]
+    fn padding_uses_terminal_cells() {
+        assert_eq!(pad_cells("pi", 6), "pi    ");
+        assert_eq!(pad_cells("矩阵", 6), "矩阵  ");
+        assert_eq!(UnicodeWidthStr::width(pad_cells("矩阵", 6).as_str()), 6);
     }
 
     #[test]

@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 regex = "1"
 libc = "0.2"
+unicode-width = "0.2"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
 # native notifications for the AgentsMon.app helper (src/bin/agents-mon-notifier.rs)
