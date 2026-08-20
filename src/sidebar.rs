@@ -13,7 +13,7 @@ use crate::conf::AgentConf;
 use crate::pane_writers::PaneWriters;
 use crate::procs::IdentCache;
 use crate::scan::{self, PaneRow};
-use crate::tmux::{Tmux, TmuxError};
+use crate::tmux::{command_status, Tmux, TmuxError};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
@@ -1117,14 +1117,14 @@ impl Sidebar {
                     .max_by_key(|(act, _)| *act)
                     .map(|(_, name)| name)
             });
-        let mut cmd = std::process::Command::new("tmux");
+        let mut args = Vec::new();
         if let Some(client) = &client {
-            cmd.args([
+            args.extend([
                 "switch-client",
                 "-c",
                 client,
                 "-t",
-                &target,
+                target.as_str(),
                 ";",
                 "switch-client",
                 "-c",
@@ -1134,9 +1134,16 @@ impl Sidebar {
                 ";",
             ]);
         }
-        let _ = cmd
-            .args(["select-window", "-t", &target, ";", "select-pane", "-t", &target])
-            .status();
+        args.extend([
+            "select-window",
+            "-t",
+            target.as_str(),
+            ";",
+            "select-pane",
+            "-t",
+            target.as_str(),
+        ]);
+        let _ = command_status(&args);
         false
     }
 
@@ -1271,7 +1278,8 @@ impl Sidebar {
                 ]);
                 m.w = wopt;
             }
-            let _ = std::process::Command::new("tmux").args(&argv).status();
+            let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+            let _ = command_status(&args);
         }
         // Width DOES fold to the minimum: mirror::draw clips rows but NOT
         // columns, so a frame wider than some pane would wrap and shift every
@@ -1298,17 +1306,22 @@ impl Sidebar {
             // resize the OTHER sidebars via forked tmux (hook run-shell
             // echoes on the control pipe would desync it); the dragged pane
             // stays untouched so nothing ever fights the user's drag
-            let mut cmd = std::process::Command::new("tmux");
-            let mut any = false;
+            let mut argv = Vec::new();
             for m in ms.iter().filter(|m| m.pane != src_pane && m.w != width) {
-                if any {
-                    cmd.arg(";");
+                if !argv.is_empty() {
+                    argv.push(";".to_string());
                 }
-                cmd.args(["resize-pane", "-t", &m.pane, "-x", &width.to_string()]);
-                any = true;
+                argv.extend([
+                    "resize-pane".to_string(),
+                    "-t".to_string(),
+                    m.pane.clone(),
+                    "-x".to_string(),
+                    width.to_string(),
+                ]);
             }
-            if any {
-                let _ = cmd.status();
+            if !argv.is_empty() {
+                let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+                let _ = command_status(&args);
             }
             w = width; // render for the adopted width now, not the stale min
         }
@@ -1693,9 +1706,7 @@ impl Sidebar {
                 continue;
             };
             if title == "agents-mon" {
-                let _ = std::process::Command::new("tmux")
-                    .args(["switch-client", "-c", client, "-T", "agents-mon"])
-                    .spawn();
+                let _ = command_status(&["switch-client", "-c", client, "-T", "agents-mon"]);
             }
         }
     }
