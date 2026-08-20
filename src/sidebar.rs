@@ -464,6 +464,17 @@ fn picker_sel(tags: &[String], cur: &str, chosen: Option<&str>, sel: usize) -> u
     selected.min(tags.len().saturating_sub(1))
 }
 
+fn viewport(selected: usize, len: usize, capacity: usize) -> std::ops::Range<usize> {
+    if len == 0 || capacity == 0 {
+        return 0..0;
+    }
+    let capacity = capacity.min(len);
+    let start = (selected.min(len - 1) + 1)
+        .saturating_sub(capacity)
+        .min(len - capacity);
+    start..start + capacity
+}
+
 /// A tag is passed to update.sh as an argument — keep it boring.
 fn is_tag(t: &str) -> bool {
     t.len() > 1
@@ -1658,52 +1669,99 @@ impl Sidebar {
     }
 
     fn render_overlay(&mut self, force: bool) {
+        let (cols, trows) = match &self.daemon {
+            Some(d) => d.size,
+            None => term_size(),
+        };
         let text = match &mut self.overlay {
             Some(Overlay::Help) => {
-                let quit_keys = " q        close sidebar";
-                format!(
-                    "{E}[2J{E}[H{E}[1magents — help{E}[0m {E}[2m{}{E}[0m\n\n\
-{E}[1mstatus{E}[0m\n\
- {E}[32m⣿{E}[0m  idle\n\
- {E}[33m⠹{E}[0m  working (spinner)\n\
- {E}[31m⣿{E}[0m  blocked, waiting for input (blinks)\n\
- {E}[32m⣿{E}[0m  done, not viewed yet (blinks)\n\n\
-{E}[1mkeys{E}[0m\n\
- j/k ↑/↓  move selection\n\
- Enter/l  jump to agent\n\
- /        live search; Enter enables j/k\n\
- f        select next state filter\n\
- Esc      clear filters / show all\n\
- u        update / switch version\n\
-{quit_keys}\n\
- ?        this help\n\n\
-{E}[2mpress any key to return{E}[0m",
-                    current_tag()
-                )
+                let heading = format!("agents — help  {}", current_tag());
+                let full = [
+                    heading.as_str(),
+                    "",
+                    "status",
+                    " ⣿ idle/done   ⠹ working",
+                    " ⣿ blocked",
+                    "",
+                    "keys",
+                    " j/k ↑/↓   move",
+                    " ↵/l       open",
+                    " /         search",
+                    " f         status",
+                    " Esc       clear",
+                    " u         versions",
+                    " q         close",
+                    " ?         back",
+                    "",
+                    " any key returns",
+                ];
+                let compact = [
+                    heading.as_str(),
+                    "status  ⣿ idle/done ⠹ working",
+                    "        ⣿ blocked",
+                    "j/k move  ↵/l open  / search",
+                    "f status  Esc clear",
+                    "u versions  q close  ? back",
+                    "any key returns",
+                ];
+                let lines: &[&str] = if trows < 18 { &compact } else { &full };
+                let mut text = format!("{E}[2J{E}[H");
+                for (i, plain) in lines.iter().enumerate() {
+                    let mut line = clip_cells(plain, cols);
+                    if line.starts_with("agents — help") {
+                        line = line.replacen(
+                            "agents — help",
+                            &format!("{E}[1magents — help{E}[0m"),
+                            1,
+                        );
+                    }
+                    if line == "status" || line == "keys" || line.starts_with("status  ") {
+                        let label = if line.starts_with("status") {
+                            "status"
+                        } else {
+                            "keys"
+                        };
+                        line = line.replacen(label, &format!("{E}[1m{label}{E}[0m"), 1);
+                    }
+                    let dot_color = if plain.contains("blocked") { 31 } else { 32 };
+                    line = line.replace('⣿', &format!("{E}[{dot_color}m⣿{E}[0m"));
+                    line = line.replace('⠹', &format!("{E}[33m⠹{E}[0m"));
+                    if plain.contains("any key returns") {
+                        line = format!("{E}[2m{line}{E}[0m");
+                    }
+                    text.push_str(&line);
+                    if i + 1 < lines.len() {
+                        text.push('\n');
+                    }
+                }
+                text
             }
             Some(Overlay::Versions { sel, chosen }) => {
                 let cur = current_tag();
                 let tags = known_tags(&self.plugin_dir);
                 *sel = picker_sel(&tags, &cur, chosen.as_deref(), *sel);
-                let mut text = format!(
-                    "{E}[2J{E}[H{E}[1magents — versions{E}[0m {E}[2m{cur}{E}[0m\n\n"
+                let heading = clip_cells(&format!("agents — versions {cur}"), cols).replacen(
+                    "agents — versions",
+                    &format!("{E}[1magents — versions{E}[0m"),
+                    1,
                 );
+                let mut text = format!("{E}[2J{E}[H{heading}\n\n");
                 if tags.is_empty() {
-                    text.push_str(&format!(
-                        " {E}[2mno releases found — checking…{E}[0m\n\n\
-                         {E}[2mq back{E}[0m"
-                    ));
+                    let empty = clip_cells(" no releases found — checking…", cols);
+                    let footer = clip_cells("q back", cols);
+                    text.push_str(&format!("{E}[2m{empty}{E}[0m\n\n{E}[2m{footer}{E}[0m"));
                 } else {
-                    for (i, t) in tags.iter().enumerate() {
+                    let capacity = trows.saturating_sub(4);
+                    for i in viewport(*sel, tags.len(), capacity) {
                         let mark = cursor_mark(i == *sel, true, "idle");
-                        let tail = if *t == cur {
-                            format!(" {E}[2m(current){E}[0m")
-                        } else {
-                            String::new()
-                        };
-                        text.push_str(&format!("{mark}{t}{tail}\n"));
+                        let suffix = if tags[i] == cur { " (current)" } else { "" };
+                        let item =
+                            clip_cells(&format!("{}{suffix}", tags[i]), cols.saturating_sub(2))
+                                .replace("(current)", &format!("{E}[2m(current){E}[0m"));
+                        text.push_str(&format!("{mark}{item}\n"));
                     }
-                    text.push_str(&format!("\n{E}[2m↵ switch · j/k ↑/↓ · q back{E}[0m"));
+                    let footer = clip_cells("↵ switch · j/k ↑/↓ · q back", cols);
+                    text.push_str(&format!("\n{E}[2m{footer}{E}[0m"));
                 }
                 text
             }
@@ -1925,6 +1983,15 @@ mod tests {
         // a shorter tag is the same as trailing zeros
         assert!(!newer_than("v0.1", "v0.1.0"));
         assert!(newer_than("v0.1.1", "v0.1"));
+    }
+
+    #[test]
+    fn overlay_viewport_keeps_the_selection_visible() {
+        assert_eq!(viewport(0, 10, 3), 0..3);
+        assert_eq!(viewport(5, 10, 3), 3..6);
+        assert_eq!(viewport(9, 10, 3), 7..10);
+        assert_eq!(viewport(0, 0, 3), 0..0);
+        assert_eq!(viewport(4, 10, 0), 0..0);
     }
 
     #[test]

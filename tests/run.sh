@@ -640,7 +640,7 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   chmod +x "$tmp/bin/tmux"
   printf '#!/bin/sh\nwhile :; do sleep 10; done\n' >"$tmp/codex"
   chmod +x "$tmp/codex"
-  TMPDIR="$tmp" $T new-session -d -s t -x 200 -y 50 "$tmp/codex"
+  TMPDIR="$tmp" $T new-session -d -s t -x 80 -y 15 "$tmp/codex"
   $T new-window -t t: "$tmp/codex"
   $T set-option -g @agents-mon-bin "$BIN_ABS"
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" \
@@ -667,15 +667,22 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key j
   sleep 1
   list_moved="$($T capture-pane -p -t "$mir")"
+  help_fits=0
+  versions_fit=0
+  printf '%s\n' "$help_frame" | head -n 1 | grep -Fq 'agents — help' \
+    && printf '%s\n' "$help_frame" | grep -Fq 'any key returns' \
+    && help_fits=1
+  printf '%s\n' "$vers_frame" | head -n 1 | grep -Fq 'agents — versions' \
+    && printf '%s\n' "$vers_frame" | grep -Fq 'q back' \
+    && versions_fit=1
   if [ "$opened" -eq 2 ] && [ "$help_alive" -eq 2 ] && [ "$vers_alive" -eq 2 ] \
-     && printf '%s\n' "$help_frame" | grep -Fq 'agents — help' \
-     && printf '%s\n' "$vers_frame" | grep -Fq 'agents — versions' \
+     && [ "$help_fits" -eq 1 ] && [ "$versions_fit" -eq 1 ] \
      && printf '%s\n' "$list_before" | grep -Fq codex \
      && [ "$list_after" = "$list_before" ] \
      && ! printf '%s\n' "$list_moved" | grep -Fq '❯'; then
     echo "ok   overlays-render-in-processless-panes"
   else
-    echo "FAIL overlays-render-in-processless-panes: opened=$opened help=$help_alive versions=$vers_alive list=[$list_before/$list_after/$list_moved]"
+    echo "FAIL overlays-render-in-processless-panes: opened=$opened help=$help_alive versions=$vers_alive help_fits=$help_fits versions_fit=$versions_fit list=[$list_before/$list_after/$list_moved]"
     fail=1
   fi
   $T kill-server 2>/dev/null || true
