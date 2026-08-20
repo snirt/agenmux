@@ -355,9 +355,14 @@ fn stale_click_origin_is_a_noop() {
         "exec sleep 60",
     ]);
     assert_ne!(clicked, selected_before);
+    let viewer_window = client_before.split('\t').next().unwrap();
+    let target_window = tmux.text(&["display-message", "-p", "-t", &clicked, "#{window_id}"]);
+    assert_ne!(target_window, viewer_window);
 
     let rows = tmux.tmp.join(format!("agents-mon-rows-{}", &clicked[1..]));
-    std::fs::write(rows, format!("{selected_before}\n")).unwrap();
+    // If the handler guessed the attached viewer after rejecting the stale
+    // origin, this valid row would visibly move it to the other window.
+    std::fs::write(rows, format!("{clicked}\n")).unwrap();
     assert_success(
         tmux.script("click.sh", &[&clicked, "1", "vanished-client"]),
         "click.sh",
