@@ -16,6 +16,10 @@ popup_key="$(tmux show-option -gqv @agents-mon-popup-key)"
 tmux list-windows -a -F '#{window_id}' 2>/dev/null | while read -r w; do
   tmux set-option -wu -t "$w" @agents-mon-sidebar 2>/dev/null
 done
+# Live servers may retain the deleted moving-sidebar hooks across an upgrade.
+tmux set-hook -gu 'after-select-window[42]' 2>/dev/null || true
+tmux set-hook -gu 'client-session-changed[42]' 2>/dev/null || true
+tmux set-hook -gu 'session-window-changed[42]' 2>/dev/null || true
 
 # Config reloads may clear hooks; restore them while the native daemon is on.
 if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ]; then

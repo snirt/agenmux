@@ -634,9 +634,9 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     ));
 
     unsafe {
-        libc::signal(libc::SIGWINCH, on_winch as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, on_term as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_term as libc::sighandler_t);
+        libc::signal(libc::SIGWINCH, on_winch as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
     }
     let _raw = RawMode::enable();
     print!("{E}[?25l{E}[2J");
@@ -664,8 +664,8 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
 /// (with full teardown) when the last pane disappears.
 pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     unsafe {
-        libc::signal(libc::SIGTERM, on_term as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_term as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
     }
     let tmp = std::env::temp_dir();
     let keys_path = tmp.join("agents-mon-keys");

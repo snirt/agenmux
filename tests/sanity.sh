@@ -31,8 +31,11 @@ export XDG_CONFIG_HOME="$root/home/.config"
 export TMPDIR="$root/tmp"
 export TERM=xterm-256color
 case "$(tmux -V)" in
-  'tmux 3.7'*) ;;
-  *) printf 'FAIL: tmux 3.7 required, found %s\n' "$(tmux -V)" >&2; exit 1 ;;
+'tmux 3.7'*) ;;
+*)
+  printf 'FAIL: tmux 3.7 required, found %s\n' "$(tmux -V)" >&2
+  exit 1
+  ;;
 esac
 
 # A real executable name identifies Codex; the pane title supplies its state.
@@ -52,8 +55,8 @@ run_tmux_case() {
   tmux -L "$socket" set-option -g status-right '#{agents_mon}'
   tmux -L "$socket" run-shell "bash '$plugin/agents-mon.tmux'"
 
-  tmux -L "$socket" list-keys -T prefix \
-    | grep -Fq '/scripts/toggle.sh'
+  tmux -L "$socket" list-keys -T prefix |
+    grep -Fq '/scripts/toggle.sh'
   socket_path="$(tmux -L "$socket" display-message -p '#{socket_path}')"
   server_pid="$(tmux -L "$socket" display-message -p '#{pid}')"
   tmux_env="$socket_path,$server_pid,0"
@@ -67,12 +70,12 @@ run_tmux_case() {
     i=$((i + 1))
   done
   case "$rows" in
-    *$'\tcodex\tblocked\t'*) ;;
-    *)
-      printf 'FAIL %s: Codex blocked row not found\n%s\n' "$name" "$rows" >&2
-      tmux -L "$socket" list-panes -a -F '#{pane_id} #{pane_pid} #{pane_current_command} #{pane_title}' >&2
-      return 1
-      ;;
+  *$'\tcodex\tblocked\t'*) ;;
+  *)
+    printf 'FAIL %s: Codex blocked row not found\n%s\n' "$name" "$rows" >&2
+    tmux -L "$socket" list-panes -a -F '#{pane_id} #{pane_pid} #{pane_current_command} #{pane_title}' >&2
+    return 1
+    ;;
   esac
 
   status="$(TMUX="$tmux_env" "$bin" status)"
@@ -86,8 +89,8 @@ run_tmux_case() {
   i=0
   while [ "$i" -lt 50 ]; do
     # mirror mode marks panes by title (no @agents-mon-sidebar option)
-    sidebar="$(tmux -L "$socket" list-panes -a -F '#{pane_id}	#{pane_title}' \
-      | awk -F'\t' '$2 == "agents-mon" { print $1; exit }')"
+    sidebar="$(tmux -L "$socket" list-panes -a -F '#{pane_id}	#{pane_title}' |
+      awk -F'\t' '$2 == "agents-mon" { print $1; exit }')"
     if [ -n "$sidebar" ]; then
       frame="$(tmux -L "$socket" capture-pane -p -t "$sidebar" 2>/dev/null || true)"
       printf '%s\n' "$frame" | grep -Fq codex && break
@@ -104,6 +107,124 @@ run_tmux_case() {
   active_socket=""
   printf 'ok   %s binary in real tmux\n' "$name"
 }
+
+run_immediate_popup_bootstrap() { # verified|cargo|bad-checksum
+  local mode="$1" case_root="$root/popup-$1" case_plugin="$root/popup-$1/plugin"
+  local case_bin="$root/popup-$1/bin" downloads="$root/popup-$1/downloads"
+  local marker="$root/popup-$1/opened" socket="agents-mon-popup-$1-$$"
+  local package tag archive expect_pid opened=0 i
+  mkdir -p "$case_plugin" "$case_bin" "$downloads"
+  cp -R "$DIR/agents" "$DIR/scripts" "$case_plugin/"
+  cp "$DIR/agents-mon.tmux" "$case_plugin/agents-mon.tmux"
+  tag="$(bash "$DIR/scripts/version.sh" tag)"
+  case "$(uname -s):$(uname -m)" in
+    Darwin:arm64) package=tmux-agents-mon-macos-aarch64 ;;
+    Darwin:x86_64) package=tmux-agents-mon-macos-x86_64 ;;
+    Linux:aarch64 | Linux:arm64) package=tmux-agents-mon-linux-aarch64 ;;
+    Linux:x86_64 | Linux:amd64) package=tmux-agents-mon-linux-x86_64 ;;
+    *) printf 'FAIL popup bootstrap: unsupported platform\n' >&2; return 1 ;;
+  esac
+
+  if [ "$mode" = cargo ]; then
+    cat >"$case_plugin/Cargo.toml" <<TOML
+[package]
+name = "agents-mon"
+version = "${tag#v}"
+edition = "2021"
+TOML
+    mkdir -p "$case_plugin/src"
+    cat >"$case_plugin/src/main.rs" <<RS
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("sidebar") {
+        std::fs::write("$marker", "opened").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+RS
+    printf '#!/usr/bin/env bash\nexit 1\n' >"$case_bin/curl"
+    printf '#!/usr/bin/env bash\nexit 1\n' >"$case_bin/git"
+  else
+    mkdir -p "$downloads/$tag/$package/target/release"
+    cat >"$downloads/$tag/$package/target/release/agents-mon" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = sidebar ]; then
+  printf opened >"$marker"
+  sleep 0.3
+fi
+SH
+    chmod +x "$downloads/$tag/$package/target/release/agents-mon"
+    archive="$downloads/$tag/$package.tar.gz"
+    tar -czf "$archive" -C "$downloads/$tag" "$package"
+    rm -rf "$downloads/$tag/$package"
+    if [ "$mode" = bad-checksum ]; then
+      printf '%064d  ./%s.tar.gz\n' 0 "$package" >"$downloads/$tag/SHA256SUMS"
+      printf '#!/usr/bin/env bash\nexit 1\n' >"$case_bin/cargo"
+    elif command -v sha256sum >/dev/null; then
+      (cd "$downloads/$tag" && sha256sum "./$package.tar.gz" >SHA256SUMS)
+    else
+      (cd "$downloads/$tag" && shasum -a 256 "./$package.tar.gz" >SHA256SUMS)
+    fi
+    cat >"$case_bin/curl" <<'SH'
+#!/usr/bin/env bash
+url=""; out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) shift; out="$1" ;;
+    http*) url="$1" ;;
+  esac
+  shift
+done
+case "$url" in
+  */releases/latest) printf '%s/tag/%s' "$url" "$BOOTSTRAP_TAG" ;;
+  *) cp "$BOOTSTRAP_DOWNLOADS/$BOOTSTRAP_TAG/${url##*/}" "$out" ;;
+esac
+SH
+    printf '#!/usr/bin/env bash\nexit 1\n' >"$case_bin/git"
+  fi
+  chmod +x "$case_bin"/*
+
+  PATH="$case_bin:$PATH" BOOTSTRAP_TAG="$tag" BOOTSTRAP_DOWNLOADS="$downloads" \
+    tmux -L "$socket" -f /dev/null new-session -d -s popup -x 100 -y 30
+  active_socket="$socket"
+  tmux -L "$socket" set-environment -g PATH "$case_bin:$PATH"
+  tmux -L "$socket" set-environment -g BOOTSTRAP_TAG "$tag"
+  tmux -L "$socket" set-environment -g BOOTSTRAP_DOWNLOADS "$downloads"
+  [ -z "${RUSTUP_HOME:-}" ] || tmux -L "$socket" set-environment -g RUSTUP_HOME "$RUSTUP_HOME"
+  tmux -L "$socket" set-environment -g CARGO_HOME "$case_root/cargo-home"
+  tmux -L "$socket" set-environment -g CARGO_TARGET_DIR "$case_plugin/target"
+  tmux -L "$socket" set-option -g @agents-mon-popup-key e
+  tmux -L "$socket" run-shell "bash '$case_plugin/agents-mon.tmux'"
+  expect -c "log_user 0; set timeout -1; spawn tmux -L $socket attach-session -t popup; after 50; send \\002e; expect eof" &
+  expect_pid=$!
+
+  for i in $(seq 1 600); do
+    if [ -e "$marker" ]; then opened=1; break; fi
+    if [ "$mode" = bad-checksum ] && tmux -L "$socket" show-messages 2>/dev/null \
+        | grep -Fq 'agents-mon: native engine installation failed'; then
+      break
+    fi
+    sleep 0.1
+  done
+  kill "$expect_pid" 2>/dev/null || true
+  wait "$expect_pid" 2>/dev/null || true
+
+  if [ "$mode" = bad-checksum ]; then
+    [ ! -e "$case_plugin/target/release/agents-mon" ]
+    [ ! -e "$marker" ]
+    tmux -L "$socket" show-messages \
+      | grep -Fq 'agents-mon: native engine installation failed'
+  else
+    [ "$opened" -eq 1 ]
+    [ -x "$case_plugin/target/release/agents-mon" ]
+  fi
+  tmux -L "$socket" kill-server 2>/dev/null || true
+  active_socket=""
+  printf 'ok   source then immediate popup (%s)\n' "$mode"
+}
+
+run_immediate_popup_bootstrap verified
+run_immediate_popup_bootstrap cargo
+run_immediate_popup_bootstrap bad-checksum
 
 # Clean checkout: source the TPM entrypoint and activate immediately, before a
 # native engine exists. The toggle must wait for the eager verified installer

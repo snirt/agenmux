@@ -1,37 +1,13 @@
 #!/usr/bin/env bash
-# Asserts detect_state over fixtures: tests/fixtures/<agent>-<state>[-x].txt
-# Optional <fixture>.title sidecar supplies the pane title.
+# Shell/integration checks; Rust fixture detection is owned by tests/parity.rs.
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-fail=0 count=0
+fail=0
 
-# Rust is the sole detection engine.
 BIN="${AGENTS_MON_BIN:-$DIR/target/release/agents-mon}"
 if [ ! -x "$BIN" ]; then
   PATH="$HOME/.cargo/bin:$PATH" cargo build --release --manifest-path "$DIR/Cargo.toml" || exit 1
 fi
 
-for fx in "$DIR"/tests/fixtures/*.txt; do
-  base="$(basename "$fx" .txt)"
-  name="$base"
-  case "${name##*-}" in
-  '' | *[!0-9]*) ;;
-  *) name="${name%-*}" ;;
-  esac
-  agent="${name%-*}"
-  expected="${name##*-}"
-  title=""
-  [ -f "${fx%.txt}.title" ] && title="$(cat "${fx%.txt}.title")"
-  got="$("$BIN" detect "$DIR/agents/$agent.conf" "$fx" "$title")"
-  count=$((count + 1))
-  if [ "$got" = "$expected" ]; then
-    echo "ok   $base (rust)"
-  else
-    echo "FAIL $base (rust): expected $expected, got $got"
-    fail=1
-  fi
-done
-
-echo "$count fixtures"
 if [ "$fail" -eq 0 ]; then
   version="$(bash "$DIR/scripts/version.sh")"
   tag="$(bash "$DIR/scripts/version.sh" tag)"
@@ -187,9 +163,9 @@ SH
     "$tmp/plugin/target/release/agents-mon-notifier"
   bad_rc=0
   install_bin v0.2.0 >/dev/null 2>&1 || bad_rc=$?
-  if [ "$bad_rc" -ne 0 ] \
-      && [ ! -e "$tmp/plugin/target/release/agents-mon" ] \
-      && [ ! -e "$tmp/executed-unverified" ]; then
+  if [ "$bad_rc" -ne 0 ] &&
+    [ ! -e "$tmp/plugin/target/release/agents-mon" ] &&
+    [ ! -e "$tmp/executed-unverified" ]; then
     echo "ok   native-engine-rejects-bad-checksum"
   else
     echo "FAIL native-engine-rejects-bad-checksum: rc=$bad_rc bin=$([ -e "$tmp/plugin/target/release/agents-mon" ] && echo y || echo n) executed=$([ -e "$tmp/executed-unverified" ] && echo y || echo n)"
@@ -215,9 +191,9 @@ TOML
   chmod +x "$tmp/offline/curl" "$tmp/offline/git" "$tmp/offline/uname"
   rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
   if PATH="$tmp/offline:$HOME/.cargo/bin:$PATH" RUSTUP_HOME="$rustup_home" \
-      CARGO_HOME="$tmp/cargo-home" CARGO_TARGET_DIR="$cargo_plugin/target" \
-      HOME="$tmp/cargo-home-user" bash "$cargo_plugin/scripts/install-bin.sh" >/dev/null \
-      && [ "$("$cargo_plugin/target/release/agents-mon")" = cargo-fallback ]; then
+    CARGO_HOME="$tmp/cargo-home" CARGO_TARGET_DIR="$cargo_plugin/target" \
+    HOME="$tmp/cargo-home-user" bash "$cargo_plugin/scripts/install-bin.sh" >/dev/null &&
+    [ "$("$cargo_plugin/target/release/agents-mon")" = cargo-fallback ]; then
     echo "ok   native-engine-cargo-fallback"
   else
     echo "FAIL native-engine-cargo-fallback"
@@ -390,68 +366,25 @@ SH
   fi
   rm -rf "$tmp"
 fi
-if [ "$fail" -eq 0 ]; then
-  # A first popup activation must wait for the same installer as the eager
-  # entrypoint job, refresh bindings, and continue with the installed engine.
+if [ "$fail" -eq 0 ] && command -v tmux >/dev/null; then
+  # A live server can retain indexed moving-sidebar hooks after updating the
+  # plugin source. Sourcing the new entrypoint must purge all three.
   tmp="$(mktemp -d)"
-  mkdir -p "$tmp/plugin/scripts" "$tmp/bin"
-  cp "$DIR/agents-mon.tmux" "$DIR/scripts/toggle.sh" "$DIR/scripts/client.sh" \
-    "$DIR/scripts/mirror-add.sh" "$DIR/scripts/teardown.sh" "$DIR/scripts/hooks.sh" \
-    "$DIR/scripts/pin.sh" "$DIR/scripts/orphan.sh" "$DIR/scripts/scroll.sh" \
-    "$DIR/scripts/click.sh" "$tmp/plugin/scripts/"
-  mv "$tmp/plugin/scripts/agents-mon.tmux" "$tmp/plugin/agents-mon.tmux"
-  cat >"$tmp/plugin/scripts/install-bin.sh" <<'SH'
-#!/usr/bin/env bash
-mkdir -p "$(cd "$(dirname "$0")/.." && pwd)/target/release"
-cat >"$(cd "$(dirname "$0")/.." && pwd)/target/release/agents-mon" <<'BIN'
-#!/usr/bin/env bash
-exit 0
-BIN
-chmod +x "$(cd "$(dirname "$0")/.." && pwd)/target/release/agents-mon"
-SH
-  cat >"$tmp/bin/tmux" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
-exit 0
-SH
-  chmod +x "$tmp/plugin/scripts/install-bin.sh" "$tmp/bin/tmux"
-  if TMUX_STUB_LOG="$tmp/tmux.log" TMPDIR="$tmp" PATH="$tmp/bin:$PATH" \
-    bash "$tmp/plugin/scripts/toggle.sh" popup popup-client &&
-    [ -x "$tmp/plugin/target/release/agents-mon" ] &&
-    grep -q '^display-popup ' "$tmp/tmux.log" &&
-    ! grep -Fq 'agents-mon: native engine installation failed' "$tmp/tmux.log"; then
-    echo "ok   first-activation-waits-for-native-install"
+  socket="agents-mon-hook-upgrade-$$"
+  tmux -L "$socket" -f /dev/null new-session -d
+  for hook in after-select-window client-session-changed session-window-changed; do
+    tmux -L "$socket" set-hook -g "${hook}[42]" 'display-message stale-agents-mon-hook'
+  done
+  tmux -L "$socket" set-option -g @agents-mon-bin "$BIN"
+  tmux -L "$socket" run-shell "bash '$DIR/agents-mon.tmux'"
+  stale="$(tmux -L "$socket" show-hooks -g 2>/dev/null | grep -F '[42]' || true)"
+  if [ -z "$stale" ]; then
+    echo "ok   entrypoint-removes-legacy-follow-hooks"
   else
-    echo "FAIL first-activation-waits-for-native-install"
-    cat "$tmp/tmux.log"
+    echo "FAIL entrypoint-removes-legacy-follow-hooks: $stale"
     fail=1
   fi
-  rm -rf "$tmp"
-fi
-if [ "$fail" -eq 0 ]; then
-  # Installation failure must not execute a missing/staged engine and must tell
-  # the user exactly why activation did not open.
-  tmp="$(mktemp -d)"
-  mkdir -p "$tmp/plugin/scripts" "$tmp/bin"
-  cp "$DIR/scripts/toggle.sh" "$tmp/plugin/scripts/"
-  printf '#!/usr/bin/env bash\nexit 1\n' >"$tmp/plugin/scripts/install-bin.sh"
-  : >"$tmp/plugin/agents-mon.tmux"
-  cat >"$tmp/bin/tmux" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
-exit 0
-SH
-  chmod +x "$tmp/plugin/scripts/install-bin.sh" "$tmp/bin/tmux"
-  if ! TMUX_STUB_LOG="$tmp/tmux.log" PATH="$tmp/bin:$PATH" \
-    bash "$tmp/plugin/scripts/toggle.sh" >/dev/null 2>&1 &&
-    [ ! -e "$tmp/plugin/target/release/agents-mon" ] &&
-    grep -Fxq 'display-message agents-mon: native engine installation failed' "$tmp/tmux.log"; then
-    echo "ok   failed-native-install-is-reported"
-  else
-    echo "FAIL failed-native-install-is-reported"
-    cat "$tmp/tmux.log"
-    fail=1
-  fi
+  tmux -L "$socket" kill-server 2>/dev/null || true
   rm -rf "$tmp"
 fi
 if [ "$fail" -eq 0 ]; then

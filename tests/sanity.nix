@@ -17,6 +17,7 @@ pkgs.mkShell {
     cargo
     coreutils
     curl
+    expect
     gawk
     git
     gnugrep
