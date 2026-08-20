@@ -191,6 +191,8 @@ impl StateFilter {
 enum Key {
     Up,
     Down,
+    WheelUp,
+    WheelDown,
     Jump,
     Quit,
     Close,
@@ -218,6 +220,8 @@ fn read_key(fd: libc::c_int) -> Key {
     match b {
         b'j' => Key::Down,
         b'k' => Key::Up,
+        0x01 => Key::WheelUp,
+        0x02 => Key::WheelDown,
         b'q' | 0x03 | 0x04 => Key::Quit, // q, Ctrl-C, Ctrl-D
         b'Q' => Key::Close,
         b'l' | b'\r' | b'\n' => Key::Jump,
@@ -319,6 +323,8 @@ pub fn send_key(name: &str) -> i32 {
             "space" => b" ".to_vec(),
             "j" => b"j".to_vec(),
             "k" => b"k".to_vec(),
+            "wheel-up" => vec![0x01],
+            "wheel-down" => vec![0x02],
             "l" => b"l".to_vec(),
             "q" => b"q".to_vec(),
             "close" => b"Q".to_vec(),
@@ -518,6 +524,18 @@ fn suicide(seen_mirror: bool, since_start: Duration, empty_ticks: u32) -> bool {
 fn superseded(mine: &str, current: &str) -> bool {
     let current = current.trim();
     !mine.is_empty() && !current.is_empty() && current != mine
+}
+
+fn parse_wheel_delay(value: &str) -> Option<Duration> {
+    match value.trim() {
+        "off" => None,
+        "" => Some(Duration::from_millis(300)),
+        value => value
+            .parse::<f64>()
+            .ok()
+            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+            .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok()),
+    }
 }
 
 /// Headless-mode state: frames → visible panes, keys ← FIFO, size ← panes.
@@ -759,11 +777,20 @@ fn event_loop(sb: &mut Sidebar) -> bool {
     let key_fd = sb.daemon.as_ref().map_or(0, |d| d.keys_fd);
     let mut next_scan = Instant::now(); // scan immediately
     let mut next_tick = Instant::now();
+    let mut wheel_jump_at: Option<Instant> = None;
     loop {
         if QUIT.load(Ordering::Relaxed) {
             break;
         }
         let mut now = Instant::now();
+        if wheel_jump_at.is_some_and(|deadline| now >= deadline) {
+            wheel_jump_at = None;
+            if sb.jump() {
+                break;
+            }
+            sb.render(false);
+            now = Instant::now();
+        }
         if now >= next_scan {
             match sb.scan_tick() {
                 Ok(()) => {}
@@ -798,11 +825,14 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             sb.render(false);
         }
         // animated states need ticks; all-idle sleeps until the next scan
-        let wake = if animating {
+        let mut wake = if animating {
             next_tick.saturating_duration_since(now)
         } else {
             next_scan.saturating_duration_since(now)
         };
+        if let Some(deadline) = wheel_jump_at {
+            wake = wake.min(deadline.saturating_duration_since(now));
+        }
         let (key_ready, pipe_ready) = poll_inputs(key_fd, sb.tmux.fd(), sb.tmux.buffered(), wake);
         if pipe_ready {
             // focus notification (%window-pane-changed etc.) — rescan now so
@@ -819,6 +849,16 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             } else {
                 read_key(key_fd)
             };
+            let (key, wheel) = match key {
+                Key::WheelUp => (Key::Up, true),
+                Key::WheelDown => (Key::Down, true),
+                key => (key, false),
+            };
+            if wheel {
+                wheel_jump_at = sb
+                    .wheel_jump_delay()
+                    .map(|delay| Instant::now() + delay);
+            }
             if sb.overlay.is_some() {
                 sb.overlay_key(key);
                 sb.render(false);
@@ -857,7 +897,12 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 Key::Close => {
                     break;
                 }
-                Key::Backspace | Key::ClearSearch | Key::Text(_) | Key::Other => {}
+                Key::WheelUp
+                | Key::WheelDown
+                | Key::Backspace
+                | Key::ClearSearch
+                | Key::Text(_)
+                | Key::Other => {}
             }
             sb.render(false);
         }
@@ -882,6 +927,15 @@ fn cleanup(rows_file: &PathBuf, pin: &Option<String>) {
 }
 
 impl Sidebar {
+    fn wheel_jump_delay(&mut self) -> Option<Duration> {
+        parse_wheel_delay(
+            &self
+                .tmux
+                .run("show-option -gqv @agents-mon-wheel-jump")
+                .unwrap_or_default(),
+        )
+    }
+
     fn scan_tick(&mut self) -> Result<(), TmuxError> {
         let t0 = Instant::now();
         let scanned = scan::scan(
@@ -1066,7 +1120,9 @@ impl Sidebar {
                 self.rebuild_visible(true);
             }
             Key::AllStates => self.clear_filter(),
-            Key::Search
+            Key::WheelUp
+            | Key::WheelDown
+            | Key::Search
             | Key::CycleState
             | Key::Help
             | Key::Versions
@@ -1817,6 +1873,10 @@ mod tests {
         }
         feed(b"j");
         assert!(matches!(read_key(fds[0]), Key::Down));
+        feed(&[0x01]);
+        assert!(matches!(read_key(fds[0]), Key::WheelUp));
+        feed(&[0x02]);
+        assert!(matches!(read_key(fds[0]), Key::WheelDown));
         feed(b"u");
         assert!(matches!(read_key(fds[0]), Key::Versions));
         feed(&[0, b'q']);
@@ -1848,6 +1908,16 @@ mod tests {
         // a tail that never completes is not a close — Esc already decided that
         assert!(matches!(decode(&[Some(b'['), None]), Key::Other));
         assert!(matches!(decode(&[Some(b'['), Some(b'Z')]), Key::Other));
+    }
+
+    #[test]
+    fn wheel_jump_delay_preserves_option_contract() {
+        assert_eq!(parse_wheel_delay(""), Some(Duration::from_millis(300)));
+        assert_eq!(parse_wheel_delay("0.5"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_wheel_delay("0"), Some(Duration::ZERO));
+        assert_eq!(parse_wheel_delay("off"), None);
+        assert_eq!(parse_wheel_delay("-1"), None);
+        assert_eq!(parse_wheel_delay("invalid"), None);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -75,7 +76,8 @@ impl TestTmux {
             .args(args)
             .current_dir(root)
             .env("TMPDIR", &self.tmp)
-            .env("TMUX", self.tmux_env());
+            .env("TMUX", self.tmux_env())
+            .env("AGENTS_MON_BIN", env!("CARGO_BIN_EXE_agents-mon"));
         command
     }
 
@@ -107,26 +109,6 @@ impl TestTmux {
             assert!(Instant::now() < deadline, "condition timed out");
             thread::sleep(Duration::from_millis(20));
         }
-    }
-
-    fn input_pane(&self, name: &str) -> (String, PathBuf) {
-        let path = self.tmp.join(name);
-        let command = format!(
-            "exec sh -c 'stty -icanon -echo; cat > {}'",
-            path.to_string_lossy()
-        );
-        let pane = self.text(&[
-            "new-window",
-            "-d",
-            "-P",
-            "-F",
-            "#{pane_id}",
-            "-t",
-            "plugin:",
-            &command,
-        ]);
-        self.assert_tmux(&["select-pane", "-t", &pane, "-T", "agents-mon"]);
-        (pane, path)
     }
 
     fn attach(&self) -> Child {
@@ -229,33 +211,31 @@ fn mirror_add_is_idempotent_under_concurrent_calls() {
 }
 
 #[test]
-fn wheel_off_moves_without_jumping() {
-    let tmux = TestTmux::new("wheel-off");
-    let (pane, keys) = tmux.input_pane("wheel-off.keys");
-    tmux.assert_tmux(&["set-option", "-g", "@agents-mon-wheel-jump", "off"]);
+fn wheel_cli_and_wrapper_use_reserved_packets() {
+    let tmux = TestTmux::new("wheel-packets");
+    let pane = tmux.text(&["display-message", "-p", "#{pane_id}"]);
+    let fifo = tmux.tmp.join("agents-mon-keys");
+    let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+    let mut fifo = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(fifo)
+        .unwrap();
 
-    assert_success(tmux.script("scroll.sh", &[&pane, "down"]), "scroll down");
-    tmux.wait_for(Duration::from_secs(1), || {
-        std::fs::read(&keys).is_ok_and(|bytes| bytes == b"j")
-    });
-    thread::sleep(Duration::from_millis(400));
-    assert_eq!(std::fs::read(keys).unwrap(), b"j");
+    assert_success(tmux.bin(&["wheel", &pane, "down"]), "wheel down");
+    assert_success(tmux.script("scroll.sh", &[&pane, "up"]), "scroll wrapper");
+    let mut packets = [0; 2];
+    fifo.read_exact(&mut packets).unwrap();
+    assert_eq!(packets, [0x02, 0x01]);
+    assert!(!tmux.tmp.join("agents-mon-wheel").exists());
 }
 
 #[test]
-fn wheel_custom_delay_jumps_only_once() {
-    let tmux = TestTmux::new("wheel-delay");
-    let (pane, keys) = tmux.input_pane("wheel-delay.keys");
-    tmux.assert_tmux(&["set-option", "-g", "@agents-mon-wheel-jump", "0.5"]);
-
-    assert_success(tmux.script("scroll.sh", &[&pane, "down"]), "scroll down");
-    thread::sleep(Duration::from_millis(20));
-    assert_success(tmux.script("scroll.sh", &[&pane, "up"]), "scroll up");
-    tmux.wait_for(Duration::from_secs(2), || {
-        std::fs::read(&keys).is_ok_and(|bytes| bytes == b"jkl")
-    });
-    thread::sleep(Duration::from_millis(150));
-    assert_eq!(std::fs::read(keys).unwrap(), b"jkl");
+fn click_wrapper_dispatches_native_cli() {
+    let tmux = TestTmux::new("click-wrapper");
+    let pane = tmux.text(&["display-message", "-p", "#{pane_id}"]);
+    assert_success(tmux.script("click.sh", &[&pane, "0", ""]), "click wrapper");
 }
 
 #[test]
@@ -359,13 +339,13 @@ fn stale_click_origin_is_a_noop() {
     let target_window = tmux.text(&["display-message", "-p", "-t", &clicked, "#{window_id}"]);
     assert_ne!(target_window, viewer_window);
 
-    let rows = tmux.tmp.join(format!("agents-mon-rows-{}", &clicked[1..]));
+    let rows = tmux.tmp.join("agents-mon-rows");
     // If the handler guessed the attached viewer after rejecting the stale
     // origin, this valid row would visibly move it to the other window.
     std::fs::write(rows, format!("{clicked}\n")).unwrap();
     assert_success(
-        tmux.script("click.sh", &[&clicked, "1", "vanished-client"]),
-        "click.sh",
+        tmux.bin(&["click", &clicked, "1", "vanished-client"]),
+        "agents-mon click",
     );
 
     assert_eq!(

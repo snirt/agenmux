@@ -2,6 +2,7 @@ mod attention;
 mod conf;
 mod detect;
 mod focus;
+mod input;
 mod notifications;
 mod pane_writers;
 mod procs;
@@ -27,12 +28,15 @@ fn main() {
         ["sidebar"] => sidebar::run(plugin_dir(), scan_cache_path()),
         ["daemon"] => sidebar::run_daemon(plugin_dir(), scan_cache_path()),
         ["key", key] => sidebar::send_key(key),
+        ["click", pane, y, client] => y.parse().map_or(2, |y| input::click(pane, y, client)),
+        ["wheel", pane, "up"] => input::wheel(pane, input::Direction::Up),
+        ["wheel", pane, "down"] => input::wheel(pane, input::Direction::Down),
         ["notification-open", socket, pane, bundle] => {
             notifications::open_pane(socket, pane, bundle)
         }
         _ => {
             eprintln!(
-                "usage: agents-mon [--version|scan|list|status|sidebar|daemon|key <name>|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
+                "usage: agents-mon [--version|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
             );
             2
         }
