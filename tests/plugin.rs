@@ -171,7 +171,7 @@ fn assert_success(output: Output, context: &str) {
 }
 
 #[test]
-fn restore_skips_a_layout_after_window_size_changes() {
+fn teardown_discards_a_layout_after_window_size_changes() {
     let tmux = TestTmux::new("restore-size");
     let window = tmux.text(&["display-message", "-p", "#{window_id}"]);
     let saved = tmux.text(&["display-message", "-p", "#{window_layout}"]);
@@ -181,7 +181,7 @@ fn restore_skips_a_layout_after_window_size_changes() {
     let resized = tmux.text(&["display-message", "-p", "-t", &window, "#{window_layout}"]);
     assert_ne!(saved, resized);
 
-    assert_success(tmux.script("restore.sh", &[&window]), "restore.sh");
+    assert_success(tmux.script("teardown.sh", &[]), "teardown.sh");
 
     assert_eq!(
         tmux.text(&["display-message", "-p", "-t", &window, "#{window_layout}"]),

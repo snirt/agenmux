@@ -22,25 +22,27 @@ config format.
 1. Add `agents/<name>.conf`.
 2. Capture real screens into fixtures so the detection is tested against actual
    output:
+
    ```sh
    tmux capture-pane -p -t <pane> > tests/fixtures/<name>-idle.txt
    tmux capture-pane -p -t <pane> > tests/fixtures/<name>-working.txt
    tmux capture-pane -p -t <pane> > tests/fixtures/<name>-blocked.txt
    ```
+
    Real captures beat synthetic ones — only reconstruct a screen by hand when a
    state is hard to trigger.
 3. Add the expected states to the test suite and run `tests/run.sh`.
 
 ## Code changes
 
-- Keep it bash + coreutils. No new runtime dependencies.
-- Scripts live in `scripts/`; each does one thing (`scan`, `sidebar`, `toggle`,
-  `follow`, `click`, `orphan`).
-- `scripts/scan.sh` is the detection core — the CLI (`scan.sh list` / `status`)
-  is the contract the sidebar and status segment build on. Don't break its
-  output format without updating both consumers.
-- Match the existing style: `set -euo pipefail`, quote expansions, prefer tmux
-  format strings over extra subshells (they run on the render tick).
+- Rust is the sole runtime. Keep bootstrap and packaging shell small and avoid
+  new runtime dependencies.
+- Detection lives in `src/detect.rs`; `agents-mon list`/`status` TSV and status
+  output are contracts consumed by the sidebar and tmux status segment.
+- Runtime tmux integration is still being moved out of `scripts/`; preserve
+  option names, hook indexes, processless panes, and exact-client targeting.
+- Match existing Rust and shell style, quote shell expansions, and prefer tmux
+  format strings over extra subprocesses on hot paths.
 
 ## Before you open a PR
 

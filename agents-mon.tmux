@@ -17,20 +17,15 @@ tmux list-windows -a -F '#{window_id}' 2>/dev/null | while read -r w; do
   tmux set-option -wu -t "$w" @agents-mon-sidebar 2>/dev/null
 done
 
-# config reloads may clear hooks — re-install them if the plugin is open. Mirror
-# mode never sets @agents-mon-sidebar, so testing that alone left a reloaded
-# server with the daemon running and no hooks: new windows got no mirror at all.
-sb="$(tmux show-option -gqv @agents-mon-sidebar)"
-if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ] ||
-  { [ -n "$sb" ] && tmux list-panes -a -F '#{pane_id}' | grep -qx "$sb"; }; then
+# Config reloads may clear hooks; restore them while the native daemon is on.
+if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ]; then
   bash "$CURRENT_DIR/scripts/hooks.sh"
 fi
 
 # click a sidebar row -> jump to that agent; any other pane keeps the native
 # click behavior (mouse event stays intact — no run-shell detour)
 if [ "$(tmux show-option -gv mouse)" = "on" ]; then
-  # match by pane title: covers the single follow-sidebar AND every mirror
-  # pane (mirror mode has no @agents-mon-sidebar option)
+  # Every processless sidebar pane is identified by its title.
   tmux bind-key -n MouseDown1Pane if-shell -F '#{==:#{pane_title},agents-mon}' \
     "run-shell -b \"bash '$CURRENT_DIR/scripts/click.sh' '#{pane_id}' '#{mouse_y}' '#{client_name}'\"" \
     'select-pane -t = ; send-keys -M'
@@ -58,24 +53,42 @@ elif [ -n "$(tmux show-options -gq @agents-mon-hide-windows)" ]; then
   tmux bind-key w choose-tree -Zw
 fi
 
-# replace #{agents_mon} placeholder in status-left/right with the live segment
-# (Rust binary when built — see `make build`; bash fallback otherwise)
+# replace #{agents_mon} placeholder in status-left/right with the live segment.
+# The source checkout has no binary, so eagerly install the default in the
+# background. toggle.sh takes the same tmux lock when first use beats it.
 BIN="$(tmux show-option -gqv @agents-mon-bin)"
 [ -n "$BIN" ] || BIN="$CURRENT_DIR/target/release/agents-mon"
-# install the default binary in the background; bash fallback serves until it lands
-if [ "$BIN" = "$CURRENT_DIR/target/release/agents-mon" ]; then
-  bash "$CURRENT_DIR/scripts/install-bin.sh" >/dev/null 2>&1 &
+if [ "$BIN" = "$CURRENT_DIR/target/release/agents-mon" ] \
+   && [ "${AGENTS_MON_INSTALL_REFRESH:-}" != 1 ]; then
+  (
+    locked=""
+    unlock() {
+      [ -n "$locked" ] || return
+      locked=""
+      tmux wait-for -U agents-mon-install 2>/dev/null || true
+    }
+    trap unlock EXIT HUP INT TERM
+    tmux wait-for -L agents-mon-install || exit 0
+    locked=1
+    before=""
+    [ -x "$BIN" ] && before=1
+    bash "$CURRENT_DIR/scripts/install-bin.sh" >/dev/null 2>&1 || true
+    # A just-installed binary can now own the status command and bindings.
+    if [ -z "$before" ] && [ -x "$BIN" ]; then
+      AGENTS_MON_INSTALL_REFRESH=1 bash "$CURRENT_DIR/agents-mon.tmux"
+    fi
+  ) &
 fi
+# An unknown tmux format expands empty, so leave the placeholder untouched
+# while installation runs. The refresh above replaces it once Rust exists.
 if [ -x "$BIN" ]; then
   seg="#($BIN status)"
-else
-  seg="#(bash $CURRENT_DIR/scripts/scan.sh status)"
+  for opt in status-left status-right; do
+    v="$(tmux show-option -gqv "$opt")"
+    case "$v" in
+      *'#{agents_mon}'*)
+        tmux set-option -g "$opt" "${v//'#{agents_mon}'/$seg}"
+        ;;
+    esac
+  done
 fi
-for opt in status-left status-right; do
-  v="$(tmux show-option -gqv "$opt")"
-  case "$v" in
-    *'#{agents_mon}'*)
-      tmux set-option -g "$opt" "${v//'#{agents_mon}'/$seg}"
-      ;;
-  esac
-done

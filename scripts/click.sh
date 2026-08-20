@@ -15,47 +15,35 @@ tmux list-clients -F '#{client_name}' 2>/dev/null |
 panes="$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null)" || exit 0
 printf '%s\n' "$panes" | grep -Fxq "$pane" || exit 0
 
-ROWS_FILE="${TMPDIR:-/tmp}/agents-mon-rows-${pane#%}"
-# Processless preserved panes share the daemon's current visible-row map; no
-# per-pane mirror process exists to copy it.
-if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ]; then
-  ROWS_FILE="${TMPDIR:-/tmp}/agents-mon-rows"
-fi
+# Processless preserved panes share the daemon's current visible-row map.
+ROWS_FILE="${TMPDIR:-/tmp}/agents-mon-rows"
 
 # y0 is header. Rows file maps every visual line below it, including optional
 # contextual hints and session separators, so variable header height is safe.
 row="$y"
 target="$(awk -v n="$row" 'NR == n { print $1 }' "$ROWS_FILE" 2>/dev/null)"
 case "$target" in
-  %*)
-    printf '%s\n' "$panes" | grep -Fxq "$target" ||
-      target=''
-    ;;
+%*)
+  printf '%s\n' "$panes" | grep -Fxq "$target" ||
+    target=''
+  ;;
 esac
 case "$target" in
-  %*)
-    # Clear navigator state before this persistent sidebar follows the click
-    # target, using its native FIFO or pane stdin.
-    if [ "$(tmux show-option -gqv @agents-mon-on)" = 1 ]; then
-      BIN="$(tmux show-option -gqv @agents-mon-bin)"
-      [ -n "$BIN" ] || BIN="$DIR/target/release/agents-mon"
-      [ ! -x "$BIN" ] || "$BIN" key all >/dev/null 2>&1
-    else
-      # private clear-and-blur control understood in both fallback input modes
-      tmux send-keys -t "$pane" C-l
-    fi
-    # relocate the sidebar off-screen first — no visible reflow after switch
-    bash "$DIR/scripts/follow.sh" "$target"
-    tmux switch-client -c "$client" -t "$target" 2>/dev/null
-    tmux select-window -t "$target"
-    tmux select-pane -t "$target"
-    ;;
-  *)
-    # The sidebar binding replaces tmux's native select-pane action. Restore
-    # that behavior when the click is not on an agent row, and enter navigation
-    # only for the client that generated this mouse event.
-    tmux switch-client -c "$client" -t "$pane" 2>/dev/null || exit 0
-    tmux switch-client -c "$client" -T agents-mon 2>/dev/null
-    ;;
+%*)
+  # Clear navigator state before switching the exact originating client.
+  BIN="$(tmux show-option -gqv @agents-mon-bin)"
+  [ -n "$BIN" ] || BIN="$DIR/target/release/agents-mon"
+  [ ! -x "$BIN" ] || "$BIN" key all >/dev/null 2>&1
+  tmux switch-client -c "$client" -t "$target" 2>/dev/null
+  tmux select-window -t "$target"
+  tmux select-pane -t "$target"
+  ;;
+*)
+  # The sidebar binding replaces tmux's native select-pane action. Restore
+  # that behavior when the click is not on an agent row, and enter navigation
+  # only for the client that generated this mouse event.
+  tmux switch-client -c "$client" -t "$pane" 2>/dev/null || exit 0
+  tmux switch-client -c "$client" -T agents-mon 2>/dev/null
+  ;;
 esac
 exit 0

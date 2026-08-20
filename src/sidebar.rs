@@ -1096,13 +1096,6 @@ impl Sidebar {
             let _ = std::fs::write(format!("{pin}.jump"), &target);
             return true;
         }
-        // move the sidebar into the target window BEFORE switching the view —
-        // the join-pane reflow happens off-screen (no flash on arrival)
-        let follow = self.plugin_dir.join("scripts/follow.sh");
-        let _ = std::process::Command::new("bash")
-            .arg(follow)
-            .arg(&target)
-            .status();
         // switch/select MUST NOT go over the control pipe: they fire the
         // plugin's select-window/session hooks, and tmux delivers each hook's
         // run-shell result to the triggering client as an extra %begin/%end
