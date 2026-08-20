@@ -4,53 +4,54 @@
 > implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for
 > tracking.
 
-**Goal:** Make Rust own every plugin behavior that can run after the native binary is available, while preserving the current tmux UI, navigation, lifecycle, update, detection, and notification contracts.
+**Goal:** Make Rust the sole plugin runtime while preserving the current tmux UI, navigation, pane lifecycle, update/rollback, detection, and notification behavior.
 
-**Architecture:** Keep `agents-mon.tmux` and a reduced `scripts/install-bin.sh` as the unavoidable TPM/pre-binary bootstrap. Add explicit Rust commands for setup, toggle, mouse input, pane lifecycle, and release switching; all commands reuse one Rust tmux adapter and the existing daemon/sidebar state. Remove the duplicated Bash scanner/sidebar only after native installation opens the plugin successfully on all supported release platforms.
+**Architecture:** Prove native installation first, then immediately delete the duplicated Bash scanner/sidebar. Port the remaining shell adapters behind focused Rust modules: `input` for mouse events, `panes` for processless pane lifecycle, `setup` for hooks/key tables, `toggle` for split/popup ownership, and `release` for updates. Retain only shell that must run before Rust exists or packages a macOS app.
 
-**Tech Stack:** Rust 2021, existing `regex`/`libc`/`sysinfo` dependencies, tmux control mode and CLI, Cargo integration tests, isolated tmux servers, existing shell smoke tests.
+**Tech Stack:** Rust 2021, existing `regex`/`libc`/`sysinfo` dependencies, tmux control mode and CLI, Cargo tests, isolated tmux servers, existing release smoke tests.
 
 ## Global Constraints
 
-- Preserve tmux options, hook indexes, key tables, pane title `agents-mon`, temp-file names, TSV output, CLI output, and exit codes unless a task explicitly replaces an internal contract.
-- Preserve split and popup behavior, mouse behavior, search/filter/navigation semantics, layout restoration, multi-client targeting, processless panes, update/rollback, notifications, agent config overrides, and status-line output.
-- Keep exact originating-client checks for mouse actions; never infer a different client after a background delay.
-- Keep size-matched layout restoration: never apply an absolute tmux layout after the window size changes.
-- Keep `agents-mon.tmux` sourceable by TPM before any Rust binary exists.
-- Do not add a Rust HTTP client or async runtime. Bootstrap may continue using `curl`, `tar`, `git`, and platform tools.
-- Keep one coherent Bash fallback until Task 8 proves the native bootstrap path; do not partially port `scripts/scan.sh` or `scripts/sidebar.sh`.
-- Each task must pass `cargo test` and the named isolated-tmux checks before commit.
+- Preserve tmux options, hook indexes, key tables, pane title `agents-mon`, temp-file names, TSV output, public CLI output, and exit codes unless a task explicitly replaces an internal contract.
+- Preserve split and popup behavior, mouse behavior, search/filter/navigation, layout restoration, multi-client targeting, processless panes, update/rollback, notifications, agent overrides, and status output.
+- Keep exact originating-client checks for mouse actions; never infer another client after a background delay.
+- Restore saved layouts only when their embedded size matches the current window size.
+- Keep `agents-mon.tmux` and `scripts/install-bin.sh` usable before a Rust binary exists.
+- Do not add an HTTP client, async runtime, command-builder framework, or semver dependency. Continue using installed `curl`, `tar`, `git`, and platform tools where needed.
+- Do not delete the Bash scanner/sidebar until Task 2's native bootstrap gate passes on every supported release platform.
+- After Task 2 passes, the Bash runtime fallback is intentionally gone; compatibility wrappers may call Rust unconditionally until their callers are migrated.
+- Preserve public CLI commands `scan` (alias of `list`) and `notification-open`; delete only the unused `mirror` command.
+- Each task must pass `cargo test` and its named isolated-tmux checks before commit.
 
 ## Target File Structure
 
 - `src/main.rs` — CLI dispatch only.
-- `src/plugin.rs` — native setup/toggle, client selection, click/wheel handling, pane lifecycle, layout restore, and teardown.
-- `src/release.rs` — release discovery, verified package staging through the bootstrap fetch primitive, source switching, and restart coordination.
-- `src/tmux.rs` — shared tmux transport, command execution, output parsing, and escaping.
-- `src/sidebar.rs` — existing daemon/sidebar state, plus in-memory wheel debounce; no script spawning.
+- `src/tmux.rs` — persistent control-mode transport plus small synchronous tmux helpers.
+- `src/input.rs` — click validation/row lookup and wheel input.
+- `src/panes.rs` — processless pane add, orphan recovery, width pinning, layout restoration, teardown, and real-client selection shared by input/toggle.
+- `src/setup.rs` — tmux hooks, key tables, mouse bindings, picker filtering, and status interpolation.
+- `src/toggle.rs` — split daemon startup and popup ownership loop.
+- `src/release.rs` — release discovery and update/rollback coordination.
+- `src/sidebar.rs` — existing sidebar/daemon state and one in-memory wheel jump deadline; no shell spawning.
 - `tests/plugin.rs` — Rust integration tests against private tmux servers.
-- `tests/release.rs` — Rust update/rollback tests using local fixtures and command stubs.
-- `agents-mon.tmux` — minimal TPM/pre-binary bootstrap and invocation glue.
-- `scripts/install-bin.sh` — only code that must work before Rust exists: platform selection, download, SHA-256 verification, atomic binary install, and local Cargo fallback.
-- `scripts/install-app.sh` — macOS app-bundle packaging/codesign; keep because it is platform packaging, not plugin runtime logic.
-- `scripts/version.sh` — release/CI manifest check usable before the binary exists.
+- `tests/release.rs` — update/rollback tests using local repositories and command fixtures.
+- `agents-mon.tmux` — minimal TPM/pre-binary bootstrap.
+- `scripts/install-bin.sh` — pre-binary platform selection, verified download, atomic install, and Cargo fallback.
+- `scripts/install-app.sh` — macOS app bundle and codesign packaging.
+- `scripts/version.sh` — pre-binary manifest/tag validation for bootstrap and CI.
 
 ---
 
-### Task 1: Freeze the Shell Behavior as Native Acceptance Tests
+### Task 1: Freeze Current Behavior
 
 **Files:**
 - Create: `tests/plugin.rs`
-- Modify: `tests/navigation.sh`
-- Modify: `tests/run.sh`
 
 **Interfaces:**
-- Consumes: current scripts and `agents-mon` binary.
-- Produces: reusable private-tmux helpers and behavior tests that later tasks reroute from shell scripts to Rust commands.
+- Consumes: current shell entrypoints and `agents-mon` binary.
+- Produces: private-tmux helpers and characterization tests reused unchanged as shell calls move to Rust.
 
-- [ ] **Step 1: Extract the existing private tmux-server setup into Rust test helpers**
-
-Create helpers in `tests/plugin.rs` with these signatures:
+- [ ] **Step 1: Create private tmux test helpers**
 
 ```rust
 struct TestTmux {
@@ -61,6 +62,7 @@ struct TestTmux {
 impl TestTmux {
     fn new(name: &str) -> Self;
     fn tmux(&self, args: &[&str]) -> std::process::Output;
+    fn script(&self, name: &str, args: &[&str]) -> std::process::Output;
     fn bin(&self, args: &[&str]) -> std::process::Output;
 }
 
@@ -69,11 +71,9 @@ impl Drop for TestTmux {
 }
 ```
 
-Use `CARGO_BIN_EXE_agents-mon`, a unique `tmux -L` socket, `TMPDIR`, and `AGENTS_MON_DIR`; kill the private server in `Drop`.
+Use `CARGO_BIN_EXE_agents-mon`, a unique `tmux -L` socket, `TMPDIR`, and `AGENTS_MON_DIR`. Kill the private server in `Drop`.
 
-- [ ] **Step 2: Add missing characterization tests**
-
-Add tests named:
+- [ ] **Step 2: Add the missing characterization tests**
 
 ```rust
 #[test] fn restore_skips_a_layout_after_window_size_changes();
@@ -84,11 +84,9 @@ Add tests named:
 #[test] fn stale_click_origin_is_a_noop();
 ```
 
-For now invoke the current scripts. Assert observable tmux state—pane count/title/width, selected pane/window, and client key table—not command strings.
+Invoke current scripts. Assert observable tmux state—pane count/title/width, selected pane/window, and client key table—not generated command strings.
 
 - [ ] **Step 3: Run the characterization tests**
-
-Run:
 
 ```bash
 cargo test --test plugin -- --test-threads=1
@@ -96,25 +94,125 @@ cargo test --test plugin -- --test-threads=1
 ./tests/run.sh
 ```
 
-Expected: PASS on the current Bash implementation.
+Expected: PASS on the current implementation.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add tests/plugin.rs tests/navigation.sh tests/run.sh
+git add tests/plugin.rs
 git commit -m "test: freeze plugin shell behavior"
 ```
 
-### Task 2: Add a Shared Rust tmux Command Layer
+### Task 2: Prove Native Bootstrap and Delete the Duplicated Runtime First
+
+**Files:**
+- Modify: `agents-mon.tmux`
+- Modify: `scripts/install-bin.sh`
+- Modify: `scripts/toggle.sh`
+- Modify: `scripts/click.sh`
+- Modify: `scripts/hooks.sh`
+- Modify: `scripts/orphan.sh`
+- Delete: `scripts/scan.sh`
+- Delete: `scripts/sidebar.sh`
+- Delete: `scripts/follow.sh`
+- Delete: `scripts/restore.sh`
+- Delete: `src/mirror.rs`
+- Modify: `src/main.rs`
+- Modify: `src/sidebar.rs`
+- Modify: `tests/run.sh`
+- Modify: `tests/navigation.sh`
+- Modify: `tests/sanity.sh`
+- Modify: `README.md`
+- Modify: `CONTRIBUTING.md`
+
+**Interfaces:**
+- `agents-mon.tmux` guarantees that activation either runs a verified native binary or displays a clear install failure.
+- Existing public commands remain: `--version`, `scan`, `list`, `status`, `detect`, `sidebar`, `daemon`, `key`, and `notification-open`.
+- The unused `mirror` command is removed.
+
+- [ ] **Step 1: Add clean-checkout bootstrap tests**
+
+In `tests/sanity.sh`, start from a plugin package with no `target/release/agents-mon`, source `agents-mon.tmux`, trigger split and popup immediately, and assert that installation finishes and the requested native view opens. Cover a mocked verified-download path and Cargo fallback. Assert checksum failure neither executes nor installs the staged binary and displays:
+
+```text
+agents-mon: native engine installation failed
+```
+
+- [ ] **Step 2: Serialize first activation with installation**
+
+Keep background eager installation. Bind first activation through minimal bootstrap shell that:
+
+1. executes the binary immediately when present;
+2. otherwise acquires one `tmux wait-for` install lock;
+3. runs `scripts/install-bin.sh`;
+4. verifies the installed executable;
+5. re-enters `agents-mon.tmux` so the installed version owns bindings/hooks;
+6. invokes the current tree's `scripts/toggle.sh` with the original split/popup arguments (the existing script already selects the Rust daemon/sidebar once the binary exists; native `agents-mon toggle` is added later in Task 7);
+7. reports the failure message through tmux and exits non-zero on failure.
+
+Do not create a second installer.
+
+- [ ] **Step 3: Run the release-platform gate**
+
+Run the GitHub release matrix for macOS ARM64/x86_64 and Linux ARM64/x86_64. Verify SHA-256, executable bit, `--version`, clean-checkout immediate split/popup, status interpolation, and notification-helper presence where applicable.
+
+Expected: every supported archive PASS. If one fails, stop this task and retain all fallback files.
+
+- [ ] **Step 4: Remove the moving-sidebar fallback as one coherent unit**
+
+After the gate passes:
+
+- delete `scan.sh` and `sidebar.sh`;
+- remove no-binary and single-sidebar branches from `toggle.sh`, `click.sh`, `hooks.sh`, and `orphan.sh`;
+- delete `follow.sh` and `restore.sh`;
+- remove the no-op `follow.sh` spawn from `Sidebar::jump` (popup returns before it; processless native panes do not relocate);
+- remove old tmux `<3.2` follow hooks tied to `@agents-mon-sidebar`;
+- change status fallback to install-or-empty rather than invoke `scan.sh`.
+
+- [ ] **Step 5: Delete the dead mirror process**
+
+Remove `mod mirror`, `src/mirror.rs`, and only the `main.rs` `mirror` arm. Keep both:
+
+```rust
+["scan"] | ["list"] => cmd_scan(),
+["notification-open", socket, pane, bundle] => notifications::open_pane(socket, pane, bundle),
+```
+
+Update usage text and tests accordingly.
+
+- [ ] **Step 6: Remove Bash/Rust parity tests, not Rust behavior tests**
+
+Delete shell-fixture comparisons whose only purpose was dual-engine parity. Keep `tests/parity.rs`, which verifies all detection fixtures against Rust, plus navigation, lifecycle, and CLI tests.
+
+- [ ] **Step 7: Run the gate again after deletion**
+
+```bash
+cargo test
+./tests/run.sh
+./tests/navigation.sh
+./tests/daemon-orphan.sh
+./tests/sanity.sh
+rg -n 'scripts/(scan|sidebar|follow|restore)\.sh|agents-mon mirror' --glob '!docs/**' .
+```
+
+Expected: tests PASS; `rg` returns no matches.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add -A
+git commit -m "refactor: remove duplicated Bash runtime"
+```
+
+### Task 3: Add Shared Synchronous tmux Helpers
 
 **Files:**
 - Modify: `src/tmux.rs`
-- Modify: `src/main.rs`
+- Modify: `src/sidebar.rs`
 - Test: `src/tmux.rs`
+- Test: `tests/navigation.sh`
 
 **Interfaces:**
-- Consumes: `TMUX`, normal tmux argv, current control-mode `Tmux`.
-- Produces:
 
 ```rust
 pub fn command(args: &[&str]) -> Result<String, TmuxError>;
@@ -124,47 +222,53 @@ pub fn format_truth(value: &str) -> bool;
 pub fn quote(value: &str) -> String;
 ```
 
-- [ ] **Step 1: Write unit tests for output, errors, and quoting**
+- [ ] **Step 1: Write pure unit tests**
 
-Cover empty output, non-zero status including stderr, embedded single quotes, `#`, commas, `}`, tabs, and newlines. Use a temporary executable tmux stub selected through a test-only command-path constructor; do not mutate process-global `PATH` across parallel tests.
+Test `quote()` and `format_truth()` directly for empty strings, embedded single quotes, `#`, commas, `}`, tabs, newlines, and tmux truth values. Do not add command-path injection or mutate global `PATH`.
 
-- [ ] **Step 2: Verify the tests fail**
-
-Run: `cargo test tmux::tests`
-
-Expected: FAIL because the public helpers do not exist.
-
-- [ ] **Step 3: Implement the minimum synchronous adapter**
-
-Use `std::process::Command`; keep the existing persistent control-mode `Tmux` unchanged for daemon scans. Return structured `TmuxError` on spawn/non-zero/UTF-8 failure. Do not add a generic command-builder abstraction.
-
-- [ ] **Step 4: Run tests**
+- [ ] **Step 2: Verify unit-test failure**
 
 Run: `cargo test tmux::tests`
+
+Expected: FAIL because the pure helpers do not exist.
+
+- [ ] **Step 3: Implement the minimum adapter**
+
+Use `std::process::Command::new("tmux")`; return `TmuxError` on spawn, non-zero status, or invalid UTF-8. Keep the existing persistent control-mode `Tmux` unchanged. Do not add a builder or injectable global.
+
+- [ ] **Step 4: Route existing sidebar tmux subprocesses through the adapter**
+
+Replace the existing direct `Command::new("tmux")` call sites in `src/sidebar.rs` with `command`/`command_status` where their argv and best-effort behavior are unchanged. This provides real execution coverage through the existing private-server navigation tests without an injectable command path.
+
+- [ ] **Step 5: Run tests**
+
+```bash
+cargo test tmux::tests
+./tests/navigation.sh
+cargo test
+```
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/tmux.rs src/main.rs
+git add src/tmux.rs src/sidebar.rs tests/navigation.sh
 git commit -m "refactor: share tmux command handling"
 ```
 
-### Task 3: Move Click and Wheel Behavior into Rust
+### Task 4: Move Click and Wheel Input into Rust
 
 **Files:**
-- Create: `src/plugin.rs`
+- Create: `src/input.rs`
 - Modify: `src/main.rs`
 - Modify: `src/sidebar.rs`
 - Modify: `scripts/click.sh`
 - Modify: `scripts/scroll.sh`
-- Test: `tests/plugin.rs`
-- Test: `tests/navigation.sh`
+- Modify: `tests/plugin.rs`
+- Modify: `tests/navigation.sh`
 
 **Interfaces:**
-- Consumes: click pane/y/client, wheel pane/direction, daemon key FIFO, row-map files.
-- Produces CLI commands:
 
 ```text
 agents-mon click <pane-id> <mouse-y> <client-name>
@@ -176,43 +280,40 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32;
 pub fn wheel(pane: &str, direction: Direction) -> i32;
 ```
 
-- [ ] **Step 1: Change characterization tests to call missing Rust commands**
+- [ ] **Step 1: Reroute click/wheel tests to missing Rust commands**
 
-Reroute only click/wheel test invocations from `bash scripts/*.sh` to `agents-mon click|wheel`. Keep assertions unchanged.
+Keep assertions unchanged. Retain one wrapper smoke test per script until Task 9.
 
 - [ ] **Step 2: Verify focused failures**
-
-Run:
 
 ```bash
 cargo test --test plugin stale_click_origin_is_a_noop -- --exact
 cargo test --test plugin wheel_off_moves_without_jumping -- --exact
 ```
 
-Expected: FAIL with CLI usage status 2.
+Expected: FAIL with usage status 2.
 
-- [ ] **Step 3: Implement click behavior**
+- [ ] **Step 3: Port click behavior**
 
-Port all guards from `scripts/click.sh`: require the exact client, verify client and clicked pane still exist, select the correct shared/per-pane rows file, map the visual row, revalidate target pane, clear native navigation state, switch only the originating client, and enter the `agents-mon` key table on non-agent rows.
+Preserve every `click.sh` guard: exact non-empty client, live client, live clicked pane, shared rows map in native mode, visual row lookup, target-pane revalidation, filter clear, exact-client switch, and non-agent-row entry into `agents-mon` key table. Do not call `follow.sh`; native processless panes already exist in each window.
 
-- [ ] **Step 4: Implement daemon-owned wheel debounce**
+- [ ] **Step 4: Add two reserved wheel bytes to the existing FIFO protocol**
 
-Send one logical `j`/`k` action immediately. Replace `${TMPDIR}/agents-mon-wheel`, token files, subshell, and `sleep` with one daemon timer: each wheel command writes a timestamp/generation and requested jump deadline through the existing FIFO; the daemon jumps only when the newest generation expires. Parse `@agents-mon-wheel-jump` exactly: empty = `0.3`, `off` = no jump, non-negative seconds = custom delay.
+Map `wheel-up` and `wheel-down` in `send_key` to unused bytes `0x01` and `0x02`. Decode them as `Key::WheelUp` and `Key::WheelDown`. In the existing event loop:
 
-- [ ] **Step 5: Keep temporary compatibility wrappers**
+- move selection immediately as `k`/`j` would;
+- parse `@agents-mon-wheel-jump` as empty = 300 ms, `off` = no jump, non-negative seconds = custom delay;
+- set one `wheel_jump_at: Option<Instant>` after each tick, overwriting the prior deadline;
+- include that deadline in the existing poll timeout;
+- call `jump()` once when the latest deadline expires.
 
-Reduce scripts to:
+No timestamp packet, generation counter, temp token, subprocess, or `sleep` is needed: overwriting one deadline implements last-tick-wins.
 
-```bash
-#!/usr/bin/env bash
-exec "${AGENTS_MON_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/release/agents-mon}" click "$@"
-```
+- [ ] **Step 5: Reduce scripts to compatibility execs**
 
-and the equivalent `wheel` wrapper. Live tmux servers may retain old script paths across plugin updates.
+Because Task 2 removed the no-binary fallback, `click.sh` and `scroll.sh` may now unconditionally execute `agents-mon click|wheel` until Task 9 removes them.
 
 - [ ] **Step 6: Run tests**
-
-Run:
 
 ```bash
 cargo test
@@ -220,80 +321,76 @@ cargo test
 ./tests/run.sh
 ```
 
-Expected: PASS; no `agents-mon-wheel` temp file is created.
+Expected: PASS; no `${TMPDIR}/agents-mon-wheel` file is created.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/main.rs src/plugin.rs src/sidebar.rs scripts/click.sh scripts/scroll.sh tests/plugin.rs tests/navigation.sh
-git commit -m "feat: handle mouse navigation in Rust"
+git add src/input.rs src/main.rs src/sidebar.rs scripts/click.sh scripts/scroll.sh tests/plugin.rs tests/navigation.sh
+git commit -m "feat: handle mouse input in Rust"
 ```
 
-### Task 4: Move Processless Pane Lifecycle into Rust
+### Task 5: Move Processless Pane Lifecycle into Rust
 
 **Files:**
-- Modify: `src/plugin.rs`
+- Create: `src/panes.rs`
 - Modify: `src/main.rs`
 - Modify: `src/sidebar.rs`
+- Modify: `scripts/client.sh`
 - Modify: `scripts/mirror-add.sh`
 - Modify: `scripts/teardown.sh`
 - Modify: `scripts/orphan.sh`
 - Modify: `scripts/pin.sh`
-- Modify: `scripts/restore.sh`
-- Test: `tests/plugin.rs`
-- Test: `tests/run.sh`
-- Test: `tests/daemon-orphan.sh`
+- Modify: `tests/plugin.rs`
+- Modify: `tests/run.sh`
+- Modify: `tests/daemon-orphan.sh`
 
 **Interfaces:**
-- Produces CLI commands:
 
 ```text
 agents-mon pane-add [window-id]
 agents-mon pane-orphan
 agents-mon pane-pin
-agents-mon pane-restore [window-id]
 agents-mon teardown
 ```
 
 ```rust
+pub fn newest_real_client(format: &str) -> Result<Option<String>, TmuxError>;
 pub fn pane_add(window: Option<&str>) -> i32;
 pub fn pane_orphan() -> i32;
 pub fn pane_pin() -> i32;
-pub fn pane_restore(window: Option<&str>) -> i32;
 pub fn teardown() -> i32;
 ```
 
 - [ ] **Step 1: Reroute lifecycle characterization tests to missing Rust commands**
 
-Keep shell-wrapper tests once each for upgrade compatibility, but make the behavior matrix call the native commands.
+Keep one wrapper smoke test per remaining script until Task 9.
 
-- [ ] **Step 2: Verify failures**
+- [ ] **Step 2: Verify failure**
 
 Run: `cargo test --test plugin -- --test-threads=1`
 
-Expected: lifecycle tests FAIL with CLI usage status 2.
+Expected: lifecycle tests FAIL with usage status 2.
 
-- [ ] **Step 3: Port add/restore/pin as one transaction boundary**
+- [ ] **Step 3: Port client selection and pane add**
 
-Preserve: `@agents-mon-on` guard; `pi` session exclusion; `tmux wait-for -L/-U` lock; duplicate-title guard; saved `@agents-mon-layout-@N`; `split-window -I -hbf -d`; `pane_pid=0`; `allow-rename off`; title; width default 30; cleanup after split failure; exact window-size check before restore.
+Preserve newest non-control-client ordering, `@agents-mon-on`, `pi` session exclusion, `tmux wait-for -L/-U`, duplicate-title guard, saved `@agents-mon-layout-@N`, `split-window -I -hbf -d`, `pane_pid=0`, `allow-rename off`, title, width default 30, and split-failure cleanup.
 
-Use a Rust RAII guard to always run `wait-for -U`, including command errors and signal-free early returns. Do not invent a second lock.
+Use one Rust RAII lock guard that always runs `wait-for -U`. Do not introduce another lock.
 
-- [ ] **Step 4: Port teardown and orphan recovery**
+- [ ] **Step 4: Port pin, orphan recovery, and teardown**
 
-Preserve all current mirror-mode behavior: affect only `agents-mon` panes; relocate only clients stranded on the orphan window; ignore control-mode clients; prefer last window then another window/session; kill the orphan window; clear saved layout/winsize/on/control-client options; remain idempotent.
+Preserve native behavior only: affect `agents-mon` panes; relocate only clients stranded on an orphan window; ignore control clients; prefer last window then another window/session; kill orphan window; resize every plugin pane; restore saved layout only on exact size match; clear layout/winsize/on/control-client options; remain idempotent.
 
-- [ ] **Step 5: Remove daemon script spawning**
+- [ ] **Step 5: Remove daemon shell spawning**
 
-Replace `src/sidebar.rs` calls to `scripts/teardown.sh` with `plugin::teardown()`. Keep failures best-effort where current shell ignores them.
+Replace `src/sidebar.rs` teardown-script execution with `panes::teardown()`. Preserve existing best-effort error handling.
 
-- [ ] **Step 6: Reduce scripts to `exec agents-mon <command>` wrappers**
+- [ ] **Step 6: Reduce scripts to compatibility execs**
 
-Retain filenames through the next release because previously installed hooks may still call them.
+Map each filename to its native command. `client.sh` may call a hidden `agents-mon client [format]` compatibility command until Task 9; runtime Rust code must call `newest_real_client()` directly.
 
 - [ ] **Step 7: Run lifecycle tests**
-
-Run:
 
 ```bash
 cargo test --test plugin -- --test-threads=1
@@ -301,57 +398,52 @@ cargo test --test plugin -- --test-threads=1
 ./tests/run.sh
 ```
 
-Expected: PASS, including concurrent pane-add and size-mismatch restore.
+Expected: PASS, including concurrent add and size-mismatch restoration.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/main.rs src/plugin.rs src/sidebar.rs scripts/mirror-add.sh scripts/teardown.sh scripts/orphan.sh scripts/pin.sh scripts/restore.sh tests/plugin.rs tests/run.sh tests/daemon-orphan.sh
+git add src/panes.rs src/main.rs src/sidebar.rs scripts/client.sh scripts/mirror-add.sh scripts/teardown.sh scripts/orphan.sh scripts/pin.sh tests/plugin.rs tests/run.sh tests/daemon-orphan.sh
 git commit -m "feat: manage sidebar panes in Rust"
 ```
 
-### Task 5: Move Hook and Key-Table Installation into Rust
+### Task 6: Move Hook and Key-Table Setup into Rust
 
 **Files:**
-- Modify: `src/plugin.rs`
+- Create: `src/setup.rs`
 - Modify: `src/main.rs`
-- Modify: `scripts/hooks.sh`
 - Modify: `agents-mon.tmux`
-- Test: `tests/plugin.rs`
-- Test: `tests/navigation.sh`
+- Modify: `scripts/hooks.sh`
+- Modify: `tests/plugin.rs`
+- Modify: `tests/navigation.sh`
 
 **Interfaces:**
-- Produces CLI command: `agents-mon setup`.
-- `setup()` installs hook indexes `[42]`, `[43]`, `[44]`, key tables `agents-mon`/`agents-mon-search`, wheel bindings, nav contract version, mouse bindings, hidden-window picker, and status interpolation.
+- Produces `agents-mon setup`.
+- Installs hook indexes `[42]`, `[43]`, `[44]`, key tables `agents-mon`/`agents-mon-search`, mouse bindings, hidden-window picker, status interpolation, and nav version.
 
-- [ ] **Step 1: Add a setup snapshot test**
+- [ ] **Step 1: Add semantic setup tests**
 
-On a private server, install custom root bindings, mouse on/off, status-left/right placeholders, popup key, hide-windows pattern, and tmux-version fixture. Run `agents-mon setup`, then assert semantic outputs from `tmux show-hooks`, `list-keys`, and `show-options`. Do not compare ordering or whitespace.
+On a private server, install custom root bindings, mouse on/off, status placeholders, popup key, and hide-window pattern. Run `agents-mon setup`; assert semantic output from `show-hooks`, `list-keys`, and `show-options`, ignoring ordering/whitespace.
 
 - [ ] **Step 2: Verify failure**
 
 Run: `cargo test --test plugin setup_preserves_root_bindings_and_installs_plugin_tables -- --exact`
 
-Expected: FAIL with CLI usage status 2.
+Expected: FAIL with usage status 2.
 
-- [ ] **Step 3: Port hook installation**
+- [ ] **Step 3: Port setup**
 
-Move the generated key loop and hook command construction from `scripts/hooks.sh` into `plugin::setup()`. Preserve synchronous search/filter/text delivery, framed `text-XX` packets, root-table cloning, native wheel fallback, tmux `<3.2` follow fallback until Task 8, hook indexes, and `@agents-mon-nav-version`.
+Move hook/key construction from `hooks.sh` into `setup::run()`. Preserve synchronous search/filter/text delivery, `text-XX` packets, root-table cloning, native wheel fallback, hook indexes, and `@agents-mon-nav-version`. Do not port the deleted moving-sidebar follow hooks.
 
-- [ ] **Step 4: Port entrypoint configuration that requires the binary**
+- [ ] **Step 4: Port binary-backed entrypoint configuration**
 
-Move config-reload hook recovery, mouse bindings, hide-window picker, and status placeholder replacement from `agents-mon.tmux` into `setup()`. Keep only pre-binary key/install/status bootstrap in `agents-mon.tmux`.
+Move config-reload recovery, mouse bindings, hide-window picker, and status replacement from `agents-mon.tmux` into `setup`. Keep only pre-binary install/activation glue in `agents-mon.tmux`.
 
-- [ ] **Step 5: Keep `hooks.sh` as one compatibility exec**
+- [ ] **Step 5: Reduce `hooks.sh` to `exec agents-mon setup`**
 
-```bash
-#!/usr/bin/env bash
-exec "$(cd "$(dirname "$0")/.." && pwd)/target/release/agents-mon" setup
-```
+No binary guard is needed after Task 2; bootstrap owns installation before runtime setup.
 
 - [ ] **Step 6: Run tests**
-
-Run:
 
 ```bash
 cargo test --test plugin -- --test-threads=1
@@ -359,60 +451,54 @@ cargo test --test plugin -- --test-threads=1
 ./tests/run.sh
 ```
 
-Expected: PASS with existing key semantics unchanged.
+Expected: PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/main.rs src/plugin.rs agents-mon.tmux scripts/hooks.sh tests/plugin.rs tests/navigation.sh
+git add src/setup.rs src/main.rs agents-mon.tmux scripts/hooks.sh tests/plugin.rs tests/navigation.sh
 git commit -m "feat: install tmux integration from Rust"
 ```
 
-### Task 6: Move Split and Popup Toggle into Rust
+### Task 7: Move Split and Popup Toggle into Rust
 
 **Files:**
-- Modify: `src/plugin.rs`
+- Create: `src/toggle.rs`
 - Modify: `src/main.rs`
 - Modify: `src/sidebar.rs`
 - Modify: `scripts/toggle.sh`
 - Modify: `agents-mon.tmux`
-- Test: `tests/plugin.rs`
-- Test: `tests/navigation.sh`
-- Test: `tests/daemon-orphan.sh`
+- Modify: `tests/plugin.rs`
+- Modify: `tests/navigation.sh`
+- Modify: `tests/daemon-orphan.sh`
 
 **Interfaces:**
-- Produces CLI command: `agents-mon toggle [split|popup] [client-name]`.
-- Consumes current options `@agents-mon-display`, `@agents-mon-width`, `@agents-mon-height`, control-client/on state, scan cache, popup pin/jump files.
+- Produces `agents-mon toggle [split|popup] [client-name]`.
+- Consumes `@agents-mon-display`, width/height options, control-client/on state, scan cache, and popup pin/jump files.
 
-- [ ] **Step 1: Add native toggle acceptance tests**
+- [ ] **Step 1: Add native toggle tests**
 
-Cover first split open, repeated open, stale control client recovery, all-window pane creation, selected visual sidebar plus client key table, popup close, popup jump/reopen, calculated/fixed height, and killed-popup stale-pin cleanup.
+Cover first split, repeated split, stale control client, all-window panes, selected visual sidebar plus client key table, popup close, popup jump/reopen, calculated/fixed height, and killed-popup pin cleanup.
 
 - [ ] **Step 2: Verify failure**
 
 Run: `cargo test --test plugin native_toggle_preserves_split_and_popup_behavior -- --exact`
 
-Expected: FAIL with CLI usage status 2.
+Expected: FAIL with usage status 2.
 
-- [ ] **Step 3: Implement split toggle**
+- [ ] **Step 3: Port split toggle**
 
-Port the Rust branch of `scripts/toggle.sh`: resolve/validate daemon control client, teardown crash leftovers, set `@agents-mon-on`, spawn detached `agents-mon daemon` with null stdio, add panes to every window, run setup, refresh nav contract, choose the exact/latest real client, select its sidebar pane, and switch only that client to the plugin table.
+Resolve/validate daemon control client, teardown crash leftovers, set `@agents-mon-on`, spawn detached `agents-mon daemon` with null stdio, add panes to every window through `panes`, call `setup`, refresh nav version, choose the exact/latest real client, select its sidebar pane, and switch only that client to the plugin table.
 
-- [ ] **Step 4: Implement popup ownership loop**
+- [ ] **Step 4: Port popup ownership**
 
-Preserve pin toggling, stable popup owner, default width 40, minimum height 15, cache-based fleet sizing, client-height cap, `AGENTS_MON_PIN`, `AGENTS_MON_POPUP_CLIENT`, jump-file handoff, exact-client switch, reopen-after-jump, and stale-pin cleanup when the sidebar exits unexpectedly.
+Preserve pin toggling, stable owner, width 40, height floor 15, cache-based fleet sizing, client-height cap, `AGENTS_MON_PIN`, `AGENTS_MON_POPUP_CLIENT`, jump-file handoff, exact-client switch, reopen-after-jump, and stale-pin cleanup.
 
-- [ ] **Step 5: Remove Rust-to-shell update/follow dependencies exposed by toggle**
+- [ ] **Step 5: Reduce `toggle.sh` to `exec agents-mon toggle`**
 
-For processless native mode, call Rust pane lifecycle directly. Leave legacy fallback branches untouched until Task 8.
+No fallback branch remains after Task 2.
 
-- [ ] **Step 6: Reduce `toggle.sh` to compatibility dispatch**
-
-If the binary exists, `exec agents-mon toggle "$@"`; otherwise run the legacy Bash fallback. This preserves old live bindings during the migration release.
-
-- [ ] **Step 7: Run tests**
-
-Run:
+- [ ] **Step 6: Run tests**
 
 ```bash
 cargo test
@@ -423,14 +509,14 @@ cargo test
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/main.rs src/plugin.rs src/sidebar.rs agents-mon.tmux scripts/toggle.sh tests/plugin.rs tests/navigation.sh tests/daemon-orphan.sh
+git add src/toggle.rs src/main.rs src/sidebar.rs agents-mon.tmux scripts/toggle.sh tests/plugin.rs tests/navigation.sh tests/daemon-orphan.sh
 git commit -m "feat: toggle native views from Rust"
 ```
 
-### Task 7: Move Release Refresh and Version Switching into Rust
+### Task 8: Move Release Refresh and Version Switching into Rust
 
 **Files:**
 - Create: `src/release.rs`
@@ -438,11 +524,10 @@ git commit -m "feat: toggle native views from Rust"
 - Modify: `src/sidebar.rs`
 - Modify: `scripts/install-bin.sh`
 - Modify: `scripts/update.sh`
-- Test: `tests/release.rs`
-- Test: `tests/run.sh`
+- Create: `tests/release.rs`
+- Modify: `tests/run.sh`
 
 **Interfaces:**
-- Produces CLI commands:
 
 ```text
 agents-mon releases refresh
@@ -454,9 +539,9 @@ pub fn refresh(plugin_dir: &Path) -> i32;
 pub fn update(plugin_dir: &Path, target: &str) -> i32;
 ```
 
-- [ ] **Step 1: Port existing update tests to a Rust integration test**
+- [ ] **Step 1: Port update tests to Rust integration tests**
 
-Use a local bare Git remote, fixture tags, a fake verified package directory, and tmux stub. Cover latest resolution, explicit rollback, dirty-tree refusal, unknown tag, detached checkout, tarball copy, open-view restart, closed-view no-reopen, daemon shutdown wait, and source/binary version match.
+Use a local bare Git remote, fixture tags, fake verified package, and tmux stub. Cover latest, explicit rollback, dirty-tree refusal, unknown tag, detached checkout, tarball copy, open restart, closed no-reopen, daemon shutdown wait, and source/binary version match.
 
 - [ ] **Step 2: Verify failure**
 
@@ -466,30 +551,38 @@ Expected: FAIL because update/release commands do not exist.
 
 - [ ] **Step 3: Implement release metadata refresh**
 
-Use `std::process::Command` with existing `curl` and `git`; preserve one-day throttling files, redirect-derived latest tag, semver-like tag ordering already used by the sidebar, atomic writes, and best-effort failure. Do not add HTTP or semver dependencies.
+Use existing `curl` and `git`; preserve one-day throttle files, redirect-derived latest tag, current numeric tag ordering, atomic writes, and best-effort failure. Add no dependency.
 
-- [ ] **Step 4: Implement source switching and restart**
+- [ ] **Step 4: Implement safe source switching**
 
-Port all safety rules from `scripts/update.sh`: validate `v[0-9]*`; no-op current version; dirty Git refusal; fetch/verify tag; detached checkout; tarball staging/copy only after verified fetch; clear install marker; install matching engine; teardown; wait up to 8 seconds for old control client; rerun setup; reopen only if previously open; display the same user messages.
+Preserve `update.sh`: validate `v[0-9]*`; no-op current version; refuse dirty Git; fetch/verify tag; detached checkout; tarball stage/copy only after verified fetch; clear install marker; install matching engine; teardown; wait up to 8 seconds for old control client; preserve messages.
 
-The verified archive fetch remains callable through reduced `scripts/install-bin.sh fetch` until bootstrap is redesigned; Rust must never duplicate checksum rules.
+After the target source and binary are installed, always re-enter through the **target tree's** public entrypoint:
 
-- [ ] **Step 5: Call Rust directly from the sidebar**
-
-Replace `src/sidebar.rs` spawns of `install-bin.sh refresh` and `update.sh` with `release::refresh()` and a detached invocation of the current binary's `update` command. Update must detach before replacing source/binary.
-
-- [ ] **Step 6: Reduce `update.sh` to an exec wrapper**
-
-Keep the public documented path for one compatibility release:
-
-```bash
-#!/usr/bin/env bash
-exec "$(cd "$(dirname "$0")/.." && pwd)/target/release/agents-mon" update "${1:-latest}"
+```text
+bash <target-dir>/agents-mon.tmux
 ```
 
-- [ ] **Step 7: Run tests**
+If the view was open, reopen with the target's own mechanism:
 
-Run:
+1. if `<target-dir>/scripts/toggle.sh` exists, run it (required when rolling back to pre-migration tags whose binary has no `toggle` command);
+2. otherwise run `<target-dir>/target/release/agents-mon toggle`.
+
+Never assume the binary at the rollback target supports the new `setup` or `toggle` commands.
+
+- [ ] **Step 5: Keep one verified-fetch primitive**
+
+Continue calling reduced `scripts/install-bin.sh fetch` for archive download/checksum/extraction. Rust must not duplicate checksum policy.
+
+- [ ] **Step 6: Call Rust from the sidebar**
+
+Replace `install-bin.sh refresh` and `update.sh` spawns with `release::refresh()` and a detached current-binary `update`. Detach before replacing source/binary.
+
+- [ ] **Step 7: Reduce `update.sh` to a compatibility exec**
+
+Task 9 removes it after all callers use Rust.
+
+- [ ] **Step 8: Run tests**
 
 ```bash
 cargo test --test release -- --test-threads=1
@@ -497,31 +590,26 @@ cargo test
 ./tests/run.sh
 ```
 
-Expected: PASS; dirty trees remain untouched on failure.
+Expected: PASS, including rollback to a fixture tag without native `setup`/`toggle`; dirty trees remain untouched.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add src/main.rs src/release.rs src/sidebar.rs scripts/install-bin.sh scripts/update.sh tests/release.rs tests/run.sh
+git add src/release.rs src/main.rs src/sidebar.rs scripts/install-bin.sh scripts/update.sh tests/release.rs tests/run.sh
 git commit -m "feat: switch plugin releases from Rust"
 ```
 
-### Task 8: Make Native Bootstrap Reliable, Then Remove Runtime Duplication
+### Task 9: Remove Runtime Compatibility Wrappers
 
 **Files:**
 - Modify: `agents-mon.tmux`
-- Modify: `scripts/install-bin.sh`
-- Delete: `scripts/scan.sh`
-- Delete: `scripts/sidebar.sh`
 - Delete: `scripts/client.sh`
-- Delete: `scripts/follow.sh`
 - Delete: `scripts/click.sh`
 - Delete: `scripts/scroll.sh`
 - Delete: `scripts/hooks.sh`
 - Delete: `scripts/mirror-add.sh`
 - Delete: `scripts/orphan.sh`
 - Delete: `scripts/pin.sh`
-- Delete: `scripts/restore.sh`
 - Delete: `scripts/teardown.sh`
 - Delete: `scripts/toggle.sh`
 - Delete: `scripts/update.sh`
@@ -532,35 +620,31 @@ git commit -m "feat: switch plugin releases from Rust"
 - Modify: `CONTRIBUTING.md`
 
 **Interfaces:**
-- `agents-mon.tmux` guarantees that key activation either runs a verified native binary or displays a clear install failure; it never invokes removed runtime scripts.
-- Public runtime CLI is `agents-mon list|status|detect|sidebar|daemon|key|click|wheel|setup|toggle|pane-*|teardown|releases|update`.
+- Final public runtime CLI:
 
-- [ ] **Step 1: Add a clean-checkout bootstrap test**
+```text
+agents-mon --version
+agents-mon scan|list|status
+agents-mon detect <conf> <screen-file> [title]
+agents-mon sidebar|daemon
+agents-mon key <name>
+agents-mon click <pane> <row> <client>
+agents-mon wheel <pane> <up|down>
+agents-mon setup
+agents-mon toggle [split|popup] [client]
+agents-mon pane-add [window]|pane-orphan|pane-pin|teardown
+agents-mon releases refresh
+agents-mon update [latest|vX.Y.Z]
+agents-mon notification-open <socket> <pane> <bundle>
+```
 
-In `tests/sanity.sh`, start from a package with no `target/release/agents-mon`, source `agents-mon.tmux`, trigger the toggle key immediately, and assert that installation completes and the same action opens the native sidebar. Run for both mocked verified-download and Cargo-fallback paths; assert checksum failure never executes or installs the staged file.
+- [ ] **Step 1: Point every hook, binding, and internal call directly at Rust**
 
-- [ ] **Step 2: Make `agents-mon.tmux` serialize first use with install**
+Run `rg` before deletion. Update all active paths and update tests to invoke native commands. Ensure update/rollback retains the Task 8 old-tag `scripts/toggle.sh` existence check even though the current tree deletes that script.
 
-Keep background eager install on source. Bind toggle through one bootstrap function/command that:
+- [ ] **Step 2: Delete wrappers**
 
-1. executes the binary immediately when present;
-2. otherwise acquires one install lock;
-3. runs `scripts/install-bin.sh`;
-4. verifies the installed executable;
-5. runs `agents-mon setup` and the originally requested toggle;
-6. reports `agents-mon: native engine installation failed` through tmux on failure.
-
-This intentionally replaces the old first-open Bash UI with a possibly delayed but behavior-equivalent native open.
-
-- [ ] **Step 3: Prove release-platform bootstrap before deleting fallback**
-
-Run the GitHub release matrix equivalent locally/CI for macOS ARM64/x86_64 and Linux ARM64/x86_64 archives. Verify SHA-256, executable bit, `--version`, clean-checkout immediate toggle, status interpolation, popup, split, and notification-helper presence where applicable.
-
-Expected: all supported archives PASS. If any platform fails, stop here and retain the coherent `scan.sh`/`sidebar.sh` fallback; do not delete only part of it.
-
-- [ ] **Step 4: Delete runtime wrappers and duplicated fallback**
-
-Update every tmux hook/binding to call the binary directly before deleting compatibility paths. Remove Bash-specific branches from tests. Keep only:
+Keep only:
 
 ```text
 agents-mon.tmux
@@ -569,15 +653,11 @@ scripts/install-app.sh
 scripts/version.sh
 ```
 
-`agents-mon.tmux` remains because TPM needs a sourceable entrypoint; `install-bin.sh` remains because Rust cannot run before it exists; `install-app.sh` remains platform packaging; `version.sh` remains pre-binary release/CI validation.
+- [ ] **Step 3: Update docs**
 
-- [ ] **Step 5: Update docs and contributor model**
+Document Rust-only runtime, first-use installation wait/failure, retained bootstrap/package scripts, complete CLI, rollback compatibility, and private-tmux tests. Remove Bash fallback and parity instructions.
 
-Document Rust as the only runtime engine, the first-use install wait/failure message, the four remaining shell files and why each remains, native CLI commands, release switching, and how to run Rust/private-tmux tests. Remove Bash fallback requirements and parity instructions.
-
-- [ ] **Step 6: Run the full gate**
-
-Run:
+- [ ] **Step 4: Run the full gate**
 
 ```bash
 cargo fmt --check
@@ -586,12 +666,13 @@ cargo test
 ./tests/navigation.sh
 ./tests/daemon-orphan.sh
 ./tests/sanity.sh
-rg -n 'scripts/(scan|sidebar|client|follow|click|scroll|hooks|mirror-add|orphan|pin|restore|teardown|toggle|update)\.sh' --glob '!docs/superpowers/plans/**' .
+rg -n 'scripts/(scan|sidebar|client|follow|click|scroll|hooks|mirror-add|orphan|pin|restore|teardown|update)\.sh|agents-mon mirror' --glob '!docs/superpowers/plans/**' .
+rg -n 'scripts/toggle\.sh' --glob '!docs/superpowers/plans/**' .
 ```
 
-Expected: every test PASS; final `rg` returns no matches.
+Expected: every test PASS; the first `rg` returns no matches. The second returns exactly one intentional production reference in `src/release.rs`, used to reopen pre-migration rollback targets through their own entrypoint; tests may contain fixture strings for the same contract.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -602,26 +683,26 @@ git commit -m "refactor: make Rust the sole plugin runtime"
 
 | Existing behavior | Preserved by |
 |---|---|
-| Agent config/detection/subject rules and TSV/status output | Existing `conf.rs`, `detect.rs`, `procs.rs`, `scan.rs`; `tests/parity.rs` |
-| Idle debounce, done state, attention and notifications | Existing `attention.rs` and sidebar tests |
-| Search/filter/key decoding/help/version picker | Existing `sidebar.rs` tests plus `tests/navigation.sh` |
-| Exact-client click and stale-origin safety | Task 3 native click tests |
-| Wheel one-row movement and settle-to-jump | Task 3 daemon timer tests |
-| Processless pane creation and width pinning | Task 4 private-tmux tests |
-| Layout snapshots and size-safe restore | Tasks 1/4 restore regression test |
-| Concurrent hook pane-add race | Tasks 1/4 concurrent idempotence test |
-| Stranded-client orphan recovery | Task 4 plus `tests/daemon-orphan.sh` |
-| Hook/key-table semantics and config reload | Task 5 setup snapshot/navigation tests |
-| Split and popup lifecycle | Task 6 native toggle tests |
-| Dirty-tree update refusal and rollback | Task 7 release tests |
-| First-use availability without Bash runtime | Task 8 clean-checkout bootstrap gate |
-| macOS notification bundle | Existing `install-app.sh` and sanity/release package checks |
+| Agent config/detection/subject rules and TSV/status | Existing Rust modules and `tests/parity.rs` |
+| Idle debounce, done state, attention, notifications | Existing `attention.rs` and sidebar tests |
+| Search/filter/key decoding/help/version picker | Existing sidebar tests and `tests/navigation.sh` |
+| First-use operation without preinstalled binary | Task 2 bootstrap/platform gate |
+| Exact-client click and stale-origin safety | Task 4 input tests |
+| Wheel move and settle-to-jump | Task 4 reserved-byte/deadline tests |
+| Processless panes, widths, and add race | Task 5 private-tmux tests |
+| Size-safe layout restoration | Tasks 1/5 regression test |
+| Stranded-client orphan recovery | Task 5 and `tests/daemon-orphan.sh` |
+| Hook/key-table semantics and reload | Task 6 setup tests |
+| Split and popup lifecycle | Task 7 native toggle tests |
+| Dirty-tree refusal and old-tag rollback | Task 8 release tests |
+| `scan` alias and notification click entrypoint | Tasks 2/9 CLI tests |
+| macOS notification bundle | Retained `install-app.sh` and package checks |
 
 ## Deliberately Retained Shell Boundary
 
-- `agents-mon.tmux`: TPM/tmux loads shell before the binary can exist.
-- `scripts/install-bin.sh`: downloads/verifies/builds the binary that would otherwise be needed to run an installer.
-- `scripts/install-app.sh`: thin macOS bundle/codesign packaging around platform commands.
-- `scripts/version.sh`: validates release tags from `Cargo.toml` in CI and pre-binary bootstrap environments.
+- `agents-mon.tmux`: TPM loads shell before the binary can exist.
+- `scripts/install-bin.sh`: installs/verifies/builds the Rust binary that cannot install itself before it exists.
+- `scripts/install-app.sh`: macOS bundle/codesign packaging around platform commands.
+- `scripts/version.sh`: pre-binary manifest/tag validation for bootstrap and CI.
 
-Converting these four files to Rust either creates a bootstrap cycle or merely wraps platform commands without removing a runtime dependency. Stop after Task 8 unless packaging changes make one of them unnecessary.
+Converting these four files creates a bootstrap cycle or merely rewrites platform command invocation. Stop after Task 9 unless the packaging model changes.
