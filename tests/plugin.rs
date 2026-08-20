@@ -20,7 +20,7 @@ impl TestTmux {
             std::process::id()
         ));
         std::fs::create_dir_all(&tmp).unwrap();
-        let socket = tmp.join("sock").to_string_lossy().into_owned();
+        let socket = format!("agents-mon-plugin-{name}-{}-{serial}", std::process::id());
         let server = Self { socket, tmp };
         server.assert_tmux(&[
             "-f",
@@ -40,30 +40,28 @@ impl TestTmux {
 
     fn tmux(&self, args: &[&str]) -> Output {
         Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket)
+            .args(["-L", &self.socket])
             .args(args)
             .output()
             .unwrap()
     }
 
+    fn tmux_env(&self) -> String {
+        format!(
+            "{},0,0",
+            self.text(&["display-message", "-p", "#{socket_path}"])
+        )
+    }
+
     fn script(&self, name: &str, args: &[&str]) -> Output {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        Command::new("bash")
-            .arg(root.join("scripts").join(name))
-            .args(args)
-            .current_dir(root)
-            .env("TMPDIR", &self.tmp)
-            .env("TMUX", format!("{},0,0", self.socket))
-            .output()
-            .unwrap()
+        self.script_command(name, args).output().unwrap()
     }
 
     fn bin(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_agents-mon"))
             .args(args)
             .env("TMPDIR", &self.tmp)
-            .env("TMUX", format!("{},0,0", self.socket))
+            .env("TMUX", self.tmux_env())
             .env("AGENTS_MON_DIR", env!("CARGO_MANIFEST_DIR"))
             .output()
             .unwrap()
@@ -77,7 +75,7 @@ impl TestTmux {
             .args(args)
             .current_dir(root)
             .env("TMPDIR", &self.tmp)
-            .env("TMUX", format!("{},0,0", self.socket));
+            .env("TMUX", self.tmux_env());
         command
     }
 
@@ -133,12 +131,22 @@ impl TestTmux {
 
     fn attach(&self) -> Child {
         let program = format!(
-            "log_user 0; set timeout -1; spawn tmux -S {{{}}} attach-session -t plugin; expect eof",
+            "log_user 0; set timeout -1; spawn tmux -L {{{}}} attach-session -t plugin; expect eof",
             self.socket
         );
         Command::new("expect")
             .args(["-c", &program])
             .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    fn attach_control(&self) -> Child {
+        Command::new("tmux")
+            .args(["-L", &self.socket, "-C", "attach-session", "-t", "plugin"])
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -188,6 +196,10 @@ fn mirror_add_is_idempotent_under_concurrent_calls() {
     let window = tmux.text(&["display-message", "-p", "#{window_id}"]);
     tmux.assert_tmux(&["set-option", "-g", "@agents-mon-on", "1"]);
     tmux.assert_tmux(&["set-option", "-g", "@agents-mon-width", "30"]);
+    let original_panes = tmux
+        .text(&["list-panes", "-t", &window, "-F", "#{pane_id}"])
+        .lines()
+        .count();
 
     let mut children = (0..8)
         .map(|_| {
@@ -207,6 +219,7 @@ fn mirror_add_is_idempotent_under_concurrent_calls() {
         "-F",
         "#{pane_title}\t#{pane_pid}\t#{pane_width}",
     ]);
+    assert_eq!(panes.lines().count(), original_panes + 1, "{panes}");
     let mirrors = panes
         .lines()
         .filter(|line| line.starts_with("agents-mon\t"))
@@ -269,7 +282,37 @@ fn newest_non_control_client_wins() {
         .lines()
         .map(str::to_owned)
         .collect::<HashSet<_>>();
-    let second = clients.iter().find(|name| *name != &first).unwrap();
+    let second = clients.iter().find(|name| *name != &first).unwrap().clone();
+    thread::sleep(Duration::from_secs(1));
+
+    let mut control_process = tmux.attach_control();
+    tmux.wait_for(Duration::from_secs(2), || {
+        tmux.text(&["list-clients", "-F", "#{client_name}"])
+            .lines()
+            .count()
+            == 3
+    });
+    let newest = tmux
+        .text(&[
+            "list-clients",
+            "-F",
+            "#{client_activity}\t#{client_flags}\t#{client_name}",
+        ])
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            Some((
+                fields.next()?.parse::<u64>().ok()?,
+                fields.next()?.to_owned(),
+            ))
+        })
+        .max_by_key(|(activity, _)| *activity)
+        .unwrap();
+    assert!(
+        newest.1.contains("control-mode"),
+        "newest flags: {}",
+        newest.1
+    );
 
     let output = tmux.script("client.sh", &[]);
     assert_success(output.clone(), "client.sh");
@@ -277,15 +320,32 @@ fn newest_non_control_client_wins() {
 
     let _ = first_process.kill();
     let _ = second_process.kill();
+    let _ = control_process.kill();
     let _ = first_process.wait();
     let _ = second_process.wait();
+    let _ = control_process.wait();
 }
 
 #[test]
 fn stale_click_origin_is_a_noop() {
     let tmux = TestTmux::new("stale-click");
+    let mut viewer_process = tmux.attach();
+    tmux.wait_for(Duration::from_secs(2), || {
+        !tmux
+            .text(&["list-clients", "-F", "#{client_name}"])
+            .is_empty()
+    });
+    let viewer = tmux.text(&["list-clients", "-F", "#{client_name}"]);
+    let client_before = tmux.text(&[
+        "display-message",
+        "-p",
+        "-c",
+        &viewer,
+        "#{window_id}\t#{pane_id}\t#{client_key_table}",
+    ]);
+    let selected_before = client_before.split('\t').nth(1).unwrap().to_owned();
     let clicked = tmux.text(&[
-        "split-window",
+        "new-window",
         "-d",
         "-P",
         "-F",
@@ -294,7 +354,6 @@ fn stale_click_origin_is_a_noop() {
         "plugin:",
         "exec sleep 60",
     ]);
-    let selected_before = tmux.text(&["display-message", "-p", "#{pane_id}"]);
     assert_ne!(clicked, selected_before);
 
     let rows = tmux.tmp.join(format!("agents-mon-rows-{}", &clicked[1..]));
@@ -305,9 +364,18 @@ fn stale_click_origin_is_a_noop() {
     );
 
     assert_eq!(
-        tmux.text(&["display-message", "-p", "#{pane_id}"]),
-        selected_before
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &viewer,
+            "#{window_id}\t#{pane_id}\t#{client_key_table}",
+        ]),
+        client_before
     );
+
+    let _ = viewer_process.kill();
+    let _ = viewer_process.wait();
 }
 
 #[test]
