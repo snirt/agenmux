@@ -1,0 +1,317 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+static NEXT_SERVER: AtomicUsize = AtomicUsize::new(0);
+
+struct TestTmux {
+    socket: String,
+    tmp: PathBuf,
+}
+
+impl TestTmux {
+    fn new(name: &str) -> Self {
+        let serial = NEXT_SERVER.fetch_add(1, Ordering::Relaxed);
+        let tmp = std::env::temp_dir().join(format!(
+            "agents-mon-plugin-{name}-{}-{serial}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let socket = tmp.join("sock").to_string_lossy().into_owned();
+        let server = Self { socket, tmp };
+        server.assert_tmux(&[
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-s",
+            "plugin",
+            "-x",
+            "120",
+            "-y",
+            "40",
+            "exec sleep 60",
+        ]);
+        server
+    }
+
+    fn tmux(&self, args: &[&str]) -> Output {
+        Command::new("tmux")
+            .arg("-S")
+            .arg(&self.socket)
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    fn script(&self, name: &str, args: &[&str]) -> Output {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        Command::new("bash")
+            .arg(root.join("scripts").join(name))
+            .args(args)
+            .current_dir(root)
+            .env("TMPDIR", &self.tmp)
+            .env("TMUX", format!("{},0,0", self.socket))
+            .output()
+            .unwrap()
+    }
+
+    fn bin(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_agents-mon"))
+            .args(args)
+            .env("TMPDIR", &self.tmp)
+            .env("TMUX", format!("{},0,0", self.socket))
+            .env("AGENTS_MON_DIR", env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .unwrap()
+    }
+
+    fn script_command(&self, name: &str, args: &[&str]) -> Command {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut command = Command::new("bash");
+        command
+            .arg(root.join("scripts").join(name))
+            .args(args)
+            .current_dir(root)
+            .env("TMPDIR", &self.tmp)
+            .env("TMUX", format!("{},0,0", self.socket));
+        command
+    }
+
+    fn text(&self, args: &[&str]) -> String {
+        let output = self.tmux(args);
+        assert!(
+            output.status.success(),
+            "tmux {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim_end()
+            .to_string()
+    }
+
+    fn assert_tmux(&self, args: &[&str]) {
+        let output = self.tmux(args);
+        assert!(
+            output.status.success(),
+            "tmux {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn wait_for(&self, timeout: Duration, mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + timeout;
+        while !condition() {
+            assert!(Instant::now() < deadline, "condition timed out");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn input_pane(&self, name: &str) -> (String, PathBuf) {
+        let path = self.tmp.join(name);
+        let command = format!(
+            "exec sh -c 'stty -icanon -echo; cat > {}'",
+            path.to_string_lossy()
+        );
+        let pane = self.text(&[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            "plugin:",
+            &command,
+        ]);
+        self.assert_tmux(&["select-pane", "-t", &pane, "-T", "agents-mon"]);
+        (pane, path)
+    }
+
+    fn attach(&self) -> Child {
+        let program = format!(
+            "log_user 0; set timeout -1; spawn tmux -S {{{}}} attach-session -t plugin; expect eof",
+            self.socket
+        );
+        Command::new("expect")
+            .args(["-c", &program])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+}
+
+impl Drop for TestTmux {
+    fn drop(&mut self) {
+        let _ = self.tmux(&["kill-server"]);
+        let _ = std::fs::remove_dir_all(&self.tmp);
+    }
+}
+
+fn assert_success(output: Output, context: &str) {
+    assert!(
+        output.status.success(),
+        "{context}: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn restore_skips_a_layout_after_window_size_changes() {
+    let tmux = TestTmux::new("restore-size");
+    let window = tmux.text(&["display-message", "-p", "#{window_id}"]);
+    let saved = tmux.text(&["display-message", "-p", "#{window_layout}"]);
+    let option = format!("@agents-mon-layout-{window}");
+    tmux.assert_tmux(&["set-option", "-g", &option, &saved]);
+    tmux.assert_tmux(&["resize-window", "-t", &window, "-x", "100", "-y", "30"]);
+    let resized = tmux.text(&["display-message", "-p", "-t", &window, "#{window_layout}"]);
+    assert_ne!(saved, resized);
+
+    assert_success(tmux.script("restore.sh", &[&window]), "restore.sh");
+
+    assert_eq!(
+        tmux.text(&["display-message", "-p", "-t", &window, "#{window_layout}"]),
+        resized
+    );
+    assert_eq!(tmux.text(&["show-option", "-gqv", &option]), "");
+}
+
+#[test]
+fn mirror_add_is_idempotent_under_concurrent_calls() {
+    let tmux = TestTmux::new("mirror-race");
+    let window = tmux.text(&["display-message", "-p", "#{window_id}"]);
+    tmux.assert_tmux(&["set-option", "-g", "@agents-mon-on", "1"]);
+    tmux.assert_tmux(&["set-option", "-g", "@agents-mon-width", "30"]);
+
+    let mut children = (0..8)
+        .map(|_| {
+            tmux.script_command("mirror-add.sh", &[&window])
+                .spawn()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for child in &mut children {
+        assert!(child.wait().unwrap().success());
+    }
+
+    let panes = tmux.text(&[
+        "list-panes",
+        "-t",
+        &window,
+        "-F",
+        "#{pane_title}\t#{pane_pid}\t#{pane_width}",
+    ]);
+    let mirrors = panes
+        .lines()
+        .filter(|line| line.starts_with("agents-mon\t"))
+        .collect::<Vec<_>>();
+    assert_eq!(mirrors.len(), 1, "{panes}");
+    assert_eq!(mirrors[0], "agents-mon\t0\t30");
+}
+
+#[test]
+fn wheel_off_moves_without_jumping() {
+    let tmux = TestTmux::new("wheel-off");
+    let (pane, keys) = tmux.input_pane("wheel-off.keys");
+    tmux.assert_tmux(&["set-option", "-g", "@agents-mon-wheel-jump", "off"]);
+
+    assert_success(tmux.script("scroll.sh", &[&pane, "down"]), "scroll down");
+    tmux.wait_for(Duration::from_secs(1), || {
+        std::fs::read(&keys).is_ok_and(|bytes| bytes == b"j")
+    });
+    thread::sleep(Duration::from_millis(400));
+    assert_eq!(std::fs::read(keys).unwrap(), b"j");
+}
+
+#[test]
+fn wheel_custom_delay_jumps_only_once() {
+    let tmux = TestTmux::new("wheel-delay");
+    let (pane, keys) = tmux.input_pane("wheel-delay.keys");
+    tmux.assert_tmux(&["set-option", "-g", "@agents-mon-wheel-jump", "0.5"]);
+
+    assert_success(tmux.script("scroll.sh", &[&pane, "down"]), "scroll down");
+    thread::sleep(Duration::from_millis(20));
+    assert_success(tmux.script("scroll.sh", &[&pane, "up"]), "scroll up");
+    tmux.wait_for(Duration::from_secs(2), || {
+        std::fs::read(&keys).is_ok_and(|bytes| bytes == b"jkl")
+    });
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(std::fs::read(keys).unwrap(), b"jkl");
+}
+
+#[test]
+fn newest_non_control_client_wins() {
+    let tmux = TestTmux::new("newest-client");
+    let mut first_process = tmux.attach();
+    tmux.wait_for(Duration::from_secs(2), || {
+        !tmux
+            .text(&["list-clients", "-F", "#{client_name}"])
+            .is_empty()
+    });
+    let first = tmux.text(&["list-clients", "-F", "#{client_name}"]);
+    thread::sleep(Duration::from_secs(1));
+
+    let mut second_process = tmux.attach();
+    tmux.wait_for(Duration::from_secs(2), || {
+        tmux.text(&["list-clients", "-F", "#{client_name}"])
+            .lines()
+            .count()
+            == 2
+    });
+    let clients = tmux
+        .text(&["list-clients", "-F", "#{client_name}"])
+        .lines()
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    let second = clients.iter().find(|name| *name != &first).unwrap();
+
+    let output = tmux.script("client.sh", &[]);
+    assert_success(output.clone(), "client.sh");
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), second);
+
+    let _ = first_process.kill();
+    let _ = second_process.kill();
+    let _ = first_process.wait();
+    let _ = second_process.wait();
+}
+
+#[test]
+fn stale_click_origin_is_a_noop() {
+    let tmux = TestTmux::new("stale-click");
+    let clicked = tmux.text(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "plugin:",
+        "exec sleep 60",
+    ]);
+    let selected_before = tmux.text(&["display-message", "-p", "#{pane_id}"]);
+    assert_ne!(clicked, selected_before);
+
+    let rows = tmux.tmp.join(format!("agents-mon-rows-{}", &clicked[1..]));
+    std::fs::write(rows, format!("{selected_before}\n")).unwrap();
+    assert_success(
+        tmux.script("click.sh", &[&clicked, "1", "vanished-client"]),
+        "click.sh",
+    );
+
+    assert_eq!(
+        tmux.text(&["display-message", "-p", "#{pane_id}"]),
+        selected_before
+    );
+}
+
+#[test]
+fn binary_helper_uses_private_server() {
+    let tmux = TestTmux::new("binary-helper");
+    assert_success(tmux.bin(&["status"]), "agents-mon status");
+}
