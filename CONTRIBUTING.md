@@ -53,7 +53,7 @@ config format.
 ## Before you open a PR
 
 - [ ] `cargo test` passes
-- [ ] `tests/run.sh` passes
+- [ ] `tests/run.sh` passes (includes `tests/no-stale-runtime-refs.sh`)
 - [ ] New/changed detection has a fixture behind it
 - [ ] README updated if you added an option or changed behavior
 - [ ] One focused change per PR

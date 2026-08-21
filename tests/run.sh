@@ -8,6 +8,12 @@ if [ ! -x "$BIN" ]; then
   PATH="$HOME/.cargo/bin:$PATH" cargo build --release --manifest-path "$DIR/Cargo.toml" || exit 1
 fi
 
+if "$DIR/tests/no-stale-runtime-refs.sh"; then
+  echo "ok   no-stale-runtime-references"
+else
+  fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then
   version="$(bash "$DIR/scripts/version.sh")"
   tag="$(bash "$DIR/scripts/version.sh" tag)"
