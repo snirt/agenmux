@@ -71,12 +71,16 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Install static Linux build tools
+      - name: Install Linux build and test tools
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes musl-tools
+          sudo apt-get install --yes musl-tools tmux expect
           rustup target add "${{ matrix.target }}"
+
+      - name: Install macOS test tools
+        if: runner.os == 'macOS'
+        run: brew install tmux expect
 
       - name: Test
         run: |
