@@ -13,6 +13,11 @@ if "$DIR/tests/no-stale-runtime-refs.sh"; then
 else
   fail=1
 fi
+if "$DIR/tests/no-stale-runtime-refs-self-test.sh"; then
+  echo "ok   no-stale-runtime-reference-gate"
+else
+  fail=1
+fi
 
 if [ "$fail" -eq 0 ]; then
   version="$(bash "$DIR/scripts/version.sh")"
