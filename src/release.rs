@@ -248,11 +248,21 @@ fn git_install(plugin_dir: &Path, target: &str) -> Result<String, &'static str> 
     if !status.stdout.is_empty() {
         return Err("dirty");
     }
-    let previous = git_output(plugin_dir, &["rev-parse", "HEAD"])
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|revision| !revision.is_empty())
-        .ok_or("status")?;
+    let symbolic =
+        git_output(plugin_dir, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok_or("status")?;
+    let previous = if symbolic.status.success() {
+        String::from_utf8_lossy(&symbolic.stdout).trim().to_string()
+    } else if symbolic.status.code() == Some(1) {
+        git_output(plugin_dir, &["rev-parse", "HEAD"])
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_default()
+    } else {
+        return Err("status");
+    };
+    if previous.is_empty() {
+        return Err("status");
+    }
     let _ = git_success(plugin_dir, &["fetch", "--tags", "--quiet", "origin"]);
     let revision = format!("refs/tags/{target}^{{commit}}");
     if !git_success(plugin_dir, &["rev-parse", "-q", "--verify", &revision]) {
@@ -350,11 +360,51 @@ fn write_engine_state(plugin_dir: &Path, target: &str) -> std::io::Result<()> {
     )
 }
 
+fn restore_snapshot(path: &Path, snapshot: &Path, existed: bool) -> std::io::Result<()> {
+    if !existed {
+        return match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+    }
+    let staged = path.with_extension(format!("restore-{}", std::process::id()));
+    fs::copy(snapshot, &staged)?;
+    fs::rename(staged, path)
+}
+
+fn replace_engine_and_state(
+    destination: &Path,
+    staged: &Path,
+    state: &Path,
+    backup_dir: &Path,
+    write_state: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let previous_engine = backup_dir.join("previous-engine");
+    let previous_state = backup_dir.join("previous-state");
+    let had_engine = destination.exists();
+    let had_state = state.exists();
+    if had_engine {
+        fs::copy(destination, &previous_engine)?;
+    }
+    if had_state {
+        fs::copy(state, &previous_state)?;
+    }
+    fs::rename(staged, destination)?;
+    if let Err(error) = write_state() {
+        let _ = restore_snapshot(destination, &previous_engine, had_engine);
+        let _ = restore_snapshot(state, &previous_state, had_state);
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn install_exact_engine(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
     let scratch = Scratch::new("agents-mon-engine").map_err(|_| "scratch")?;
     let package = fetch_package(plugin_dir, target, &scratch)?;
     let source = package.join("target/release/agents-mon");
     let destination = release_dir(plugin_dir).join("agents-mon");
+    let state = release_dir(plugin_dir).join(".agents-mon-version");
     fs::create_dir_all(release_dir(plugin_dir)).map_err(|_| "engine")?;
     let staged = destination.with_extension(format!("new-{}", std::process::id()));
     fs::copy(source, &staged).map_err(|_| "engine")?;
@@ -366,7 +416,10 @@ fn install_exact_engine(plugin_dir: &Path, target: &str) -> Result<(), &'static 
         let _ = fs::remove_file(&staged);
         return Err("engine");
     }
-    fs::rename(&staged, &destination).map_err(|_| "engine")?;
+    replace_engine_and_state(&destination, &staged, &state, &scratch.0, || {
+        write_engine_state(plugin_dir, target)
+    })
+    .map_err(|_| "engine")?;
     let notifier = package.join("target/release/agents-mon-notifier");
     if notifier.is_file() {
         let _ = fs::copy(
@@ -374,7 +427,7 @@ fn install_exact_engine(plugin_dir: &Path, target: &str) -> Result<(), &'static 
             release_dir(plugin_dir).join("agents-mon-notifier"),
         );
     }
-    write_engine_state(plugin_dir, target).map_err(|_| "engine")
+    Ok(())
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -533,6 +586,32 @@ mod tests {
         assert_eq!(compare_tags("v1.2.3-rc1", "v1.2.2"), Ordering::Greater);
         assert_eq!(compare_tags("v1.2.3", "v1.2.3-rc1"), Ordering::Greater);
         assert_eq!(compare_tags("v1.2.3-rc10", "v1.2.3-rc2"), Ordering::Greater);
+    }
+
+    #[test]
+    fn late_state_write_failure_restores_previous_engine_and_state() {
+        let scratch = Scratch::new("agents-mon-state-failure-test").unwrap();
+        let destination = scratch.0.join("agents-mon");
+        let staged = scratch.0.join("agents-mon-new");
+        let state = scratch.0.join(".agents-mon-version");
+        fs::write(&destination, "old engine\n").unwrap();
+        fs::write(&staged, "new engine\n").unwrap();
+        fs::write(&state, "v0.1.1\nold-revision\n").unwrap();
+
+        let result = replace_engine_and_state(
+            &destination,
+            &staged,
+            &state,
+            &scratch.0,
+            || -> std::io::Result<()> {
+                fs::write(&state, "v0.1.0\nnew-revision\n")?;
+                Err(std::io::Error::other("forced late state failure"))
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(destination).unwrap(), "old engine\n");
+        assert_eq!(fs::read_to_string(state).unwrap(), "v0.1.1\nold-revision\n");
     }
 
     #[test]

@@ -144,6 +144,28 @@ fn make_git_releases(repo: &Path) {
     git_ok(repo, &["tag", "v0.1.1"]);
 }
 
+fn make_wrong_engine_release(repo: &Path) {
+    git_ok(repo, &["checkout", "-q", "v0.1.0"]);
+    script(
+        &repo.join("scripts/install-bin.sh"),
+        r#"if [ "${1:-}" = fetch ]; then
+  pkg="$3/tmux-agents-mon-wrong"
+  mkdir -p "$pkg/target/release"
+  cat > "$pkg/target/release/agents-mon" <<'BIN'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] && printf 'agents-mon 9.9.9\n'
+BIN
+  chmod +x "$pkg/target/release/agents-mon"
+  printf '%s\n' "$pkg"
+  exit 0
+fi
+exit 1"#,
+    );
+    git_ok(repo, &["add", "scripts/install-bin.sh"]);
+    git_ok(repo, &["commit", "--amend", "-qm", "old wrong engine"]);
+    git_ok(repo, &["tag", "-f", "v0.1.0"]);
+}
+
 fn no_server_tmux(bin_dir: &Path) {
     script(
         &bin_dir.join("tmux"),
@@ -313,25 +335,7 @@ fn wrong_target_engine_restores_the_previous_git_source() {
     make_git_releases(&repo);
     no_server_tmux(&bin);
 
-    git_ok(&repo, &["checkout", "-q", "v0.1.0"]);
-    script(
-        &repo.join("scripts/install-bin.sh"),
-        r#"if [ "${1:-}" = fetch ]; then
-  pkg="$3/tmux-agents-mon-wrong"
-  mkdir -p "$pkg/target/release"
-  cat > "$pkg/target/release/agents-mon" <<'BIN'
-#!/usr/bin/env bash
-[ "${1:-}" = --version ] && printf 'agents-mon 9.9.9\n'
-BIN
-  chmod +x "$pkg/target/release/agents-mon"
-  printf '%s\n' "$pkg"
-  exit 0
-fi
-exit 1"#,
-    );
-    git_ok(&repo, &["add", "scripts/install-bin.sh"]);
-    git_ok(&repo, &["commit", "--amend", "-qm", "old wrong engine"]);
-    git_ok(&repo, &["tag", "-f", "v0.1.0"]);
+    make_wrong_engine_release(&repo);
     git_ok(&repo, &["checkout", "-q", "v0.1.1"]);
 
     let out = run(&repo, &bin, &["update", "v0.1.0"]);
@@ -345,6 +349,41 @@ exit 1"#,
     assert_eq!(
         fs::read_to_string(repo.join("Cargo.toml")).unwrap(),
         "[package]\nname = \"agents-mon\"\nversion = \"0.1.1\"\n"
+    );
+}
+
+#[test]
+fn failed_git_update_restores_the_previous_branch() {
+    let tmp = TempDir::new("restore-branch");
+    let repo = tmp.path().join("repo");
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    make_git_releases(&repo);
+    no_server_tmux(&bin);
+    let branch = String::from_utf8_lossy(
+        &git(&repo, &["symbolic-ref", "--quiet", "--short", "HEAD"]).stdout,
+    )
+    .trim()
+    .to_string();
+    let revision = String::from_utf8_lossy(&git(&repo, &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+    make_wrong_engine_release(&repo);
+    git_ok(&repo, &["checkout", "-q", &branch]);
+
+    let out = run(&repo, &bin, &["update", "v0.1.0"]);
+
+    assert!(!out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(
+            &git(&repo, &["symbolic-ref", "--quiet", "--short", "HEAD"]).stdout
+        )
+        .trim(),
+        branch
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&git(&repo, &["rev-parse", "HEAD"]).stdout).trim(),
+        revision
     );
 }
 
