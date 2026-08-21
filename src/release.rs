@@ -278,24 +278,66 @@ impl Drop for Scratch {
     }
 }
 
-fn synchronize_tarball_source(plugin_dir: &Path, package: &Path) -> std::io::Result<()> {
-    for entry in fs::read_dir(plugin_dir)? {
-        let entry = entry?;
-        if entry.file_name() == "target" {
-            continue;
-        }
-        let path = entry.path();
-        let kind = fs::symlink_metadata(&path)?.file_type();
-        if kind.is_dir() && !kind.is_symlink() {
-            fs::remove_dir_all(path)?;
-        } else {
-            fs::remove_file(path)?;
-        }
-    }
-    let source = format!("{}/.", package.display());
-    success("cp", &["-R", &source, &plugin_dir.display().to_string()])
+fn update_sibling(plugin_dir: &Path, label: &str) -> std::io::Result<PathBuf> {
+    let parent = plugin_dir
+        .parent()
+        .ok_or_else(|| std::io::Error::other("plugin directory has no parent"))?;
+    let mut name = plugin_dir
+        .file_name()
+        .unwrap_or_else(|| OsStr::new("plugin"))
+        .to_os_string();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    name.push(format!(".{label}-{}-{stamp}", std::process::id()));
+    Ok(parent.join(name))
+}
+
+fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let source = format!("{}/.", source.display());
+    success("cp", &["-R", &source, &destination.display().to_string()])
         .then_some(())
-        .ok_or_else(|| std::io::Error::other("could not copy verified package"))
+        .ok_or_else(|| std::io::Error::other("could not copy tree"))
+}
+
+fn synchronize_tarball_source(plugin_dir: &Path, package: &Path) -> std::io::Result<()> {
+    let replacement = update_sibling(plugin_dir, "replacement")?;
+    let backup = update_sibling(plugin_dir, "backup")?;
+    fs::create_dir(&replacement)?;
+
+    let staged = (|| {
+        copy_tree(package, &replacement)?;
+        let installed_release = plugin_dir.join("target/release");
+        if installed_release.is_dir() {
+            let replacement_target = replacement.join("target");
+            fs::create_dir_all(&replacement_target)?;
+            let installed = installed_release.display().to_string();
+            if !success(
+                "cp",
+                &["-R", &installed, &replacement_target.display().to_string()],
+            ) {
+                return Err(std::io::Error::other("could not preserve installed engine"));
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = staged {
+        let _ = fs::remove_dir_all(&replacement);
+        return Err(error);
+    }
+
+    if let Err(error) = fs::rename(plugin_dir, &backup) {
+        let _ = fs::remove_dir_all(&replacement);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&replacement, plugin_dir) {
+        let _ = fs::rename(&backup, plugin_dir);
+        let _ = fs::remove_dir_all(&replacement);
+        return Err(error);
+    }
+    let _ = fs::remove_dir_all(backup);
+    Ok(())
 }
 
 fn tarball_install(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {

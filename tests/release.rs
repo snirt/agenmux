@@ -510,6 +510,55 @@ exit 0"#,
 }
 
 #[test]
+fn failed_source_copy_leaves_tarball_tree_untouched() {
+    let tmp = TempDir::new("tarball-copy-failure");
+    let plugin = tmp.path().join("plugin");
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(plugin.join("scripts")).unwrap();
+    fs::create_dir_all(plugin.join("target/release")).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    let manifest = "[package]\nname = \"agents-mon\"\nversion = \"0.1.1\"\n";
+    fs::write(plugin.join("Cargo.toml"), manifest).unwrap();
+    fs::write(plugin.join("stale-source"), "untouched\n").unwrap();
+    fs::write(plugin.join("target/release/preserved"), "keep\n").unwrap();
+    script(
+        &plugin.join("scripts/toggle.sh"),
+        r#"printf 'still here\n' >/dev/null"#,
+    );
+    script(
+        &plugin.join("scripts/install-bin.sh"),
+        r#"if [ "${1:-}" = fetch ]; then
+  pkg="$3/tmux-agents-mon-test"
+  mkdir -p "$pkg/scripts"
+  printf '[package]\nname = "agents-mon"\nversion = "0.1.0"\n' > "$pkg/Cargo.toml"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$pkg/scripts/install-bin.sh"
+  printf '%s\n' "$pkg"
+  exit 0
+fi
+exit 0"#,
+    );
+    no_server_tmux(&bin);
+    script(&bin.join("cp"), "exit 1");
+
+    let out = run(&plugin, &bin, &["update", "v0.1.0"]);
+
+    assert!(!out.status.success());
+    assert_eq!(
+        fs::read_to_string(plugin.join("Cargo.toml")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read_to_string(plugin.join("stale-source")).unwrap(),
+        "untouched\n"
+    );
+    assert!(plugin.join("scripts/toggle.sh").is_file());
+    assert_eq!(
+        fs::read_to_string(plugin.join("target/release/preserved")).unwrap(),
+        "keep\n"
+    );
+}
+
+#[test]
 fn failed_verified_fetch_leaves_tarball_tree_untouched() {
     let tmp = TempDir::new("tarball-fetch-failure");
     let plugin = tmp.path().join("plugin");
