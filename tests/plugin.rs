@@ -105,6 +105,7 @@ impl TestTmux {
         );
         Command::new("expect")
             .args(["-c", &program])
+            .env("TERM", "xterm")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
