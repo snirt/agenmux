@@ -896,6 +896,13 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                     // kill the sidebar.
                 }
                 Key::Close => {
+                    if sb.daemon.is_some() {
+                        // Finish teardown before a fast reopen can observe the
+                        // dying control client and attach panes to it.
+                        sb.teardown();
+                        sb.daemon = None;
+                        return true;
+                    }
                     break;
                 }
                 Key::WheelUp
@@ -920,7 +927,7 @@ fn cleanup(rows_file: &PathBuf, pin: &Option<String>) {
     let _ = std::io::stdout().flush();
     let _ = std::fs::remove_file(rows_file);
     if let Some(p) = pin {
-        // keep the pin when a jump is pending — toggle.sh reopens the popup
+        // keep the pin when a jump is pending — native toggle reopens the popup
         if !std::path::Path::new(&format!("{p}.jump")).exists() {
             let _ = std::fs::remove_file(p);
         }
@@ -1131,7 +1138,7 @@ impl Sidebar {
         }
     }
 
-    /// true = exit the loop (popup jump hands off to toggle.sh)
+    /// true = exit the loop (popup jump hands off to native toggle)
     fn jump(&mut self) -> bool {
         let Some(target) = self
             .visible
@@ -1148,7 +1155,7 @@ impl Sidebar {
         // navigator state before leaving.
         self.clear_filter();
         if let Some(pin) = &self.pin {
-            // popup holds the client — hand the target to toggle.sh, which
+            // popup holds the client — hand the target to native toggle, which
             // jumps after the popup closes
             let _ = std::fs::write(format!("{pin}.jump"), &target);
             return true;

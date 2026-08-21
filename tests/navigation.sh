@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end regression for the preserved sidebar's client key table.
-# It intentionally invokes toggle.sh without a client argument, matching old
-# live tmux bindings that survive a plugin update until config is reloaded.
+# End-to-end regression for the preserved sidebar's native client key table.
+# The first invocation omits a client to verify newest-real-client discovery.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -100,10 +99,11 @@ done
 }
 
 server_pid="$(tmux -S "$sock" display-message -p '#{pid}')"
-# No client argument is the compatibility case that regressed in production.
-env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" bash "$DIR/scripts/toggle.sh"
+# No client argument exercises native newest-real-client discovery.
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENTS_MON_DIR="$DIR" \
+  "$BIN" toggle split
 
-# toggle invokes the compatibility hooks path; native setup must preserve the
+# Native toggle invokes setup, which must preserve the
 # user's root binding and install synchronous search delivery before use.
 normal_keys="$(tmux -S "$sock" list-keys -T agents-mon)"
 search_keys="$(tmux -S "$sock" list-keys -T agents-mon-search)"
@@ -709,7 +709,8 @@ done
 
 # Escape clears filters without closing. Reopen, create a blocked projection,
 # reset it with a literal escape byte, then close explicitly with q.
-env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" bash "$DIR/scripts/toggle.sh"
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENTS_MON_DIR="$DIR" \
+  "$BIN" toggle split "$client"
 escape_ready=0
 escape_sidebar=''
 for _ in $(seq 1 40); do
@@ -765,7 +766,8 @@ for _ in $(seq 1 20); do
 done
 
 # Uppercase Q closes too (alias of q).
-env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" bash "$DIR/scripts/toggle.sh"
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENTS_MON_DIR="$DIR" \
+  "$BIN" toggle split "$client"
 close_ready=0
 for _ in $(seq 1 40); do
   close_table="$(tmux -S "$sock" display-message -p -c "$client" \

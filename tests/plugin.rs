@@ -307,9 +307,26 @@ fn newest_non_control_client_wins() {
         newest.1
     );
 
-    let output = tmux.script("client.sh", &[]);
-    assert_success(output.clone(), "client.sh");
-    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), second);
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agents-mon-bin",
+        env!("CARGO_BIN_EXE_agents-mon"),
+    ]);
+    assert_success(tmux.bin(&["toggle", "split"]), "toggle newest real client");
+    tmux.wait_for(Duration::from_secs(3), || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &second,
+            "#{client_key_table}",
+        ]) == "agents-mon"
+    });
+    assert_eq!(
+        tmux.text(&["display-message", "-p", "-c", &first, "#{client_key_table}",]),
+        "root"
+    );
 
     let _ = first_process.kill();
     let _ = second_process.kill();
@@ -508,6 +525,96 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
         .unwrap();
     assert!(picker.contains("choose-tree -Zw"), "{picker}");
     assert!(!picker.contains("agents*"), "{picker}");
+}
+
+#[test]
+fn native_toggle_preserves_split_and_popup_behavior() {
+    let tmux = TestTmux::new("native-toggle");
+    let bin = env!("CARGO_BIN_EXE_agents-mon");
+    tmux.assert_tmux(&["set-option", "-g", "@agents-mon-bin", bin]);
+    tmux.assert_tmux(&["new-window", "-d", "-n", "other", "exec sleep 60"]);
+    let mut viewer_process = tmux.attach();
+    tmux.wait_for(Duration::from_secs(2), || {
+        !tmux
+            .text(&["list-clients", "-F", "#{client_name}"])
+            .is_empty()
+    });
+    let client = tmux.text(&["list-clients", "-F", "#{client_name}"]);
+
+    assert_success(
+        tmux.bin(&["toggle", "split", &client]),
+        "first native split toggle",
+    );
+    tmux.wait_for(Duration::from_secs(3), || {
+        !tmux
+            .text(&["show-option", "-gqv", "@agents-mon-control-client"])
+            .is_empty()
+    });
+    assert_eq!(tmux.text(&["show-option", "-gqv", "@agents-mon-on"]), "1");
+    let sidebars = tmux.text(&[
+        "list-panes",
+        "-a",
+        "-F",
+        "#{window_id}\t#{pane_title}\t#{pane_pid}",
+    ]);
+    let windows = tmux.text(&["list-windows", "-a", "-F", "#{window_id}"]);
+    for window in windows.lines() {
+        assert_eq!(
+            sidebars
+                .lines()
+                .filter(|line| *line == format!("{window}\tagents-mon\t0"))
+                .count(),
+            1,
+            "{sidebars}"
+        );
+    }
+    let selected = tmux.text(&[
+        "display-message",
+        "-p",
+        "-c",
+        &client,
+        "#{pane_title}\t#{client_key_table}",
+    ]);
+    assert_eq!(selected, "agents-mon\tagents-mon");
+
+    assert_success(
+        tmux.bin(&["toggle", "split", &client]),
+        "repeated native split toggle",
+    );
+    let repeated = tmux.text(&["list-panes", "-a", "-F", "#{pane_title}"]);
+    assert_eq!(
+        repeated
+            .lines()
+            .filter(|title| *title == "agents-mon")
+            .count(),
+        windows.lines().count()
+    );
+
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agents-mon-control-client",
+        "stale-control-client",
+    ]);
+    assert_success(
+        tmux.bin(&["toggle", "split", &client]),
+        "stale native split toggle",
+    );
+    tmux.wait_for(Duration::from_secs(3), || {
+        let control = tmux.text(&["show-option", "-gqv", "@agents-mon-control-client"]);
+        !control.is_empty() && control != "stale-control-client"
+    });
+
+    let pin = tmux.tmp.join("agents-mon-pin");
+    std::fs::write(&pin, "").unwrap();
+    assert_success(
+        tmux.bin(&["toggle", "popup", &client]),
+        "existing popup pin closes",
+    );
+    assert!(!pin.exists());
+
+    let _ = viewer_process.kill();
+    let _ = viewer_process.wait();
 }
 
 #[test]

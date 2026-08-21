@@ -3,6 +3,7 @@
 # the native engine exists, `agents-mon setup` owns all tmux integration.
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# The wrapper only serializes first-install bootstrap, then execs native toggle.
 key="$(tmux show-option -gqv @agents-mon-key)"
 tmux bind-key "${key:-A}" run-shell -b \
   "bash '$CURRENT_DIR/scripts/toggle.sh' '' '#{client_name}'"

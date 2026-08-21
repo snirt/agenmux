@@ -11,6 +11,7 @@ mod scan;
 mod setup;
 mod sidebar;
 mod tmux;
+mod toggle;
 
 use std::path::{Path, PathBuf};
 
@@ -39,12 +40,15 @@ fn main() {
         ["pane-pin"] => panes::pane_pin(),
         ["teardown"] => panes::teardown(),
         ["setup"] => setup::run(&plugin_dir()),
+        ["toggle"] => toggle::run(&plugin_dir(), None, None),
+        ["toggle", mode] => toggle::run(&plugin_dir(), Some(mode), None),
+        ["toggle", mode, client] => toggle::run(&plugin_dir(), Some(mode), Some(client)),
         ["notification-open", socket, pane, bundle] => {
             notifications::open_pane(socket, pane, bundle)
         }
         _ => {
             eprintln!(
-                "usage: agents-mon [--version|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|setup|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
+                "usage: agents-mon [--version|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|setup|toggle [split|popup] [client]|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
             );
             2
         }

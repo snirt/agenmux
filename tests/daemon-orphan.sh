@@ -34,7 +34,8 @@ TMPDIR="$tmp" tmux -S "$sock" -f /dev/null new-session \
 tmux -S "$sock" set-option -g @agents-mon-bin "$BIN"
 tmux -S "$sock" set-option -g @agents-mon-width 30
 server_pid="$(tmux -S "$sock" display-message -p '#{pid}')"
-env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" bash "$DIR/scripts/toggle.sh"
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENTS_MON_DIR="$DIR" \
+  "$BIN" toggle split
 
 for _ in $(seq 1 60); do
   after="$(pgrep -f 'agents-mon daemon' 2>/dev/null | sort)"

@@ -450,15 +450,16 @@ if [ "$fail" -eq 0 ]; then
   cat >"$tmp/bin/tmux" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
-case "$1" in
-  show-option) exit 0 ;;
-  display-popup) exit 0 ;;
+case "$*" in
+  "show-option -gqv @agents-mon-width") printf '41\n' ;;
+  "show-option -gqv @agents-mon-height") printf '19\n' ;;
+  display-popup*) exit 0 ;;
   *) exit 0 ;;
 esac
 SH
   chmod +x "$tmp/bin/tmux"
   TMUX_STUB_LOG="$tmp/tmux.log" TMPDIR="$tmp" PATH="$tmp/bin:$PATH" \
-    bash "$DIR/scripts/toggle.sh" popup popup-client &
+    "$BIN" toggle popup popup-client &
   pid=$!
   waited=0
   while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 20 ]; do
@@ -467,7 +468,8 @@ SH
   done
   owner_ok=0
   if grep -Fq -- '-c popup-client' "$tmp/tmux.log" &&
-    grep -Fq -- '-e AGENTS_MON_POPUP_CLIENT=popup-client' "$tmp/tmux.log"; then
+    grep -Fq -- '-e AGENTS_MON_POPUP_CLIENT=popup-client' "$tmp/tmux.log" &&
+    grep -Fq -- '-w 41 -h 19' "$tmp/tmux.log"; then
     owner_ok=1
   fi
   if kill -0 "$pid" 2>/dev/null; then
@@ -483,6 +485,38 @@ SH
   else
     wait "$pid"
     echo "ok   popup-exits-when-helper-exits"
+  fi
+  rm -rf "$tmp"
+fi
+if [ "$fail" -eq 0 ]; then
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
+case "$*" in
+  "show-option -gqv @agents-mon-width"|"show-option -gqv @agents-mon-height") ;;
+  "list-clients -f "*) printf '20\tnewest-client\n' ;;
+  display-popup*)
+    count="$(grep -c '^display-popup' "$TMUX_STUB_LOG")"
+    [ "$count" -ne 1 ] || printf '%%42\n' >"$TMPDIR/agents-mon-pin.jump"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$tmp/bin/tmux"
+  TMUX_STUB_LOG="$tmp/tmux.log" TMPDIR="$tmp" PATH="$tmp/bin:$PATH" \
+    "$BIN" toggle popup popup-client
+  popups="$(grep -c '^display-popup' "$tmp/tmux.log")"
+  if [ "$popups" -eq 2 ] &&
+    grep -Fq 'switch-client -c newest-client -t %42' "$tmp/tmux.log" &&
+    grep -Fq 'select-window -t %42' "$tmp/tmux.log" &&
+    grep -Fq 'select-pane -t %42' "$tmp/tmux.log"; then
+    echo "ok   popup-jump-reopens-over-target"
+  else
+    echo "FAIL popup-jump-reopens-over-target"
+    cat "$tmp/tmux.log"
+    fail=1
   fi
   rm -rf "$tmp"
 fi
