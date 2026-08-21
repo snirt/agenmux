@@ -255,10 +255,13 @@ SH
   chmod +x "$tmp/bin/tmux"
   TMUX_STUB_LOG="$tmp/tmux.log" PATH="$tmp/bin:$PATH" bash "$DIR/agents-mon.tmux"
   if grep -q "^bind-key E run-shell -b " "$tmp/tmux.log" &&
-    grep -q "^bind-key e run-shell -b " "$tmp/tmux.log"; then
-    echo "ok   entrypoint-binds-toggle-in-background"
+    grep -q "^bind-key e run-shell -b " "$tmp/tmux.log" &&
+    grep -Fq '/agents-mon.tmux' "$tmp/tmux.log" &&
+    grep -Fq ' activate ' "$tmp/tmux.log" &&
+    ! grep -Fq '/scripts/toggle.sh' "$tmp/tmux.log"; then
+    echo "ok   entrypoint-binds-native-toggle-bootstrap-in-background"
   else
-    echo "FAIL entrypoint-binds-toggle-in-background: popup toggle would block tmux"
+    echo "FAIL entrypoint-binds-native-toggle-bootstrap-in-background"
     cat "$tmp/tmux.log"
     fail=1
   fi
@@ -489,8 +492,8 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   TMPDIR="$tmp" $T new-session -d -s t -x 200 -y 50 'exec sleep 60'
   $T new-window -t t: 'exec sleep 60'
   $T set-option -g @agents-mon-bin "$BIN_ABS"
-  env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" \
-    bash "$DIR/scripts/toggle.sh"
+  env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" AGENTS_MON_DIR="$DIR" \
+    "$BIN_ABS" toggle split
   sleep 2
   mirrors=0
   processless=0
@@ -525,8 +528,8 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   new_ok=0
   $T list-panes -t "$neww" -F '#{pane_title}' | grep -qx agents-mon && new_ok=1
   # concurrent adds must not double-split. One window switch fires two [43]
-  # hooks, so racing mirror-add.sh calls are routine, and the old
-  # check-then-split let every one of them through.
+  # hooks, so racing pane-add commands are routine, and a check-then-split
+  # without the native lock would let every one of them through.
   racew="$($T new-window -d -a -t t: -P -F '#{window_id}' 'exec sleep 60')"
   $T list-panes -t "$racew" -F '#{pane_id}	#{pane_title}' |
     awk -F'\t' '$2 == "agents-mon" { print $1 }' |
@@ -541,8 +544,8 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
 
   mir="$($T list-panes -t t: -F '#{pane_id}	#{pane_title}' |
     awk -F'\t' '$2 == "agents-mon" { print $1; exit }')"
-  # dragging one mirror's border adopts the width everywhere (sync-width.sh
-  # via window-layout-changed hook)
+  # Dragging one mirror's border adopts the width everywhere through the
+  # daemon's window-layout-changed handling.
   $T resize-pane -t "$mir" -x 45
   # the drag guard needs two same-window-size measures (2s scan apart) when
   # the resized mirror lives in a window created moments ago
@@ -598,8 +601,8 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   TMPDIR="$tmp" $T new-session -d -s t -x 200 -y 50 "$tmp/codex"
   $T new-window -t t: "$tmp/codex"
   $T set-option -g @agents-mon-bin "$BIN_ABS"
-  env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" \
-    bash "$DIR/scripts/toggle.sh"
+  env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" AGENTS_MON_DIR="$DIR" \
+    "$BIN_ABS" toggle split
   sleep 2
   mirrors() { $T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agents-mon; }
   mir="$($T list-panes -t t: -F '#{pane_id}	#{pane_title}' |

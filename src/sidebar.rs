@@ -211,14 +211,13 @@ enum Key {
 
 enum Overlay {
     Help,
-    Versions {
-        sel: usize,
-        chosen: Option<String>,
-    },
+    Versions { sel: usize, chosen: Option<String> },
 }
 
 fn read_key(fd: libc::c_int) -> Key {
-    let Some(b) = read_byte(fd) else { return Key::Quit }; // EOF: explicit close
+    let Some(b) = read_byte(fd) else {
+        return Key::Quit;
+    }; // EOF: explicit close
     match b {
         b'j' => Key::Down,
         b'k' => Key::Up,
@@ -258,7 +257,9 @@ fn read_key(fd: libc::c_int) -> Key {
 /// Popup/tty search owns printable input. Daemon search receives printable
 /// bytes through NUL-prefixed packets decoded by read_key instead.
 fn read_search_key(fd: libc::c_int) -> Key {
-    let Some(first) = read_byte(fd) else { return Key::Quit };
+    let Some(first) = read_byte(fd) else {
+        return Key::Quit;
+    };
     match first {
         b'\r' | b'\n' => Key::Jump,
         0x03 | 0x04 => Key::Quit,
@@ -293,7 +294,9 @@ fn read_search_key(fd: libc::c_int) -> Key {
                 };
                 bytes.push(next);
             }
-            String::from_utf8(bytes).map(Key::Text).unwrap_or(Key::Other)
+            String::from_utf8(bytes)
+                .map(Key::Text)
+                .unwrap_or(Key::Other)
         }
         _ => Key::Other,
     }
@@ -351,7 +354,9 @@ pub fn send_key(name: &str) -> i32 {
 /// Decode the tail of an escape sequence. `next` yields the next byte, or None
 /// once nothing more arrives — a bare Esc, which clears filtering.
 fn escape_key(mut next: impl FnMut() -> Option<u8>) -> Key {
-    let Some(a) = next() else { return Key::AllStates };
+    let Some(a) = next() else {
+        return Key::AllStates;
+    };
     // CSI (ESC [ A) normally, SS3 (ESC O A) in application-cursor mode
     match (a, next()) {
         (b'[' | b'O', Some(b'A')) => Key::Up,
@@ -388,7 +393,10 @@ fn newer_than(a: &str, b: &str) -> bool {
     };
     let (x, y) = (parts(a), parts(b));
     for i in 0..x.len().max(y.len()) {
-        let (l, r) = (x.get(i).copied().unwrap_or(0), y.get(i).copied().unwrap_or(0));
+        let (l, r) = (
+            x.get(i).copied().unwrap_or(0),
+            y.get(i).copied().unwrap_or(0),
+        );
         if l != r {
             return l > r;
         }
@@ -413,7 +421,12 @@ fn known_tags(plugin_dir: &PathBuf) -> Vec<String> {
 fn picker_sel(tags: &[String], cur: &str, chosen: Option<&str>, sel: usize) -> usize {
     let selected = chosen
         .and_then(|tag| tags.iter().position(|t| t == tag))
-        .or_else(|| chosen.is_none().then(|| tags.iter().position(|t| t == cur)).flatten())
+        .or_else(|| {
+            chosen
+                .is_none()
+                .then(|| tags.iter().position(|t| t == cur))
+                .flatten()
+        })
         .unwrap_or(sel);
     selected.min(tags.len().saturating_sub(1))
 }
@@ -548,7 +561,7 @@ struct Daemon {
     size: (usize, usize), // narrowest pane x watched pane's height
     seen_mirror: bool,    // suicide only arms after the first pane appears
     empty_ticks: u32,     // consecutive measurements that found no pane
-    client: String, // our control client, as published in the option
+    client: String,       // our control client, as published in the option
     started: Instant,
     // window id -> (window size, pane count) at the last measure: a mirror
     // whose width changed while both stayed put is a user border-drag. The
@@ -567,13 +580,13 @@ pub struct Sidebar {
     ident: IdentCache,
     subj: scan::SubjectCache,
     tracker: Tracker,
-    rows: Vec<PaneRow>,   // complete debounced view-model; never filter cache/status
-    visible: Vec<usize>,  // filtered indexes used by render/navigation/clicks
+    rows: Vec<PaneRow>, // complete debounced view-model; never filter cache/status
+    visible: Vec<usize>, // filtered indexes used by render/navigation/clicks
     query: String,
     state_filter: Option<StateFilter>,
     search_focused: bool,
-    sel: usize,           // 1-based index into visible, like the bash script
-    scroll: usize,      // first visible list line — follows the selection
+    sel: usize,    // 1-based index into visible, like the bash script
+    scroll: usize, // first visible list line — follows the selection
     sel_pane: String,
     last_active: String,
     active: String,
@@ -647,7 +660,9 @@ fn new_sidebar(
 
 pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     let self_pane = std::env::var("TMUX_PANE").unwrap_or_default();
-    let pin = std::env::var("AGENTS_MON_PIN").ok().filter(|p| !p.is_empty());
+    let pin = std::env::var("AGENTS_MON_PIN")
+        .ok()
+        .filter(|p| !p.is_empty());
     let rows_file = std::env::temp_dir().join(format!(
         "agents-mon-rows-{}",
         self_pane.trim_start_matches('%')
@@ -813,12 +828,10 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             now = Instant::now();
             next_scan = now + Duration::from_secs(2);
         }
-        let animating = sb.visible.iter().any(|&i| {
-            matches!(
-                sb.rows[i].state.as_str(),
-                "working" | "blocked" | "done"
-            )
-        });
+        let animating = sb
+            .visible
+            .iter()
+            .any(|&i| matches!(sb.rows[i].state.as_str(), "working" | "blocked" | "done"));
         // deadline-based tick: held keys keep poll_inputs returning early, so
         // advancing on poll timeout would freeze the spinner during key repeat
         if animating && now >= next_tick {
@@ -857,9 +870,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 key => (key, false),
             };
             if wheel {
-                wheel_jump_at = sb
-                    .wheel_jump_delay()
-                    .map(|delay| Instant::now() + delay);
+                wheel_jump_at = sb.wheel_jump_delay().map(|delay| Instant::now() + delay);
             }
             if sb.overlay.is_some() {
                 sb.overlay_key(key);
@@ -1121,11 +1132,8 @@ impl Sidebar {
             Key::Text(text) => {
                 self.state_filter = None;
                 let room = 256usize.saturating_sub(self.query.chars().count());
-                self.query.extend(
-                    text.chars()
-                        .filter(|c| !c.is_control())
-                        .take(room),
-                );
+                self.query
+                    .extend(text.chars().filter(|c| !c.is_control()).take(room));
                 self.rebuild_visible(true);
             }
             Key::AllStates => self.clear_filter(),
@@ -1270,10 +1278,14 @@ impl Sidebar {
         let mut ms: Vec<M> = Vec::new();
         for l in out.lines() {
             let f: Vec<&str> = l.split('\t').collect();
-            let [pane, win, pw, ph, ws, wp, act, sess] = f.as_slice() else { continue };
-            let (Ok(pw), Ok(ph), Ok(wp)) =
-                (pw.parse::<usize>(), ph.parse::<usize>(), wp.parse::<usize>())
-            else {
+            let [pane, win, pw, ph, ws, wp, act, sess] = f.as_slice() else {
+                continue;
+            };
+            let (Ok(pw), Ok(ph), Ok(wp)) = (
+                pw.parse::<usize>(),
+                ph.parse::<usize>(),
+                wp.parse::<usize>(),
+            ) else {
                 continue;
             };
             let Some((ww, wh)) = ws
@@ -1502,11 +1514,7 @@ impl Sidebar {
         let mut filter = match self.state_filter {
             Some(state) => format!(" [{}]", state.label()),
             None if self.search_focused || !self.query.is_empty() => {
-                let query: String = self
-                    .query
-                    .chars()
-                    .filter(|c| !c.is_control())
-                    .collect();
+                let query: String = self.query.chars().filter(|c| !c.is_control()).collect();
                 format!(" /{query}")
             }
             None => String::new(),
@@ -1685,9 +1693,8 @@ impl Sidebar {
                 let cur = current_tag();
                 let tags = known_tags(&self.plugin_dir);
                 *sel = picker_sel(&tags, &cur, chosen.as_deref(), *sel);
-                let mut text = format!(
-                    "{E}[2J{E}[H{E}[1magents — versions{E}[0m {E}[2m{cur}{E}[0m\n\n"
-                );
+                let mut text =
+                    format!("{E}[2J{E}[H{E}[1magents — versions{E}[0m {E}[2m{cur}{E}[0m\n\n");
                 if tags.is_empty() {
                     text.push_str(&format!(
                         " {E}[2mno releases found — checking…{E}[0m\n\n\
@@ -1827,7 +1834,7 @@ mod tests {
         // mirror list reads back empty, and every mirror pane got torn down
         assert!(!suicide(true, s(60), 1));
         assert!(suicide(true, s(60), 2)); // user really did close them all
-        // startup grace: no mirror has ever appeared yet
+                                          // startup grace: no mirror has ever appeared yet
         assert!(!suicide(false, s(5), 9));
         assert!(suicide(false, s(30), 2)); // none ever came — give up
     }
@@ -1844,9 +1851,15 @@ mod tests {
 
     #[test]
     fn cursor_uses_state_hue_and_focus_bold() {
-        assert_eq!(cursor_mark(true, true, "idle"), format!("{E}[1;32m❯{E}[0m "));
+        assert_eq!(
+            cursor_mark(true, true, "idle"),
+            format!("{E}[1;32m❯{E}[0m ")
+        );
         assert_eq!(cursor_mark(true, false, "idle"), format!("{E}[32m❯{E}[0m "));
-        assert_eq!(cursor_mark(true, true, "working"), format!("{E}[1;33m❯{E}[0m "));
+        assert_eq!(
+            cursor_mark(true, true, "working"),
+            format!("{E}[1;33m❯{E}[0m ")
+        );
         assert_eq!(cursor_mark(false, true, "blocked"), "  ");
     }
 
@@ -1997,9 +2010,9 @@ mod tests {
     fn bar_reasserts_the_background_after_every_reset() {
         let line = format!("{E}[1mcodex{E}[0m {E}[2mwork{E}[0m");
         let painted = bar(&line, BAR_BG, 14, 10);
-        assert!(!painted.split(&format!("{E}[0m")).any(|part| {
-            !part.is_empty() && !part.starts_with(BAR_BG)
-        }));
+        assert!(!painted
+            .split(&format!("{E}[0m"))
+            .any(|part| { !part.is_empty() && !part.starts_with(BAR_BG) }));
         assert!(painted.ends_with(&format!("    {E}[0m")));
         assert_eq!(bar(&line, "", 14, 10), line);
         assert_eq!(state_bg("blocked", true), "\x1b[48;2;42;16;16m");

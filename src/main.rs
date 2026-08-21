@@ -81,7 +81,9 @@ fn scan_cache_path() -> PathBuf {
 }
 
 fn self_pane() -> Option<String> {
-    std::env::var("AGENTS_MON_SELF").ok().filter(|s| !s.is_empty())
+    std::env::var("AGENTS_MON_SELF")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 fn run_scan() -> Result<Vec<scan::PaneRow>, tmux::TmuxError> {
@@ -89,7 +91,13 @@ fn run_scan() -> Result<Vec<scan::PaneRow>, tmux::TmuxError> {
     let mut t = tmux::Tmux::connect()?;
     let mut cache = procs::IdentCache::new();
     let mut subj = scan::SubjectCache::new();
-    scan::scan(&mut t, &confs, &mut cache, &mut subj, self_pane().as_deref())
+    scan::scan(
+        &mut t,
+        &confs,
+        &mut cache,
+        &mut subj,
+        self_pane().as_deref(),
+    )
 }
 
 fn cmd_scan() -> i32 {

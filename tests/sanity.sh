@@ -54,7 +54,8 @@ run_tmux_case() {
   tmux -L "$socket" run-shell "bash '$plugin/agents-mon.tmux'"
 
   tmux -L "$socket" list-keys -T prefix |
-    grep -Fq '/scripts/toggle.sh'
+    grep -Fq '/agents-mon.tmux' \
+    && tmux -L "$socket" list-keys -T prefix | grep -Fq ' activate '
   socket_path="$(tmux -L "$socket" display-message -p '#{socket_path}')"
   server_pid="$(tmux -L "$socket" display-message -p '#{pid}')"
   tmux_env="$socket_path,$server_pid,0"
@@ -82,7 +83,7 @@ run_tmux_case() {
     return 1
   }
 
-  tmux -L "$socket" run-shell "bash '$plugin/scripts/toggle.sh'"
+  TMUX="$tmux_env" AGENTS_MON_DIR="$plugin" "$bin" toggle split
   frame=""
   i=0
   while [ "$i" -lt 50 ]; do
@@ -228,9 +229,9 @@ run_immediate_popup_bootstrap cargo
 run_immediate_popup_bootstrap bad-checksum
 
 # Clean checkout: source the TPM entrypoint and activate immediately, before a
-# native engine exists. The toggle must wait for the eager verified installer
-# and then open the requested split in the same action. Popup lock/failure paths
-# use deterministic command stubs in tests/run.sh.
+# native engine exists. Activation must wait for the eager installer and then
+# open the requested split in the same action. Verified, Cargo, and bad-checksum
+# popup bootstrap paths are covered above.
 bootstrap_socket="agents-mon-sanity-bootstrap-$$"
 active_socket="$bootstrap_socket"
 # This checkout is ahead of the latest published binary, whose CLI may not yet
@@ -248,7 +249,7 @@ tmux -L "$bootstrap_socket" run-shell "bash '$plugin/agents-mon.tmux'"
 bootstrap_path="$(tmux -L "$bootstrap_socket" display-message -p '#{socket_path}')"
 bootstrap_pid="$(tmux -L "$bootstrap_socket" display-message -p '#{pid}')"
 env PATH="$root/bootstrap-bin:$PATH" TMPDIR="$TMPDIR" \
-  TMUX="$bootstrap_path,$bootstrap_pid,0" bash "$plugin/scripts/toggle.sh"
+  TMUX="$bootstrap_path,$bootstrap_pid,0" bash "$plugin/agents-mon.tmux" activate '' ''
 for _ in $(seq 1 80); do
   tmux -L "$bootstrap_socket" list-panes -a -F '#{pane_title}' | grep -qx agents-mon && break
   sleep 0.1

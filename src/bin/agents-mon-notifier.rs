@@ -36,7 +36,9 @@ fn main() {
         std::process::exit(setup());
     }
     let Some(parsed) = parse(&args) else {
-        eprintln!("usage: agents-mon-notifier [--setup] [--spawned] <title> <body> [click-command]");
+        eprintln!(
+            "usage: agents-mon-notifier [--setup] [--spawned] <title> <body> [click-command]"
+        );
         std::process::exit(2);
     };
     std::process::exit(run(parsed));

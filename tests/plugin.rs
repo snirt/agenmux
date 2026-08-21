@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -54,10 +54,6 @@ impl TestTmux {
         )
     }
 
-    fn script(&self, name: &str, args: &[&str]) -> Output {
-        self.script_command(name, args).output().unwrap()
-    }
-
     fn bin(&self, args: &[&str]) -> Output {
         self.bin_command(args).output().unwrap()
     }
@@ -69,19 +65,6 @@ impl TestTmux {
             .env("TMPDIR", &self.tmp)
             .env("TMUX", self.tmux_env())
             .env("AGENTS_MON_DIR", env!("CARGO_MANIFEST_DIR"));
-        command
-    }
-
-    fn script_command(&self, name: &str, args: &[&str]) -> Command {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut command = Command::new("bash");
-        command
-            .arg(root.join("scripts").join(name))
-            .args(args)
-            .current_dir(root)
-            .env("TMPDIR", &self.tmp)
-            .env("TMUX", self.tmux_env())
-            .env("AGENTS_MON_BIN", env!("CARGO_BIN_EXE_agents-mon"));
         command
     }
 
@@ -211,20 +194,7 @@ fn mirror_add_is_idempotent_under_concurrent_calls() {
 }
 
 #[test]
-fn pane_lifecycle_wrappers_dispatch_native_cli() {
-    let tmux = TestTmux::new("pane-wrappers");
-    for (script, args) in [
-        ("mirror-add.sh", vec!["@missing"]),
-        ("orphan.sh", vec![]),
-        ("pin.sh", vec![]),
-        ("teardown.sh", vec![]),
-    ] {
-        assert_success(tmux.script(script, &args), script);
-    }
-}
-
-#[test]
-fn wheel_cli_and_wrapper_use_reserved_packets() {
+fn wheel_cli_uses_reserved_packets() {
     let tmux = TestTmux::new("wheel-packets");
     let pane = tmux.text(&["display-message", "-p", "#{pane_id}"]);
     let fifo = tmux.tmp.join("agents-mon-keys");
@@ -237,18 +207,11 @@ fn wheel_cli_and_wrapper_use_reserved_packets() {
         .unwrap();
 
     assert_success(tmux.bin(&["wheel", &pane, "down"]), "wheel down");
-    assert_success(tmux.script("scroll.sh", &[&pane, "up"]), "scroll wrapper");
+    assert_success(tmux.bin(&["wheel", &pane, "up"]), "wheel up");
     let mut packets = [0; 2];
     fifo.read_exact(&mut packets).unwrap();
     assert_eq!(packets, [0x02, 0x01]);
     assert!(!tmux.tmp.join("agents-mon-wheel").exists());
-}
-
-#[test]
-fn click_wrapper_dispatches_native_cli() {
-    let tmux = TestTmux::new("click-wrapper");
-    let pane = tmux.text(&["display-message", "-p", "#{pane_id}"]);
-    assert_success(tmux.script("click.sh", &[&pane, "0", ""]), "click wrapper");
 }
 
 #[test]
@@ -421,6 +384,7 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
 
     let root_mouse = tmux.text(&["list-keys", "-T", "root"]);
     assert!(!root_mouse.contains(" click '#{pane_id}'"), "{root_mouse}");
+    let mut installed_hooks = String::new();
     for (hook, expected) in [
         ("pane-exited", "pane-exited[42]"),
         ("window-pane-changed", "window-pane-changed[42]"),
@@ -437,6 +401,12 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
             installed.contains(expected),
             "missing {expected}: {installed}"
         );
+        installed_hooks.push_str(&installed);
+        installed_hooks.push('\n');
+    }
+    assert!(!installed_hooks.contains("/scripts/"), "{installed_hooks}");
+    for command in ["pane-orphan", "pane-pin", "pane-add"] {
+        assert!(installed_hooks.contains(command), "{installed_hooks}");
     }
     let normal = tmux.text(&["list-keys", "-T", "agents-mon"]);
     assert!(
@@ -468,7 +438,8 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
     assert!(
         normal.contains("WheelUpPane")
             && normal.contains("copy-mode -e; send-keys -M")
-            && normal.contains("WheelDownPane"),
+            && normal.contains("WheelDownPane")
+            && normal.contains(" wheel "),
         "{normal}"
     );
     let search = tmux.text(&["list-keys", "-T", "agents-mon-search"]);

@@ -188,9 +188,7 @@ pub fn load_all(plugin_dir: &Path) -> Vec<AgentConf> {
     let mut confs: Vec<AgentConf> = Vec::new();
     let user_dir = std::env::var("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            Path::new(&std::env::var("HOME").unwrap_or_default()).join(".config")
-        })
+        .unwrap_or_else(|_| Path::new(&std::env::var("HOME").unwrap_or_default()).join(".config"))
         .join("tmux-agents-mon/agents");
     for dir in [&plugin_dir.join("agents"), &user_dir] {
         let mut files: Vec<_> = match std::fs::read_dir(dir) {

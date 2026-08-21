@@ -176,8 +176,8 @@ fn refresh_records_latest_and_published_tags() {
 }
 
 #[test]
-fn shell_compatibility_paths_delegate_to_native_release_commands() {
-    let tmp = TempDir::new("wrappers");
+fn installer_refresh_delegates_to_native_release_command() {
+    let tmp = TempDir::new("installer-refresh");
     let plugin = tmp.path().join("plugin");
     let scripts = plugin.join("scripts");
     let release = plugin.join("target/release");
@@ -190,7 +190,6 @@ fn shell_compatibility_paths_delegate_to_native_release_commands() {
         scripts.join("install-bin.sh"),
     )
     .unwrap();
-    fs::copy(root.join("scripts/update.sh"), scripts.join("update.sh")).unwrap();
     script(
         &release.join("agents-mon"),
         r#"printf '%s\n' "$*" >> "$ARGS_LOG""#,
@@ -202,19 +201,9 @@ fn shell_compatibility_paths_delegate_to_native_release_commands() {
         .env("ARGS_LOG", &log)
         .status()
         .unwrap();
-    let update = Command::new("bash")
-        .arg(scripts.join("update.sh"))
-        .arg("v1.2.3")
-        .env("ARGS_LOG", &log)
-        .status()
-        .unwrap();
 
     assert!(refresh.success());
-    assert!(update.success());
-    assert_eq!(
-        fs::read_to_string(log).unwrap(),
-        "releases refresh\nupdate v1.2.3\n"
-    );
+    assert_eq!(fs::read_to_string(log).unwrap(), "releases refresh\n");
 }
 
 #[test]

@@ -40,14 +40,9 @@ pub fn scan(
     let mut captured_any = false;
     for line in panes.lines() {
         let mut f = line.splitn(6, '\t');
-        let (Some(pane), Some(pid), Some(cmd), Some(path), Some(loc), Some(title)) = (
-            f.next(),
-            f.next(),
-            f.next(),
-            f.next(),
-            f.next(),
-            f.next(),
-        ) else {
+        let (Some(pane), Some(pid), Some(cmd), Some(path), Some(loc), Some(title)) =
+            (f.next(), f.next(), f.next(), f.next(), f.next(), f.next())
+        else {
             continue;
         };
         if self_pane == Some(pane) {
@@ -55,12 +50,9 @@ pub fn scan(
         }
         let pid: u32 = pid.parse().unwrap_or(0);
         let key = (pane.to_string(), pid, cmd.to_string());
-        let name = cache
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| {
-                procs::identify(confs, &mut snap, pid, cmd).map(|i| confs[i].name.clone())
-            });
+        let name = cache.get(&key).cloned().unwrap_or_else(|| {
+            procs::identify(confs, &mut snap, pid, cmd).map(|i| confs[i].name.clone())
+        });
         seen.insert(key, name.clone());
         let Some(name) = name else { continue };
         let Some(idx) = confs.iter().position(|c| c.name == name) else {

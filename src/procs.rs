@@ -72,9 +72,7 @@ pub fn normalize_bin(tok: &str) -> &str {
 }
 
 fn agent_for_bin(confs: &[AgentConf], bin: &str) -> Option<usize> {
-    confs
-        .iter()
-        .position(|c| c.bins.iter().any(|b| b == bin))
+    confs.iter().position(|c| c.bins.iter().any(|b| b == bin))
 }
 
 /// Wrapped process: first non-flag arg after argv[0] decides.
@@ -157,7 +155,11 @@ mod tests {
     #[test]
     fn argv_first_nonflag_and_payload_bail() {
         let cs = confs();
-        let hit = vec!["node".into(), "--max-old-space".into(), "/x/pi-coding-agent/cli.js".into()];
+        let hit = vec![
+            "node".into(),
+            "--max-old-space".into(),
+            "/x/pi-coding-agent/cli.js".into(),
+        ];
         assert_eq!(agent_for_argv(&cs, &hit), Some(0));
         let payload = vec!["node".into(), "-e".into(), "pi".into()];
         assert_eq!(agent_for_argv(&cs, &payload), None);
@@ -199,7 +201,10 @@ mod tests {
             "/n/@earendil-works/pi-coding-agent/dist/cli.js".into(),
         ];
         assert_eq!(agent_for_argv(&cs, &pi), Some(1));
-        let omp = vec!["bun".into(), "/n/@oh-my-pi/pi-coding-agent/dist/cli.js".into()];
+        let omp = vec![
+            "bun".into(),
+            "/n/@oh-my-pi/pi-coding-agent/dist/cli.js".into(),
+        ];
         assert_eq!(agent_for_argv(&cs, &omp), Some(0));
     }
 }

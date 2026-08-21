@@ -25,7 +25,7 @@ esac
 
 # Download the release archive for $1, verify its checksum, extract the whole
 # package into $2 (the archive carries the full plugin source, not just the
-# binary — that is what update.sh switches versions with). Prints the package
+# binary — the native updater switches that source tree). Prints the package
 # directory. Nothing is written outside $2 unless verification passed.
 fetch_pkg() {
   local tag="$1" dest="$2"
@@ -191,7 +191,7 @@ if [ -n "$tag" ] && [ "$tag" != "$want" ]; then
   fi
   download_bin "$tag" && exit 0
 fi
-# 3. keep whatever works: existing binary, then a local build, then bash
+# 3. keep whatever works: existing binary, then a local build
 [ -x "$BIN" ] && exit 0
 if command -v cargo >/dev/null 2>&1; then
   (cd "$DIR" && cargo build --release)

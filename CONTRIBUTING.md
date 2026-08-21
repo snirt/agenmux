@@ -1,17 +1,19 @@
 # Contributing
 
-Thanks for helping out. This is a small, dependency-free bash plugin — keep
-changes in that spirit.
+Thanks for helping out. This is a small Rust plugin with minimal pre-binary
+shell bootstrap — keep changes in that spirit.
 
 ## Setup
 
 ```sh
 git clone https://github.com/snirt/tmux-agents-mon
 cd tmux-agents-mon
-tests/run.sh          # everything should pass before you start
+cargo test
+tests/run.sh          # private-tmux and integration checks
+tests/sanity.sh       # Nix release/install smoke (network required)
 ```
 
-Requirements: tmux, bash, grep, awk, ps. No build step, no package manager.
+Requirements: Rust 1.90 or newer, tmux, and bash for TPM/pre-binary bootstrap.
 
 ## Adding an agent
 
@@ -39,13 +41,18 @@ config format.
   new runtime dependencies.
 - Detection lives in `src/detect.rs`; `agents-mon list`/`status` TSV and status
   output are contracts consumed by the sidebar and tmux status segment.
-- Runtime tmux integration is still being moved out of `scripts/`; preserve
-  option names, hook indexes, processless panes, and exact-client targeting.
+- Runtime tmux integration lives in `src/input.rs`, `src/panes.rs`,
+  `src/setup.rs`, and `src/toggle.rs`; preserve option names, hook indexes,
+  processless panes, and exact-client targeting.
+- The only shell boundary is `agents-mon.tmux`, `scripts/install-bin.sh`,
+  `scripts/install-app.sh`, and `scripts/version.sh`. Do not put runtime logic
+  back into shell wrappers.
 - Match existing Rust and shell style, quote shell expansions, and prefer tmux
   format strings over extra subprocesses on hot paths.
 
 ## Before you open a PR
 
+- [ ] `cargo test` passes
 - [ ] `tests/run.sh` passes
 - [ ] New/changed detection has a fixture behind it
 - [ ] README updated if you added an option or changed behavior

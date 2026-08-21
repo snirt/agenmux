@@ -244,7 +244,11 @@ pub fn debug_note(msg: &str) {
     let Ok(path) = std::env::var("AGENTS_MON_DEBUG") else {
         return;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "[{}] # {msg}", std::process::id());
     }
 }
@@ -255,10 +259,18 @@ fn debug_log(cmd: &str, r: &Result<String, TmuxError>, took: std::time::Duration
         return;
     };
     let summary = match r {
-        Ok(b) => format!("ok {}B {:?}", b.len(), b.chars().take(60).collect::<String>()),
+        Ok(b) => format!(
+            "ok {}B {:?}",
+            b.len(),
+            b.chars().take(60).collect::<String>()
+        ),
         Err(e) => format!("ERR {e}"),
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(
             f,
             "[{}] {}ms {:.60} -> {}",
@@ -319,6 +331,9 @@ mod tests {
             .status();
 
         assert!(result.is_ok());
-        assert!(elapsed < std::time::Duration::from_millis(1500), "{elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(1500),
+            "{elapsed:?}"
+        );
     }
 }

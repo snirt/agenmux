@@ -144,9 +144,18 @@ mod tests {
     #[test]
     fn truncated_dir_echo_blanks() {
         let c = conf("");
-        assert_eq!(subject(&c, "MX-4122-fix-vol...", "", "/a/MX-4122-fix-volumez"), "");
-        assert_eq!(subject(&c, "MX-4122-fix-vol…", "", "/a/MX-4122-fix-volumez"), "");
+        assert_eq!(
+            subject(&c, "MX-4122-fix-vol...", "", "/a/MX-4122-fix-volumez"),
+            ""
+        );
+        assert_eq!(
+            subject(&c, "MX-4122-fix-vol…", "", "/a/MX-4122-fix-volumez"),
+            ""
+        );
         // truncated real subject is not a dir echo — keep it
-        assert_eq!(subject(&c, "fix the logo re...", "", "/a/MX-4122-fix-volumez"), "fix the logo re...");
+        assert_eq!(
+            subject(&c, "fix the logo re...", "", "/a/MX-4122-fix-volumez"),
+            "fix the logo re..."
+        );
     }
 }

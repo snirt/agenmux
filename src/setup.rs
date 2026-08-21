@@ -17,7 +17,6 @@ pub fn run(plugin_dir: &Path) -> i32 {
 }
 
 fn setup(plugin_dir: &Path) -> Result<(), TmuxError> {
-    let dir = plugin_dir.to_string_lossy();
     let default_bin = plugin_dir.join("target/release/agents-mon");
     let configured_bin = tmux::command(&["show-option", "-gqv", "@agents-mon-bin"])?;
     let bin = configured_bin
@@ -27,7 +26,7 @@ fn setup(plugin_dir: &Path) -> Result<(), TmuxError> {
         .unwrap_or_else(|| configured_bin.trim_end().to_string());
 
     clear_legacy_options_and_hooks()?;
-    install_hooks(&dir)?;
+    install_hooks(&bin)?;
     // Mouse keys live in root (`bind-key -n`). Install them before cloning so
     // the plugin tables keep click behavior after tmux switches key tables.
     install_mouse(&bin)?;
@@ -35,7 +34,7 @@ fn setup(plugin_dir: &Path) -> Result<(), TmuxError> {
     clone_root_table(SEARCH_TABLE)?;
     install_normal_keys(&bin)?;
     install_search_keys(&bin)?;
-    install_wheel_keys(&dir)?;
+    install_wheel_keys(&bin)?;
     install_picker_filter()?;
     install_status(&bin)?;
     tmux::command_status(&["set-option", "-g", "@agents-mon-nav-version", "12"])
@@ -55,24 +54,24 @@ fn clear_legacy_options_and_hooks() -> Result<(), TmuxError> {
     Ok(())
 }
 
-fn install_hooks(dir: &str) -> Result<(), TmuxError> {
-    let script = |name: &str| tmux::quote(&format!("{dir}/scripts/{name}"));
+fn install_hooks(bin: &str) -> Result<(), TmuxError> {
+    let bin = tmux::quote(bin);
     for (hook, command) in [
         (
             "pane-exited[42]",
-            format!("run-shell \"bash {}\"", script("orphan.sh")),
+            format!("run-shell \"{bin} pane-orphan\""),
         ),
         (
             "window-pane-changed[42]",
-            format!("run-shell \"bash {}\"", script("orphan.sh")),
+            format!("run-shell \"{bin} pane-orphan\""),
         ),
         (
             "window-layout-changed[42]",
-            format!("run-shell \"bash {}\"", script("orphan.sh")),
+            format!("run-shell \"{bin} pane-orphan\""),
         ),
         (
             "window-resized[42]",
-            format!("run-shell \"bash {}\"", script("pin.sh")),
+            format!("run-shell \"{bin} pane-pin\""),
         ),
         (
             "pane-mode-changed[44]",
@@ -83,8 +82,7 @@ fn install_hooks(dir: &str) -> Result<(), TmuxError> {
     }
 
     let add = format!(
-        "if -F '#{{!=:#{{@agents-mon-on}},}}' {{ run-shell -b \"bash {} #{{window_id}}\" }}",
-        script("mirror-add.sh")
+        "if -F '#{{!=:#{{@agents-mon-on}},}}' {{ run-shell -b \"{bin} pane-add #{{window_id}}\" }}"
     );
     for hook in [
         "after-select-window[43]",
@@ -209,8 +207,8 @@ fn install_search_keys(bin: &str) -> Result<(), TmuxError> {
     bind(SEARCH_TABLE, "Any", "switch-client -T agents-mon-search")
 }
 
-fn install_wheel_keys(dir: &str) -> Result<(), TmuxError> {
-    let scroll = tmux::quote(&format!("{dir}/scripts/scroll.sh"));
+fn install_wheel_keys(bin: &str) -> Result<(), TmuxError> {
+    let bin = tmux::quote(bin);
     for table in [NORMAL_TABLE, SEARCH_TABLE] {
         for (key, direction, native) in [
             (
@@ -221,7 +219,7 @@ fn install_wheel_keys(dir: &str) -> Result<(), TmuxError> {
             ("WheelDownPane", "down", "send-keys -M"),
         ] {
             let command = format!(
-                "if-shell -F '#{{==:#{{pane_title}},agents-mon}}' \"run-shell -b \\\"bash {scroll} '#{{pane_id}}' {direction}\\\" ; switch-client -T {table}\" \"{native}\""
+                "if-shell -F '#{{==:#{{pane_title}},agents-mon}}' \"run-shell -b \\\"{bin} wheel '#{{pane_id}}' {direction}\\\" ; switch-client -T {table}\" \"{native}\""
             );
             bind(table, key, &command)?;
         }
