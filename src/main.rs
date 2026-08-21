@@ -7,6 +7,7 @@ mod notifications;
 mod pane_writers;
 mod panes;
 mod procs;
+mod release;
 mod scan;
 mod setup;
 mod sidebar;
@@ -43,12 +44,15 @@ fn main() {
         ["toggle"] => toggle::run(&plugin_dir(), None, None),
         ["toggle", mode] => toggle::run(&plugin_dir(), Some(mode), None),
         ["toggle", mode, client] => toggle::run(&plugin_dir(), Some(mode), Some(client)),
+        ["releases", "refresh"] => release::refresh(&plugin_dir()),
+        ["update"] => release::update(&plugin_dir(), "latest"),
+        ["update", target] => release::update(&plugin_dir(), target),
         ["notification-open", socket, pane, bundle] => {
             notifications::open_pane(socket, pane, bundle)
         }
         _ => {
             eprintln!(
-                "usage: agents-mon [--version|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|setup|toggle [split|popup] [client]|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
+                "usage: agents-mon [--version|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|setup|toggle [split|popup] [client]|releases refresh|update [latest|vX.Y.Z]|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
             );
             2
         }

@@ -134,6 +134,10 @@ download_bin() {
 # Opening the version picker is an explicit "what is out there?" — answer it
 # now rather than serving a list that can be a day old.
 if [ "${1:-}" = "refresh" ]; then
+  if [ -x "$BIN" ]; then
+    exec "$BIN" releases refresh
+  fi
+  # Pre-binary bootstrap still needs to discover a release before Rust exists.
   command -v curl >/dev/null 2>&1 && record_releases
   exit 0
 fi

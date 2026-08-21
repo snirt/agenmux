@@ -13,6 +13,7 @@ use crate::conf::AgentConf;
 use crate::pane_writers::PaneWriters;
 use crate::panes;
 use crate::procs::IdentCache;
+use crate::release;
 use crate::scan::{self, PaneRow};
 use crate::tmux::{command_spawn, command_status, Tmux, TmuxError};
 use std::collections::{HashMap, HashSet};
@@ -1640,19 +1641,15 @@ impl Sidebar {
     }
 
     /// Version picker: update or roll back to any release the last check saw.
-    /// Selecting one hands off to update.sh, which switches the source, the
-    /// engine, and restarts the view.
+    /// Selecting one switches the source, the engine, and restarts the view.
     fn versions(&mut self) {
         // opening the picker is an explicit "what is out there?" — ask now
         // instead of serving a list that the daily check may have left a day
         // old. It lands in the file and normal scan renders pick it up live.
-        let _ = std::process::Command::new("bash")
-            .arg(self.plugin_dir.join("scripts/install-bin.sh"))
-            .arg("refresh")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let plugin_dir = self.plugin_dir.clone();
+        std::thread::spawn(move || {
+            release::refresh(&plugin_dir);
+        });
         self.overlay = Some(Overlay::Versions {
             sel: 0,
             chosen: None,
@@ -1773,13 +1770,15 @@ impl Sidebar {
         }
     }
 
-    /// nohup + no wait: update.sh kills the panes this engine renders into,
-    /// and a pane kill would otherwise SIGHUP the switch halfway through.
+    /// nohup + no wait: update kills the panes this engine renders into, and a
+    /// pane kill would otherwise SIGHUP the switch halfway through.
     fn switch_version(&mut self, tag: &str) {
-        let script = self.plugin_dir.join("scripts/update.sh");
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
         let _ = std::process::Command::new("nohup")
-            .arg("bash")
-            .arg(script)
+            .arg(exe)
+            .arg("update")
             .arg(tag)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
