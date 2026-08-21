@@ -73,20 +73,64 @@ fn numeric_parts(tag: &str) -> Vec<u64> {
         .collect()
 }
 
+fn natural_cmp(left: &str, right: &str) -> Ordering {
+    let (left, right) = (left.as_bytes(), right.as_bytes());
+    let (mut l, mut r) = (0, 0);
+    while l < left.len() && r < right.len() {
+        if left[l].is_ascii_digit() && right[r].is_ascii_digit() {
+            let (l0, r0) = (l, r);
+            while l < left.len() && left[l].is_ascii_digit() {
+                l += 1;
+            }
+            while r < right.len() && right[r].is_ascii_digit() {
+                r += 1;
+            }
+            let ld = &left[l0..l];
+            let rd = &right[r0..r];
+            let ld = &ld[ld.iter().position(|b| *b != b'0').unwrap_or(ld.len())..];
+            let rd = &rd[rd.iter().position(|b| *b != b'0').unwrap_or(rd.len())..];
+            match ld.len().cmp(&rd.len()).then_with(|| ld.cmp(rd)) {
+                Ordering::Equal => {}
+                order => return order,
+            }
+        } else {
+            match left[l].cmp(&right[r]) {
+                Ordering::Equal => {
+                    l += 1;
+                    r += 1;
+                }
+                order => return order,
+            }
+        }
+    }
+    (left.len() - l).cmp(&(right.len() - r))
+}
+
 fn compare_tags(left: &str, right: &str) -> Ordering {
-    let (left, right) = (numeric_parts(left), numeric_parts(right));
-    for i in 0..left.len().max(right.len()) {
-        match left
+    let (left_version, left_pre) = left
+        .split_once('-')
+        .map_or((left, None), |(v, p)| (v, Some(p)));
+    let (right_version, right_pre) = right
+        .split_once('-')
+        .map_or((right, None), |(v, p)| (v, Some(p)));
+    let (left_parts, right_parts) = (numeric_parts(left_version), numeric_parts(right_version));
+    for i in 0..left_parts.len().max(right_parts.len()) {
+        match left_parts
             .get(i)
             .copied()
             .unwrap_or(0)
-            .cmp(&right.get(i).copied().unwrap_or(0))
+            .cmp(&right_parts.get(i).copied().unwrap_or(0))
         {
             Ordering::Equal => {}
             order => return order,
         }
     }
-    Ordering::Equal
+    match (left_pre, right_pre) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(left), Some(right)) => natural_cmp(left, right),
+    }
 }
 
 fn remote_tags(repo: &str, latest: &str) -> Vec<String> {
@@ -197,10 +241,11 @@ fn git_success(plugin_dir: &Path, args: &[&str]) -> bool {
 }
 
 fn git_install(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
-    let dirty = git_output(plugin_dir, &["status", "--porcelain"])
-        .filter(|output| output.status.success())
-        .is_some_and(|output| !output.stdout.is_empty());
-    if dirty {
+    let status = git_output(plugin_dir, &["status", "--porcelain"]).ok_or("status")?;
+    if !status.status.success() {
+        return Err("status");
+    }
+    if !status.stdout.is_empty() {
         return Err("dirty");
     }
     let _ = git_success(plugin_dir, &["fetch", "--tags", "--quiet", "origin"]);
@@ -233,6 +278,26 @@ impl Drop for Scratch {
     }
 }
 
+fn synchronize_tarball_source(plugin_dir: &Path, package: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(plugin_dir)? {
+        let entry = entry?;
+        if entry.file_name() == "target" {
+            continue;
+        }
+        let path = entry.path();
+        let kind = fs::symlink_metadata(&path)?.file_type();
+        if kind.is_dir() && !kind.is_symlink() {
+            fs::remove_dir_all(path)?;
+        } else {
+            fs::remove_file(path)?;
+        }
+    }
+    let source = format!("{}/.", package.display());
+    success("cp", &["-R", &source, &plugin_dir.display().to_string()])
+        .then_some(())
+        .ok_or_else(|| std::io::Error::other("could not copy verified package"))
+}
+
 fn tarball_install(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
     let scratch = Scratch::new("agents-mon-up").map_err(|_| "scratch")?;
     let installer = plugin_dir.join("scripts/install-bin.sh");
@@ -251,10 +316,7 @@ fn tarball_install(plugin_dir: &Path, target: &str) -> Result<(), &'static str> 
         return Err("fetch");
     }
     let _ = fs::remove_dir_all(package.join("target"));
-    let source = format!("{}/.", package.display());
-    success("cp", &["-R", &source, &plugin_dir.display().to_string()])
-        .then_some(())
-        .ok_or("copy")
+    synchronize_tarball_source(plugin_dir, &package).map_err(|_| "copy")
 }
 
 fn install_engine(plugin_dir: &Path) -> bool {
@@ -343,6 +405,10 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
                 "uncommitted changes in {} — commit or stash first",
                 plugin_dir.display()
             )),
+            "status" => fail(&format!(
+                "could not inspect working tree in {}",
+                plugin_dir.display()
+            )),
             "unknown" => fail(&format!("unknown release {target}")),
             "checkout" => fail(&format!("could not check out {target}")),
             "fetch" => fail(&format!("could not download {target}")),
@@ -365,6 +431,9 @@ mod tests {
     fn tags_sort_numerically() {
         assert_eq!(compare_tags("v1.10.0", "v1.9.9"), Ordering::Greater);
         assert_eq!(compare_tags("v1.0", "v1.0.0"), Ordering::Equal);
+        assert_eq!(compare_tags("v1.2.3-rc1", "v1.2.2"), Ordering::Greater);
+        assert_eq!(compare_tags("v1.2.3", "v1.2.3-rc1"), Ordering::Greater);
+        assert_eq!(compare_tags("v1.2.3-rc10", "v1.2.3-rc2"), Ordering::Greater);
     }
 
     #[test]

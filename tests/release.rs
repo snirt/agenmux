@@ -75,6 +75,15 @@ fn git_ok(repo: &Path, args: &[&str]) {
     );
 }
 
+fn real_git() -> String {
+    let out = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
 fn write_release_tree(repo: &Path, version: &str, include_toggle: bool) {
     fs::create_dir_all(repo.join("scripts")).unwrap();
     fs::write(
@@ -263,6 +272,39 @@ fn git_update_switches_latest_and_refuses_dirty_or_unknown_targets() {
 }
 
 #[test]
+fn git_status_errors_refuse_to_touch_the_checkout() {
+    let tmp = TempDir::new("git-status-error");
+    let repo = tmp.path().join("repo");
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    make_git_releases(&repo);
+    no_server_tmux(&bin);
+    script(
+        &bin.join("git"),
+        r#"case "$*" in
+  *" status --porcelain") exit 1 ;;
+esac
+exec "$REAL_GIT" "$@""#,
+    );
+
+    let out = command(&repo, &bin, &["update", "v0.1.0"])
+        .env("REAL_GIT", real_git())
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&git(&repo, &["describe", "--tags", "--exact-match"]).stdout)
+            .trim(),
+        "v0.1.1"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("Cargo.toml")).unwrap(),
+        "[package]\nname = \"agents-mon\"\nversion = \"0.1.1\"\n"
+    );
+}
+
+#[test]
 fn update_waits_for_old_daemon_then_reenters_the_target_release() {
     let tmp = TempDir::new("restart");
     let repo = tmp.path().join("repo");
@@ -371,17 +413,29 @@ exit 0"#,
 }
 
 #[test]
-fn tarball_update_copies_verified_source_and_installs_matching_engine() {
+fn tarball_update_removes_stale_source_and_reopens_with_target_native_toggle() {
     let tmp = TempDir::new("tarball");
     let plugin = tmp.path().join("plugin");
     let bin = tmp.path().join("bin");
+    let log = tmp.path().join("restart.log");
     fs::create_dir_all(plugin.join("scripts")).unwrap();
+    fs::create_dir_all(plugin.join("target/release")).unwrap();
     fs::create_dir_all(&bin).unwrap();
     fs::write(
         plugin.join("Cargo.toml"),
         "[package]\nname = \"agents-mon\"\nversion = \"0.1.1\"\n",
     )
     .unwrap();
+    fs::write(plugin.join("target/release/preserved"), "keep\n").unwrap();
+    fs::write(
+        plugin.join("target/release/.agents-mon-version"),
+        "v0.1.1\nold\n",
+    )
+    .unwrap();
+    script(
+        &plugin.join("scripts/toggle.sh"),
+        r#"printf 'stale-toggle\n' >> "$RESTART_LOG""#,
+    );
     script(
         &plugin.join("scripts/install-bin.sh"),
         r#"DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -397,27 +451,50 @@ TOML
   cp "$0" "$pkg/scripts/install-bin.sh"
   cat > "$pkg/agents-mon.tmux" <<'ENTRY'
 #!/usr/bin/env bash
-:
+printf 'entrypoint\n' >> "$RESTART_LOG"
 ENTRY
   printf '%s\n' "$pkg"
   exit 0
 fi
 mkdir -p "$DIR/target/release"
-printf '#!/usr/bin/env bash\nprintf "v0.1.0\\n"\n' > "$DIR/target/release/agents-mon"
+cat > "$DIR/target/release/agents-mon" <<'BIN'
+#!/usr/bin/env bash
+if [ "${1:-}" = toggle ]; then printf 'native-toggle\n' >> "$RESTART_LOG"; else printf 'v0.1.0\n'; fi
+BIN
 chmod +x "$DIR/target/release/agents-mon"
-printf 'v0.1.0\n-\n' > "$DIR/target/release/.agents-mon-version""#,
+printf 'v0.1.0\nnew\n' > "$DIR/target/release/.agents-mon-version""#,
     );
-    no_server_tmux(&bin);
+    script(
+        &bin.join("tmux"),
+        r#"case "$*" in
+  info) exit 0 ;;
+  "show-option -gqv @agents-mon-on") printf '1\n' ;;
+esac
+exit 0"#,
+    );
 
-    let out = run(&plugin, &bin, &["update", "v0.1.0"]);
+    let out = command(&plugin, &bin, &["update", "v0.1.0"])
+        .env("RESTART_LOG", &log)
+        .output()
+        .unwrap();
+
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert!(!plugin.join("scripts/toggle.sh").exists());
     assert_eq!(
         fs::read_to_string(plugin.join("source-marker")).unwrap(),
         "verified source\n"
+    );
+    assert_eq!(
+        fs::read_to_string(plugin.join("target/release/preserved")).unwrap(),
+        "keep\n"
+    );
+    assert_eq!(
+        fs::read_to_string(plugin.join("target/release/.agents-mon-version")).unwrap(),
+        "v0.1.0\nnew\n"
     );
     assert_eq!(
         Command::new(plugin.join("target/release/agents-mon"))
@@ -425,5 +502,50 @@ printf 'v0.1.0\n-\n' > "$DIR/target/release/.agents-mon-version""#,
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
             .unwrap(),
         "v0.1.0"
+    );
+    let events = fs::read_to_string(log).unwrap();
+    assert!(events.contains("entrypoint"));
+    assert!(events.contains("native-toggle"));
+    assert!(!events.contains("stale-toggle"));
+}
+
+#[test]
+fn failed_verified_fetch_leaves_tarball_tree_untouched() {
+    let tmp = TempDir::new("tarball-fetch-failure");
+    let plugin = tmp.path().join("plugin");
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(plugin.join("scripts")).unwrap();
+    fs::create_dir_all(plugin.join("target/release")).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    let manifest = "[package]\nname = \"agents-mon\"\nversion = \"0.1.1\"\n";
+    fs::write(plugin.join("Cargo.toml"), manifest).unwrap();
+    fs::write(plugin.join("stale-source"), "untouched\n").unwrap();
+    fs::write(plugin.join("target/release/preserved"), "keep\n").unwrap();
+    script(
+        &plugin.join("scripts/install-bin.sh"),
+        r#"[ "${1:-}" != fetch ]
+exit 1"#,
+    );
+    script(
+        &plugin.join("scripts/toggle.sh"),
+        r#"printf 'still here\n' >/dev/null"#,
+    );
+    no_server_tmux(&bin);
+
+    let out = run(&plugin, &bin, &["update", "v0.1.0"]);
+
+    assert!(!out.status.success());
+    assert_eq!(
+        fs::read_to_string(plugin.join("Cargo.toml")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read_to_string(plugin.join("stale-source")).unwrap(),
+        "untouched\n"
+    );
+    assert!(plugin.join("scripts/toggle.sh").is_file());
+    assert_eq!(
+        fs::read_to_string(plugin.join("target/release/preserved")).unwrap(),
+        "keep\n"
     );
 }
