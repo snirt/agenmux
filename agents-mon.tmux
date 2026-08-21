@@ -2,8 +2,21 @@
 # tmux-agents-mon TPM entry point. Keep this pre-binary bootstrap small: once
 # the native engine exists, `agents-mon setup` owns all tmux integration.
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_BIN="$CURRENT_DIR/target/release/agents-mon"
 BIN="$(tmux show-option -gqv @agents-mon-bin)"
-[ -n "$BIN" ] || BIN="$CURRENT_DIR/target/release/agents-mon"
+[ -n "$BIN" ] || BIN="$DEFAULT_BIN"
+
+engine_current() {
+  [ -x "$BIN" ] || return 1
+  [ "$BIN" != "$DEFAULT_BIN" ] && return 0
+  want="$(bash "$CURRENT_DIR/scripts/version.sh" tag 2>/dev/null)" || return 1
+  state="$CURRENT_DIR/target/release/.agents-mon-version"
+  installed_tag="$(sed -n '1p' "$state" 2>/dev/null)"
+  installed_rev="$(sed -n '2p' "$state" 2>/dev/null)"
+  current_rev="$(git -C "$CURRENT_DIR" rev-parse HEAD 2>/dev/null || printf '-')"
+  [ "$installed_tag" = "$want" ] && [ "$installed_rev" = "$current_rev" ] \
+    && [ "$("$BIN" --version 2>/dev/null)" = "agents-mon ${want#v}" ]
+}
 
 # Internal activation entrypoint used by the tmux bindings below. First use can
 # beat the eager installer, so serialize with it before handing runtime control
@@ -11,7 +24,7 @@ BIN="$(tmux show-option -gqv @agents-mon-bin)"
 if [ "${1:-}" = activate ]; then
   mode="${2:-}"
   client="${3:-}"
-  if [ ! -x "$BIN" ]; then
+  if ! engine_current; then
     locked=""
     unlock() {
       [ -n "$locked" ] || return
@@ -21,12 +34,12 @@ if [ "${1:-}" = activate ]; then
     trap unlock EXIT HUP INT TERM
     if tmux wait-for -L agents-mon-install; then
       locked=1
-      if [ ! -x "$BIN" ] && [ "$BIN" = "$CURRENT_DIR/target/release/agents-mon" ]; then
+      if ! engine_current && [ "$BIN" = "$DEFAULT_BIN" ]; then
         bash "$CURRENT_DIR/scripts/install-bin.sh" >/dev/null 2>&1 || true
       fi
       unlock
     fi
-    if [ ! -x "$BIN" ]; then
+    if ! engine_current; then
       tmux display-message 'agents-mon: native engine installation failed' 2>/dev/null || true
       exit 1
     fi
@@ -55,12 +68,14 @@ tmux set-hook -gu 'session-window-changed[42]' 2>/dev/null || true
 # A source update can briefly leave the previous release's binary here; it may
 # not know `setup` yet. The installer refresh below re-enters with the matching
 # binary, so keep this compatibility probe quiet.
-[ ! -x "$BIN" ] || AGENTS_MON_DIR="$CURRENT_DIR" "$BIN" setup >/dev/null 2>&1 || true
+if engine_current; then
+  AGENTS_MON_DIR="$CURRENT_DIR" "$BIN" setup >/dev/null 2>&1 || true
+fi
 
 # The source checkout has no binary, so eagerly install the default in the
 # background. The activation entrypoint takes the same lock when first use
 # beats it.
-if [ "$BIN" = "$CURRENT_DIR/target/release/agents-mon" ] \
+if [ "$BIN" = "$DEFAULT_BIN" ] \
    && [ "${AGENTS_MON_INSTALL_REFRESH:-}" != 1 ]; then
   (
     locked=""
@@ -75,7 +90,7 @@ if [ "$BIN" = "$CURRENT_DIR/target/release/agents-mon" ] \
     bash "$CURRENT_DIR/scripts/install-bin.sh" >/dev/null 2>&1 || true
     # Re-enter even when an older binary already existed: source and engine
     # upgrades must install this version's setup contract together.
-    if [ -x "$BIN" ]; then
+    if engine_current; then
       AGENTS_MON_INSTALL_REFRESH=1 bash "$CURRENT_DIR/agents-mon.tmux"
     fi
   ) &

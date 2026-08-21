@@ -271,14 +271,14 @@ table="$empty_click_table"
 
 # A row can outlive its agent pane until the daemon's next scan. Treat that
 # stale record like open space instead of leaving the click dead.
-rows_own="$tmp/agents-mon-rows-${sidebar#%}"
+rows_own="$tmp/agents-mon-rows"
+cp "$rows_own" "$rows_own.saved"
 tmux -S "$sock" switch-client -c "$client" -T root
 tmux -S "$sock" select-pane -t "$work"
-tmux -S "$sock" set-option -g @agents-mon-on 0
 printf '%%999999\tstale\n' >"$rows_own"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
   "$BIN" click "$sidebar" 1 "$client"
-tmux -S "$sock" set-option -g @agents-mon-on 1
+mv "$rows_own.saved" "$rows_own"
 stale_click_works=0
 for _ in $(seq 1 20); do
   stale_click_table="$(tmux -S "$sock" display-message -p -c "$client" \

@@ -76,6 +76,19 @@ write_state() {
   printf '%s\n%s\n' "$1" "$current_rev" > "$staged" && mv -f "$staged" "$STATE"
 }
 
+binary_matches() {
+  [ -x "$1" ] || return 1
+  [ "$("$1" --version 2>/dev/null)" = "agents-mon ${2#v}" ]
+}
+
+# A git checkout not exactly at its Cargo.toml tag is source ahead of (or
+# different from) the published package. Only a local build can match that
+# revision; downloading the same version tag would install older CLI logic.
+source_is_release=1
+if [ "$current_rev" != - ]; then
+  [ "$(git -C "$DIR" describe --tags --exact-match 2>/dev/null)" = "$want" ] || source_is_release=0
+fi
+
 latest_tag() {
   local url tag
   url="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
@@ -115,7 +128,9 @@ download_bin() {
     staged="$BIN.$$"
     if cp "$pkg/target/release/agents-mon" "$staged"; then
       chmod +x "$staged"
-      mv -f "$staged" "$BIN" && write_state "$tag" && rc=0
+      if binary_matches "$staged" "$tag"; then
+        mv -f "$staged" "$BIN" && write_state "$tag" && rc=0
+      fi
     fi
     [ "$rc" -eq 0 ] || rm -f "$staged"
     # macOS packages also carry the notification helper (see install-app.sh)
@@ -166,35 +181,35 @@ if command -v curl >/dev/null 2>&1 \
   record_releases
 fi
 
-# Avoid a download on every toggle. A TPM update changes current_rev and forces
-# an immediate check; otherwise the engine is re-checked at most once per day.
-if [ -x "$BIN" ] && [ "$installed_rev" = "$current_rev" ] \
+# Avoid work on every toggle only when source revision, manifest version, and
+# executable all agree. Existence alone is not enough after a source upgrade.
+if [ "$installed_tag" = "$want" ] && [ "$installed_rev" = "$current_rev" ] \
+   && binary_matches "$BIN" "$want" \
    && [ -n "$(find "$STATE" -mtime -1 -print 2>/dev/null)" ]; then
   exit 0
 fi
 
-# 1. the engine this checkout's source expects
-if [ -n "$want" ]; then
-  if [ -x "$BIN" ] && [ "$installed_tag" = "$want" ]; then
+# Untagged/development git source must be built from this exact revision. A
+# release asset with the same Cargo version can still have an older CLI.
+if [ "$source_is_release" = 0 ]; then
+  if command -v cargo >/dev/null 2>&1 \
+     && (cd "$DIR" && cargo build --release) \
+     && binary_matches "$BIN" "$want"; then
     write_state "$want"
     exit 0
   fi
-  download_bin "$want" && exit 0
+  exit 1
 fi
-# 2. no release for this version — a checkout tracking master is ahead of every
-#    tag, so fall back to the newest release rather than leaving it on bash
-tag="$(sed -n '1p' "$LATEST" 2>/dev/null)"
-if [ -n "$tag" ] && [ "$tag" != "$want" ]; then
-  if [ -x "$BIN" ] && [ "$installed_tag" = "$tag" ]; then
-    write_state "$tag"
-    exit 0
-  fi
-  download_bin "$tag" && exit 0
+
+# Tagged/tarball source installs only its matching verified release. Never
+# fall back to latest or retain an arbitrary executable under a new marker.
+if [ -n "$want" ] && download_bin "$want"; then
+  exit 0
 fi
-# 3. keep whatever works: existing binary, then a local build
-[ -x "$BIN" ] && exit 0
-if command -v cargo >/dev/null 2>&1; then
-  (cd "$DIR" && cargo build --release)
-  exit $?
+if command -v cargo >/dev/null 2>&1 \
+   && (cd "$DIR" && cargo build --release) \
+   && binary_matches "$BIN" "$want"; then
+  write_state "$want"
+  exit 0
 fi
 exit 1

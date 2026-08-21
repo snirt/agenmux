@@ -114,7 +114,7 @@ run_immediate_popup_bootstrap() { # verified|cargo|bad-checksum
   local package tag archive expect_pid opened=0 i
   mkdir -p "$case_plugin" "$case_bin" "$downloads"
   cp -R "$DIR/agents" "$DIR/scripts" "$case_plugin/"
-  cp "$DIR/agents-mon.tmux" "$case_plugin/agents-mon.tmux"
+  cp "$DIR/agents-mon.tmux" "$DIR/Cargo.toml" "$case_plugin/"
   tag="$(bash "$DIR/scripts/version.sh" tag)"
   case "$(uname -s):$(uname -m)" in
     Darwin:arm64) package=tmux-agents-mon-macos-aarch64 ;;
@@ -135,7 +135,9 @@ TOML
     cat >"$case_plugin/src/main.rs" <<RS
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.get(0).map(String::as_str) == Some("toggle")
+    if args.get(0).map(String::as_str) == Some("--version") {
+        println!("agents-mon ${tag#v}");
+    } else if args.get(0).map(String::as_str) == Some("toggle")
         && args.get(1).map(String::as_str) == Some("popup")
     {
         std::fs::write("$marker", "opened").unwrap();
@@ -149,7 +151,9 @@ RS
     mkdir -p "$downloads/$tag/$package/target/release"
     cat >"$downloads/$tag/$package/target/release/agents-mon" <<SH
 #!/usr/bin/env bash
-if [ "\${1:-}" = toggle ] && [ "\${2:-}" = popup ]; then
+if [ "\${1:-}" = --version ]; then
+  printf 'agents-mon ${tag#v}\n'
+elif [ "\${1:-}" = toggle ] && [ "\${2:-}" = popup ]; then
   printf opened >"$marker"
   sleep 0.3
 fi

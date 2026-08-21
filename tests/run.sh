@@ -42,7 +42,7 @@ if [ "$fail" -eq 0 ]; then
   mk_release() {
     local t="$1" d="$tmp/downloads/$1"
     mkdir -p "$d/$package/target/release"
-    printf '#!/usr/bin/env bash\nprintf "%s\\n"\n' "$t" \
+    printf '#!/usr/bin/env bash\nif [ "${1:-}" = --version ]; then printf "agents-mon %s\\n"; else printf "%s\\n"; fi\n' "${t#v}" "$t" \
       >"$d/$package/target/release/agents-mon"
     printf '#!/usr/bin/env bash\nexit 0\n' \
       >"$d/$package/target/release/agents-mon-notifier"
@@ -121,13 +121,16 @@ SH
     echo "FAIL native-engine-matches-checkout-version: got $(engine)/$(marker)"
     fail=1
   fi
-  # 2. a checkout ahead of every release (master) falls back to the newest one
+  # 2. source ahead of every release must not relabel an older latest binary
+  # as matching. With no buildable source in this fixture, installation fails
+  # and leaves the prior verified engine/state untouched.
   set_version 0.9.9
-  install_bin v0.1.1
-  if [ "$(engine)" = "v0.1.1" ] && [ "$(marker)" = "v0.1.1" ]; then
-    echo "ok   native-engine-falls-back-to-latest-release"
+  ahead_rc=0
+  install_bin v0.1.1 >/dev/null 2>&1 || ahead_rc=$?
+  if [ "$ahead_rc" -ne 0 ] && [ "$(engine)" = "v0.1.0" ] && [ "$(marker)" = "v0.0.0" ]; then
+    echo "ok   native-engine-refuses-mismatched-latest-release"
   else
-    echo "FAIL native-engine-falls-back-to-latest-release: got $(engine)/$(marker)"
+    echo "FAIL native-engine-refuses-mismatched-latest-release: rc=$ahead_rc got $(engine)/$(marker)"
     fail=1
   fi
   # 3. rolling the source back pins the matching engine — no extra state
@@ -195,7 +198,15 @@ name = "agents-mon"
 version = "9.9.9"
 edition = "2021"
 TOML
-  printf 'fn main() { println!("cargo-fallback"); }\n' >"$cargo_plugin/src/main.rs"
+  cat >"$cargo_plugin/src/main.rs" <<'RS'
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("agents-mon 9.9.9");
+    } else {
+        println!("cargo-fallback");
+    }
+}
+RS
   printf '#!/usr/bin/env bash\nexit 1\n' >"$tmp/offline/curl"
   printf '#!/usr/bin/env bash\nexit 1\n' >"$tmp/offline/git"
   cp "$tmp/bin/uname" "$tmp/offline/uname"
@@ -274,6 +285,54 @@ SH
   else
     echo "FAIL entrypoint-binds-native-toggle-bootstrap-in-background"
     cat "$tmp/tmux.log"
+    fail=1
+  fi
+  rm -rf "$tmp"
+fi
+if [ "$fail" -eq 0 ]; then
+  # An executable from the previous source revision is not ready merely because
+  # it reports the same Cargo version. Activation must wait for the installer
+  # before invoking a newly introduced native command such as `toggle`.
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/plugin/scripts" "$tmp/plugin/target/release" "$tmp/bin"
+  cp "$DIR/agents-mon.tmux" "$tmp/plugin/agents-mon.tmux"
+  cp "$DIR/scripts/version.sh" "$tmp/plugin/scripts/version.sh"
+  cp "$DIR/Cargo.toml" "$tmp/plugin/Cargo.toml"
+  version="$(bash "$DIR/scripts/version.sh")"
+  cat >"$tmp/plugin/target/release/agents-mon" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then printf 'agents-mon $version\\n'; else printf 'old %s\\n' "\$*" >>"$tmp/runtime.log"; exit 2; fi
+SH
+  chmod +x "$tmp/plugin/target/release/agents-mon"
+  printf 'v%s\nstale-revision\n' "$version" >"$tmp/plugin/target/release/.agents-mon-version"
+  cat >"$tmp/plugin/scripts/install-bin.sh" <<SH
+#!/usr/bin/env bash
+printf 'install\\n' >>"$tmp/runtime.log"
+cat >"$tmp/plugin/target/release/agents-mon" <<'BIN'
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then printf 'agents-mon $version\\n'; else printf 'new %s\\n' "\$*" >>"$tmp/runtime.log"; fi
+BIN
+chmod +x "$tmp/plugin/target/release/agents-mon"
+printf 'v$version\\n-\\n' >"$tmp/plugin/target/release/.agents-mon-version"
+SH
+  chmod +x "$tmp/plugin/scripts/install-bin.sh"
+  cat >"$tmp/bin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "show-option -gqv @agents-mon-bin") ;;
+  "wait-for -L agents-mon-install"|"wait-for -U agents-mon-install") exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$tmp/bin/tmux"
+  if PATH="$tmp/bin:$PATH" bash "$tmp/plugin/agents-mon.tmux" activate popup exact-client &&
+    grep -qx install "$tmp/runtime.log" &&
+    grep -qx 'new toggle popup exact-client' "$tmp/runtime.log" &&
+    ! grep -q '^old ' "$tmp/runtime.log"; then
+    echo "ok   stale-binary-activation-waits-for-matching-engine"
+  else
+    echo "FAIL stale-binary-activation-waits-for-matching-engine"
+    cat "$tmp/runtime.log" 2>/dev/null || true
     fail=1
   fi
   rm -rf "$tmp"

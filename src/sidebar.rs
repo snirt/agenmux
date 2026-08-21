@@ -214,6 +214,30 @@ enum Overlay {
     Versions { sel: usize, chosen: Option<String> },
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum DispatchMode {
+    Overlay,
+    Search,
+    Normal,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DispatchResult {
+    Continue,
+    Break,
+    QuietExit,
+}
+
+fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMode {
+    if overlay.is_some() {
+        DispatchMode::Overlay
+    } else if search_focused {
+        DispatchMode::Search
+    } else {
+        DispatchMode::Normal
+    }
+}
+
 fn read_key(fd: libc::c_int) -> Key {
     let Some(b) = read_byte(fd) else {
         return Key::Quit;
@@ -802,8 +826,10 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         let mut now = Instant::now();
         if wheel_jump_at.is_some_and(|deadline| now >= deadline) {
             wheel_jump_at = None;
-            if sb.jump() {
-                break;
+            match sb.dispatch_key(Key::Jump) {
+                DispatchResult::Continue => {}
+                DispatchResult::Break => break,
+                DispatchResult::QuietExit => return true,
             }
             sb.render(false);
             now = Instant::now();
@@ -870,59 +896,14 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 key => (key, false),
             };
             if wheel {
-                wheel_jump_at = sb.wheel_jump_delay().map(|delay| Instant::now() + delay);
+                wheel_jump_at = sb
+                    .wheel_jump_delay()
+                    .and_then(|delay| Instant::now().checked_add(delay));
             }
-            if sb.overlay.is_some() {
-                sb.overlay_key(key);
-                sb.render(false);
-                continue;
-            }
-            if sb.search_focused {
-                sb.search_key(key);
-                sb.render(false);
-                continue;
-            }
-            match key {
-                Key::Down => sb.move_sel(1),
-                Key::Up => sb.move_sel(-1),
-                Key::Jump => {
-                    if sb.jump() {
-                        break;
-                    }
-                }
-                Key::Help => sb.help(),
-                Key::Versions => sb.versions(),
-                Key::Search => sb.focus_search(),
-                Key::CycleState => sb.cycle_state_filter(),
-                Key::AllStates => sb.clear_filter(),
-                Key::Quit => {
-                    if sb.daemon.is_none() {
-                        // Popup/tty mode owns stdin, so q/Ctrl-C/Ctrl-D closes it.
-                        if let Some(p) = &sb.pin {
-                            let _ = std::fs::remove_file(p);
-                        }
-                        break;
-                    }
-                    // In preserved-pane mode close arrives as Key::Close from
-                    // the key table; Quit also covers FIFO EOF, which must not
-                    // kill the sidebar.
-                }
-                Key::Close => {
-                    if sb.daemon.is_some() {
-                        // Finish teardown before a fast reopen can observe the
-                        // dying control client and attach panes to it.
-                        sb.teardown();
-                        sb.daemon = None;
-                        return true;
-                    }
-                    break;
-                }
-                Key::WheelUp
-                | Key::WheelDown
-                | Key::Backspace
-                | Key::ClearSearch
-                | Key::Text(_)
-                | Key::Other => {}
+            match sb.dispatch_key(key) {
+                DispatchResult::Continue => {}
+                DispatchResult::Break => break,
+                DispatchResult::QuietExit => return true,
             }
             sb.render(false);
         }
@@ -947,6 +928,65 @@ fn cleanup(rows_file: &PathBuf, pin: &Option<String>) {
 }
 
 impl Sidebar {
+    /// Route every logical key through the active UI mode. Delayed wheel jumps
+    /// use this too, so search accepts before jumping and overlays consume the
+    /// key instead of acting on the hidden list.
+    fn dispatch_key(&mut self, key: Key) -> DispatchResult {
+        match dispatch_mode(self.overlay.as_ref(), self.search_focused) {
+            DispatchMode::Overlay => {
+                self.overlay_key(key);
+                return DispatchResult::Continue;
+            }
+            DispatchMode::Search => {
+                self.search_key(key);
+                return DispatchResult::Continue;
+            }
+            DispatchMode::Normal => {}
+        }
+        match key {
+            Key::Down => self.move_sel(1),
+            Key::Up => self.move_sel(-1),
+            Key::Jump => {
+                if self.jump() {
+                    return DispatchResult::Break;
+                }
+            }
+            Key::Help => self.help(),
+            Key::Versions => self.versions(),
+            Key::Search => self.focus_search(),
+            Key::CycleState => self.cycle_state_filter(),
+            Key::AllStates => self.clear_filter(),
+            Key::Quit => {
+                if self.daemon.is_none() {
+                    // Popup/tty mode owns stdin, so q/Ctrl-C/Ctrl-D closes it.
+                    if let Some(p) = &self.pin {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    return DispatchResult::Break;
+                }
+                // In preserved-pane mode close arrives as Key::Close from the
+                // key table; Quit also covers FIFO EOF, which must not kill it.
+            }
+            Key::Close => {
+                if self.daemon.is_some() {
+                    // Finish teardown before a fast reopen can observe the
+                    // dying control client and attach panes to it.
+                    self.teardown();
+                    self.daemon = None;
+                    return DispatchResult::QuietExit;
+                }
+                return DispatchResult::Break;
+            }
+            Key::Backspace
+            | Key::ClearSearch
+            | Key::Text(_)
+            | Key::WheelUp
+            | Key::WheelDown
+            | Key::Other => {}
+        }
+        DispatchResult::Continue
+    }
+
     fn wheel_jump_delay(&mut self) -> Option<Duration> {
         parse_wheel_delay(
             &self
@@ -1936,6 +1976,26 @@ mod tests {
         assert_eq!(parse_wheel_delay("off"), None);
         assert_eq!(parse_wheel_delay("-1"), None);
         assert_eq!(parse_wheel_delay("invalid"), None);
+    }
+
+    #[test]
+    fn delayed_wheel_jump_uses_search_help_and_versions_routes() {
+        assert_eq!(dispatch_mode(None, true), DispatchMode::Search);
+        assert_eq!(
+            dispatch_mode(Some(&Overlay::Help), false),
+            DispatchMode::Overlay
+        );
+        assert_eq!(
+            dispatch_mode(
+                Some(&Overlay::Versions {
+                    sel: 0,
+                    chosen: None,
+                }),
+                false,
+            ),
+            DispatchMode::Overlay
+        );
+        assert_eq!(dispatch_mode(None, false), DispatchMode::Normal);
     }
 
     #[test]

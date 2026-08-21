@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_REPO: &str = "https://github.com/snirt/tmux-agents-mon";
@@ -240,7 +240,7 @@ fn git_success(plugin_dir: &Path, args: &[&str]) -> bool {
     git_output(plugin_dir, args).is_some_and(|output| output.status.success())
 }
 
-fn git_install(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
+fn git_install(plugin_dir: &Path, target: &str) -> Result<String, &'static str> {
     let status = git_output(plugin_dir, &["status", "--porcelain"]).ok_or("status")?;
     if !status.status.success() {
         return Err("status");
@@ -248,13 +248,18 @@ fn git_install(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
     if !status.stdout.is_empty() {
         return Err("dirty");
     }
+    let previous = git_output(plugin_dir, &["rev-parse", "HEAD"])
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|revision| !revision.is_empty())
+        .ok_or("status")?;
     let _ = git_success(plugin_dir, &["fetch", "--tags", "--quiet", "origin"]);
     let revision = format!("refs/tags/{target}^{{commit}}");
     if !git_success(plugin_dir, &["rev-parse", "-q", "--verify", &revision]) {
         return Err("unknown");
     }
     git_success(plugin_dir, &["checkout", "--quiet", target])
-        .then_some(())
+        .then_some(previous)
         .ok_or("checkout")
 }
 
@@ -294,6 +299,84 @@ fn update_sibling(plugin_dir: &Path, label: &str) -> std::io::Result<PathBuf> {
     Ok(parent.join(name))
 }
 
+fn expected_version(tag: &str) -> &str {
+    tag.strip_prefix('v').unwrap_or(tag)
+}
+
+fn engine_matches(binary: &Path, target: &str) -> bool {
+    Command::new(binary)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| {
+            String::from_utf8_lossy(&output.stdout).trim()
+                == format!("agents-mon {}", expected_version(target))
+        })
+}
+
+fn fetch_package(
+    plugin_dir: &Path,
+    target: &str,
+    scratch: &Scratch,
+) -> Result<PathBuf, &'static str> {
+    let output = Command::new("bash")
+        .arg(plugin_dir.join("scripts/install-bin.sh"))
+        .arg("fetch")
+        .arg(target)
+        .arg(&scratch.0)
+        .output()
+        .map_err(|_| "fetch")?;
+    if !output.status.success() {
+        return Err("fetch");
+    }
+    let package = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let binary = package.join("target/release/agents-mon");
+    if !package.is_dir() || !engine_matches(&binary, target) {
+        return Err("engine");
+    }
+    Ok(package)
+}
+
+fn write_engine_state(plugin_dir: &Path, target: &str) -> std::io::Result<()> {
+    let revision = git_output(plugin_dir, &["rev-parse", "HEAD"])
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|revision| !revision.is_empty())
+        .unwrap_or_else(|| "-".to_string());
+    atomic_write(
+        &release_dir(plugin_dir).join(".agents-mon-version"),
+        &format!("{target}\n{revision}\n"),
+    )
+}
+
+fn install_exact_engine(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
+    let scratch = Scratch::new("agents-mon-engine").map_err(|_| "scratch")?;
+    let package = fetch_package(plugin_dir, target, &scratch)?;
+    let source = package.join("target/release/agents-mon");
+    let destination = release_dir(plugin_dir).join("agents-mon");
+    fs::create_dir_all(release_dir(plugin_dir)).map_err(|_| "engine")?;
+    let staged = destination.with_extension(format!("new-{}", std::process::id()));
+    fs::copy(source, &staged).map_err(|_| "engine")?;
+    let permissions = fs::metadata(&package.join("target/release/agents-mon"))
+        .map_err(|_| "engine")?
+        .permissions();
+    fs::set_permissions(&staged, permissions).map_err(|_| "engine")?;
+    if !engine_matches(&staged, target) {
+        let _ = fs::remove_file(&staged);
+        return Err("engine");
+    }
+    fs::rename(&staged, &destination).map_err(|_| "engine")?;
+    let notifier = package.join("target/release/agents-mon-notifier");
+    if notifier.is_file() {
+        let _ = fs::copy(
+            notifier,
+            release_dir(plugin_dir).join("agents-mon-notifier"),
+        );
+    }
+    write_engine_state(plugin_dir, target).map_err(|_| "engine")
+}
+
 fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
     let source = format!("{}/.", source.display());
     success("cp", &["-R", &source, &destination.display().to_string()])
@@ -306,22 +389,7 @@ fn synchronize_tarball_source(plugin_dir: &Path, package: &Path) -> std::io::Res
     let backup = update_sibling(plugin_dir, "backup")?;
     fs::create_dir(&replacement)?;
 
-    let staged = (|| {
-        copy_tree(package, &replacement)?;
-        let installed_release = plugin_dir.join("target/release");
-        if installed_release.is_dir() {
-            let replacement_target = replacement.join("target");
-            fs::create_dir_all(&replacement_target)?;
-            let installed = installed_release.display().to_string();
-            if !success(
-                "cp",
-                &["-R", &installed, &replacement_target.display().to_string()],
-            ) {
-                return Err(std::io::Error::other("could not preserve installed engine"));
-            }
-        }
-        Ok(())
-    })();
+    let staged = copy_tree(package, &replacement);
     if let Err(error) = staged {
         let _ = fs::remove_dir_all(&replacement);
         return Err(error);
@@ -332,7 +400,14 @@ fn synchronize_tarball_source(plugin_dir: &Path, package: &Path) -> std::io::Res
         return Err(error);
     }
     if let Err(error) = fs::rename(&replacement, plugin_dir) {
-        let _ = fs::rename(&backup, plugin_dir);
+        if fs::rename(&backup, plugin_dir).is_err() {
+            // Last-resort restore: keep the original tree available even when
+            // a second rename fails (for example, an injected filesystem fault).
+            let _ = fs::create_dir(plugin_dir);
+            if copy_tree(&backup, plugin_dir).is_ok() {
+                let _ = fs::remove_dir_all(&backup);
+            }
+        }
         let _ = fs::remove_dir_all(&replacement);
         return Err(error);
     }
@@ -342,34 +417,12 @@ fn synchronize_tarball_source(plugin_dir: &Path, package: &Path) -> std::io::Res
 
 fn tarball_install(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
     let scratch = Scratch::new("agents-mon-up").map_err(|_| "scratch")?;
-    let installer = plugin_dir.join("scripts/install-bin.sh");
-    let output = Command::new("bash")
-        .arg(installer)
-        .arg("fetch")
-        .arg(target)
-        .arg(&scratch.0)
-        .output()
-        .map_err(|_| "fetch")?;
-    if !output.status.success() {
-        return Err("fetch");
+    let package = fetch_package(plugin_dir, target, &scratch)?;
+    synchronize_tarball_source(plugin_dir, &package).map_err(|_| "copy")?;
+    if !engine_matches(&release_dir(plugin_dir).join("agents-mon"), target) {
+        return Err("engine");
     }
-    let package = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    if !package.is_dir() {
-        return Err("fetch");
-    }
-    let _ = fs::remove_dir_all(package.join("target"));
-    synchronize_tarball_source(plugin_dir, &package).map_err(|_| "copy")
-}
-
-fn install_engine(plugin_dir: &Path) -> bool {
-    let _ = fs::remove_file(release_dir(plugin_dir).join(".agents-mon-version"));
-    Command::new("bash")
-        .arg(plugin_dir.join("scripts/install-bin.sh"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    write_engine_state(plugin_dir, target).map_err(|_| "engine")
 }
 
 fn tmux_value(args: &[&str]) -> String {
@@ -437,7 +490,13 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
     note(&format!("switching to {target}…"));
 
     let result = if plugin_dir.join(".git").exists() {
-        git_install(plugin_dir, &target)
+        git_install(plugin_dir, &target).and_then(|previous| {
+            if let Err(reason) = install_exact_engine(plugin_dir, &target) {
+                let _ = git_success(plugin_dir, &["checkout", "--quiet", &previous]);
+                return Err(reason);
+            }
+            Ok(())
+        })
     } else {
         tarball_install(plugin_dir, &target)
     };
@@ -454,11 +513,9 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
             "unknown" => fail(&format!("unknown release {target}")),
             "checkout" => fail(&format!("could not check out {target}")),
             "fetch" => fail(&format!("could not download {target}")),
+            "engine" => fail(&format!("could not install engine for {target}")),
             _ => fail(&format!("could not write to {}", plugin_dir.display())),
         };
-    }
-    if !install_engine(plugin_dir) {
-        return fail(&format!("could not install engine for {target}"));
     }
     restart(plugin_dir, was_open, &old_control);
     note(&format!("now on {target}"));

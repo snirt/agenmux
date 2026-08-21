@@ -97,13 +97,23 @@ fn write_release_tree(repo: &Path, version: &str, include_toggle: bool) {
         r#"printf 'entrypoint\n' >> "$RESTART_LOG""#,
     );
     let install = format!(
-        r#"mkdir -p "$DIR/../target/release"
-printf 'v{version}\n%s\n' "$(git -C "$DIR/.." rev-parse HEAD 2>/dev/null || printf -)" > "$DIR/../target/release/.agents-mon-version"
-cat > "$DIR/../target/release/agents-mon" <<'BIN'
+        r#"write_bin() {{
+  cat > "$1" <<'BIN'
 #!/usr/bin/env bash
-if [ "${{1:-}}" = toggle ]; then printf 'native-toggle\n' >> "$RESTART_LOG"; else printf 'v{version}\n'; fi
+if [ "${{1:-}}" = --version ]; then printf 'agents-mon {version}\n'; elif [ "${{1:-}}" = toggle ]; then printf 'native-toggle\n' >> "$RESTART_LOG"; fi
 BIN
-chmod +x "$DIR/../target/release/agents-mon""#
+  chmod +x "$1"
+}}
+if [ "${{1:-}}" = fetch ]; then
+  pkg="$3/tmux-agents-mon-test"
+  mkdir -p "$pkg/target/release"
+  write_bin "$pkg/target/release/agents-mon"
+  printf '%s\n' "$pkg"
+  exit 0
+fi
+mkdir -p "$DIR/../target/release"
+write_bin "$DIR/../target/release/agents-mon"
+printf 'v{version}\n%s\n' "$(git -C "$DIR/.." rev-parse HEAD 2>/dev/null || printf -)" > "$DIR/../target/release/.agents-mon-version""#
     );
     script(
         &repo.join("scripts/install-bin.sh"),
@@ -231,12 +241,13 @@ fn git_update_switches_latest_and_refuses_dirty_or_unknown_targets() {
     assert_eq!(
         String::from_utf8_lossy(
             &Command::new(repo.join("target/release/agents-mon"))
+                .arg("--version")
                 .output()
                 .unwrap()
                 .stdout
         )
         .trim(),
-        "v0.1.0"
+        "agents-mon 0.1.0"
     );
 
     fs::write(repo.join("scratch"), "dirty\n").unwrap();
@@ -280,6 +291,50 @@ exec "$REAL_GIT" "$@""#,
         .env("REAL_GIT", real_git())
         .output()
         .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&git(&repo, &["describe", "--tags", "--exact-match"]).stdout)
+            .trim(),
+        "v0.1.1"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("Cargo.toml")).unwrap(),
+        "[package]\nname = \"agents-mon\"\nversion = \"0.1.1\"\n"
+    );
+}
+
+#[test]
+fn wrong_target_engine_restores_the_previous_git_source() {
+    let tmp = TempDir::new("wrong-engine");
+    let repo = tmp.path().join("repo");
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    make_git_releases(&repo);
+    no_server_tmux(&bin);
+
+    git_ok(&repo, &["checkout", "-q", "v0.1.0"]);
+    script(
+        &repo.join("scripts/install-bin.sh"),
+        r#"if [ "${1:-}" = fetch ]; then
+  pkg="$3/tmux-agents-mon-wrong"
+  mkdir -p "$pkg/target/release"
+  cat > "$pkg/target/release/agents-mon" <<'BIN'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] && printf 'agents-mon 9.9.9\n'
+BIN
+  chmod +x "$pkg/target/release/agents-mon"
+  printf '%s\n' "$pkg"
+  exit 0
+fi
+exit 1"#,
+    );
+    git_ok(&repo, &["add", "scripts/install-bin.sh"]);
+    git_ok(&repo, &["commit", "--amend", "-qm", "old wrong engine"]);
+    git_ok(&repo, &["tag", "-f", "v0.1.0"]);
+    git_ok(&repo, &["checkout", "-q", "v0.1.1"]);
+
+    let out = run(&repo, &bin, &["update", "v0.1.0"]);
 
     assert!(!out.status.success());
     assert_eq!(
@@ -430,7 +485,7 @@ fn tarball_update_removes_stale_source_and_reopens_with_target_native_toggle() {
         r#"DIR="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "${1:-}" = fetch ]; then
   pkg="$3/tmux-agents-mon-test"
-  mkdir -p "$pkg/scripts"
+  mkdir -p "$pkg/scripts" "$pkg/target/release"
   cat > "$pkg/Cargo.toml" <<'TOML'
 [package]
 name = "agents-mon"
@@ -442,16 +497,15 @@ TOML
 #!/usr/bin/env bash
 printf 'entrypoint\n' >> "$RESTART_LOG"
 ENTRY
+  cat > "$pkg/target/release/agents-mon" <<'BIN'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then printf 'agents-mon 0.1.0\n'; elif [ "${1:-}" = toggle ]; then printf 'native-toggle\n' >> "$RESTART_LOG"; fi
+BIN
+  chmod +x "$pkg/target/release/agents-mon"
   printf '%s\n' "$pkg"
   exit 0
 fi
-mkdir -p "$DIR/target/release"
-cat > "$DIR/target/release/agents-mon" <<'BIN'
-#!/usr/bin/env bash
-if [ "${1:-}" = toggle ]; then printf 'native-toggle\n' >> "$RESTART_LOG"; else printf 'v0.1.0\n'; fi
-BIN
-chmod +x "$DIR/target/release/agents-mon"
-printf 'v0.1.0\nnew\n' > "$DIR/target/release/.agents-mon-version""#,
+exit 1"#,
     );
     script(
         &bin.join("tmux"),
@@ -477,20 +531,18 @@ exit 0"#,
         fs::read_to_string(plugin.join("source-marker")).unwrap(),
         "verified source\n"
     );
-    assert_eq!(
-        fs::read_to_string(plugin.join("target/release/preserved")).unwrap(),
-        "keep\n"
-    );
+    assert!(!plugin.join("target/release/preserved").exists());
     assert_eq!(
         fs::read_to_string(plugin.join("target/release/.agents-mon-version")).unwrap(),
-        "v0.1.0\nnew\n"
+        "v0.1.0\n-\n"
     );
     assert_eq!(
         Command::new(plugin.join("target/release/agents-mon"))
+            .arg("--version")
             .output()
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
             .unwrap(),
-        "v0.1.0"
+        "agents-mon 0.1.0"
     );
     let events = fs::read_to_string(log).unwrap();
     assert!(events.contains("entrypoint"));
