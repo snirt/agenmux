@@ -2,6 +2,7 @@
 # End-to-end regression for the preserved sidebar's native client key table.
 # The first invocation omits a client to verify newest-real-client discovery.
 set -euo pipefail
+export TERM=xterm
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${AGENTS_MON_BIN:-$DIR/target/release/agents-mon}"
