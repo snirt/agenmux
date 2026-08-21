@@ -715,7 +715,7 @@ if [ "$fail" -eq 0 ] && [ "$(uname -s)" = Darwin ] &&
   tmp="$(mktemp -d)"
   plist="$tmp/apps/AgentsMon.app/Contents/Info.plist"
   if AGENTS_MON_NOTIFIER_BIN="$DIR/target/release/agents-mon-notifier" \
-    bash "$DIR/scripts/install-app.sh" "$tmp/apps" >/dev/null 2>&1 &&
+    bash "$DIR/scripts/install-app.sh" --quiet "$tmp/apps" >/dev/null 2>&1 &&
     [ -x "$tmp/apps/AgentsMon.app/Contents/MacOS/agents-mon-notifier" ] &&
     grep -q 'io.github.snirt.agents-mon' "$plist" &&
     grep -q 'LSUIElement' "$plist" &&
