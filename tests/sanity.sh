@@ -12,9 +12,6 @@ fi
 
 root="$(mktemp -d "${TMPDIR:-/tmp}/agents-mon-sanity.XXXXXX")"
 plugin="$root/plugin"
-host_cargo="$HOME/.cargo/bin/cargo"
-host_rustc="$HOME/.cargo/bin/rustc"
-host_rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
 active_socket=""
 started=$SECONDS
 
@@ -242,17 +239,10 @@ active_socket="$bootstrap_socket"
 mkdir -p "$root/bootstrap-bin"
 printf '#!/usr/bin/env bash\nexit 1\n' >"$root/bootstrap-bin/curl"
 printf '#!/usr/bin/env bash\nexit 1\n' >"$root/bootstrap-bin/git"
-cat >"$root/bootstrap-bin/cargo" <<SH
-#!/usr/bin/env bash
-exec env RUSTUP_HOME="$host_rustup_home" RUSTC="$host_rustc" \
-  "$host_cargo" "\$@"
-SH
-chmod +x "$root/bootstrap-bin/curl" "$root/bootstrap-bin/git" \
-  "$root/bootstrap-bin/cargo"
+chmod +x "$root/bootstrap-bin/curl" "$root/bootstrap-bin/git"
 PATH="$root/bootstrap-bin:$PATH" tmux -L "$bootstrap_socket" -f /dev/null \
   new-session -d -s bootstrap -x 100 -y 30 -c "$plugin" "$root/bin/codex"
 tmux -L "$bootstrap_socket" set-environment -g PATH "$root/bootstrap-bin:$PATH"
-tmux -L "$bootstrap_socket" set-environment -g RUSTUP_HOME "$host_rustup_home"
 tmux -L "$bootstrap_socket" set-option -g status-right '#{agents_mon}'
 tmux -L "$bootstrap_socket" run-shell "bash '$plugin/agents-mon.tmux'"
 bootstrap_path="$(tmux -L "$bootstrap_socket" display-message -p '#{socket_path}')"
@@ -285,9 +275,8 @@ printf 'ok   downloaded binary verified and executed\n'
 printf 'time download: %ss\n' "$download_seconds"
 
 phase=$SECONDS
-RUSTUP_HOME="$host_rustup_home" RUSTC="$host_rustc" \
-  CARGO_HOME="$root/cargo" CARGO_TARGET_DIR="$root/build" \
-  "$host_cargo" build --release --locked --manifest-path "$DIR/Cargo.toml"
+CARGO_HOME="$root/cargo" CARGO_TARGET_DIR="$root/build" \
+  cargo build --release --locked --manifest-path "$DIR/Cargo.toml"
 build_seconds=$((SECONDS - phase))
 mkdir -p "$plugin/target/source"
 cp "$root/build/release/agents-mon" "$plugin/target/source/agents-mon"
