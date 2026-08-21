@@ -12,6 +12,9 @@ fi
 
 root="$(mktemp -d "${TMPDIR:-/tmp}/agents-mon-sanity.XXXXXX")"
 plugin="$root/plugin"
+host_cargo="$HOME/.cargo/bin/cargo"
+host_rustc="$HOME/.cargo/bin/rustc"
+host_rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
 active_socket=""
 started=$SECONDS
 
@@ -22,10 +25,8 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$plugin" "$root/home" "$root/tmp" "$root/bin"
-cp -R "$DIR/agents" "$DIR/scripts" "$plugin/"
-cp "$DIR/agents-mon.tmux" "$plugin/agents-mon.tmux"
-# install-bin.sh resolves the release to fetch from the manifest version
-cp "$DIR/Cargo.toml" "$plugin/Cargo.toml"
+cp -R "$DIR/agents" "$DIR/scripts" "$DIR/src" "$plugin/"
+cp "$DIR/agents-mon.tmux" "$DIR/Cargo.toml" "$DIR/Cargo.lock" "$plugin/"
 export HOME="$root/home"
 export XDG_CONFIG_HOME="$root/home/.config"
 export TMPDIR="$root/tmp"
@@ -135,7 +136,10 @@ TOML
     mkdir -p "$case_plugin/src"
     cat >"$case_plugin/src/main.rs" <<RS
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("sidebar") {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.get(0).map(String::as_str) == Some("toggle")
+        && args.get(1).map(String::as_str) == Some("popup")
+    {
         std::fs::write("$marker", "opened").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
@@ -147,7 +151,7 @@ RS
     mkdir -p "$downloads/$tag/$package/target/release"
     cat >"$downloads/$tag/$package/target/release/agents-mon" <<SH
 #!/usr/bin/env bash
-if [ "\${1:-}" = sidebar ]; then
+if [ "\${1:-}" = toggle ] && [ "\${2:-}" = popup ]; then
   printf opened >"$marker"
   sleep 0.3
 fi
@@ -232,14 +236,29 @@ run_immediate_popup_bootstrap bad-checksum
 # use deterministic command stubs in tests/run.sh.
 bootstrap_socket="agents-mon-sanity-bootstrap-$$"
 active_socket="$bootstrap_socket"
-tmux -L "$bootstrap_socket" -f /dev/null new-session -d -s bootstrap -x 100 -y 30 \
-  -c "$plugin" "$root/bin/codex"
+# This checkout is ahead of the latest published binary, whose CLI may not yet
+# include native toggle. Force the already-covered Cargo fallback so this case
+# executes the current source without restoring a Bash runtime path.
+mkdir -p "$root/bootstrap-bin"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$root/bootstrap-bin/curl"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$root/bootstrap-bin/git"
+cat >"$root/bootstrap-bin/cargo" <<SH
+#!/usr/bin/env bash
+exec env RUSTUP_HOME="$host_rustup_home" RUSTC="$host_rustc" \
+  "$host_cargo" "\$@"
+SH
+chmod +x "$root/bootstrap-bin/curl" "$root/bootstrap-bin/git" \
+  "$root/bootstrap-bin/cargo"
+PATH="$root/bootstrap-bin:$PATH" tmux -L "$bootstrap_socket" -f /dev/null \
+  new-session -d -s bootstrap -x 100 -y 30 -c "$plugin" "$root/bin/codex"
+tmux -L "$bootstrap_socket" set-environment -g PATH "$root/bootstrap-bin:$PATH"
+tmux -L "$bootstrap_socket" set-environment -g RUSTUP_HOME "$host_rustup_home"
 tmux -L "$bootstrap_socket" set-option -g status-right '#{agents_mon}'
 tmux -L "$bootstrap_socket" run-shell "bash '$plugin/agents-mon.tmux'"
 bootstrap_path="$(tmux -L "$bootstrap_socket" display-message -p '#{socket_path}')"
 bootstrap_pid="$(tmux -L "$bootstrap_socket" display-message -p '#{pid}')"
-env TMPDIR="$TMPDIR" TMUX="$bootstrap_path,$bootstrap_pid,0" \
-  bash "$plugin/scripts/toggle.sh"
+env PATH="$root/bootstrap-bin:$PATH" TMPDIR="$TMPDIR" \
+  TMUX="$bootstrap_path,$bootstrap_pid,0" bash "$plugin/scripts/toggle.sh"
 for _ in $(seq 1 80); do
   tmux -L "$bootstrap_socket" list-panes -a -F '#{pane_title}' | grep -qx agents-mon && break
   sleep 0.1
@@ -266,8 +285,9 @@ printf 'ok   downloaded binary verified and executed\n'
 printf 'time download: %ss\n' "$download_seconds"
 
 phase=$SECONDS
-CARGO_HOME="$root/cargo" CARGO_TARGET_DIR="$root/build" \
-  cargo build --release --locked --manifest-path "$DIR/Cargo.toml"
+RUSTUP_HOME="$host_rustup_home" RUSTC="$host_rustc" \
+  CARGO_HOME="$root/cargo" CARGO_TARGET_DIR="$root/build" \
+  "$host_cargo" build --release --locked --manifest-path "$DIR/Cargo.toml"
 build_seconds=$((SECONDS - phase))
 mkdir -p "$plugin/target/source"
 cp "$root/build/release/agents-mon" "$plugin/target/source/agents-mon"

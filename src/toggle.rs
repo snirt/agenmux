@@ -202,7 +202,7 @@ fn scan_cache() -> PathBuf {
 
 fn popup_height(cache: &Path, client: Option<&str>) -> usize {
     let text = std::fs::read_to_string(cache).unwrap_or_default();
-    let Some(mut height) = cache_height(&text) else {
+    let Some(height) = cache_height(&text) else {
         return 15;
     };
     let client_height = client
@@ -212,8 +212,11 @@ fn popup_height(cache: &Path, client: Option<&str>) -> usize {
         .or_else(|| tmux::command(&["display-message", "-p", "#{client_height}"]).ok())
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(height + 2);
-    height = height.min(client_height.saturating_sub(2));
-    height.max(15)
+    cap_popup_height(height, client_height)
+}
+
+fn cap_popup_height(height: usize, client_height: usize) -> usize {
+    height.min(client_height.saturating_sub(2)).max(15)
 }
 
 fn cache_height(text: &str) -> Option<usize> {
@@ -251,5 +254,12 @@ mod tests {
             .join("\n");
         assert_eq!(cache_height(""), None);
         assert_eq!(cache_height(&text), Some(27));
+    }
+
+    #[test]
+    fn popup_height_caps_to_client_and_keeps_help_floor() {
+        assert_eq!(cap_popup_height(40, 22), 20);
+        assert_eq!(cap_popup_height(10, 40), 15);
+        assert_eq!(cap_popup_height(40, 10), 15);
     }
 }
