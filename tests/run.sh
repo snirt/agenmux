@@ -479,13 +479,15 @@ SH
   TMUX_STUB_LOG="$tmp/tmux.log" TMPDIR="$tmp" PATH="$tmp/bin:$PATH" \
     "$BIN" toggle popup popup-client
   popups="$(grep -c '^display-popup' "$tmp/tmux.log")"
-  if [ "$popups" -eq 2 ] &&
-    grep -Fq 'switch-client -c newest-client -t %42' "$tmp/tmux.log" &&
+  owner_popups="$(grep '^display-popup' "$tmp/tmux.log" | grep -Fc -- '-c popup-client')"
+  if [ "$popups" -eq 2 ] && [ "$owner_popups" -eq 2 ] &&
+    grep -Fq 'switch-client -c popup-client -t %42' "$tmp/tmux.log" &&
+    ! grep -Fq 'switch-client -c newest-client' "$tmp/tmux.log" &&
     grep -Fq 'select-window -t %42' "$tmp/tmux.log" &&
     grep -Fq 'select-pane -t %42' "$tmp/tmux.log"; then
-    echo "ok   popup-jump-reopens-over-target"
+    echo "ok   popup-jump-keeps-owner"
   else
-    echo "FAIL popup-jump-reopens-over-target"
+    echo "FAIL popup-jump-keeps-owner"
     cat "$tmp/tmux.log"
     fail=1
   fi

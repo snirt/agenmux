@@ -127,7 +127,7 @@ fn select_sidebar(client: Option<&str>) {
     let _ = tmux::command_status(&["switch-client", "-c", client, "-T", "agents-mon"]);
 }
 
-fn popup(plugin_dir: &Path, mut client: Option<String>) -> i32 {
+fn popup(plugin_dir: &Path, client: Option<String>) -> i32 {
     let pin = std::env::temp_dir().join("agents-mon-pin");
     if pin.exists() {
         let _ = std::fs::remove_file(pin);
@@ -175,10 +175,14 @@ fn popup(plugin_dir: &Path, mut client: Option<String>) -> i32 {
             let target = std::fs::read_to_string(&jump).unwrap_or_default();
             let target = target.trim();
             let _ = std::fs::remove_file(&jump);
-            client = panes::newest_real_client("#{client_name}").ok().flatten();
             if !target.is_empty() {
-                if let Some(owner) = client.as_deref() {
-                    let _ = tmux::command_status(&["switch-client", "-c", owner, "-t", target]);
+                let Some(owner) = client.as_deref() else {
+                    let _ = std::fs::remove_file(&pin);
+                    break;
+                };
+                if tmux::command_status(&["switch-client", "-c", owner, "-t", target]).is_err() {
+                    let _ = std::fs::remove_file(&pin);
+                    break;
                 }
                 let _ = tmux::command_status(&["select-window", "-t", target]);
                 let _ = tmux::command_status(&["select-pane", "-t", target]);
