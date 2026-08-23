@@ -11,9 +11,11 @@
 use crate::attention::Tracker;
 use crate::conf::AgentConf;
 use crate::pane_writers::PaneWriters;
+use crate::panes;
 use crate::procs::IdentCache;
+use crate::release;
 use crate::scan::{self, PaneRow};
-use crate::tmux::{Tmux, TmuxError};
+use crate::tmux::{command_spawn, command_status, Tmux, TmuxError};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
@@ -191,6 +193,8 @@ impl StateFilter {
 enum Key {
     Up,
     Down,
+    WheelUp,
+    WheelDown,
     Jump,
     Quit,
     Close,
@@ -207,17 +211,42 @@ enum Key {
 
 enum Overlay {
     Help,
-    Versions {
-        sel: usize,
-        chosen: Option<String>,
-    },
+    Versions { sel: usize, chosen: Option<String> },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DispatchMode {
+    Overlay,
+    Search,
+    Normal,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DispatchResult {
+    Continue,
+    Break,
+    QuietExit,
+}
+
+fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMode {
+    if overlay.is_some() {
+        DispatchMode::Overlay
+    } else if search_focused {
+        DispatchMode::Search
+    } else {
+        DispatchMode::Normal
+    }
 }
 
 fn read_key(fd: libc::c_int) -> Key {
-    let Some(b) = read_byte(fd) else { return Key::Quit }; // EOF: explicit close
+    let Some(b) = read_byte(fd) else {
+        return Key::Quit;
+    }; // EOF: explicit close
     match b {
         b'j' => Key::Down,
         b'k' => Key::Up,
+        0x01 => Key::WheelUp,
+        0x02 => Key::WheelDown,
         b'q' | 0x03 | 0x04 => Key::Quit, // q, Ctrl-C, Ctrl-D
         b'Q' => Key::Close,
         b'l' | b'\r' | b'\n' => Key::Jump,
@@ -252,7 +281,9 @@ fn read_key(fd: libc::c_int) -> Key {
 /// Popup/tty search owns printable input. Daemon search receives printable
 /// bytes through NUL-prefixed packets decoded by read_key instead.
 fn read_search_key(fd: libc::c_int) -> Key {
-    let Some(first) = read_byte(fd) else { return Key::Quit };
+    let Some(first) = read_byte(fd) else {
+        return Key::Quit;
+    };
     match first {
         b'\r' | b'\n' => Key::Jump,
         0x03 | 0x04 => Key::Quit,
@@ -287,7 +318,9 @@ fn read_search_key(fd: libc::c_int) -> Key {
                 };
                 bytes.push(next);
             }
-            String::from_utf8(bytes).map(Key::Text).unwrap_or(Key::Other)
+            String::from_utf8(bytes)
+                .map(Key::Text)
+                .unwrap_or(Key::Other)
         }
         _ => Key::Other,
     }
@@ -319,6 +352,8 @@ pub fn send_key(name: &str) -> i32 {
             "space" => b" ".to_vec(),
             "j" => b"j".to_vec(),
             "k" => b"k".to_vec(),
+            "wheel-up" => vec![0x01],
+            "wheel-down" => vec![0x02],
             "l" => b"l".to_vec(),
             "q" => b"q".to_vec(),
             "close" => b"Q".to_vec(),
@@ -343,7 +378,9 @@ pub fn send_key(name: &str) -> i32 {
 /// Decode the tail of an escape sequence. `next` yields the next byte, or None
 /// once nothing more arrives — a bare Esc, which clears filtering.
 fn escape_key(mut next: impl FnMut() -> Option<u8>) -> Key {
-    let Some(a) = next() else { return Key::AllStates };
+    let Some(a) = next() else {
+        return Key::AllStates;
+    };
     // CSI (ESC [ A) normally, SS3 (ESC O A) in application-cursor mode
     match (a, next()) {
         (b'[' | b'O', Some(b'A')) => Key::Up,
@@ -380,7 +417,10 @@ fn newer_than(a: &str, b: &str) -> bool {
     };
     let (x, y) = (parts(a), parts(b));
     for i in 0..x.len().max(y.len()) {
-        let (l, r) = (x.get(i).copied().unwrap_or(0), y.get(i).copied().unwrap_or(0));
+        let (l, r) = (
+            x.get(i).copied().unwrap_or(0),
+            y.get(i).copied().unwrap_or(0),
+        );
         if l != r {
             return l > r;
         }
@@ -405,7 +445,12 @@ fn known_tags(plugin_dir: &PathBuf) -> Vec<String> {
 fn picker_sel(tags: &[String], cur: &str, chosen: Option<&str>, sel: usize) -> usize {
     let selected = chosen
         .and_then(|tag| tags.iter().position(|t| t == tag))
-        .or_else(|| chosen.is_none().then(|| tags.iter().position(|t| t == cur)).flatten())
+        .or_else(|| {
+            chosen
+                .is_none()
+                .then(|| tags.iter().position(|t| t == cur))
+                .flatten()
+        })
         .unwrap_or(sel);
     selected.min(tags.len().saturating_sub(1))
 }
@@ -520,6 +565,18 @@ fn superseded(mine: &str, current: &str) -> bool {
     !mine.is_empty() && !current.is_empty() && current != mine
 }
 
+fn parse_wheel_delay(value: &str) -> Option<Duration> {
+    match value.trim() {
+        "off" => None,
+        "" => Some(Duration::from_millis(300)),
+        value => value
+            .parse::<f64>()
+            .ok()
+            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+            .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok()),
+    }
+}
+
 /// Headless-mode state: frames → visible panes, keys ← FIFO, size ← panes.
 struct Daemon {
     keys_path: PathBuf,
@@ -528,7 +585,7 @@ struct Daemon {
     size: (usize, usize), // narrowest pane x watched pane's height
     seen_mirror: bool,    // suicide only arms after the first pane appears
     empty_ticks: u32,     // consecutive measurements that found no pane
-    client: String, // our control client, as published in the option
+    client: String,       // our control client, as published in the option
     started: Instant,
     // window id -> (window size, pane count) at the last measure: a mirror
     // whose width changed while both stayed put is a user border-drag. The
@@ -547,13 +604,13 @@ pub struct Sidebar {
     ident: IdentCache,
     subj: scan::SubjectCache,
     tracker: Tracker,
-    rows: Vec<PaneRow>,   // complete debounced view-model; never filter cache/status
-    visible: Vec<usize>,  // filtered indexes used by render/navigation/clicks
+    rows: Vec<PaneRow>, // complete debounced view-model; never filter cache/status
+    visible: Vec<usize>, // filtered indexes used by render/navigation/clicks
     query: String,
     state_filter: Option<StateFilter>,
     search_focused: bool,
-    sel: usize,           // 1-based index into visible, like the bash script
-    scroll: usize,      // first visible list line — follows the selection
+    sel: usize,    // 1-based index into visible, like the bash script
+    scroll: usize, // first visible list line — follows the selection
     sel_pane: String,
     last_active: String,
     active: String,
@@ -627,16 +684,18 @@ fn new_sidebar(
 
 pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     let self_pane = std::env::var("TMUX_PANE").unwrap_or_default();
-    let pin = std::env::var("AGENTS_MON_PIN").ok().filter(|p| !p.is_empty());
+    let pin = std::env::var("AGENTS_MON_PIN")
+        .ok()
+        .filter(|p| !p.is_empty());
     let rows_file = std::env::temp_dir().join(format!(
         "agents-mon-rows-{}",
         self_pane.trim_start_matches('%')
     ));
 
     unsafe {
-        libc::signal(libc::SIGWINCH, on_winch as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, on_term as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_term as libc::sighandler_t);
+        libc::signal(libc::SIGWINCH, on_winch as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
     }
     let _raw = RawMode::enable();
     print!("{E}[?25l{E}[2J");
@@ -664,8 +723,8 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
 /// (with full teardown) when the last pane disappears.
 pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     unsafe {
-        libc::signal(libc::SIGTERM, on_term as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_term as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
     }
     let tmp = std::env::temp_dir();
     let keys_path = tmp.join("agents-mon-keys");
@@ -759,11 +818,22 @@ fn event_loop(sb: &mut Sidebar) -> bool {
     let key_fd = sb.daemon.as_ref().map_or(0, |d| d.keys_fd);
     let mut next_scan = Instant::now(); // scan immediately
     let mut next_tick = Instant::now();
+    let mut wheel_jump_at: Option<Instant> = None;
     loop {
         if QUIT.load(Ordering::Relaxed) {
             break;
         }
         let mut now = Instant::now();
+        if wheel_jump_at.is_some_and(|deadline| now >= deadline) {
+            wheel_jump_at = None;
+            match sb.dispatch_key(Key::Jump) {
+                DispatchResult::Continue => {}
+                DispatchResult::Break => break,
+                DispatchResult::QuietExit => return true,
+            }
+            sb.render(false);
+            now = Instant::now();
+        }
         if now >= next_scan {
             match sb.scan_tick() {
                 Ok(()) => {}
@@ -784,12 +854,10 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             now = Instant::now();
             next_scan = now + Duration::from_secs(2);
         }
-        let animating = sb.visible.iter().any(|&i| {
-            matches!(
-                sb.rows[i].state.as_str(),
-                "working" | "blocked" | "done"
-            )
-        });
+        let animating = sb
+            .visible
+            .iter()
+            .any(|&i| matches!(sb.rows[i].state.as_str(), "working" | "blocked" | "done"));
         // deadline-based tick: held keys keep poll_inputs returning early, so
         // advancing on poll timeout would freeze the spinner during key repeat
         if animating && now >= next_tick {
@@ -798,11 +866,14 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             sb.render(false);
         }
         // animated states need ticks; all-idle sleeps until the next scan
-        let wake = if animating {
+        let mut wake = if animating {
             next_tick.saturating_duration_since(now)
         } else {
             next_scan.saturating_duration_since(now)
         };
+        if let Some(deadline) = wheel_jump_at {
+            wake = wake.min(deadline.saturating_duration_since(now));
+        }
         let (key_ready, pipe_ready) = poll_inputs(key_fd, sb.tmux.fd(), sb.tmux.buffered(), wake);
         if pipe_ready {
             // focus notification (%window-pane-changed etc.) — rescan now so
@@ -819,45 +890,20 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             } else {
                 read_key(key_fd)
             };
-            if sb.overlay.is_some() {
-                sb.overlay_key(key);
-                sb.render(false);
-                continue;
+            let (key, wheel) = match key {
+                Key::WheelUp => (Key::Up, true),
+                Key::WheelDown => (Key::Down, true),
+                key => (key, false),
+            };
+            if wheel {
+                wheel_jump_at = sb
+                    .wheel_jump_delay()
+                    .and_then(|delay| Instant::now().checked_add(delay));
             }
-            if sb.search_focused {
-                sb.search_key(key);
-                sb.render(false);
-                continue;
-            }
-            match key {
-                Key::Down => sb.move_sel(1),
-                Key::Up => sb.move_sel(-1),
-                Key::Jump => {
-                    if sb.jump() {
-                        break;
-                    }
-                }
-                Key::Help => sb.help(),
-                Key::Versions => sb.versions(),
-                Key::Search => sb.focus_search(),
-                Key::CycleState => sb.cycle_state_filter(),
-                Key::AllStates => sb.clear_filter(),
-                Key::Quit => {
-                    if sb.daemon.is_none() {
-                        // Popup/tty mode owns stdin, so q/Ctrl-C/Ctrl-D closes it.
-                        if let Some(p) = &sb.pin {
-                            let _ = std::fs::remove_file(p);
-                        }
-                        break;
-                    }
-                    // In preserved-pane mode close arrives as Key::Close from
-                    // the key table; Quit also covers FIFO EOF, which must not
-                    // kill the sidebar.
-                }
-                Key::Close => {
-                    break;
-                }
-                Key::Backspace | Key::ClearSearch | Key::Text(_) | Key::Other => {}
+            match sb.dispatch_key(key) {
+                DispatchResult::Continue => {}
+                DispatchResult::Break => break,
+                DispatchResult::QuietExit => return true,
             }
             sb.render(false);
         }
@@ -874,7 +920,7 @@ fn cleanup(rows_file: &PathBuf, pin: &Option<String>) {
     let _ = std::io::stdout().flush();
     let _ = std::fs::remove_file(rows_file);
     if let Some(p) = pin {
-        // keep the pin when a jump is pending — toggle.sh reopens the popup
+        // keep the pin when a jump is pending — native toggle reopens the popup
         if !std::path::Path::new(&format!("{p}.jump")).exists() {
             let _ = std::fs::remove_file(p);
         }
@@ -882,6 +928,74 @@ fn cleanup(rows_file: &PathBuf, pin: &Option<String>) {
 }
 
 impl Sidebar {
+    /// Route every logical key through the active UI mode. Delayed wheel jumps
+    /// use this too, so search accepts before jumping and overlays consume the
+    /// key instead of acting on the hidden list.
+    fn dispatch_key(&mut self, key: Key) -> DispatchResult {
+        match dispatch_mode(self.overlay.as_ref(), self.search_focused) {
+            DispatchMode::Overlay => {
+                self.overlay_key(key);
+                return DispatchResult::Continue;
+            }
+            DispatchMode::Search => {
+                self.search_key(key);
+                return DispatchResult::Continue;
+            }
+            DispatchMode::Normal => {}
+        }
+        match key {
+            Key::Down => self.move_sel(1),
+            Key::Up => self.move_sel(-1),
+            Key::Jump => {
+                if self.jump() {
+                    return DispatchResult::Break;
+                }
+            }
+            Key::Help => self.help(),
+            Key::Versions => self.versions(),
+            Key::Search => self.focus_search(),
+            Key::CycleState => self.cycle_state_filter(),
+            Key::AllStates => self.clear_filter(),
+            Key::Quit => {
+                if self.daemon.is_none() {
+                    // Popup/tty mode owns stdin, so q/Ctrl-C/Ctrl-D closes it.
+                    if let Some(p) = &self.pin {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    return DispatchResult::Break;
+                }
+                // In preserved-pane mode close arrives as Key::Close from the
+                // key table; Quit also covers FIFO EOF, which must not kill it.
+            }
+            Key::Close => {
+                if self.daemon.is_some() {
+                    // Finish teardown before a fast reopen can observe the
+                    // dying control client and attach panes to it.
+                    self.teardown();
+                    self.daemon = None;
+                    return DispatchResult::QuietExit;
+                }
+                return DispatchResult::Break;
+            }
+            Key::Backspace
+            | Key::ClearSearch
+            | Key::Text(_)
+            | Key::WheelUp
+            | Key::WheelDown
+            | Key::Other => {}
+        }
+        DispatchResult::Continue
+    }
+
+    fn wheel_jump_delay(&mut self) -> Option<Duration> {
+        parse_wheel_delay(
+            &self
+                .tmux
+                .run("show-option -gqv @agents-mon-wheel-jump")
+                .unwrap_or_default(),
+        )
+    }
+
     fn scan_tick(&mut self) -> Result<(), TmuxError> {
         let t0 = Instant::now();
         let scanned = scan::scan(
@@ -1058,15 +1172,14 @@ impl Sidebar {
             Key::Text(text) => {
                 self.state_filter = None;
                 let room = 256usize.saturating_sub(self.query.chars().count());
-                self.query.extend(
-                    text.chars()
-                        .filter(|c| !c.is_control())
-                        .take(room),
-                );
+                self.query
+                    .extend(text.chars().filter(|c| !c.is_control()).take(room));
                 self.rebuild_visible(true);
             }
             Key::AllStates => self.clear_filter(),
-            Key::Search
+            Key::WheelUp
+            | Key::WheelDown
+            | Key::Search
             | Key::CycleState
             | Key::Help
             | Key::Versions
@@ -1074,7 +1187,7 @@ impl Sidebar {
         }
     }
 
-    /// true = exit the loop (popup jump hands off to toggle.sh)
+    /// true = exit the loop (popup jump hands off to native toggle)
     fn jump(&mut self) -> bool {
         let Some(target) = self
             .visible
@@ -1091,18 +1204,11 @@ impl Sidebar {
         // navigator state before leaving.
         self.clear_filter();
         if let Some(pin) = &self.pin {
-            // popup holds the client — hand the target to toggle.sh, which
+            // popup holds the client — hand the target to native toggle, which
             // jumps after the popup closes
             let _ = std::fs::write(format!("{pin}.jump"), &target);
             return true;
         }
-        // move the sidebar into the target window BEFORE switching the view —
-        // the join-pane reflow happens off-screen (no flash on arrival)
-        let follow = self.plugin_dir.join("scripts/follow.sh");
-        let _ = std::process::Command::new("bash")
-            .arg(follow)
-            .arg(&target)
-            .status();
         // switch/select MUST NOT go over the control pipe: they fire the
         // plugin's select-window/session hooks, and tmux delivers each hook's
         // run-shell result to the triggering client as an extra %begin/%end
@@ -1124,14 +1230,14 @@ impl Sidebar {
                     .max_by_key(|(act, _)| *act)
                     .map(|(_, name)| name)
             });
-        let mut cmd = std::process::Command::new("tmux");
+        let mut args = Vec::new();
         if let Some(client) = &client {
-            cmd.args([
+            args.extend([
                 "switch-client",
                 "-c",
                 client,
                 "-t",
-                &target,
+                target.as_str(),
                 ";",
                 "switch-client",
                 "-c",
@@ -1141,9 +1247,16 @@ impl Sidebar {
                 ";",
             ]);
         }
-        let _ = cmd
-            .args(["select-window", "-t", &target, ";", "select-pane", "-t", &target])
-            .status();
+        args.extend([
+            "select-window",
+            "-t",
+            target.as_str(),
+            ";",
+            "select-pane",
+            "-t",
+            target.as_str(),
+        ]);
+        let _ = command_status(&args);
         false
     }
 
@@ -1205,10 +1318,14 @@ impl Sidebar {
         let mut ms: Vec<M> = Vec::new();
         for l in out.lines() {
             let f: Vec<&str> = l.split('\t').collect();
-            let [pane, win, pw, ph, ws, wp, act, sess] = f.as_slice() else { continue };
-            let (Ok(pw), Ok(ph), Ok(wp)) =
-                (pw.parse::<usize>(), ph.parse::<usize>(), wp.parse::<usize>())
-            else {
+            let [pane, win, pw, ph, ws, wp, act, sess] = f.as_slice() else {
+                continue;
+            };
+            let (Ok(pw), Ok(ph), Ok(wp)) = (
+                pw.parse::<usize>(),
+                ph.parse::<usize>(),
+                wp.parse::<usize>(),
+            ) else {
                 continue;
             };
             let Some((ww, wh)) = ws
@@ -1278,7 +1395,8 @@ impl Sidebar {
                 ]);
                 m.w = wopt;
             }
-            let _ = std::process::Command::new("tmux").args(&argv).status();
+            let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+            let _ = command_status(&args);
         }
         // Width DOES fold to the minimum: mirror::draw clips rows but NOT
         // columns, so a frame wider than some pane would wrap and shift every
@@ -1305,17 +1423,22 @@ impl Sidebar {
             // resize the OTHER sidebars via forked tmux (hook run-shell
             // echoes on the control pipe would desync it); the dragged pane
             // stays untouched so nothing ever fights the user's drag
-            let mut cmd = std::process::Command::new("tmux");
-            let mut any = false;
+            let mut argv = Vec::new();
             for m in ms.iter().filter(|m| m.pane != src_pane && m.w != width) {
-                if any {
-                    cmd.arg(";");
+                if !argv.is_empty() {
+                    argv.push(";".to_string());
                 }
-                cmd.args(["resize-pane", "-t", &m.pane, "-x", &width.to_string()]);
-                any = true;
+                argv.extend([
+                    "resize-pane".to_string(),
+                    "-t".to_string(),
+                    m.pane.clone(),
+                    "-x".to_string(),
+                    width.to_string(),
+                ]);
             }
-            if any {
-                let _ = cmd.status();
+            if !argv.is_empty() {
+                let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+                let _ = command_status(&args);
             }
             w = width; // render for the adopted width now, not the stale min
         }
@@ -1356,9 +1479,8 @@ impl Sidebar {
     }
 
     /// Preserved-pane shutdown: close visible writers, kill empty panes and
-    /// restore layouts via a
-    /// forked script (hook run-shell echoes would desync the control pipe),
-    /// then drop the key FIFO and row map.
+    /// restore layouts through the native pane lifecycle, then drop the key
+    /// FIFO and row map.
     /// Drop only what is ours. The panes, the FIFO path and the rows file
     /// belong to the daemon that replaced us — teardown() would delete them.
     fn quiet_exit(&mut self) {
@@ -1374,8 +1496,7 @@ impl Sidebar {
         if let Some(d) = &mut self.daemon {
             d.writers.clear();
         }
-        let script = self.plugin_dir.join("scripts/teardown.sh");
-        let _ = std::process::Command::new("bash").arg(script).status();
+        let _ = panes::teardown();
         if let Some(d) = &self.daemon {
             let _ = std::fs::remove_file(&d.keys_path);
             unsafe { libc::close(d.keys_fd) };
@@ -1433,11 +1554,7 @@ impl Sidebar {
         let mut filter = match self.state_filter {
             Some(state) => format!(" [{}]", state.label()),
             None if self.search_focused || !self.query.is_empty() => {
-                let query: String = self
-                    .query
-                    .chars()
-                    .filter(|c| !c.is_control())
-                    .collect();
+                let query: String = self.query.chars().filter(|c| !c.is_control()).collect();
                 format!(" /{query}")
             }
             None => String::new(),
@@ -1572,19 +1689,15 @@ impl Sidebar {
     }
 
     /// Version picker: update or roll back to any release the last check saw.
-    /// Selecting one hands off to update.sh, which switches the source, the
-    /// engine, and restarts the view.
+    /// Selecting one switches the source, the engine, and restarts the view.
     fn versions(&mut self) {
         // opening the picker is an explicit "what is out there?" — ask now
         // instead of serving a list that the daily check may have left a day
         // old. It lands in the file and normal scan renders pick it up live.
-        let _ = std::process::Command::new("bash")
-            .arg(self.plugin_dir.join("scripts/install-bin.sh"))
-            .arg("refresh")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let plugin_dir = self.plugin_dir.clone();
+        std::thread::spawn(move || {
+            release::refresh(&plugin_dir);
+        });
         self.overlay = Some(Overlay::Versions {
             sel: 0,
             chosen: None,
@@ -1620,9 +1733,8 @@ impl Sidebar {
                 let cur = current_tag();
                 let tags = known_tags(&self.plugin_dir);
                 *sel = picker_sel(&tags, &cur, chosen.as_deref(), *sel);
-                let mut text = format!(
-                    "{E}[2J{E}[H{E}[1magents — versions{E}[0m {E}[2m{cur}{E}[0m\n\n"
-                );
+                let mut text =
+                    format!("{E}[2J{E}[H{E}[1magents — versions{E}[0m {E}[2m{cur}{E}[0m\n\n");
                 if tags.is_empty() {
                     text.push_str(&format!(
                         " {E}[2mno releases found — checking…{E}[0m\n\n\
@@ -1700,20 +1812,20 @@ impl Sidebar {
                 continue;
             };
             if title == "agents-mon" {
-                let _ = std::process::Command::new("tmux")
-                    .args(["switch-client", "-c", client, "-T", "agents-mon"])
-                    .spawn();
+                let _ = command_spawn(&["switch-client", "-c", client, "-T", "agents-mon"]);
             }
         }
     }
 
-    /// nohup + no wait: update.sh kills the panes this engine renders into,
-    /// and a pane kill would otherwise SIGHUP the switch halfway through.
+    /// nohup + no wait: update kills the panes this engine renders into, and a
+    /// pane kill would otherwise SIGHUP the switch halfway through.
     fn switch_version(&mut self, tag: &str) {
-        let script = self.plugin_dir.join("scripts/update.sh");
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
         let _ = std::process::Command::new("nohup")
-            .arg("bash")
-            .arg(script)
+            .arg(exe)
+            .arg("update")
             .arg(tag)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -1762,7 +1874,7 @@ mod tests {
         // mirror list reads back empty, and every mirror pane got torn down
         assert!(!suicide(true, s(60), 1));
         assert!(suicide(true, s(60), 2)); // user really did close them all
-        // startup grace: no mirror has ever appeared yet
+                                          // startup grace: no mirror has ever appeared yet
         assert!(!suicide(false, s(5), 9));
         assert!(suicide(false, s(30), 2)); // none ever came — give up
     }
@@ -1779,9 +1891,15 @@ mod tests {
 
     #[test]
     fn cursor_uses_state_hue_and_focus_bold() {
-        assert_eq!(cursor_mark(true, true, "idle"), format!("{E}[1;32m❯{E}[0m "));
+        assert_eq!(
+            cursor_mark(true, true, "idle"),
+            format!("{E}[1;32m❯{E}[0m ")
+        );
         assert_eq!(cursor_mark(true, false, "idle"), format!("{E}[32m❯{E}[0m "));
-        assert_eq!(cursor_mark(true, true, "working"), format!("{E}[1;33m❯{E}[0m "));
+        assert_eq!(
+            cursor_mark(true, true, "working"),
+            format!("{E}[1;33m❯{E}[0m ")
+        );
         assert_eq!(cursor_mark(false, true, "blocked"), "  ");
     }
 
@@ -1813,6 +1931,10 @@ mod tests {
         }
         feed(b"j");
         assert!(matches!(read_key(fds[0]), Key::Down));
+        feed(&[0x01]);
+        assert!(matches!(read_key(fds[0]), Key::WheelUp));
+        feed(&[0x02]);
+        assert!(matches!(read_key(fds[0]), Key::WheelDown));
         feed(b"u");
         assert!(matches!(read_key(fds[0]), Key::Versions));
         feed(&[0, b'q']);
@@ -1844,6 +1966,36 @@ mod tests {
         // a tail that never completes is not a close — Esc already decided that
         assert!(matches!(decode(&[Some(b'['), None]), Key::Other));
         assert!(matches!(decode(&[Some(b'['), Some(b'Z')]), Key::Other));
+    }
+
+    #[test]
+    fn wheel_jump_delay_preserves_option_contract() {
+        assert_eq!(parse_wheel_delay(""), Some(Duration::from_millis(300)));
+        assert_eq!(parse_wheel_delay("0.5"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_wheel_delay("0"), Some(Duration::ZERO));
+        assert_eq!(parse_wheel_delay("off"), None);
+        assert_eq!(parse_wheel_delay("-1"), None);
+        assert_eq!(parse_wheel_delay("invalid"), None);
+    }
+
+    #[test]
+    fn delayed_wheel_jump_uses_search_help_and_versions_routes() {
+        assert_eq!(dispatch_mode(None, true), DispatchMode::Search);
+        assert_eq!(
+            dispatch_mode(Some(&Overlay::Help), false),
+            DispatchMode::Overlay
+        );
+        assert_eq!(
+            dispatch_mode(
+                Some(&Overlay::Versions {
+                    sel: 0,
+                    chosen: None,
+                }),
+                false,
+            ),
+            DispatchMode::Overlay
+        );
+        assert_eq!(dispatch_mode(None, false), DispatchMode::Normal);
     }
 
     #[test]
@@ -1918,9 +2070,9 @@ mod tests {
     fn bar_reasserts_the_background_after_every_reset() {
         let line = format!("{E}[1mcodex{E}[0m {E}[2mwork{E}[0m");
         let painted = bar(&line, BAR_BG, 14, 10);
-        assert!(!painted.split(&format!("{E}[0m")).any(|part| {
-            !part.is_empty() && !part.starts_with(BAR_BG)
-        }));
+        assert!(!painted
+            .split(&format!("{E}[0m"))
+            .any(|part| { !part.is_empty() && !part.starts_with(BAR_BG) }));
         assert!(painted.ends_with(&format!("    {E}[0m")));
         assert_eq!(bar(&line, "", 14, 10), line);
         assert_eq!(state_bg("blocked", true), "\x1b[48;2;42;16;16m");

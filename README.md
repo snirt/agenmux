@@ -18,7 +18,7 @@ hooks to install, nothing runs inside your agents.
 
 ## Demo
 
-https://github.com/user-attachments/assets/b141a2db-b0f2-4775-bc9c-2aac70075187
+<https://github.com/user-attachments/assets/b141a2db-b0f2-4775-bc9c-2aac70075187>
 
 ## Install
 
@@ -29,25 +29,24 @@ set -g @plugin 'snirt/tmux-agents-mon'
 ```
 
 Press `prefix + I`. That's it: the plugin downloads and verifies the Rust
-engine for your platform in the background, then uses it automatically on the
-next toggle. The bash fallback serves the first open while installation runs.
-After TPM updates, the native engine is refreshed without removing the old
-binary first.
+engine for your platform in the background. If you toggle before installation
+finishes, that first activation waits for the same installer; a failed download
+or build is reported in tmux instead of running an unverified fallback. After
+TPM updates, the native engine is refreshed without removing the old binary.
 
 Or manually: clone the repo and add `run-shell /path/to/tmux-agents-mon/agents-mon.tmux`
 to `~/.tmux.conf`.
 
-Requirements: tmux, bash, grep, awk, ps. `curl` and `tar` enable the automatic
-native download; without them, Cargo builds it when available. Bash is the
-fallback while the native engine is being installed or when it cannot be
-installed. No required build step.
+Requirements: tmux and bash for TPM/bootstrap. `curl` and `tar` enable the
+automatic native download; without them, Cargo builds it when available. No
+required build step on a supported release platform.
 
 ### Rust engine
 
-The Rust engine is the primary implementation. It runs the scan/sidebar hot
-path with one persistent tmux control-mode connection, using roughly 10x less
-CPU than the bash fallback. The plugin downloads and verifies a prebuilt binary
-automatically; if one is unavailable and [cargo](https://rustup.rs) is
+The Rust engine is the sole runtime implementation. It runs the scan/sidebar
+hot path with one persistent tmux control-mode connection. The plugin downloads
+and verifies a prebuilt binary automatically; if one is unavailable and
+[cargo](https://rustup.rs) is
 installed, it builds the engine in the background. `make build` does the same
 by hand, and `@agents-mon-bin` overrides the binary path. Agent detection stays
 in `agents/*.conf`, so adding or tuning agents never needs a rebuild. Building
@@ -93,7 +92,9 @@ Details worth knowing:
   It **refuses to run against a dirty working tree**; commit or stash first.
 - On a tarball install the verified release archive is extracted in place.
 - TPM's `prefix + U` still works and moves you to the tip of the default branch.
-- From a shell: `bash scripts/update.sh v0.1.5` (or `latest`).
+- From a shell: `target/release/agents-mon update v0.1.5` (or `latest`).
+  Rollbacks to older releases re-enter that release's own entrypoint, including
+  its legacy toggle script when the target predates the Rust-only runtime.
 
 ## Usage
 
@@ -233,27 +234,32 @@ displays.
 
 The sidebar or popup must remain open while the state transition occurs because
 notifications use the existing monitor process; no extra daemon is installed.
-The Bash fallback does not send notifications. A transition suppressed while
-focused is not delivered later merely because focus moves away.
+A transition suppressed while focused is not delivered later merely because
+focus moves away.
 
 ### CLI
 
-```sh
-scripts/scan.sh list    # pane_id  session:win.pane  agent  state  dir  subject
-scripts/scan.sh status  # the status-line segment
-scripts/scan.sh detect agents/codex.conf screen.txt 'pane title'
+The Rust binary is the complete runtime (`scan` is an alias for `list`):
+
+```text
+agents-mon --version
+agents-mon scan|list|status
+agents-mon detect <conf> <screen-file> [title]
+agents-mon sidebar|daemon
+agents-mon key <name>
+agents-mon click <pane> <row> <client>
+agents-mon wheel <pane> <up|down>
+agents-mon setup
+agents-mon toggle [split|popup] [client]
+agents-mon pane-add [window]|pane-orphan|pane-pin|teardown
+agents-mon releases refresh
+agents-mon update [latest|vX.Y.Z]
+agents-mon notification-open <socket> <pane> <bundle>
 ```
 
-The Rust binary exposes the same commands (with `scan` as an alias for `list`):
-
-```sh
-target/release/agents-mon list
-target/release/agents-mon status
-target/release/agents-mon detect agents/codex.conf screen.txt 'pane title'
-target/release/agents-mon --version
-```
-
-`sidebar` is an internal command used by the tmux integration.
+`sidebar`, `daemon`, `key`, mouse, setup, pane lifecycle, and
+`notification-open` are internal contracts called by the tmux integration;
+the scanner and update commands are suitable for direct shell use.
 
 ## Adding / overriding agents
 
@@ -282,9 +288,9 @@ prompt left on screen doesn't read as blocked.
 
 The sidebar subject shown below an agent is resolved from the cleaned pane
 title, then `SUBJECT_SCREEN`, then `SUBJECT_CMD`. The shell snippet can use
-`$path`, the pane's working directory. User configs are sourced by the bash
-engine, so only install configs you trust; the Rust engine parses the same
-assignments and runs `SUBJECT_CMD` when needed.
+`$path`, the pane's working directory. The Rust engine parses these assignments
+and executes `SUBJECT_CMD` through the shell when needed, so only install configs
+you trust.
 
 ## Tests
 
@@ -294,7 +300,14 @@ tests/sanity.sh    # release smoke + source build in an isolated tmux server
 ```
 
 The sanity test requires Nix and network access. It is the same end-to-end
-check run for pull requests.
+check run for pull requests. Rust integration tests also create private tmux
+servers for exact-client, pane lifecycle, setup, toggle, and release behavior.
+
+Only four shell entrypoints remain: `agents-mon.tmux` is TPM/pre-binary
+bootstrap, `scripts/install-bin.sh` installs and verifies the engine,
+`scripts/install-app.sh` packages the macOS notification app, and
+`scripts/version.sh` validates manifest/release versions. All plugin runtime
+behavior lives in Rust.
 
 Fixtures in `tests/fixtures/` are real `tmux capture-pane -p` dumps where
 possible (`claude-*`, `codex-idle`, `pi-idle`) and synthetic reconstructions for

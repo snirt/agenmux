@@ -28,6 +28,42 @@ impl From<std::io::Error> for TmuxError {
     }
 }
 
+pub fn command(args: &[&str]) -> Result<String, TmuxError> {
+    let output = Command::new("tmux").args(args).output()?;
+    if !output.status.success() {
+        return Err(TmuxError::Error(
+            String::from_utf8_lossy(&output.stderr)
+                .trim_end()
+                .to_string(),
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|e| TmuxError::Error(e.to_string()))
+}
+
+pub fn command_status(args: &[&str]) -> Result<(), TmuxError> {
+    command(args).map(drop)
+}
+
+pub fn command_spawn(args: &[&str]) -> Result<(), TmuxError> {
+    Command::new("tmux").args(args).spawn()?;
+    Ok(())
+}
+
+#[allow(dead_code)] // setup/pane commands added in the next migration tasks consume this
+pub fn lines(args: &[&str]) -> Result<Vec<String>, TmuxError> {
+    command(args).map(|output| output.lines().map(str::to_string).collect())
+}
+
+#[allow(dead_code)] // setup commands added in the next migration tasks consume this
+pub fn format_truth(value: &str) -> bool {
+    !value.is_empty() && value != "0"
+}
+
+#[allow(dead_code)] // setup commands added in the next migration tasks consume this
+pub fn quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 pub struct Tmux {
     child: Child,
     stdin: ChildStdin,
@@ -208,7 +244,11 @@ pub fn debug_note(msg: &str) {
     let Ok(path) = std::env::var("AGENTS_MON_DEBUG") else {
         return;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "[{}] # {msg}", std::process::id());
     }
 }
@@ -219,10 +259,18 @@ fn debug_log(cmd: &str, r: &Result<String, TmuxError>, took: std::time::Duration
         return;
     };
     let summary = match r {
-        Ok(b) => format!("ok {}B {:?}", b.len(), b.chars().take(60).collect::<String>()),
+        Ok(b) => format!(
+            "ok {}B {:?}",
+            b.len(),
+            b.chars().take(60).collect::<String>()
+        ),
         Err(e) => format!("ERR {e}"),
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(
             f,
             "[{}] {}ms {:.60} -> {}",
@@ -239,5 +287,53 @@ impl Drop for Tmux {
         let _ = self.stdin.write_all(b"detach-client\n");
         let _ = self.stdin.flush();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quotes_shell_arguments_without_interpreting_tmux_metacharacters() {
+        assert_eq!(quote(""), "''");
+        assert_eq!(quote("can't"), "'can'\"'\"'t'");
+        assert_eq!(quote("#,}"), "'#,}'");
+        assert_eq!(quote("a\tb\nc"), "'a\tb\nc'");
+    }
+
+    #[test]
+    fn tmux_truth_is_false_only_for_empty_and_zero() {
+        assert!(!format_truth(""));
+        assert!(!format_truth("0"));
+        assert!(format_truth("1"));
+        assert!(format_truth("off"));
+        assert!(format_truth("00"));
+        assert!(format_truth("\t\n"));
+    }
+
+    #[test]
+    fn spawned_tmux_command_does_not_wait_for_completion() {
+        let socket = format!("agents-mon-spawn-test-{}", std::process::id());
+        let Ok(status) = Command::new("tmux")
+            .args(["-L", &socket, "new-session", "-d"])
+            .status()
+        else {
+            panic!("could not start private tmux server");
+        };
+        assert!(status.success());
+
+        let start = std::time::Instant::now();
+        let result = command_spawn(&["-L", &socket, "run-shell", "sleep 3"]);
+        let elapsed = start.elapsed();
+        let _ = Command::new("tmux")
+            .args(["-L", &socket, "kill-server"])
+            .status();
+
+        assert!(result.is_ok());
+        assert!(
+            elapsed < std::time::Duration::from_millis(1500),
+            "{elapsed:?}"
+        );
     }
 }

@@ -1,5 +1,8 @@
 let
-  pkgs = import <nixpkgs> { };
+  pkgs = import (builtins.fetchTarball {
+    url = "https://github.com/NixOS/nixpkgs/archive/ffb3c9b700e759be2ef13237c9d8f953b32a1e46.tar.gz";
+    sha256 = "0h1nqp7vdqqivfc8fimdc6rmjyrnjlsmd28zxbl1iy46c0ss8ga4";
+  }) { };
   tmux37 = pkgs.tmux.overrideAttrs (_: {
     version = "3.7b";
     src = pkgs.fetchFromGitHub {
@@ -17,6 +20,7 @@ pkgs.mkShell {
     cargo
     coreutils
     curl
+    expect
     gawk
     git
     gnugrep

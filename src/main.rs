@@ -2,13 +2,17 @@ mod attention;
 mod conf;
 mod detect;
 mod focus;
-mod mirror;
+mod input;
 mod notifications;
 mod pane_writers;
+mod panes;
 mod procs;
+mod release;
 mod scan;
+mod setup;
 mod sidebar;
 mod tmux;
+mod toggle;
 
 use std::path::{Path, PathBuf};
 
@@ -27,14 +31,28 @@ fn main() {
         ["status"] => cmd_status(),
         ["sidebar"] => sidebar::run(plugin_dir(), scan_cache_path()),
         ["daemon"] => sidebar::run_daemon(plugin_dir(), scan_cache_path()),
-        ["mirror"] => mirror::run(),
         ["key", key] => sidebar::send_key(key),
+        ["click", pane, y, client] => y.parse().map_or(2, |y| input::click(pane, y, client)),
+        ["wheel", pane, "up"] => input::wheel(pane, input::Direction::Up),
+        ["wheel", pane, "down"] => input::wheel(pane, input::Direction::Down),
+        ["pane-add"] => panes::pane_add(None),
+        ["pane-add", window] => panes::pane_add(Some(window)),
+        ["pane-orphan"] => panes::pane_orphan(),
+        ["pane-pin"] => panes::pane_pin(),
+        ["teardown"] => panes::teardown(),
+        ["setup"] => setup::run(&plugin_dir()),
+        ["toggle"] => toggle::run(&plugin_dir(), None, None),
+        ["toggle", mode] => toggle::run(&plugin_dir(), Some(mode), None),
+        ["toggle", mode, client] => toggle::run(&plugin_dir(), Some(mode), Some(client)),
+        ["releases", "refresh"] => release::refresh(&plugin_dir()),
+        ["update"] => release::update(&plugin_dir(), "latest"),
+        ["update", target] => release::update(&plugin_dir(), target),
         ["notification-open", socket, pane, bundle] => {
             notifications::open_pane(socket, pane, bundle)
         }
         _ => {
             eprintln!(
-                "usage: agents-mon [--version|scan|status|sidebar|daemon|mirror|key <name>|detect <conf> <screen-file> [title]]"
+                "usage: agents-mon [--version|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|setup|toggle [split|popup] [client]|releases refresh|update [latest|vX.Y.Z]|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
             );
             2
         }
@@ -63,7 +81,9 @@ fn scan_cache_path() -> PathBuf {
 }
 
 fn self_pane() -> Option<String> {
-    std::env::var("AGENTS_MON_SELF").ok().filter(|s| !s.is_empty())
+    std::env::var("AGENTS_MON_SELF")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 fn run_scan() -> Result<Vec<scan::PaneRow>, tmux::TmuxError> {
@@ -71,7 +91,13 @@ fn run_scan() -> Result<Vec<scan::PaneRow>, tmux::TmuxError> {
     let mut t = tmux::Tmux::connect()?;
     let mut cache = procs::IdentCache::new();
     let mut subj = scan::SubjectCache::new();
-    scan::scan(&mut t, &confs, &mut cache, &mut subj, self_pane().as_deref())
+    scan::scan(
+        &mut t,
+        &confs,
+        &mut cache,
+        &mut subj,
+        self_pane().as_deref(),
+    )
 }
 
 fn cmd_scan() -> i32 {
