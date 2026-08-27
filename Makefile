@@ -1,4 +1,4 @@
-.PHONY: test build bump install-app
+.PHONY: test build bump release install-app
 
 test:
 	./tests/run.sh
@@ -11,13 +11,10 @@ build:
 install-app:
 	./scripts/install-app.sh
 
+# publish the existing local bump commit + tag; never creates or moves either
+release:
+	./scripts/release.sh
+
 # patch-bump Cargo.toml, run both suites, commit + tag (no push)
 bump:
-	@old=$$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml) && \
-	new=$${old%.*}.$$(( $${old##*.} + 1 )) && \
-	sed -i '' "s/^version = \"$$old\"/version = \"$$new\"/" Cargo.toml && \
-	cargo test && ./tests/run.sh && \
-	git add Cargo.toml Cargo.lock && \
-	git commit -m "chore: bump version to $$new" && \
-	git tag "v$$new" && \
-	echo "bumped $$old -> $$new, tagged v$$new (not pushed)"
+	./scripts/bump.sh
