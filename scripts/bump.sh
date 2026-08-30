@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Patch-bump Cargo.toml, verify, commit, and tag locally.
+# Patch-bump Cargo.toml, verify, commit updated release notes, and tag locally.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -10,7 +10,7 @@ sed -i.bak "s/^version = \"$old\"/version = \"$new\"/" Cargo.toml
 rm Cargo.toml.bak
 cargo test
 ./tests/run.sh
-git add Cargo.toml Cargo.lock
+git add Cargo.toml Cargo.lock RELEASE_NOTES.md
 git commit -m "chore: bump version to $new"
 git tag "v$new"
 echo "bumped $old -> $new, tagged v$new (not pushed)"

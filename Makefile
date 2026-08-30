@@ -15,6 +15,6 @@ install-app:
 release:
 	./scripts/release.sh
 
-# patch-bump Cargo.toml, run both suites, commit + tag (no push)
+# update RELEASE_NOTES.md, then patch-bump, test, commit, and tag (no push)
 bump:
 	./scripts/bump.sh
