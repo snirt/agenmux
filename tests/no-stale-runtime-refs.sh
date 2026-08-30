@@ -15,7 +15,6 @@ stale_removed="$({
     "$DIR/README.md" "$DIR/CONTRIBUTING.md" "$DIR/Makefile" "$DIR/.github" "$DIR/docs" \
     -type f \
     ! -path "$DIR/docs/plans/*" \
-    ! -path "$DIR/docs/superpowers/plans/*" \
     ! -path "$DIR/tests/fixtures/*" \
     -exec grep -nHE "$removed" {} +
 } 2>/dev/null || true)"

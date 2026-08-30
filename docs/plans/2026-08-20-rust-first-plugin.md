@@ -685,8 +685,8 @@ cargo test
 ./tests/navigation.sh
 ./tests/daemon-orphan.sh
 ./tests/sanity.sh
-rg -n 'scripts/(scan|sidebar|client|follow|click|scroll|hooks|mirror-add|orphan|pin|restore|teardown|update)\.sh|agents-mon mirror' --glob '!docs/superpowers/plans/**' .
-rg -n 'scripts/toggle\.sh' --glob '!docs/superpowers/plans/**' .
+rg -n 'scripts/(scan|sidebar|client|follow|click|scroll|hooks|mirror-add|orphan|pin|restore|teardown|update)\.sh|agents-mon mirror' --glob '!docs/plans/**' .
+rg -n 'scripts/toggle\.sh' --glob '!docs/plans/**' .
 ```
 
 Expected: every test PASS; the first `rg` returns no matches. The second returns exactly one intentional production reference in `src/release.rs`, used to reopen pre-migration rollback targets through their own entrypoint; tests may contain fixture strings for the same contract.
