@@ -1,0 +1,43 @@
+name: Bug report
+description: Report broken or unexpected behavior
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting a bug. Remove private data from captures and logs before submitting.
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened?
+      description: Describe observed behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include AgentsMon version, OS, tmux version, and agent type.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add sanitized logs or pane captures when relevant. Never include credentials, prompts, transcripts, or private identifiers.

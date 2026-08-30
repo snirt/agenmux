@@ -36,7 +36,6 @@
 
 ```yaml
 blank_issues_enabled: false
-contact_links: []
 ```
 
 - [ ] **Step 2: Create `.github/ISSUE_TEMPLATE/bug.yml`**
@@ -44,7 +43,6 @@ contact_links: []
 ```yaml
 name: Bug report
 description: Report broken or unexpected behavior
-title: ""
 labels:
   - bug
 body:
@@ -93,7 +91,6 @@ body:
 ```yaml
 name: Feature request
 description: Propose new user-facing behavior
-title: ""
 labels:
   - enhancement
 body:
@@ -121,7 +118,6 @@ body:
 ```yaml
 name: Refactor
 description: Propose an internal change that preserves behavior
-title: ""
 labels:
   - refactor
 body:
