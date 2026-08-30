@@ -17,7 +17,8 @@ cp "$DIR/Makefile" "$work/Makefile"
 cp "$DIR/scripts/version.sh" "$DIR/scripts/release.sh" "$work/scripts/"
 chmod +x "$work/scripts/version.sh" "$work/scripts/release.sh"
 printf '[package]\nname = "agents-mon"\nversion = "0.2.0"\n' >"$work/Cargo.toml"
-git -C "$work" add Makefile Cargo.toml scripts/version.sh scripts/release.sh
+printf '0.2.0 notes\n' >"$work/RELEASE_NOTES.md"
+git -C "$work" add Makefile Cargo.toml RELEASE_NOTES.md scripts/version.sh scripts/release.sh
 git -C "$work" commit -qm initial
 git -C "$work" push -q -u origin master
 
@@ -48,6 +49,20 @@ rm "$work/untracked"
 sed -i.bak 's/version = "0.2.0"/version = "0.2.1"/' "$work/Cargo.toml"
 rm "$work/Cargo.toml.bak"
 git -C "$work" commit -qam 'chore: bump version to 0.2.1'
+git -C "$work" tag v0.2.1
+if make -s -C "$work" release >"$tmp/notes.out" 2>&1; then
+  echo 'FAIL make-release: unchanged release notes were published'
+  exit 1
+fi
+grep -Fq 'release requires updated RELEASE_NOTES.md' "$tmp/notes.out" || {
+  cat "$tmp/notes.out"
+  echo 'FAIL make-release: unchanged notes failed without the release-notes guard'
+  exit 1
+}
+git -C "$work" tag -d v0.2.1 >/dev/null
+printf '0.2.1 notes\n' >"$work/RELEASE_NOTES.md"
+git -C "$work" add RELEASE_NOTES.md
+git -C "$work" commit -q --amend --no-edit
 git -C "$work" tag v0.2.1
 make -s -C "$work" release >"$tmp/release.out"
 

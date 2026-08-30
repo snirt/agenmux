@@ -130,6 +130,8 @@ jobs:
       - name: Create checksums
         shell: bash
         run: |
+          tar -xOf dist/tmux-agents-mon-linux-x86_64.tar.gz \
+            tmux-agents-mon-linux-x86_64/RELEASE_NOTES.md > RELEASE_NOTES.md
           count="$(find dist -maxdepth 1 -name 'tmux-agents-mon-*.tar.gz' | wc -l)"
           test "$count" -eq 4
           cd dist
@@ -147,6 +149,6 @@ jobs:
             dist/*.tar.gz dist/SHA256SUMS \
             --draft \
             --verify-tag \
-            --generate-notes \
+            --notes-file RELEASE_NOTES.md \
             --title "tmux-agents-mon $GITHUB_REF_NAME"
           gh release edit "$GITHUB_REF_NAME" --draft=false

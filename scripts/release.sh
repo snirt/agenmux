@@ -28,6 +28,11 @@ git merge-base --is-ancestor origin/master HEAD || {
   echo 'release requires exactly one local bump commit' >&2
   exit 1
 }
+if [ ! -s RELEASE_NOTES.md ] ||
+  git diff --quiet origin/master..HEAD -- RELEASE_NOTES.md; then
+  echo 'release requires updated RELEASE_NOTES.md' >&2
+  exit 1
+fi
 [ "$(git log -1 --pretty=%s)" = "chore: bump version to $version" ] || {
   echo 'release requires the version bump commit at HEAD' >&2
   exit 1
