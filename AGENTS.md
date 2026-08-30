@@ -9,6 +9,11 @@
 - Before live verification, inspect `@agents-mon-bin`, derive that binary's plugin root, and confirm its loaded `agents/*.conf`. Never assume the current checkout is deployed.
 - Restart the active daemon after config changes, then verify the monitored pane reports `working` during activity and `idle` after completion.
 
+## Commits
+
+- Write concise, informative commit messages that describe the change and its intent.
+- Never add AI or agent credit/attribution to commits, including `Co-authored-by`, `Generated-by`, or similar trailers.
+
 ## Repository privacy
 
 - Never commit raw captures, logs, prompts, transcripts, agent session data, or generated diagnostics without reviewing and sanitizing them first.
