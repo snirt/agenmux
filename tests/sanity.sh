@@ -54,8 +54,8 @@ run_tmux_case() {
   tmux -L "$socket" run-shell "bash '$plugin/agents-mon.tmux'"
 
   tmux -L "$socket" list-keys -T prefix |
-    grep -Fq '/agents-mon.tmux' \
-    && tmux -L "$socket" list-keys -T prefix | grep -Fq ' activate '
+    grep -Fq '/agents-mon.tmux' &&
+    tmux -L "$socket" list-keys -T prefix | grep -Fq ' activate '
   socket_path="$(tmux -L "$socket" display-message -p '#{socket_path}')"
   server_pid="$(tmux -L "$socket" display-message -p '#{pid}')"
   tmux_env="$socket_path,$server_pid,0"
@@ -117,11 +117,14 @@ run_immediate_popup_bootstrap() { # verified|cargo|bad-checksum
   cp "$DIR/agents-mon.tmux" "$DIR/Cargo.toml" "$case_plugin/"
   tag="$(bash "$DIR/scripts/version.sh" tag)"
   case "$(uname -s):$(uname -m)" in
-    Darwin:arm64) package=tmux-agents-mon-macos-aarch64 ;;
-    Darwin:x86_64) package=tmux-agents-mon-macos-x86_64 ;;
-    Linux:aarch64 | Linux:arm64) package=tmux-agents-mon-linux-aarch64 ;;
-    Linux:x86_64 | Linux:amd64) package=tmux-agents-mon-linux-x86_64 ;;
-    *) printf 'FAIL popup bootstrap: unsupported platform\n' >&2; return 1 ;;
+  Darwin:arm64) package=tmux-agents-mon-macos-aarch64 ;;
+  Darwin:x86_64) package=tmux-agents-mon-macos-x86_64 ;;
+  Linux:aarch64 | Linux:arm64) package=tmux-agents-mon-linux-aarch64 ;;
+  Linux:x86_64 | Linux:amd64) package=tmux-agents-mon-linux-x86_64 ;;
+  *)
+    printf 'FAIL popup bootstrap: unsupported platform\n' >&2
+    return 1
+    ;;
   esac
 
   if [ "$mode" = cargo ]; then
@@ -204,9 +207,12 @@ SH
   expect_pid=$!
 
   for i in $(seq 1 600); do
-    if [ -e "$marker" ]; then opened=1; break; fi
-    if [ "$mode" = bad-checksum ] && tmux -L "$socket" show-messages 2>/dev/null \
-        | grep -Fq 'agents-mon: native engine installation failed'; then
+    if [ -e "$marker" ]; then
+      opened=1
+      break
+    fi
+    if [ "$mode" = bad-checksum ] && tmux -L "$socket" show-messages 2>/dev/null |
+      grep -Fq 'agents-mon: native engine installation failed'; then
       break
     fi
     sleep 0.1
@@ -217,8 +223,8 @@ SH
   if [ "$mode" = bad-checksum ]; then
     [ ! -e "$case_plugin/target/release/agents-mon" ]
     [ ! -e "$marker" ]
-    tmux -L "$socket" show-messages \
-      | grep -Fq 'agents-mon: native engine installation failed'
+    tmux -L "$socket" show-messages |
+      grep -Fq 'agents-mon: native engine installation failed'
   else
     [ "$opened" -eq 1 ]
     [ -x "$case_plugin/target/release/agents-mon" ]
