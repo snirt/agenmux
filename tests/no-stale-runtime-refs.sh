@@ -21,7 +21,7 @@ stale_removed="$({
 
 # The native updater intentionally probes an old target tree's toggle wrapper.
 # Require that exact probe once; reject missing, changed, or additional refs.
-production=("$DIR/agents-mon.tmux" "$DIR/scripts" "$DIR/src" "$DIR/README.md" \
+production=("$DIR/agents-mon.tmux" "$DIR/scripts" "$DIR/src" "$DIR/README.md"
   "$DIR/CONTRIBUTING.md" "$DIR/Makefile" "$DIR/.github")
 toggle_refs="$({
   find "${production[@]}" -type f -exec grep -nHF 'scripts/toggle.sh' {} +
