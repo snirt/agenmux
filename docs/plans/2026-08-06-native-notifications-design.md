@@ -30,11 +30,14 @@ automatically on every engine install or update (quiet, skipped while
 notifications are off); permission is requested by the first real
 notification. `make install-app` remains the explicit setup path. The helper binary
 (`agents-mon-notifier`, built from this crate with `mac-usernotifications`)
-owns the notification permission, is background-only (`LSUIElement`), posts
-through `UNUserNotificationCenter` with the built-in `Glass` sound, and
-detaches itself so the sidebar never blocks. The detached instance keeps the
-main run loop alive awaiting the body click for up to 24 hours, then closes
-the notification and exits.
+owns the notification permission, is background-only (`LSUIElement`), and
+posts through `UNUserNotificationCenter` with the built-in `Glass` sound.
+The helper invocation is a short-lived client of one on-demand broker process.
+The first notification starts the broker; later notifications submit over a
+user-private Unix socket. The broker owns all delivered notification response
+handlers, keeps existing notifications clickable after the sidebar closes, and
+exits after every delivered notification has been clicked or dismissed. It does
+not monitor tmux or produce new notifications after the sidebar closes.
 
 The click command invokes the internal `notification-open` command with
 shell-quoted executable, socket, pane, and terminal bundle arguments. That

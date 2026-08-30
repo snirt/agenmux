@@ -45,9 +45,11 @@
 ### Task 1: Freeze Current Behavior
 
 **Files:**
+
 - Create: `tests/plugin.rs`
 
 **Interfaces:**
+
 - Consumes: current shell entrypoints and `agents-mon` binary.
 - Produces: private-tmux helpers and characterization tests reused unchanged as shell calls move to Rust.
 
@@ -106,6 +108,7 @@ git commit -m "test: freeze plugin shell behavior"
 ### Task 2: Prove Native Bootstrap and Delete the Duplicated Runtime First
 
 **Files:**
+
 - Modify: `agents-mon.tmux`
 - Modify: `scripts/install-bin.sh`
 - Modify: `scripts/toggle.sh`
@@ -126,6 +129,7 @@ git commit -m "test: freeze plugin shell behavior"
 - Modify: `CONTRIBUTING.md`
 
 **Interfaces:**
+
 - `agents-mon.tmux` guarantees that activation either runs a verified native binary or displays a clear install failure.
 - Existing public commands remain: `--version`, `scan`, `list`, `status`, `detect`, `sidebar`, `daemon`, `key`, and `notification-open`.
 - The unused `mirror` command is removed.
@@ -224,6 +228,7 @@ git commit -m "refactor: remove duplicated Bash runtime"
 ### Task 3: Add Shared Synchronous tmux Helpers
 
 **Files:**
+
 - Modify: `src/tmux.rs`
 - Modify: `src/sidebar.rs`
 - Test: `src/tmux.rs`
@@ -277,6 +282,7 @@ git commit -m "refactor: share tmux command handling"
 ### Task 4: Move Click and Wheel Input into Rust
 
 **Files:**
+
 - Create: `src/input.rs`
 - Modify: `src/main.rs`
 - Modify: `src/sidebar.rs`
@@ -350,6 +356,7 @@ git commit -m "feat: handle mouse input in Rust"
 ### Task 5: Move Processless Pane Lifecycle into Rust
 
 **Files:**
+
 - Create: `src/panes.rs`
 - Modify: `src/main.rs`
 - Modify: `src/sidebar.rs`
@@ -430,6 +437,7 @@ git commit -m "feat: manage sidebar panes in Rust"
 ### Task 6: Move Hook and Key-Table Setup into Rust
 
 **Files:**
+
 - Create: `src/setup.rs`
 - Modify: `src/main.rs`
 - Modify: `agents-mon.tmux`
@@ -438,6 +446,7 @@ git commit -m "feat: manage sidebar panes in Rust"
 - Modify: `tests/navigation.sh`
 
 **Interfaces:**
+
 - Produces `agents-mon setup`.
 - Installs hook indexes `[42]`, `[43]`, `[44]`, key tables `agents-mon`/`agents-mon-search`, mouse bindings, hidden-window picker, status interpolation, and nav version.
 
@@ -483,6 +492,7 @@ git commit -m "feat: install tmux integration from Rust"
 ### Task 7: Move Split and Popup Toggle into Rust
 
 **Files:**
+
 - Create: `src/toggle.rs`
 - Modify: `src/main.rs`
 - Modify: `src/sidebar.rs`
@@ -493,6 +503,7 @@ git commit -m "feat: install tmux integration from Rust"
 - Modify: `tests/daemon-orphan.sh`
 
 **Interfaces:**
+
 - Produces `agents-mon toggle [split|popup] [client-name]`.
 - Consumes `@agents-mon-display`, width/height options, control-client/on state, scan cache, and popup pin/jump files.
 
@@ -539,6 +550,7 @@ git commit -m "feat: toggle native views from Rust"
 ### Task 8: Move Release Refresh and Version Switching into Rust
 
 **Files:**
+
 - Create: `src/release.rs`
 - Modify: `src/main.rs`
 - Modify: `src/sidebar.rs`
@@ -622,6 +634,7 @@ git commit -m "feat: switch plugin releases from Rust"
 ### Task 9: Remove Runtime Compatibility Wrappers
 
 **Files:**
+
 - Modify: `agents-mon.tmux`
 - Delete: `scripts/click.sh`
 - Delete: `scripts/scroll.sh`
@@ -639,6 +652,7 @@ git commit -m "feat: switch plugin releases from Rust"
 - Modify: `CONTRIBUTING.md`
 
 **Interfaces:**
+
 - Final public runtime CLI:
 
 ```text
@@ -685,8 +699,8 @@ cargo test
 ./tests/navigation.sh
 ./tests/daemon-orphan.sh
 ./tests/sanity.sh
-rg -n 'scripts/(scan|sidebar|client|follow|click|scroll|hooks|mirror-add|orphan|pin|restore|teardown|update)\.sh|agents-mon mirror' --glob '!docs/superpowers/plans/**' .
-rg -n 'scripts/toggle\.sh' --glob '!docs/superpowers/plans/**' .
+rg -n 'scripts/(scan|sidebar|client|follow|click|scroll|hooks|mirror-add|orphan|pin|restore|teardown|update)\.sh|agents-mon mirror' --glob '!docs/plans/**' .
+rg -n 'scripts/toggle\.sh' --glob '!docs/plans/**' .
 ```
 
 Expected: every test PASS; the first `rg` returns no matches. The second returns exactly one intentional production reference in `src/release.rs`, used to reopen pre-migration rollback targets through their own entrypoint; tests may contain fixture strings for the same contract.

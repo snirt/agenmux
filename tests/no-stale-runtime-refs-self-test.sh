@@ -4,7 +4,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp"/{scripts,src,tests/fixtures,.github,docs/plans,docs/superpowers/plans}
+mkdir -p "$tmp"/{scripts,src,tests/fixtures,.github,docs/plans}
 touch "$tmp/agents-mon.tmux" "$tmp/README.md" "$tmp/CONTRIBUTING.md" "$tmp/Makefile"
 printf '    let toggle = plugin_dir.join("scripts/toggle.sh");\n' > "$tmp/src/release.rs"
 
