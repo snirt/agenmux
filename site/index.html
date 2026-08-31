@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tmux-agents-mon — monitor AI coding agents in tmux</title>
+<meta name="description" content="Monitor AI coding agents (Claude Code, Codex, OpenCode, Pi…) in your tmux panes — sidebar + status-line segment. No hooks, nothing runs inside your agents.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <span class="brand">[agents-mon]</span>
+  <a href="#demo-section">0:demo</a>
+  <a href="#states">1:states</a>
+  <a href="#how">2:how</a>
+  <a href="#install">3:install</a>
+  <a href="#use">4:use</a>
+  <a href="#release">5:release</a>
+  <a class="ext" href="https://github.com/snirt/tmux-agents-mon">github ↗</a>
+</nav>
+
+<section class="hero">
+  <h1><span class="prompt">$</span> tmux-agents-mon</h1>
+  <p class="tagline">Every AI coding agent in your tmux, one glance.<br>
+  Who's <span class="c-red">blocked</span>, who's <span class="c-yellow">working</span>,
+  who's <span class="c-green">done</span> — without switching panes.</p>
+  <div class="badges">
+    <a href="https://github.com/snirt/tmux-agents-mon">github.com/snirt/tmux-agents-mon</a>
+    <span class="sep">·</span>
+    <a href="https://github.com/snirt/tmux-agents-mon/releases/latest"><span id="version">v0.2.1</span></a>
+    <span class="sep">·</span>
+    <span id="stars" hidden>★ <span id="star-count"></span></span>
+    <span>MIT</span>
+  </div>
+
+  <div class="demo-tabs" id="demo-section" role="tablist">
+    <button class="demo-tab active" data-demo="0">0:monitor</button>
+    <button class="demo-tab" data-demo="1">1:search</button>
+  </div>
+  <div class="term" aria-label="Animated mock of tmux with the agents sidebar">
+    <div class="term-bar">
+      <span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span>
+      <span class="term-title">tmux</span>
+    </div>
+    <div class="term-top">
+      <span class="pill" id="top-pill">⧉ webapp</span>
+      <span class="wins" id="top-wins"><span class="win">vim <span class="badge b1">1</span></span>
+      <span class="win active">agents <span class="badge b2">2</span></span>
+      <span class="win">nu <span class="badge b3">3</span></span></span>
+      <span class="clock-wrap"><span id="clock">15:56</span></span>
+    </div>
+    <div class="term-body">
+      <div class="sidebar" id="demo">
+        <div class="pane-title">⤳ 1 agents-mon</div>
+        <div class="bar">agents<span class="bar-filter" id="bar-filter"></span></div>
+        <div class="hint" id="hint" hidden>↵ nav · ^u clear · esc clear</div>
+        <div class="session">webapp</div>
+        <div class="entry selected" data-state="working">
+          <div class="agent">
+            <span class="cursor">❯</span><span class="glyph spinner">⠹</span>
+            <span class="name">claude</span><span class="rest">1.2 ~/code/api</span>
+          </div>
+          <div class="title">fix flaky pane test</div>
+        </div>
+        <div class="entry" data-state="idle">
+          <div class="agent">
+            <span class="cursor">❯</span><span class="glyph">⣿</span>
+            <span class="name">codex</span><span class="rest">2.1 ~/code/web</span>
+          </div>
+        </div>
+        <div class="session">oss</div>
+        <div class="entry" data-state="blocked">
+          <div class="agent">
+            <span class="cursor">❯</span><span class="glyph">⣿</span>
+            <span class="name">opencode</span><span class="rest">1.2 ~/oss/mon</span>
+          </div>
+          <div class="title">allow shell command?</div>
+        </div>
+        <div class="entry" data-state="working">
+          <div class="agent">
+            <span class="cursor">❯</span><span class="glyph spinner">⣤</span>
+            <span class="name">pi</span><span class="rest">3.2 ~/oss/pi</span>
+          </div>
+          <div class="title">refactor detector</div>
+        </div>
+      </div>
+      <div class="pane-wrap">
+        <div class="pane-title" id="pane-title">⤳ 2 ✳ claude</div>
+        <div class="pane" id="pane"></div>
+      </div>
+    </div>
+    <div class="key-osd" id="key-osd" hidden></div>
+  </div>
+
+  <p class="demo-caption" id="demo-caption">every agent's state at a glance — jump to the blocked one and answer</p>
+
+  <p class="hero-install">
+    <span class="muted">install with <a href="https://github.com/tmux-plugins/tpm">TPM</a>:</span>
+  </p>
+  <pre class="hero-pre"><code>set -g @plugin 'snirt/tmux-agents-mon'</code></pre>
+</section>
+
+<main>
+
+<h2 id="states">states</h2>
+<div class="states">
+  <div class="row" data-state="blocked"><span class="glyph">⣿</span><span><b>blocked</b> — waiting for your input (permission prompt, menu)</span></div>
+  <div class="row" data-state="working"><span class="glyph spinner">⠹</span><span><b>working</b> — actively running</span></div>
+  <div class="row" data-state="done"><span class="glyph">⣿</span><span><b>done</b> — finished while you were elsewhere; clears when you view it</span></div>
+  <div class="row" data-state="idle"><span class="glyph">⣿</span><span><b>idle</b> — waiting at the prompt</span></div>
+</div>
+
+<h2 id="how">how it works</h2>
+<div class="traits">
+  <div class="trait">
+    <span class="trait-head">no hooks</span>
+    <p>Detection is scraping-only: agents are identified by walking each pane's
+    process tree, state inferred from the visible screen and title. Nothing
+    runs inside your agents.</p>
+  </div>
+  <div class="trait">
+    <span class="trait-head">six agents built in</span>
+    <p>Claude Code, Codex, Hermes, Oh My Pi, OpenCode, and Pi.
+    Adding an agent is one small config file — no code.</p>
+  </div>
+  <div class="trait">
+    <span class="trait-head">rust engine</span>
+    <p>A single daemon on one persistent tmux control-mode connection.
+    Prebuilt, verified binaries download automatically; Linux builds are
+    statically linked.</p>
+  </div>
+  <div class="trait">
+    <span class="trait-head">native notifications</span>
+    <p>macOS notifications via a signed <code>AgentsMon.app</code> — click one
+    and your terminal jumps to the exact pane. <code>notify-send</code> on
+    Linux.</p>
+  </div>
+</div>
+
+<h2 id="install">install</h2>
+<p>With <a href="https://github.com/tmux-plugins/tpm">TPM</a>:</p>
+<pre><code>set -g @plugin 'snirt/tmux-agents-mon'</code></pre>
+<p>Press <kbd>prefix + I</kbd>. That's it: the plugin downloads and verifies the
+Rust engine for your platform in the background.</p>
+<p>Or manually:</p>
+<pre><code>git clone https://github.com/snirt/tmux-agents-mon ~/.tmux/plugins/tmux-agents-mon
+echo "run-shell ~/.tmux/plugins/tmux-agents-mon/agents-mon.tmux" >> ~/.tmux.conf</code></pre>
+<p class="muted">Requirements: tmux and bash. <code>curl</code> and <code>tar</code>
+enable the automatic native download; without them, Cargo builds the engine when
+available. Release tarballs with <code>SHA256SUMS</code> are on the
+<a href="https://github.com/snirt/tmux-agents-mon/releases/latest">latest release</a>.</p>
+
+<h2 id="use">use it</h2>
+<ul>
+  <li><kbd>prefix + A</kbd> — toggle the sidebar (left split, or popup via
+      <code>@agents-mon-display 'popup'</code>)</li>
+  <li><kbd>j</kbd>/<kbd>k</kbd> move, <kbd>Enter</kbd> jumps to the selected
+      agent, <kbd>/</kbd> live search, <kbd>f</kbd> cycles the state filter,
+      <kbd>?</kbd> help</li>
+  <li>Click an agent row to jump to its pane; wheel scroll moves the cursor
+      (needs <code>set -g mouse on</code>)</li>
+  <li><kbd>u</kbd> opens the version picker — the plugin switches its source
+      <i>and</i> native engine to any release, and rolls back just as easily</li>
+</ul>
+<p>Add <code>#{agents_mon}</code> anywhere in your status line for the compact
+summary — e.g. <span style="white-space:nowrap"><span class="c-red">⣿1</span>
+<span class="c-yellow">⣾2</span>
+<span class="c-green">⣿1</span></span> for blocked/working/idle:</p>
+<pre><code>set -g status-right '#{agents_mon} | %H:%M'</code></pre>
+
+<h2 id="release">latest release</h2>
+<p id="release-head">
+  <span id="release-tag">v0.2.1</span>
+  <span id="release-date"></span>
+  <a href="https://github.com/snirt/tmux-agents-mon/releases">all releases →</a>
+</p>
+<pre id="release-notes" hidden><code id="release-body"></code></pre>
+
+<footer>
+  MIT © 2026 Snir Turgeman ·
+  <a href="https://github.com/snirt/tmux-agents-mon">source</a>
+</footer>
+
+</main>
+<script>
+// Spinner: the real SPIN frames from src/sidebar.rs.
+const SPIN = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let frame = 0;
+if (!reduced) {
+  setInterval(() => {
+    frame = (frame + 1) % SPIN.length;
+    document.querySelectorAll('.spinner').forEach((el, i) => {
+      el.textContent = SPIN[(frame + i * 3) % SPIN.length];
+    });
+  }, 120);
+}
+
+// The main pane mirrors the selected agent; `typed` is the answer being
+// typed into a blocked prompt.
+function paneLines(agent, state, typed) {
+  const wait = [['dim', '  ❯ waiting at prompt']];
+  switch (agent + '/' + state) {
+    case 'claude/working': return [
+      ['dim', '  Running tests…'],
+      ['yellow', '  ⠹ cargo test pane_lifecycle'],
+    ];
+    case 'claude/blocked': return [
+      ['box', '│ Edit tests/pane.rs?'],
+      ['box', '│ ❯ 1. Yes   2. No'], ['', ''],
+      ['dim', '> ' + typed + '▌'],
+    ];
+    case 'claude/done': return [
+      ['green', '  ✓ 42 tests passed'], ...wait,
+    ];
+    case 'opencode/blocked': return [
+      ['box', '│ $ cargo check'],
+      ['box', '│ Allow? [y/N] ' + typed + '▌'],
+    ];
+    case 'opencode/working': return [
+      ['yellow', '  ⠹ cargo check'],
+    ];
+    case 'pi/working': return [
+      ['yellow', '  ⠹ rewriting scan.rs'],
+    ];
+    case 'pi/done': return [
+      ['green', '  ✓ refactor complete'], ...wait,
+    ];
+    default: return wait;
+  }
+}
+const AGENTS = ['claude', 'codex', 'opencode', 'pi'];
+let sel = 0;
+let typed = '';
+function renderPane() {
+  const pane = document.getElementById('pane');
+  const state = rows[sel].dataset.state;
+  document.getElementById('pane-title').textContent = '⤳ 2 ✳ ' + AGENTS[sel];
+  pane.textContent = '';
+  paneLines(AGENTS[sel], state, typed).forEach(([cls, text]) => {
+    const line = document.createElement('div');
+    if (cls) line.className = 'l-' + cls;
+    // animate ⠹ in pane lines with the shared spinner interval
+    const at = text.indexOf('⠹');
+    if (at >= 0) {
+      line.appendChild(document.createTextNode(text.slice(0, at)));
+      const sp = document.createElement('span');
+      sp.className = 'spinner';
+      sp.textContent = '⠹';
+      line.appendChild(sp);
+      line.appendChild(document.createTextNode(text.slice(at + 1)));
+    } else {
+      line.textContent = text;
+    }
+    pane.appendChild(line);
+  });
+}
+
+// Status-line segment: live counts from the demo rows, same glyphs and
+// zero-count omission as status_segment() in src/scan.rs.
+const rows = document.querySelectorAll('#demo .entry');
+function renderSeg() {
+  const n = { blocked: 0, working: 0, idle: 0 };
+  rows.forEach(r => {
+    const s = r.dataset.state;
+    n[s === 'done' ? 'idle' : s]++;
+  });
+  const seg = document.getElementById('seg');
+  if (!seg) return;
+  seg.textContent = '';
+  [['blocked', 'c-red', '⣿'], ['working', 'c-yellow', '⣾'], ['idle', 'c-green', '⣿']]
+    .forEach(([k, cls, glyph]) => {
+      if (!n[k]) return;
+      const span = document.createElement('span');
+      span.className = cls;
+      span.textContent = ' ' + glyph;
+      seg.appendChild(span);
+      seg.appendChild(document.createTextNode(String(n[k])));
+    });
+}
+
+// Jumping to an agent switches the client to that agent's session, so the
+// status bar follows: session pill and window list per session.
+const SESSIONS = [
+  { name: 'webapp', wins: ['vim', 'agents', 'nu'] },
+  { name: 'oss', wins: ['docs', 'cargo', 'agents', 'git'] },
+];
+const ROW_SESSION = [0, 0, 1, 1];
+function renderTop() {
+  const s = SESSIONS[ROW_SESSION[sel]];
+  document.getElementById('top-pill').textContent = '⧉ ' + s.name;
+  const wins = document.getElementById('top-wins');
+  wins.textContent = '';
+  s.wins.forEach((w, k) => {
+    const span = document.createElement('span');
+    span.className = 'win' + (w === 'agents' ? ' active' : '');
+    span.textContent = w + ' ';
+    const badge = document.createElement('span');
+    badge.className = 'badge b' + (k + 1);
+    badge.textContent = k + 1;
+    span.appendChild(badge);
+    wins.appendChild(span);
+    wins.appendChild(document.createTextNode(' '));
+  });
+}
+
+// Pressed-key hint in the window's bottom-right, screencast style.
+function showKey(...keys) {
+  const osd = document.getElementById('key-osd');
+  osd.hidden = false;
+  osd.textContent = '';
+  keys.forEach((k, i) => {
+    if (i) osd.appendChild(document.createTextNode('/'));
+    const cap = document.createElement('span');
+    cap.className = 'key';
+    cap.textContent = k;
+    osd.appendChild(cap);
+  });
+  osd.classList.remove('pop');
+  void osd.offsetWidth;
+  osd.classList.add('pop');
+}
+
+// Scenario helpers: move the cursor, flip a state, type an answer.
+// Moves show both bindings — vim key and arrow both work in the sidebar.
+function select(i, quiet) {
+  if (!quiet) showKey(i > sel ? 'j' : 'k', i > sel ? '↓' : '↑');
+  rows[sel].classList.remove('selected');
+  sel = i;
+  typed = '';
+  rows[sel].classList.add('selected');
+  // viewing a done agent clears it, like the real sidebar
+  if (rows[sel].dataset.state === 'done') setState(sel, 'idle');
+  renderTop();
+  renderPane();
+}
+function setState(i, state, title) {
+  rows[i].dataset.state = state;
+  const t = rows[i].querySelector('.title');
+  if (t && title !== undefined) t.textContent = title;
+  rows[i].querySelector('.glyph').classList.toggle('spinner', state === 'working');
+  if (state !== 'working') rows[i].querySelector('.glyph').textContent = '⣿';
+  if (i === sel) renderPane();
+  renderSeg();
+}
+function typeIn(text, done) {
+  let k = 0;
+  const g = gen;                    // a demo switch cancels in-flight typing
+  (function next() {
+    if (g !== gen) return;
+    showKey(text[k]);
+    typed += text[k++];
+    renderPane();
+    if (k < text.length) setTimeout(next, 160);
+    else if (done) setTimeout(done, 350);
+  })();
+}
+
+// Live search: header shows /query with match counts, list filters,
+// hint line appears — like the real `/` mode.
+const sessionHeads = document.querySelectorAll('#demo .session');
+function applyFilter(q) {
+  const bar = document.getElementById('bar-filter');
+  document.getElementById('hint').hidden = !q && q !== '';
+  let visible = 0;
+  rows.forEach((r, i) => {
+    const m = !q || AGENTS[i].includes(q);
+    r.hidden = !m;
+    if (m) visible++;
+  });
+  sessionHeads[0].hidden = !!q && rows[0].hidden && rows[1].hidden;
+  sessionHeads[1].hidden = !!q && rows[2].hidden && rows[3].hidden;
+  // counts appear only for a non-empty query, like the real header
+  bar.textContent = q === null ? '' : ' /' + q + (q ? ' ' + visible + '/' + rows.length : '');
+  if (q === null) document.getElementById('hint').hidden = true;
+}
+function typeSearch(query, done) {
+  let k = 0;
+  const g = gen;                    // a demo switch cancels in-flight typing
+  showKey('/');
+  applyFilter('');
+  (function next() {
+    if (g !== gen) return;
+    if (k < query.length) {
+      showKey(query[k]);
+      applyFilter(query.slice(0, ++k));
+      setTimeout(next, 260);
+    } else if (done) {
+      setTimeout(done, 500);
+    }
+  })();
+}
+
+// Demo carousel: two titled scenarios sharing the same mock window.
+const DEMOS = [
+  {
+    caption: "every agent's state at a glance — jump to the blocked one and answer",
+    steps: [
+      [2600, () => setState(0, 'blocked', 'Edit tests/pane.rs?')],
+      [1600, () => typeIn('1', () => setState(0, 'working', 'fix flaky pane test'))],
+      [2600, () => setState(2, 'blocked', 'allow shell command?')],
+      [1300, () => select(1)],
+      [900, () => select(2)],
+      [1300, () => typeIn('y', () => setState(2, 'working', 'run cargo check'))],
+      [2400, () => setState(3, 'done', 'refactor detector')],
+      [1500, () => select(3)],
+      [1600, () => select(0)],
+    ],
+  },
+  {
+    caption: 'find an agent instantly — / live search filters as you type',
+    steps: [
+      [1400, () => typeSearch('codex', () => select(1))],
+      [2600, () => { showKey('esc'); applyFilter(null); select(0, true); }],
+      [1400, () => typeSearch('pi', () => select(3))],
+      [2600, () => { showKey('esc'); applyFilter(null); }],
+    ],
+  },
+];
+let demo = 0, step = 0, timer = null, gen = 0;
+function resetDemo() {
+  gen++;
+  applyFilter(null);
+  setState(0, 'working', 'fix flaky pane test');
+  setState(1, 'idle');
+  setState(2, 'blocked', 'allow shell command?');
+  setState(3, 'working', 'refactor detector');
+  select(0, true);
+}
+function applyDemo(i) {
+  demo = i;
+  step = 0;
+  document.querySelectorAll('.demo-tab').forEach((t, k) => t.classList.toggle('active', k === i));
+  document.getElementById('demo-caption').textContent = DEMOS[i].caption;
+  resetDemo();
+  if (!reduced) run();
+}
+function startDemo(i, animate) {
+  clearTimeout(timer);
+  const t = document.querySelector('.term');
+  if (!animate || reduced) { applyDemo(i); return; }
+  // slide the window out one way, swap content, slide it in from the other
+  const dir = i > demo || (demo === DEMOS.length - 1 && i === 0) ? 1 : -1;
+  t.style.transition = 'transform 0.25s ease, opacity 0.25s ease';
+  t.style.transform = 'translateX(' + (-dir * 48) + 'px)';
+  t.style.opacity = '0';
+  gen++;                          // freeze the outgoing scenario mid-slide
+  setTimeout(() => {
+    applyDemo(i);
+    t.style.transition = 'none';
+    t.style.transform = 'translateX(' + (dir * 48) + 'px)';
+    void t.offsetWidth;
+    t.style.transition = 'transform 0.25s ease, opacity 0.25s ease';
+    t.style.transform = '';
+    t.style.opacity = '1';
+  }, 250);
+}
+function run() {
+  const steps = DEMOS[demo].steps;
+  const [delay, fn] = steps[step];
+  timer = setTimeout(() => {
+    fn();
+    step++;
+    if (step >= steps.length) {
+      timer = setTimeout(() => startDemo((demo + 1) % DEMOS.length, true), 2200);
+    } else {
+      run();
+    }
+  }, delay);
+}
+document.querySelectorAll('.demo-tab').forEach((t, i) =>
+  t.addEventListener('click', () => { if (i !== demo) startDemo(i, true); }));
+startDemo(0);
+
+// Clock in the mock status line.
+function clock() {
+  document.getElementById('clock').textContent =
+    new Date().toTimeString().slice(0, 5);
+}
+clock();
+setInterval(clock, 30000);
+
+// Scroll reveal: main-column blocks drift up as they enter the viewport.
+if (!reduced) {
+  const blocks = document.querySelectorAll('main > h2, main > div, main > p, main > pre, main > ul, main > footer');
+  const revealer = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        e.target.classList.add('shown');
+        revealer.unobserve(e.target);
+      }
+    });
+  }, { rootMargin: '0px 0px -10% 0px' });
+  blocks.forEach(b => { b.classList.add('reveal'); revealer.observe(b); });
+}
+
+// Nav glow: highlight the section currently in view.
+const navLinks = [...document.querySelectorAll('.topnav a[href^="#"]')];
+const sections = navLinks.map(a => document.getElementById(a.hash.slice(1)));
+function markActive(id) {
+  navLinks.forEach(a => a.classList.toggle('active', a.hash === '#' + id));
+}
+const spy = new IntersectionObserver(entries => {
+  entries.forEach(e => { if (e.isIntersecting) markActive(e.target.id); });
+}, { rootMargin: '-20% 0px -70% 0px' });
+sections.forEach(s => spy.observe(s));
+navLinks.forEach(a => a.addEventListener('click', e => {
+  markActive(a.hash.slice(1));
+  a.blur();
+  const h = document.getElementById(a.hash.slice(1));
+  if (a.hash === '#demo-section') {
+    // the demo sits in the hero: center the mock window rather than
+    // pinning the tabs to the very top of the viewport
+    e.preventDefault();
+    document.querySelector('.term').scrollIntoView(
+      reduced ? { block: 'center' } : { behavior: 'smooth', block: 'center' });
+    return;
+  }
+  h.classList.remove('glance');
+  void h.offsetWidth;              // restart the animation on repeat clicks
+  h.classList.add('glance');
+}));
+
+// Copy buttons on code blocks.
+document.querySelectorAll('pre > code').forEach(code => {
+  if (code.id === 'release-body') return;
+  const btn = document.createElement('button');
+  btn.className = 'copy';
+  btn.textContent = 'copy';
+  btn.addEventListener('click', () => {
+    navigator.clipboard.writeText(code.textContent).then(() => {
+      btn.textContent = 'copied';
+      setTimeout(() => { btn.textContent = 'copy'; }, 1500);
+    });
+  });
+  code.parentElement.appendChild(btn);
+});
+
+// Live GitHub data. The page works without it; a fetch only upgrades it.
+const API = 'https://api.github.com/repos/snirt/tmux-agents-mon';
+function cachedJson(url) {
+  const hit = sessionStorage.getItem(url);
+  if (hit) return Promise.resolve(JSON.parse(hit));
+  return fetch(url).then(r => {
+    if (!r.ok) throw new Error(r.status);
+    return r.json().then(j => {
+      try { sessionStorage.setItem(url, JSON.stringify(j)); } catch (_) {}
+      return j;
+    });
+  });
+}
+cachedJson(API).then(repo => {
+  document.getElementById('star-count').textContent = repo.stargazers_count;
+  document.getElementById('stars').hidden = false;
+}).catch(() => {});
+cachedJson(API + '/releases/latest').then(rel => {
+  document.getElementById('version').textContent = rel.tag_name;
+  document.getElementById('release-tag').textContent = rel.tag_name;
+  document.getElementById('release-date').textContent =
+    new Date(rel.published_at).toISOString().slice(0, 10);
+  if (rel.body) {
+    // textContent, never innerHTML: the release body is remote markdown.
+    document.getElementById('release-body').textContent = rel.body.trim();
+    document.getElementById('release-notes').hidden = false;
+  }
+}).catch(() => {});
+</script>
+</body>
+</html>

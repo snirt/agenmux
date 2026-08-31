@@ -1,0 +1,498 @@
+/* Palette lifted from src/sidebar.rs — the page wears the app's own colors. */
+:root {
+  --bg: #0e0e0e;
+  --bar-bg: #303030;            /* xterm 236, the focused title bar */
+  --fg: #c9c9c9;
+  --muted: #8a8a8a;
+  --faint: #5a5a5a;
+  --red: #e0665c;
+  --yellow: #d9b04c;
+  --green: #6cb56c;
+  --blocked-sel: rgb(42, 16, 16);
+  --blocked-bg: rgb(32, 12, 12);
+  --working-sel: rgb(38, 32, 16);
+  --working-bg: rgb(29, 24, 12);
+  --idle-sel: rgb(15, 36, 16);
+  --idle-bg: rgb(11, 27, 12);
+  --rule: #262626;
+  --term-bg: #101010;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+/* scroll reveal: sections drift up as they enter the viewport */
+.reveal {
+  opacity: 0;
+  transform: translateY(14px);
+  transition: opacity 0.45s ease, transform 0.45s ease;
+}
+.reveal.shown { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .reveal { opacity: 1; transform: none; transition: none; }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 15px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+.c-red { color: var(--red); }
+.c-yellow { color: var(--yellow); }
+.c-green { color: var(--green); }
+.muted { color: var(--muted); }
+
+a { color: var(--green); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ---- top nav, styled like a tmux status line ------------------------ */
+
+.topnav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 1.2rem;
+  background: #1c1c1c;
+  border-bottom: 1px solid var(--rule);
+  padding: 0.25rem 1rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.topnav::-webkit-scrollbar { display: none; }
+.topnav .brand { color: var(--green); font-weight: 600; }
+.topnav a { color: var(--muted); transition: color 0.15s, text-shadow 0.15s; }
+.topnav a:hover { color: var(--fg); text-decoration: none; }
+.topnav a.active {
+  color: var(--green);
+  text-shadow: 0 0 8px rgba(108, 181, 108, 0.9), 0 0 20px rgba(108, 181, 108, 0.45);
+}
+.topnav .ext { margin-left: auto; color: var(--green); }
+
+h2[id], #demo-section { scroll-margin-top: 3rem; }
+
+/* nav click: the target title flashes with a phosphor glow, then settles */
+@keyframes title-glow {
+  0% { color: var(--green); text-shadow: 0 0 12px rgba(108, 181, 108, 1), 0 0 32px rgba(108, 181, 108, 0.6); }
+  60% { color: var(--green); text-shadow: 0 0 8px rgba(108, 181, 108, 0.7), 0 0 20px rgba(108, 181, 108, 0.35); }
+  100% { color: var(--fg); text-shadow: none; }
+}
+h2.glance { animation: title-glow 1.1s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  h2.glance { animation: none; }
+}
+
+/* ---- hero ----------------------------------------------------------- */
+
+.hero {
+  max-width: 56rem;
+  margin: 0 auto;
+  padding: 4.5rem 1.25rem 1rem;
+  text-align: center;
+}
+
+h1 {
+  font-size: clamp(1.8rem, 5vw, 2.6rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.8rem;
+}
+h1 .prompt { color: var(--green); }
+
+.tagline {
+  color: var(--muted);
+  font-size: clamp(0.95rem, 2.5vw, 1.1rem);
+  margin: 0 auto 1.2rem;
+  max-width: 40rem;
+}
+.tagline .c-red, .tagline .c-yellow, .tagline .c-green { font-weight: 600; }
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.4rem 1.2rem;
+  margin: 0 0 2.5rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.badges .sep { color: var(--faint); }
+#stars[hidden] { display: none; }
+
+.hero-install { margin: 2rem 0 0.4rem; font-size: 0.9rem; }
+.hero-pre {
+  max-width: 30rem;
+  margin: 0 auto 1rem;
+  text-align: left;
+}
+
+/* ---- terminal mockup ------------------------------------------------ */
+
+/* demo carousel tabs, styled like tmux window entries */
+.demo-tabs {
+  display: flex;
+  justify-content: center;
+  gap: 1.4rem;
+  margin-bottom: 0.7rem;
+}
+.demo-tab {
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0.1rem 0.4rem;
+}
+.demo-tab:hover { color: var(--fg); }
+.demo-tab.active {
+  color: var(--green);
+  text-shadow: 0 0 8px rgba(108, 181, 108, 0.7);
+}
+.demo-tab.active::after { content: "*"; }
+
+.demo-caption {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.8rem 0 0;
+}
+
+/* Light terminal, matching the author's real setup: status bar on top with
+   a session pill and numbered window badges, blue ⤳ pane titles. */
+.term {
+  --t-fg: #c9c9c9;
+  --t-dim: #8a8a8a;
+  --t-blue: #6c8cd5;
+  --t-red: var(--red);
+  --t-yellow: var(--yellow);
+  --t-green: var(--green);
+  position: relative;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: hidden;
+  text-align: left;
+  background: #101010;
+  color: var(--t-fg);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+/* pressed-key hint, screencast style, bottom-right of the window */
+.key-osd {
+  position: absolute;
+  right: 1rem;
+  bottom: 0.8rem;
+  display: flex;
+  align-items: center;
+  gap: 0.8ch;
+  color: #9a9a9a;
+  font-size: 1.35rem;
+  pointer-events: none;
+}
+.key-osd .key {
+  background: rgba(0, 0, 0, 0.8);
+  color: #fff;
+  border: 1px solid #4a4a4a;
+  border-bottom-width: 3px;
+  border-radius: 6px;
+  padding: 0.15rem 1.1ch;
+  font-weight: 700;
+  min-width: 2.2ch;
+  text-align: center;
+}
+.key-osd.pop { animation: key-pop 0.9s ease-out forwards; }
+@keyframes key-pop {
+  0% { opacity: 1; transform: scale(1.15); }
+  20% { transform: scale(1); }
+  70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.term-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  background: #1f1f1f;
+  border-bottom: 1px solid var(--rule);
+  padding: 0.45rem 0.7rem;
+}
+.term-bar .dot { width: 11px; height: 11px; border-radius: 50%; }
+.term-bar .d1 { background: #ff5f57; }
+.term-bar .d2 { background: #febc2e; }
+.term-bar .d3 { background: #28c840; }
+.term-title {
+  flex: 1;
+  text-align: center;
+  color: var(--faint);
+  font-size: 0.8rem;
+  margin-right: 2.9rem;  /* offset the dots so the title truly centers */
+}
+
+.term-top {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: #161616;
+  color: #b8b8b8;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.term-top .pill {
+  background: #000;
+  color: #eee;
+  border-radius: 999px;
+  padding: 0 0.9ch;
+}
+.term-top .badge {
+  display: inline-block;
+  width: 1.55em;
+  border-radius: 50%;
+  text-align: center;
+  color: #1a1a1a;
+  font-size: 0.9em;
+}
+.term-top .b1 { background: #a8c7fa; }
+.term-top .b2 { background: #e7c9a9; }
+.term-top .b3 { background: #a9d7b3; }
+.term-top .b4 { background: #f2b8c6; }
+.term-top .wins { display: inline-flex; gap: 1rem; }
+.term-top .win.active { color: #fff; font-weight: 700; }
+.term-top .clock-wrap { margin-left: auto; color: #8a8a8a; }
+
+.term-body { display: flex; min-height: 19rem; }
+
+.pane-title { color: var(--t-blue); padding: 0.1rem 0.6rem; }
+
+/* the main "pane" next to the sidebar */
+.pane-wrap {
+  flex: 1;
+  min-width: 0;
+  border-left: 1px solid var(--rule);
+}
+.pane {
+  padding: 0.2rem 0.9rem 0.5rem;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow: hidden;
+}
+.pane .l-dim { color: var(--t-dim); }
+.pane .l-yellow { color: var(--t-yellow); }
+.pane .l-green { color: var(--t-green); }
+.pane .l-box { color: var(--t-fg); background: #1c1c1c; }
+
+/* ---- sidebar (the real thing, in CSS) ------------------------------- */
+
+.sidebar {
+  width: 32ch;
+  max-width: 55%;
+  flex: none;
+}
+
+.sidebar .bar {
+  color: var(--t-green);
+  font-weight: 700;
+  padding: 0 0.6rem;
+}
+
+.sidebar .bar .bar-filter { color: var(--t-dim); font-weight: 400; }
+.sidebar .hint {
+  color: var(--t-dim);
+  padding: 0.05rem 0.6rem;
+}
+
+.sidebar .session {
+  color: var(--t-blue);         /* bold blue session headers */
+  font-weight: 700;
+  padding: 0.1rem 0.6rem;
+}
+
+.agent, .entry .title {
+  display: flex;
+  gap: 0.55ch;
+  padding: 0.05rem 0.6rem;
+  white-space: nowrap;
+  overflow: hidden;
+}
+/* cursor color follows the row state, like cursor_mark() */
+.agent .cursor { color: var(--t-green); visibility: hidden; width: 1ch; flex: none; font-weight: 700; }
+.entry.selected .cursor { visibility: visible; }
+.entry[data-state="blocked"] .cursor { color: var(--t-red); }
+.entry[data-state="working"] .cursor { color: var(--t-yellow); }
+.agent .name { flex: none; font-weight: 700; }
+.agent .rest {
+  color: var(--t-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.entry .title {
+  color: var(--t-dim);
+  padding-left: calc(0.6rem + 4.1ch);   /* 5-space indent under the agent name */
+}
+
+/* Only the selected row is tinted, exactly like state_bg() — the app paints
+   its fixed dark row colors even on a light terminal, so the selected entry
+   flips to light-on-dark, matching the real screenshot. */
+.entry.selected { color: #e8e8e8; }
+.entry.selected .cursor { color: #e8e8e8; }
+.entry.selected .rest, .entry.selected .title { color: #a8a8a8; }
+.entry.selected[data-state="blocked"] { background: var(--blocked-sel); }
+.entry.selected[data-state="working"] { background: var(--working-sel); }
+.entry.selected[data-state="idle"],
+.entry.selected[data-state="done"] { background: var(--idle-sel); }
+
+.entry[data-state="blocked"] .glyph { color: var(--t-red); animation: blink 1s steps(1) infinite; }
+.entry[data-state="working"] .glyph { color: var(--t-yellow); }
+.entry[data-state="idle"] .glyph, .entry[data-state="done"] .glyph { color: var(--t-green); }
+.entry[data-state="done"] .glyph { animation: blink 1s steps(1) infinite; }
+.entry.selected .glyph { color: #7ddb84; }
+.entry.selected[data-state="blocked"] .glyph { color: #ff8a7a; }
+.entry.selected[data-state="working"] .glyph { color: #e8c15a; }
+
+@keyframes blink { 50% { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .glyph { animation: none !important; }
+}
+
+/* ---- main column ----------------------------------------------------- */
+
+main {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 1rem 1.25rem 4rem;
+}
+
+h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--fg);
+  margin: 3rem 0 0.8rem;
+}
+h2::before { content: "## "; color: var(--faint); }
+
+p { margin: 0.7rem 0; }
+
+/* ---- states legend ------------------------------------------------ */
+
+.states { border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; margin: 1rem 0; }
+.states .row { display: flex; gap: 1ch; padding: 0.25rem 0.75rem; }
+.states .row .glyph { width: 2ch; flex: none; }
+.states .row b { font-weight: 600; }
+.states .row[data-state="blocked"] { background: var(--blocked-bg); }
+.states .row[data-state="blocked"] .glyph { color: var(--red); animation: blink 1s steps(1) infinite; }
+.states .row[data-state="working"] { background: var(--working-bg); }
+.states .row[data-state="working"] .glyph { color: var(--yellow); }
+.states .row[data-state="done"] { background: var(--idle-bg); }
+.states .row[data-state="done"] .glyph { color: var(--green); animation: blink 1s steps(1) infinite; }
+.states .row[data-state="idle"] { background: var(--idle-bg); }
+.states .row[data-state="idle"] .glyph { color: var(--green); }
+
+/* ---- trait grid ----------------------------------------------------- */
+
+.traits {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8rem;
+  margin: 1rem 0;
+}
+.trait {
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.6rem 0.9rem;
+  background: #121212;
+}
+.trait-head { color: var(--green); font-weight: 600; }
+.trait-head::before { content: "▸ "; color: var(--faint); }
+.trait p { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.9rem; }
+@media (max-width: 560px) {
+  .traits { grid-template-columns: 1fr; }
+}
+
+/* ---- code blocks --------------------------------------------------- */
+
+pre {
+  position: relative;
+  background: #161616;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.7rem 3.2rem 0.7rem 0.9rem;
+  overflow-x: auto;
+  font-size: 0.88rem;
+  line-height: 1.55;
+  scrollbar-color: var(--bar-bg) #161616;
+  scrollbar-width: thin;
+}
+code { font-family: var(--mono); }
+p code, li code {
+  background: #1c1c1c;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0 0.3ch;
+  font-size: 0.9em;
+}
+
+pre .copy {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  background: var(--bar-bg);
+  color: var(--muted);
+  border: none;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.05rem 0.6ch;
+  cursor: pointer;
+}
+pre .copy:hover { color: var(--fg); }
+
+kbd {
+  font-family: var(--mono);
+  background: #1c1c1c;
+  border: 1px solid #3a3a3a;
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  padding: 0 0.5ch;
+  font-size: 0.85em;
+}
+
+ul { padding-left: 1.4rem; margin: 0.7rem 0; }
+li { margin: 0.25rem 0; }
+li::marker { color: var(--faint); }
+
+/* ---- latest release ------------------------------------------------ */
+
+#release-head { display: flex; gap: 1.2ch; flex-wrap: wrap; align-items: baseline; }
+#release-tag { color: var(--green); font-weight: 600; }
+#release-date { color: var(--muted); font-size: 0.85rem; }
+#release-notes { white-space: pre-wrap; }
+#release-notes[hidden] { display: none; }
+
+footer {
+  margin-top: 3.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+@media (max-width: 480px) {
+  body { font-size: 14px; }
+  .hero { padding-top: 2.5rem; }
+  .pane-wrap { display: none; }   /* sidebar alone fits a phone */
+  .sidebar { width: 100%; max-width: none; }
+}
