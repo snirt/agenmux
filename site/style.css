@@ -27,7 +27,7 @@ html { scroll-behavior: smooth; }
 .reveal {
   opacity: 0;
   transform: translateY(14px);
-  transition: opacity 0.45s ease, transform 0.45s ease;
+  transition: opacity 0.45s ease, transform 0.45s ease, filter 0.35s ease-in-out;
 }
 .reveal.shown { opacity: 1; transform: none; }
 @media (prefers-reduced-motion: reduce) {
@@ -78,9 +78,14 @@ a:hover { text-decoration: underline; }
   color: var(--green);
   text-shadow: 0 0 8px rgba(108, 181, 108, 0.9), 0 0 20px rgba(108, 181, 108, 0.45);
 }
-.topnav .ext { margin-left: auto; color: var(--green); }
+.topnav .ext { margin-left: auto; color: var(--muted); display: flex; align-items: center; gap: 0.8ch; }
+.topnav .ext:hover { color: var(--fg); text-decoration: none; }
 
 h2[id], #demo-section { scroll-margin-top: 3rem; }
+
+/* out-of-focus sections fade back; filter keeps it independent of .reveal */
+main > * { transition: filter 0.35s ease-in-out; }
+main > .dim-sec { filter: opacity(0.55); }
 
 /* nav click: the target title flashes with a phosphor glow, then settles */
 @keyframes title-glow {
@@ -128,7 +133,15 @@ h1 .prompt { color: var(--green); }
   font-size: 0.85rem;
 }
 .badges .sep { color: var(--faint); }
-#stars[hidden] { display: none; }
+/* count stays on the row baseline; the star is nudged to optically match */
+#stars .star {
+  color: var(--yellow);
+  font-size: 2rem;
+  line-height: 0;
+  display: inline-block;
+  vertical-align: -0.16em;
+}
+#stars[hidden] { display: none !important; }
 
 .hero-install { margin: 2rem 0 0.4rem; font-size: 0.9rem; }
 .hero-pre {
@@ -160,7 +173,6 @@ h1 .prompt { color: var(--green); }
   color: var(--green);
   text-shadow: 0 0 8px rgba(108, 181, 108, 0.7);
 }
-.demo-tab.active::after { content: "*"; }
 
 .demo-caption {
   color: var(--muted);
@@ -403,24 +415,52 @@ p { margin: 0.7rem 0; }
 
 /* ---- trait grid ----------------------------------------------------- */
 
-.traits {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.8rem;
-  margin: 1rem 0;
+/* how-it-works carousel: one trait at a time, tabs above, slides in */
+.traits-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.4rem;
+  margin: 1rem 0 0.7rem;
 }
+.trait-tab {
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 0.95rem;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0.1rem 0.2rem;
+}
+.trait-tab:hover { color: var(--fg); }
+.trait-tab.active {
+  color: var(--green);
+  text-shadow: 0 0 8px rgba(108, 181, 108, 0.7);
+}
+
+.traits { margin: 0 0 1rem; }
 .trait {
+  display: none;
   border: 1px solid var(--rule);
   border-radius: 4px;
-  padding: 0.6rem 0.9rem;
+  padding: 1rem 1.2rem;
   background: #121212;
+  height: 10.5rem;   /* fixed: no layout jump between slides */
+  overflow: hidden;
 }
-.trait-head { color: var(--green); font-weight: 600; }
-.trait-head::before { content: "▸ "; color: var(--faint); }
-.trait p { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.9rem; }
 @media (max-width: 560px) {
-  .traits { grid-template-columns: 1fr; }
+  .trait { height: 15rem; }
 }
+.trait.active { display: block; animation: trait-in 0.35s ease; }
+@keyframes trait-in {
+  from { opacity: 0; transform: translateX(28px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .trait.active { animation: none; }
+}
+.trait-head { color: var(--green); font-weight: 600; font-size: 1.2rem; }
+.trait-head::before { content: "▸ "; color: var(--faint); }
+.trait p { margin: 0.5rem 0 0; color: var(--fg); font-size: 1.05rem; line-height: 1.7; }
 
 /* ---- code blocks --------------------------------------------------- */
 
@@ -459,6 +499,25 @@ pre .copy {
   cursor: pointer;
 }
 pre .copy:hover { color: var(--fg); }
+
+/* use-it cheat sheet, like the sidebar's own `?` help */
+.keys-table {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.35rem 2rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.8rem 1rem;
+  background: #121212;
+  margin: 1rem 0;
+}
+.keys-table > div { display: flex; align-items: baseline; gap: 1ch; }
+.keys-table .k { min-width: 12ch; flex: none; color: var(--fg); }
+.keys-table span:last-child { color: var(--muted); }
+.keys-table .dim { color: var(--faint); }
+@media (max-width: 560px) {
+  .keys-table { grid-template-columns: 1fr; }
+}
 
 kbd {
   font-family: var(--mono);

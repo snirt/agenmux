@@ -11,13 +11,13 @@
 
 <nav class="topnav">
   <span class="brand">[agents-mon]</span>
-  <a href="#demo-section">0:demo</a>
-  <a href="#states">1:states</a>
-  <a href="#how">2:how</a>
-  <a href="#install">3:install</a>
-  <a href="#use">4:use</a>
-  <a href="#release">5:release</a>
-  <a class="ext" href="https://github.com/snirt/tmux-agents-mon">github ↗</a>
+  <a href="#demo-section">demo</a>
+  <a href="#states">states</a>
+  <a href="#how">how</a>
+  <a href="#install">install</a>
+  <a href="#use">use</a>
+  <a href="#release">release</a>
+  <a class="ext" href="https://github.com/snirt/tmux-agents-mon" aria-label="GitHub repository"><svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
 </nav>
 
 <section class="hero">
@@ -30,13 +30,13 @@
     <span class="sep">·</span>
     <a href="https://github.com/snirt/tmux-agents-mon/releases/latest"><span id="version">v0.2.1</span></a>
     <span class="sep">·</span>
-    <span id="stars" hidden>★ <span id="star-count"></span></span>
+    <span id="stars" hidden><span class="star">★</span> <span id="star-count"></span></span>
     <span>MIT</span>
   </div>
 
   <div class="demo-tabs" id="demo-section" role="tablist">
-    <button class="demo-tab active" data-demo="0">0:monitor</button>
-    <button class="demo-tab" data-demo="1">1:search</button>
+    <button class="demo-tab active" data-demo="0">monitor</button>
+    <button class="demo-tab" data-demo="1">search</button>
   </div>
   <div class="term" aria-label="Animated mock of tmux with the agents sidebar">
     <div class="term-bar">
@@ -112,6 +112,7 @@
 </div>
 
 <h2 id="how">how it works</h2>
+<div class="traits-tabs" id="traits-tabs"></div>
 <div class="traits">
   <div class="trait">
     <span class="trait-head">no hooks</span>
@@ -152,17 +153,16 @@ available. Release tarballs with <code>SHA256SUMS</code> are on the
 <a href="https://github.com/snirt/tmux-agents-mon/releases/latest">latest release</a>.</p>
 
 <h2 id="use">use it</h2>
-<ul>
-  <li><kbd>prefix + A</kbd> — toggle the sidebar (left split, or popup via
-      <code>@agents-mon-display 'popup'</code>)</li>
-  <li><kbd>j</kbd>/<kbd>k</kbd> move, <kbd>Enter</kbd> jumps to the selected
-      agent, <kbd>/</kbd> live search, <kbd>f</kbd> cycles the state filter,
-      <kbd>?</kbd> help</li>
-  <li>Click an agent row to jump to its pane; wheel scroll moves the cursor
-      (needs <code>set -g mouse on</code>)</li>
-  <li><kbd>u</kbd> opens the version picker — the plugin switches its source
-      <i>and</i> native engine to any release, and rolls back just as easily</li>
-</ul>
+<div class="keys-table">
+  <div><span class="k"><kbd>prefix + A</kbd></span><span>toggle sidebar</span></div>
+  <div><span class="k"><kbd>j</kbd>/<kbd>k</kbd> <kbd>↑</kbd>/<kbd>↓</kbd></span><span>move</span></div>
+  <div><span class="k"><kbd>Enter</kbd></span><span>jump to agent</span></div>
+  <div><span class="k"><kbd>/</kbd></span><span>live search</span></div>
+  <div><span class="k"><kbd>f</kbd></span><span>state filter</span></div>
+  <div><span class="k"><kbd>u</kbd></span><span>version picker</span></div>
+  <div><span class="k"><kbd>?</kbd></span><span>help</span></div>
+  <div><span class="k">click / wheel</span><span>jump / scroll <span class="dim">(mouse)</span></span></div>
+</div>
 <p>Add <code>#{agents_mon}</code> anywhere in your status line for the compact
 summary — e.g. <span style="white-space:nowrap"><span class="c-red">⣿1</span>
 <span class="c-yellow">⣾2</span>
@@ -395,7 +395,7 @@ function typeSearch(query, done) {
 // Demo carousel: two titled scenarios sharing the same mock window.
 const DEMOS = [
   {
-    caption: "every agent's state at a glance — jump to the blocked one and answer",
+    caption: "every agent's state at a glance — vim motions (or arrows) to the blocked one, answer, done",
     steps: [
       [2600, () => setState(0, 'blocked', 'Edit tests/pane.rs?')],
       [1600, () => typeIn('1', () => setState(0, 'working', 'fix flaky pane test'))],
@@ -498,29 +498,84 @@ if (!reduced) {
 // Nav glow: highlight the section currently in view.
 const navLinks = [...document.querySelectorAll('.topnav a[href^="#"]')];
 const sections = navLinks.map(a => document.getElementById(a.hash.slice(1)));
+// each main block belongs to the section of its nearest preceding h2
+const mainBlocks = [...document.querySelector('main').children];
+{
+  let cur = '';
+  mainBlocks.forEach(el => {
+    if (el.tagName === 'H2' && el.id) cur = el.id;
+    el.dataset.sec = cur;
+  });
+}
 function markActive(id) {
   navLinks.forEach(a => a.classList.toggle('active', a.hash === '#' + id));
+  mainBlocks.forEach(el => el.classList.toggle('dim-sec', el.dataset.sec !== id));
 }
-const spy = new IntersectionObserver(entries => {
-  entries.forEach(e => { if (e.isIntersecting) markActive(e.target.id); });
-}, { rootMargin: '-20% 0px -70% 0px' });
-sections.forEach(s => spy.observe(s));
+// mark the last section whose heading is at/above the anchor landing line
+// (scroll-margin-top is 3rem, so 80px keeps short sections correct)
+function spy() {
+  if (hoverSec) { markActive(hoverSec); return; }
+  let active = 'demo-section';   // above everything = the hero demo
+  const y = innerHeight * 0.55;  // sections land centered, so spy mid-screen
+  sections.forEach(s => { if (s.getBoundingClientRect().top <= y) active = s.id; });
+  markActive(active);
+}
+addEventListener('scroll', spy, { passive: true });
+
+// the section under the mouse takes focus; scroll position is the fallback
+let hoverSec = '';
+const mainEl = document.querySelector('main');
+mainEl.addEventListener('mousemove', e => {
+  const el = e.target.closest('main > *');
+  const s = el && el.dataset.sec;
+  if (s && s !== hoverSec) { hoverSec = s; markActive(s); }
+});
+mainEl.addEventListener('mouseleave', () => { hoverSec = ''; spy(); });
+spy();
 navLinks.forEach(a => a.addEventListener('click', e => {
   markActive(a.hash.slice(1));
   a.blur();
   const h = document.getElementById(a.hash.slice(1));
+  e.preventDefault();
   if (a.hash === '#demo-section') {
-    // the demo sits in the hero: center the mock window rather than
-    // pinning the tabs to the very top of the viewport
-    e.preventDefault();
-    document.querySelector('.term').scrollIntoView(
-      reduced ? { block: 'center' } : { behavior: 'smooth', block: 'center' });
+    // the demo sits in the hero: go to the top of the page
+    scrollTo({ top: 0, behavior: reduced ? 'auto' : 'smooth' });
     return;
   }
+  // center the whole section (heading to next heading) in the viewport
+  const heads = sections.filter(s => s.tagName === 'H2');
+  const next = heads[heads.indexOf(h) + 1];
+  const bottom = next ? next.offsetTop : document.body.scrollHeight;
+  const top = h.offsetTop - Math.max((innerHeight - (bottom - h.offsetTop)) / 2, 48);
+  scrollTo({ top, behavior: reduced ? 'auto' : 'smooth' });
   h.classList.remove('glance');
   void h.offsetWidth;              // restart the animation on repeat clicks
   h.classList.add('glance');
 }));
+
+// How-it-works carousel: tabs built from the trait headings, auto-rotating.
+const traits = [...document.querySelectorAll('.traits .trait')];
+const traitTabsWrap = document.getElementById('traits-tabs');
+let ti = 0, ttimer = null;
+traits.forEach((t, i) => {
+  const b = document.createElement('button');
+  b.className = 'trait-tab';
+  b.textContent = t.querySelector('.trait-head').textContent;
+  b.addEventListener('click', () => { showTrait(i); traitLoop(); });
+  traitTabsWrap.appendChild(b);
+});
+function showTrait(i) {
+  ti = i;
+  traits.forEach((t, k) => t.classList.toggle('active', k === i));
+  traitTabsWrap.querySelectorAll('.trait-tab').forEach((b, k) =>
+    b.classList.toggle('active', k === i));
+}
+function traitLoop() {
+  clearInterval(ttimer);
+  if (!reduced) ttimer = setInterval(() => showTrait((ti + 1) % traits.length), 8000);
+}
+showTrait(0);
+traitLoop();
 
 // Copy buttons on code blocks.
 document.querySelectorAll('pre > code').forEach(code => {
