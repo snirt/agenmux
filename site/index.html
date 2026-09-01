@@ -3,32 +3,30 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>tmux-agents-mon — monitor AI coding agents in tmux</title>
+<title>agenmux — monitor AI coding agents in tmux</title>
 <meta name="description" content="Monitor AI coding agents (Claude Code, Codex, OpenCode, Pi…) in your tmux panes — sidebar + status-line segment. No hooks, nothing runs inside your agents.">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <nav class="topnav">
-  <span class="brand">[agents-mon]</span>
+  <a class="brand" href="#" aria-label="back to top"><img class="brand-logo" src="logo.png" alt="agenmux"></a>
   <a href="#demo-section">demo</a>
-  <a href="#states">states</a>
   <a href="#how">how</a>
   <a href="#install">install</a>
   <a href="#use">use</a>
   <a href="#release">release</a>
-  <a class="ext" href="https://github.com/snirt/tmux-agents-mon" aria-label="GitHub repository"><svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  <a class="ext" href="https://github.com/snirt/agenmux" aria-label="GitHub repository"><svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
 </nav>
 
 <section class="hero">
-  <h1><span class="prompt">$</span> tmux-agents-mon</h1>
   <p class="tagline">Every AI coding agent in your tmux, one glance.<br>
   Who's <span class="c-red">blocked</span>, who's <span class="c-yellow">working</span>,
   who's <span class="c-green">done</span> — without switching panes.</p>
   <div class="badges">
-    <a href="https://github.com/snirt/tmux-agents-mon">github.com/snirt/tmux-agents-mon</a>
+    <a href="https://github.com/snirt/agenmux">agenmux on github</a>
     <span class="sep">·</span>
-    <a href="https://github.com/snirt/tmux-agents-mon/releases/latest"><span id="version">v0.2.1</span></a>
+    <a href="https://github.com/snirt/agenmux/releases/latest"><span id="version">v0.2.1</span></a>
     <span class="sep">·</span>
     <span id="stars" hidden><span class="star">★</span> <span id="star-count"></span></span>
     <span>MIT</span>
@@ -36,8 +34,10 @@
 
   <div class="demo-tabs" id="demo-section" role="tablist">
     <button class="demo-tab active" data-demo="0">monitor</button>
-    <button class="demo-tab" data-demo="1">search</button>
+    <button class="demo-tab" data-demo="1">states</button>
+    <button class="demo-tab" data-demo="2">search</button>
   </div>
+  <div class="demo-stage">
   <div class="term" aria-label="Animated mock of tmux with the agents sidebar">
     <div class="term-bar">
       <span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span>
@@ -92,24 +92,19 @@
     </div>
     <div class="key-osd" id="key-osd" hidden></div>
   </div>
+  <div class="states" hidden>
+    <div class="row" data-state="blocked"><span class="glyph">⣿</span><span><b>blocked</b> — waiting for your input (permission prompt, menu)</span></div>
+    <div class="row" data-state="working"><span class="glyph spinner">⠹</span><span><b>working</b> — actively running</span></div>
+    <div class="row" data-state="done"><span class="glyph">⣿</span><span><b>done</b> — finished while you were elsewhere; clears when you view it</span></div>
+    <div class="row" data-state="idle"><span class="glyph">⣿</span><span><b>idle</b> — waiting at the prompt</span></div>
+  </div>
+  </div>
 
-  <p class="demo-caption" id="demo-caption">every agent's state at a glance — jump to the blocked one and answer</p>
+  <p class="demo-caption" id="demo-caption">every agent's state at a glance — vim motions (or arrows) to the blocked one, answer, done</p>
 
-  <p class="hero-install">
-    <span class="muted">install with <a href="https://github.com/tmux-plugins/tpm">TPM</a>:</span>
-  </p>
-  <pre class="hero-pre"><code>set -g @plugin 'snirt/tmux-agents-mon'</code></pre>
 </section>
 
 <main>
-
-<h2 id="states">states</h2>
-<div class="states">
-  <div class="row" data-state="blocked"><span class="glyph">⣿</span><span><b>blocked</b> — waiting for your input (permission prompt, menu)</span></div>
-  <div class="row" data-state="working"><span class="glyph spinner">⠹</span><span><b>working</b> — actively running</span></div>
-  <div class="row" data-state="done"><span class="glyph">⣿</span><span><b>done</b> — finished while you were elsewhere; clears when you view it</span></div>
-  <div class="row" data-state="idle"><span class="glyph">⣿</span><span><b>idle</b> — waiting at the prompt</span></div>
-</div>
 
 <h2 id="how">how it works</h2>
 <div class="traits-tabs" id="traits-tabs"></div>
@@ -141,16 +136,16 @@
 
 <h2 id="install">install</h2>
 <p>With <a href="https://github.com/tmux-plugins/tpm">TPM</a>:</p>
-<pre><code>set -g @plugin 'snirt/tmux-agents-mon'</code></pre>
+<pre><code>set -g @plugin 'snirt/agenmux'</code></pre>
 <p>Press <kbd>prefix + I</kbd>. That's it: the plugin downloads and verifies the
 Rust engine for your platform in the background.</p>
 <p>Or manually:</p>
-<pre><code>git clone https://github.com/snirt/tmux-agents-mon ~/.tmux/plugins/tmux-agents-mon
-echo "run-shell ~/.tmux/plugins/tmux-agents-mon/agents-mon.tmux" >> ~/.tmux.conf</code></pre>
+<pre><code>git clone https://github.com/snirt/agenmux ~/.tmux/plugins/agenmux
+echo "run-shell ~/.tmux/plugins/agenmux/agents-mon.tmux" >> ~/.tmux.conf</code></pre>
 <p class="muted">Requirements: tmux and bash. <code>curl</code> and <code>tar</code>
 enable the automatic native download; without them, Cargo builds the engine when
 available. Release tarballs with <code>SHA256SUMS</code> are on the
-<a href="https://github.com/snirt/tmux-agents-mon/releases/latest">latest release</a>.</p>
+<a href="https://github.com/snirt/agenmux/releases/latest">latest release</a>.</p>
 
 <h2 id="use">use it</h2>
 <div class="keys-table">
@@ -173,13 +168,13 @@ summary — e.g. <span style="white-space:nowrap"><span class="c-red">⣿1</span
 <p id="release-head">
   <span id="release-tag">v0.2.1</span>
   <span id="release-date"></span>
-  <a href="https://github.com/snirt/tmux-agents-mon/releases">all releases →</a>
+  <a href="https://github.com/snirt/agenmux/releases">all releases →</a>
 </p>
 <pre id="release-notes" hidden><code id="release-body"></code></pre>
 
 <footer>
   MIT © 2026 Snir Turgeman ·
-  <a href="https://github.com/snirt/tmux-agents-mon">source</a>
+  <a href="https://github.com/snirt/agenmux">source</a>
 </footer>
 
 </main>
@@ -409,6 +404,11 @@ const DEMOS = [
     ],
   },
   {
+    caption: 'the four states, straight from the sidebar',
+    legend: true,
+    steps: [],
+  },
+  {
     caption: 'find an agent instantly — / live search filters as you type',
     steps: [
       [1400, () => typeSearch('codex', () => select(1))],
@@ -433,12 +433,14 @@ function applyDemo(i) {
   step = 0;
   document.querySelectorAll('.demo-tab').forEach((t, k) => t.classList.toggle('active', k === i));
   document.getElementById('demo-caption').textContent = DEMOS[i].caption;
+  document.querySelector('.term').hidden = !!DEMOS[i].legend;
+  document.querySelector('.hero .states').hidden = !DEMOS[i].legend;
   resetDemo();
   if (!reduced) run();
 }
 function startDemo(i, animate) {
   clearTimeout(timer);
-  const t = document.querySelector('.term');
+  const t = document.querySelector('.demo-stage');
   if (!animate || reduced) { applyDemo(i); return; }
   // slide the window out one way, swap content, slide it in from the other
   const dir = i > demo || (demo === DEMOS.length - 1 && i === 0) ? 1 : -1;
@@ -458,6 +460,10 @@ function startDemo(i, animate) {
 }
 function run() {
   const steps = DEMOS[demo].steps;
+  if (!steps.length) {
+    timer = setTimeout(() => startDemo((demo + 1) % DEMOS.length, true), 7000);
+    return;
+  }
   const [delay, fn] = steps[step];
   timer = setTimeout(() => {
     fn();
@@ -495,8 +501,14 @@ if (!reduced) {
   blocks.forEach(b => { b.classList.add('reveal'); revealer.observe(b); });
 }
 
+// Logo click: smooth-scroll back to the top.
+document.querySelector('.topnav .brand').addEventListener('click', e => {
+  e.preventDefault();
+  scrollTo({ top: 0, behavior: reduced ? 'auto' : 'smooth' });
+});
+
 // Nav glow: highlight the section currently in view.
-const navLinks = [...document.querySelectorAll('.topnav a[href^="#"]')];
+const navLinks = [...document.querySelectorAll('.topnav a[href^="#"]:not(.brand)')];
 const sections = navLinks.map(a => document.getElementById(a.hash.slice(1)));
 // each main block belongs to the section of its nearest preceding h2
 const mainBlocks = [...document.querySelector('main').children];
@@ -593,14 +605,17 @@ document.querySelectorAll('pre > code').forEach(code => {
 });
 
 // Live GitHub data. The page works without it; a fetch only upgrades it.
-const API = 'https://api.github.com/repos/snirt/tmux-agents-mon';
+const API = 'https://api.github.com/repos/snirt/agenmux';
 function cachedJson(url) {
-  const hit = sessionStorage.getItem(url);
-  if (hit) return Promise.resolve(JSON.parse(hit));
+  // 10-minute cache: fresh enough to see new stars, kind to the rate limit
+  try {
+    const hit = JSON.parse(sessionStorage.getItem(url));
+    if (hit && Date.now() - hit.t < 600000) return Promise.resolve(hit.j);
+  } catch (_) {}
   return fetch(url).then(r => {
     if (!r.ok) throw new Error(r.status);
     return r.json().then(j => {
-      try { sessionStorage.setItem(url, JSON.stringify(j)); } catch (_) {}
+      try { sessionStorage.setItem(url, JSON.stringify({ t: Date.now(), j })); } catch (_) {}
       return j;
     });
   });
