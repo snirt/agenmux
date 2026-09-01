@@ -1,4 +1,6 @@
-# tmux-agents-mon
+# agenmux
+
+Website: <https://snirt.github.io/agenmux/>
 
 Monitor AI coding agents running in your tmux panes. A sidebar and a status-line
 segment show every detected agent and its state:
@@ -25,7 +27,7 @@ hooks to install, nothing runs inside your agents.
 With [TPM](https://github.com/tmux-plugins/tpm):
 
 ```tmux
-set -g @plugin 'snirt/tmux-agents-mon'
+set -g @plugin 'snirt/agenmux'
 ```
 
 Press `prefix + I`. That's it: the plugin downloads and verifies the Rust
@@ -34,7 +36,7 @@ finishes, that first activation waits for the same installer; a failed download
 or build is reported in tmux instead of running an unverified fallback. After
 TPM updates, the native engine is refreshed without removing the old binary.
 
-Or manually: clone the repo and add `run-shell /path/to/tmux-agents-mon/agents-mon.tmux`
+Or manually: clone the repo and add `run-shell /path/to/agenmux/agents-mon.tmux`
 to `~/.tmux.conf`.
 
 Requirements: tmux and bash for TPM/bootstrap. `curl` and `tar` enable the
@@ -61,7 +63,7 @@ client detached, one pane stays warm for the next attach.
 GitHub Actions also builds ready-to-use plugin archives for x86_64 and ARM64 on
 Linux and macOS. The Linux binaries are statically linked for portability.
 Download the archive for your platform from the
-[latest GitHub Release](https://github.com/snirt/tmux-agents-mon/releases/latest)
+[latest GitHub Release](https://github.com/snirt/agenmux/releases/latest)
 and extract it; its native engine is already installed at
 `target/release/agents-mon`.
 Each release includes `SHA256SUMS` for verification. Builds from untagged commits
