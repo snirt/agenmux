@@ -1,5 +1,7 @@
 # agenmux
 
+[![agenmux logo](site/logo.png)](https://snirt.github.io/agenmux/)
+
 Website: <https://snirt.github.io/agenmux/>
 
 Monitor AI coding agents running in your tmux panes. A sidebar and a status-line
@@ -22,59 +24,105 @@ hooks to install, nothing runs inside your agents.
 
 <https://github.com/user-attachments/assets/b141a2db-b0f2-4775-bc9c-2aac70075187>
 
-## Install
+## Quick start
 
-With [TPM](https://github.com/tmux-plugins/tpm):
+Install with [TPM](https://github.com/tmux-plugins/tpm):
 
 ```tmux
 set -g @plugin 'snirt/agenmux'
 ```
 
-Press `prefix + I`. That's it: the plugin downloads and verifies the Rust
-engine for your platform in the background. If you toggle before installation
+Press `prefix + I` to install, then `prefix + A` to open the sidebar. The
+plugin downloads and verifies the Rust engine for your platform in the
+background. If you toggle before installation
 finishes, that first activation waits for the same installer; a failed download
 or build is reported in tmux instead of running an unverified fallback. After
 TPM updates, the native engine is refreshed without removing the old binary.
 
-Or manually: clone the repo and add `run-shell /path/to/agenmux/agents-mon.tmux`
-to `~/.tmux.conf`.
+### Manual install
+
+Clone the repo and add `run-shell /path/to/agenmux/agents-mon.tmux` to
+`~/.tmux.conf`, then reload tmux.
 
 Requirements: tmux and bash for TPM/bootstrap. `curl` and `tar` enable the
 automatic native download; without them, Cargo builds it when available. No
 required build step on a supported release platform.
 
-### Rust engine
+## Usage
 
-The Rust engine is the sole runtime implementation. It runs the scan/sidebar
-hot path with one persistent tmux control-mode connection. The plugin downloads
-and verifies a prebuilt binary automatically; if one is unavailable and
-[cargo](https://rustup.rs) is
-installed, it builds the engine in the background. `make build` does the same
-by hand, and `@agents-mon-bin` overrides the binary path. Agent detection stays
-in `agents/*.conf`, so adding or tuning agents never needs a rebuild. Building
-on macOS needs rustc 1.90 or newer (for the native notification helper).
+Press `prefix + A` to open the left sidebar or enter navigation when it is
+already open. Agents are grouped by session in tmux window order and refresh
+every two seconds.
 
-Split mode preserves one empty tmux pane in each window, so switching windows
-never changes the layout. Those panes have no shell or `agents-mon` child
-process (`pane_pid=0`); the single daemon writes only to sidebar panes currently
-visible in attached clients. Hidden panes retain their last frame; with every
-client detached, one pane stays warm for the next attach.
+| Input | Action |
+| --- | --- |
+| `prefix + A` | Open the sidebar or enter navigation |
+| Click an agent row | Jump to its pane (requires `set -g mouse on`) |
+| Mouse wheel | Move selection; jump after scrolling stops |
+| `j` / `k`, `↑` / `↓` | Move selection |
+| `Enter` / `l` | Jump to selected agent |
+| `/` | Search agent and session names |
+| `f` | Cycle `all → blocked → working → idle → done` |
+| `Esc` | Exit search and clear filters |
+| `u` | Open version picker |
+| `?` | Show help |
+| `q` / `Q` | Close sidebar |
 
-GitHub Actions also builds ready-to-use plugin archives for x86_64 and ARM64 on
-Linux and macOS. The Linux binaries are statically linked for portability.
-Download the archive for your platform from the
-[latest GitHub Release](https://github.com/snirt/agenmux/releases/latest)
-and extract it; its native engine is already installed at
-`target/release/agents-mon`.
-Each release includes `SHA256SUMS` for verification. Builds from untagged commits
-remain available as temporary artifacts on their **Build and Release** workflow
-run.
+<details>
+<summary>Search, mouse, and navigation details</summary>
+
+Clicks outside agent rows enter navigation; clicks in regular panes retain
+tmux behavior. Wheel scrolling moves one row per tick and delays the pane jump,
+so fast scrolling causes one window switch. Regular panes retain tmux
+scrollback behavior.
+
+During search, type normally, then press `Enter` to accept the query and restore
+`j`/`k` navigation; press `Enter` again to jump. `↑`/`↓` or
+`Ctrl-N`/`Ctrl-P` move while typing, and `Ctrl-U` clears the query without
+leaving search. State and text filters are mutually exclusive. Matching a
+session keeps all its agents visible as context.
+
+The header shows active filters, matching/total counts, and contextual controls
+only while filtering. The green `❯` cursor follows the focused agent pane and
+long lists scroll to keep the selection visible.
+
+</details>
+
+Add `#{agents_mon}` to `status-right` or `status-left` for the compact summary,
+e.g. `⣿1 ⣾2 ⣿1` in red/yellow/green for blocked/working/idle. It stays empty
+when no agents are running.
+
+```tmux
+set -g status-right '#{agents_mon} | %H:%M'
+```
+
+### Options
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `@agents-mon-key` | `A` | Sidebar (`split`) key in prefix table |
+| `@agents-mon-popup-key` | unset | Dedicated popup key |
+| `@agents-mon-width` | sidebar: `30`; popup: `40` | Sidebar or popup width |
+| `@agents-mon-display` | `split` | Main-key display: `split` (sidebar) or `popup` |
+| `@agents-mon-height` | agent count, minimum `15` | Fixed popup height |
+| `@agents-mon-hide-windows` | `agents*` | Window-picker exclusion pattern; `''` restores default picker |
+| `@agents-mon-notifications` | `on` | Desktop notifications; set `off` to disable |
+| `@agents-mon-wheel-jump` | `0.3` | Seconds before wheel selection jumps; `off` moves cursor only |
+
+With both keys set (e.g. `@agents-mon-key 'E'`, `@agents-mon-popup-key 'e'`)
+you get `prefix+E` for the split sidebar and `prefix+e` for the floating popup.
+
+In popup mode the same keybinding opens a floating window; close it with
+`q` or `Esc` inside (there is no outside toggle — the popup grabs the client).
+Click-to-jump and wheel scrolling work in split mode only (tmux does not
+forward mouse events into a popup); keyboard jump works in both, and the popup
+reopens over the selected agent after a jump.
 
 ## Updating
 
 When a newer release exists, the sidebar header says so, and says what to do:
 
-```
+```text
 agents ↑0.1.8
 u update · / search
 ```
@@ -98,71 +146,7 @@ Details worth knowing:
   Rollbacks to older releases re-enter that release's own entrypoint, including
   its legacy toggle script when the target predates the Rust-only runtime.
 
-## Usage
-
-- `prefix + A` — open the sidebar, or enter its navigation mode while it is
-  already open (left split, auto-refreshes every 2s); agents are grouped under
-  their session name, in tmux window order. Navigation selects the sidebar and
-  preserves your normal tmux pane bindings; `q`/`Q` closes the sidebar, while
-  `Esc` clears filters
-- **Click an agent row** in the sidebar to jump to that agent's pane
-  (requires `set -g mouse on`); clicking anywhere else in the sidebar enters
-  navigation, while clicks in regular panes keep tmux's default behavior
-- **Scroll the wheel** over the sidebar to move the cursor one row per tick,
-  the same as `↑`/`↓` (also needs `set -g mouse on`); shortly after you stop
-  scrolling it jumps to the selected agent, so a fast scroll costs one window
-  switch rather than one per row. The wheel in regular panes keeps tmux's
-  default scrollback behavior
-- In the sidebar: `j`/`k` or `↑`/`↓` move the `❯` cursor, `Enter` or `l` jumps to
-  the selected agent, and sidebar filtering uses `/` for live text search, `f`
-  to select the next state in `all → blocked → working → idle → done → all`.
-  `Esc` clears all filters. During search, type normally (`j` and `k` are query text), then press
-  `Enter` to accept the query and enable `j`/`k` navigation across filtered
-  results; press `Enter` again to jump. `↑`/`↓` or `Ctrl-N`/`Ctrl-P` can move
-  while typing, and `Ctrl-U` clears while staying in search. `Esc` exits search
-  or filtered navigation, clears every filter, and restores the full list. State
-  and text filters are mutually exclusive. `u` opens the [version picker](#updating),
-  `?` shows help (statuses + keys), and `q`/`Q` closes the sidebar;
-  matching a session keeps all its agent rows as context, active filters,
-  matching/total counts, and contextual controls appear in the header only
-  while searching or filtering; otherwise the list starts directly below the
-  header with no spacer row. The `❯` cursor is green while
-  navigation is active, long lists scroll to keep
-  the selection visible, and the cursor snaps to whichever agent pane currently
-  has focus (instantly with the Rust engine — it reacts to tmux focus events)
-- Add `#{agents_mon}` anywhere in `status-right`/`status-left` for the compact
-  summary, e.g. `⣿1 ⣾2 ⣿1` colored red/yellow/green for blocked/working/idle
-  (empty when no agents are running)
-
-```tmux
-set -g status-right '#{agents_mon} | %H:%M'
-```
-
-### Options
-
-```tmux
-set -g @agents-mon-key 'A'          # toggle keybinding (prefix table)
-set -g @agents-mon-popup-key 'e'    # optional: dedicated key that always opens the popup
-set -g @agents-mon-width '30'       # width (defaults: split 30, popup 40)
-set -g @agents-mon-display 'popup'  # make the main key open a popup (default: left split)
-set -g @agents-mon-height '15'      # fixed popup height (otherwise sized to the agent list, min. 15)
-set -g @agents-mon-hide-windows 'agents*'  # hide matching windows from the prefix+w picker
-                                    # (one fnmatch pattern; set to '' to restore the default picker)
-set -g @agents-mon-notifications 'off'  # disable desktop notifications (default: on)
-set -g @agents-mon-wheel-jump '0.3' # seconds of stillness before a wheel scroll jumps
-                                    # to the selected agent ('off' = move the cursor only)
-```
-
-With both keys set (e.g. `@agents-mon-key 'E'`, `@agents-mon-popup-key 'e'`)
-you get `prefix+E` for the split sidebar and `prefix+e` for the floating popup.
-
-In popup mode the same keybinding opens a floating window; close it with
-`q` or `Esc` inside (there is no outside toggle — the popup grabs the client).
-Click-to-jump and wheel scrolling work in split mode only (tmux does not
-forward mouse events into a popup); keyboard jump works in both, and the popup
-reopens over the selected agent after a jump.
-
-### Desktop notifications
+## Desktop notifications
 
 The Rust engine sends a native desktop notification when an agent finishes or
 needs attention while its pane is not focused. The title identifies the agent
@@ -178,12 +162,17 @@ focus events:
 set -g focus-events on
 ```
 
+<details>
+<summary>Focus detection details</summary>
+
 The [tmux manual](https://man.openbsd.org/tmux.1#focus-events) notes that clients
 may need to detach and attach again after this option changes. With focus events
 off, agents-mon conservatively suppresses a notification whenever any real tmux
 client has the pane selected. With them on, it suppresses only when at least one
 real client both selects the pane and reports itself focused; control-mode
 clients are ignored.
+
+</details>
 
 Notifications are enabled by default. Disable them with:
 
@@ -201,6 +190,9 @@ when prompted, or later under System Settings → Notifications → AgentsMon.
 Denying keeps notifications fully silent — there is no fallback around your
 choice. Plugin updates refresh the app automatically and the permission
 survives.
+
+<details>
+<summary>Platform implementation and edge cases</summary>
 
 To set up (or verify) permission right now instead of on first use:
 
@@ -239,7 +231,9 @@ notifications use the existing monitor process; no extra daemon is installed.
 A transition suppressed while focused is not delivered later merely because
 focus moves away.
 
-### CLI
+</details>
+
+## CLI
 
 The Rust binary is the complete runtime (`scan` is an alias for `list`):
 
@@ -313,12 +307,38 @@ behavior lives in Rust.
 
 Fixtures in `tests/fixtures/` are real `tmux capture-pane -p` dumps where
 possible (`claude-*`, `codex-idle`, `pi-idle`) and synthetic reconstructions for
-hard-to-trigger states (`*-blocked`, `oh-my-pi-blocked`, `opencode-*`, `pi-working`). To improve
-accuracy, re-capture a real screen into a fixture:
+hard-to-trigger states (`*-blocked`, `oh-my-pi-blocked`, `opencode-*`,
+`pi-working`). To improve accuracy, re-capture a real screen into a fixture:
 
 ```sh
 tmux capture-pane -p -t <pane> > tests/fixtures/claude-blocked.txt
 ```
+
+## Runtime architecture
+
+The Rust engine is the sole runtime implementation. It runs the scan/sidebar
+hot path with one persistent tmux control-mode connection. The plugin downloads
+and verifies a prebuilt binary automatically; if one is unavailable and
+[cargo](https://rustup.rs) is installed, it builds the engine in the background. `make build` does the same
+by hand, and `@agents-mon-bin` overrides the binary path. Agent detection stays
+in `agents/*.conf`, so adding or tuning agents never needs a rebuild. Building
+on macOS needs rustc 1.90 or newer (for the native notification helper).
+
+Sidebar (`split`) mode preserves one empty tmux pane in each window, so
+switching windows never changes the layout. Those panes have no shell or
+`agents-mon` child process (`pane_pid=0`); the single daemon writes only to sidebar panes currently
+visible in attached clients. Hidden panes retain their last frame; with every
+client detached, one pane stays warm for the next attach.
+
+GitHub Actions also builds ready-to-use plugin archives for x86_64 and ARM64 on
+Linux and macOS. The Linux binaries are statically linked for portability.
+Download the archive for your platform from the
+[latest GitHub Release](https://github.com/snirt/agenmux/releases/latest)
+and extract it; its native engine is already installed at
+`target/release/agents-mon`.
+Each release includes `SHA256SUMS` for verification. Builds from untagged commits
+remain available as temporary artifacts on their **Build and Release** workflow
+run.
 
 ## Known limits
 
