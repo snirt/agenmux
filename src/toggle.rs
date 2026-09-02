@@ -4,6 +4,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub fn run(plugin_dir: &Path, requested_mode: Option<&str>, requested_client: Option<&str>) -> i32 {
+    // tmux ignores a TMUX value that names no socket and silently falls back to
+    // the default server. A repro script with an empty socket variable must not
+    // tear down and re-own the user's live sidebar.
+    if let Ok(env) = std::env::var("TMUX") {
+        if !env.is_empty() && !env.starts_with('/') {
+            eprintln!(
+                "agenmux: TMUX={env:?} names no socket; refusing to touch the default server"
+            );
+            return 1;
+        }
+    }
     let mode = requested_mode
         .filter(|mode| !mode.is_empty())
         .map(str::to_string)
@@ -58,6 +69,9 @@ fn control_alive() -> bool {
     !control.is_empty()
         && tmux::lines(&["list-clients", "-F", "#{client_name}"])
             .is_ok_and(|clients| clients.iter().any(|client| client == &control))
+        // control client up but FIFO gone = deaf daemon; treat as dead so the
+        // caller tears down and starts fresh instead of re-selecting a zombie
+        && tmux::runtime_dir().join("agenmux-keys").exists()
 }
 
 fn split(plugin_dir: &Path, client: Option<String>) -> i32 {

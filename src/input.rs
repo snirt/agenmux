@@ -27,7 +27,7 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
     let target = y
         .checked_sub(1)
         .and_then(|line| {
-            std::fs::read_to_string(std::env::temp_dir().join("agenmux-rows"))
+            std::fs::read_to_string(tmux::runtime_dir().join("agenmux-rows"))
                 .ok()?
                 .lines()
                 .nth(line)

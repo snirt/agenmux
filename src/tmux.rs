@@ -2,6 +2,7 @@
 // responses out. Replaces one fork per tmux command with a write+read.
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 pub enum TmuxError {
@@ -38,6 +39,18 @@ pub fn command(args: &[&str]) -> Result<String, TmuxError> {
         ));
     }
     String::from_utf8(output.stdout).map_err(|e| TmuxError::Error(e.to_string()))
+}
+
+/// Where the daemon keeps its key FIFO and row map. The daemon publishes its
+/// own temp dir as @agenmux-runtime-dir so key/click/wheel senders find it even
+/// when tmux spawns them with a different TMPDIR than the daemon inherited.
+pub fn runtime_dir() -> PathBuf {
+    command(&["show-option", "-gqv", "@agenmux-runtime-dir"])
+        .ok()
+        .map(|dir| dir.trim_end().to_string())
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 pub fn command_status(args: &[&str]) -> Result<(), TmuxError> {

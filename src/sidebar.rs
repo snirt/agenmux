@@ -362,7 +362,7 @@ pub fn send_key(name: &str) -> i32 {
             _ => return 2,
         }
     };
-    let path = std::env::temp_dir().join("agenmux-keys");
+    let path = crate::tmux::runtime_dir().join("agenmux-keys");
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
         return 1;
     };
@@ -794,6 +794,10 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+    let quoted_tmp = tmp.to_string_lossy().replace('\'', "\\'");
+    let _ = sb.tmux.run(&format!(
+        "set-option -g @agenmux-runtime-dir '{quoted_tmp}'"
+    ));
     sb.daemon = Some(Daemon {
         keys_path,
         keys_fd,
@@ -861,6 +865,9 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             }
             if sb.daemon.is_some() && !sb.mirror_tick() {
                 break; // all preserved panes gone — nothing left to display
+            }
+            if sb.daemon.as_ref().is_some_and(|d| !d.keys_path.exists()) {
+                break; // runtime dir vanished: deaf to keys, better gone than a zombie
             }
             sb.render(false);
             // a scan takes tens of ms — with the pre-scan `now`, a tick due

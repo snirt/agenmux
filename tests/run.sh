@@ -553,6 +553,26 @@ SH
   fi
   rm -rf "$tmp"
 fi
+if [ "$fail" -eq 0 ]; then
+  # TMUX set but naming no socket: tmux would fall back to the default server.
+  # toggle must refuse before it issues a single tmux command.
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/bin"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$TMUX_STUB_LOG"\nexit 0\n' >"$tmp/bin/tmux"
+  chmod +x "$tmp/bin/tmux"
+  : >"$tmp/tmux.log"
+  TMUX=',,0' TMUX_STUB_LOG="$tmp/tmux.log" PATH="$tmp/bin:$PATH" \
+    "$BIN" toggle split 2>/dev/null
+  rc=$?
+  if [ "$rc" -eq 1 ] && [ ! -s "$tmp/tmux.log" ]; then
+    echo "ok   toggle-refuses-malformed-tmux-env"
+  else
+    echo "FAIL toggle-refuses-malformed-tmux-env: rc=$rc"
+    cat "$tmp/tmux.log"
+    fail=1
+  fi
+  rm -rf "$tmp"
+fi
 if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   # mirror mode end to end: toggle puts a mirror pane in every window, window
   # switches change NO layout (the whole point — no reflow bump), new windows

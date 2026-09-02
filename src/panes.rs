@@ -275,6 +275,7 @@ pub fn teardown() -> i32 {
     }
     let _ = tmux::command_status(&["set-option", "-gu", "@agenmux-on"]);
     let _ = tmux::command_status(&["set-option", "-gu", "@agenmux-control-client"]);
+    let _ = tmux::command_status(&["set-option", "-gu", "@agenmux-runtime-dir"]);
     let _ = tmux::command_status(&["set-option", "-gu", "@agents-mon-on"]);
     let _ = tmux::command_status(&["set-option", "-gu", "@agents-mon-control-client"]);
     0

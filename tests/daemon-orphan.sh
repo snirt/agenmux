@@ -53,7 +53,9 @@ sleep 4
 survives_when_current=0
 kill -0 "$daemon" 2>/dev/null && survives_when_current=1
 
-env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" "$BIN" key versions || {
+# Senders spawned by tmux need not share the daemon's TMPDIR: the daemon
+# publishes its runtime dir, so a foreign TMPDIR here must still deliver.
+env TMPDIR="$tmp/not-the-daemons" TMUX="$sock,$server_pid,0" "$BIN" key versions || {
   echo "FAIL daemon-orphan-exits: could not open version picker"
   exit 1
 }
@@ -86,5 +88,40 @@ if [ "$survives_when_current" -eq 1 ] && [ "$exits_when_replaced" -eq 1 ]; then
   echo "ok   daemon-orphan-exits"
 else
   echo "FAIL daemon-orphan-exits: survives-while-current=$survives_when_current exits-when-replaced=$exits_when_replaced"
+  exit 1
+fi
+
+# A daemon whose runtime dir was deleted under it can never hear a key again.
+# It must exit with teardown so the next toggle starts fresh instead of
+# re-selecting a zombie sidebar.
+before="$(pgrep -f 'agenmux daemon' 2>/dev/null | sort)"
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
+  "$BIN" toggle split
+daemon=''
+for _ in $(seq 1 60); do
+  after="$(pgrep -f 'agenmux daemon' 2>/dev/null | sort)"
+  daemon="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -n 1)"
+  [ -n "$daemon" ] && break
+  sleep 0.1
+done
+[ -n "$daemon" ] && [ -p "$tmp/agenmux-keys" ] || {
+  echo "FAIL daemon-exits-without-runtime-dir: no daemon or FIFO after restart"
+  exit 1
+}
+rm -f "$tmp/agenmux-keys"
+exits_without_fifo=0
+for _ in $(seq 1 40); do
+  kill -0 "$daemon" 2>/dev/null || {
+    exits_without_fifo=1
+    break
+  }
+  sleep 0.2
+done
+if [ "$exits_without_fifo" -eq 1 ] &&
+  [ -z "$(tmux -S "$sock" show-option -gqv @agenmux-on)" ] &&
+  [ -z "$(tmux -S "$sock" show-option -gqv @agenmux-runtime-dir)" ]; then
+  echo "ok   daemon-exits-without-runtime-dir"
+else
+  echo "FAIL daemon-exits-without-runtime-dir: exited=$exits_without_fifo on=$(tmux -S "$sock" show-option -gqv @agenmux-on)"
   exit 1
 fi
