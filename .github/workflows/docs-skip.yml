@@ -29,10 +29,10 @@ jobs:
     strategy:
       matrix:
         artifact:
-          - tmux-agents-mon-linux-x86_64
-          - tmux-agents-mon-linux-aarch64
-          - tmux-agents-mon-macos-x86_64
-          - tmux-agents-mon-macos-aarch64
+          - agenmux-linux-x86_64
+          - agenmux-linux-aarch64
+          - agenmux-macos-x86_64
+          - agenmux-macos-aarch64
     runs-on: ubuntu-latest
     steps:
       - run: echo "docs-only change, skipped"

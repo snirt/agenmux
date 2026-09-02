@@ -2,10 +2,10 @@ use std::process::{Command, Output};
 
 fn run_without_server(command: &str) -> Output {
     let socket = std::env::temp_dir().join(format!(
-        "agents-mon-no-server-{}-{command}",
+        "agenmux-no-server-{}-{command}",
         std::process::id()
     ));
-    Command::new(env!("CARGO_BIN_EXE_agents-mon"))
+    Command::new(env!("CARGO_BIN_EXE_agenmux"))
         .arg(command)
         .env("TMUX", format!("{},0,0", socket.display()))
         .output()
@@ -14,7 +14,7 @@ fn run_without_server(command: &str) -> Output {
 
 #[test]
 fn version_comes_from_cargo_manifest() {
-    let output = Command::new(env!("CARGO_BIN_EXE_agents-mon"))
+    let output = Command::new(env!("CARGO_BIN_EXE_agenmux"))
         .arg("--version")
         .output()
         .unwrap();
@@ -22,7 +22,7 @@ fn version_comes_from_cargo_manifest() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        format!("agents-mon {}\n", env!("CARGO_PKG_VERSION"))
+        format!("agenmux {}\n", env!("CARGO_PKG_VERSION"))
     );
 }
 

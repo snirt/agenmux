@@ -6,22 +6,51 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_REPO: &str = "https://github.com/snirt/tmux-agents-mon";
+const DEFAULT_REPO: &str = "https://github.com/snirt/agenmux";
 
 fn repo() -> String {
-    std::env::var("AGENTS_MON_REPO").unwrap_or_else(|_| DEFAULT_REPO.to_string())
+    crate::compat_env("AGENMUX_REPO", "AGENTS_MON_REPO").unwrap_or_else(|| DEFAULT_REPO.to_string())
 }
 
 fn release_dir(plugin_dir: &Path) -> PathBuf {
     plugin_dir.join("target/release")
 }
 
+fn runtime_name(plugin_dir: &Path) -> &'static str {
+    if plugin_dir.join("agenmux.tmux").is_file() {
+        "agenmux"
+    } else {
+        "agents-mon"
+    }
+}
+
+fn engine_path(plugin_dir: &Path) -> PathBuf {
+    release_dir(plugin_dir).join(runtime_name(plugin_dir))
+}
+
+fn state_path(plugin_dir: &Path) -> PathBuf {
+    release_dir(plugin_dir).join(format!(".{}-version", runtime_name(plugin_dir)))
+}
+
+fn package_engine(package: &Path) -> PathBuf {
+    let canonical = package.join("target/release/agenmux");
+    if canonical.is_file() {
+        canonical
+    } else {
+        package.join("target/release/agents-mon")
+    }
+}
+
 fn latest_file(plugin_dir: &Path) -> PathBuf {
-    release_dir(plugin_dir).join(".agents-mon-latest")
+    release_dir(plugin_dir).join(".agenmux-latest")
 }
 
 fn tags_file(plugin_dir: &Path) -> PathBuf {
-    release_dir(plugin_dir).join(".agents-mon-tags")
+    release_dir(plugin_dir).join(".agenmux-tags")
+}
+
+fn legacy_latest_file(plugin_dir: &Path) -> PathBuf {
+    release_dir(plugin_dir).join(".agents-mon-latest")
 }
 
 fn run(program: impl AsRef<OsStr>, args: &[&str]) -> std::io::Result<Output> {
@@ -197,11 +226,8 @@ fn manifest_tag(plugin_dir: &Path) -> Option<String> {
 }
 
 fn note(message: &str) {
-    if !success(
-        "tmux",
-        &["display-message", &format!("agents-mon: {message}")],
-    ) {
-        println!("agents-mon: {message}");
+    if !success("tmux", &["display-message", &format!("agenmux: {message}")]) {
+        println!("agenmux: {message}");
     }
 }
 
@@ -223,6 +249,7 @@ fn resolve_target(plugin_dir: &Path, requested: &str) -> Option<String> {
         return valid_tag(requested).then(|| requested.to_string());
     }
     first_line(&latest_file(plugin_dir))
+        .or_else(|| first_line(&legacy_latest_file(plugin_dir)))
         .filter(|tag| valid_tag(tag))
         .or_else(|| latest_remote_tag(&repo()))
 }
@@ -320,8 +347,13 @@ fn engine_matches(binary: &Path, target: &str) -> bool {
         .ok()
         .filter(|output| output.status.success())
         .is_some_and(|output| {
-            String::from_utf8_lossy(&output.stdout).trim()
-                == format!("agents-mon {}", expected_version(target))
+            let actual = String::from_utf8_lossy(&output.stdout);
+            let version = expected_version(target);
+            matches!(
+                actual.trim(),
+                value if value == format!("agenmux {version}")
+                    || value == format!("agents-mon {version}")
+            )
         })
 }
 
@@ -341,7 +373,7 @@ fn fetch_package(
         return Err("fetch");
     }
     let package = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    let binary = package.join("target/release/agents-mon");
+    let binary = package_engine(&package);
     if !package.is_dir() || !engine_matches(&binary, target) {
         return Err("engine");
     }
@@ -354,10 +386,7 @@ fn write_engine_state(plugin_dir: &Path, target: &str) -> std::io::Result<()> {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .filter(|revision| !revision.is_empty())
         .unwrap_or_else(|| "-".to_string());
-    atomic_write(
-        &release_dir(plugin_dir).join(".agents-mon-version"),
-        &format!("{target}\n{revision}\n"),
-    )
+    atomic_write(&state_path(plugin_dir), &format!("{target}\n{revision}\n"))
 }
 
 fn restore_snapshot(path: &Path, snapshot: &Path, existed: bool) -> std::io::Result<()> {
@@ -400,17 +429,15 @@ fn replace_engine_and_state(
 }
 
 fn install_exact_engine(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
-    let scratch = Scratch::new("agents-mon-engine").map_err(|_| "scratch")?;
+    let scratch = Scratch::new("agenmux-engine").map_err(|_| "scratch")?;
     let package = fetch_package(plugin_dir, target, &scratch)?;
-    let source = package.join("target/release/agents-mon");
-    let destination = release_dir(plugin_dir).join("agents-mon");
-    let state = release_dir(plugin_dir).join(".agents-mon-version");
+    let source = package_engine(&package);
+    let destination = engine_path(plugin_dir);
+    let state = state_path(plugin_dir);
     fs::create_dir_all(release_dir(plugin_dir)).map_err(|_| "engine")?;
     let staged = destination.with_extension(format!("new-{}", std::process::id()));
-    fs::copy(source, &staged).map_err(|_| "engine")?;
-    let permissions = fs::metadata(&package.join("target/release/agents-mon"))
-        .map_err(|_| "engine")?
-        .permissions();
+    fs::copy(&source, &staged).map_err(|_| "engine")?;
+    let permissions = fs::metadata(&source).map_err(|_| "engine")?.permissions();
     fs::set_permissions(&staged, permissions).map_err(|_| "engine")?;
     if !engine_matches(&staged, target) {
         let _ = fs::remove_file(&staged);
@@ -420,12 +447,10 @@ fn install_exact_engine(plugin_dir: &Path, target: &str) -> Result<(), &'static 
         write_engine_state(plugin_dir, target)
     })
     .map_err(|_| "engine")?;
-    let notifier = package.join("target/release/agents-mon-notifier");
+    let notifier_name = format!("{}-notifier", runtime_name(plugin_dir));
+    let notifier = package.join("target/release").join(&notifier_name);
     if notifier.is_file() {
-        let _ = fs::copy(
-            notifier,
-            release_dir(plugin_dir).join("agents-mon-notifier"),
-        );
+        let _ = fs::copy(notifier, release_dir(plugin_dir).join(notifier_name));
     }
     Ok(())
 }
@@ -469,10 +494,10 @@ fn synchronize_tarball_source(plugin_dir: &Path, package: &Path) -> std::io::Res
 }
 
 fn tarball_install(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
-    let scratch = Scratch::new("agents-mon-up").map_err(|_| "scratch")?;
+    let scratch = Scratch::new("agenmux-up").map_err(|_| "scratch")?;
     let package = fetch_package(plugin_dir, target, &scratch)?;
     synchronize_tarball_source(plugin_dir, &package).map_err(|_| "copy")?;
-    if !engine_matches(&release_dir(plugin_dir).join("agents-mon"), target) {
+    if !engine_matches(&engine_path(plugin_dir), target) {
         return Err("engine");
     }
     write_engine_state(plugin_dir, target).map_err(|_| "engine")
@@ -483,6 +508,15 @@ fn tmux_value(args: &[&str]) -> String {
         .unwrap_or_default()
         .trim_end()
         .to_string()
+}
+
+fn tmux_option(name: &str) -> String {
+    let canonical = tmux_value(&["show-option", "-gqv", name]);
+    if !canonical.is_empty() {
+        return canonical;
+    }
+    let legacy = name.replacen("@agenmux-", "@agents-mon-", 1);
+    tmux_value(&["show-option", "-gqv", &legacy])
 }
 
 fn tmux_running() -> bool {
@@ -507,9 +541,8 @@ fn restart(plugin_dir: &Path, was_open: bool, old_control: &str) {
     if !old_control.is_empty() {
         wait_for_client(old_control);
     }
-    let _ = Command::new("bash")
-        .arg(plugin_dir.join("agents-mon.tmux"))
-        .status();
+    let entrypoint = plugin_dir.join(format!("{}.tmux", runtime_name(plugin_dir)));
+    let _ = Command::new("bash").arg(entrypoint).status();
     if !was_open {
         return;
     }
@@ -517,9 +550,7 @@ fn restart(plugin_dir: &Path, was_open: bool, old_control: &str) {
     if toggle.is_file() {
         let _ = Command::new("bash").arg(toggle).status();
     } else {
-        let _ = Command::new(release_dir(plugin_dir).join("agents-mon"))
-            .arg("toggle")
-            .status();
+        let _ = Command::new(engine_path(plugin_dir)).arg("toggle").status();
     }
 }
 
@@ -537,9 +568,10 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
         return 0;
     }
 
-    let was_open = tmux_value(&["show-option", "-gqv", "@agents-mon-on"]) == "1"
+    let was_open = tmux_option("@agenmux-on") == "1"
+        || !tmux_value(&["show-option", "-gqv", "@agenmux-sidebar"]).is_empty()
         || !tmux_value(&["show-option", "-gqv", "@agents-mon-sidebar"]).is_empty();
-    let old_control = tmux_value(&["show-option", "-gqv", "@agents-mon-control-client"]);
+    let old_control = tmux_option("@agenmux-control-client");
     note(&format!("switching to {target}…"));
 
     let result = if plugin_dir.join(".git").exists() {
@@ -590,10 +622,10 @@ mod tests {
 
     #[test]
     fn late_state_write_failure_restores_previous_engine_and_state() {
-        let scratch = Scratch::new("agents-mon-state-failure-test").unwrap();
-        let destination = scratch.0.join("agents-mon");
-        let staged = scratch.0.join("agents-mon-new");
-        let state = scratch.0.join(".agents-mon-version");
+        let scratch = Scratch::new("agenmux-state-failure-test").unwrap();
+        let destination = scratch.0.join("agenmux");
+        let staged = scratch.0.join("agenmux-new");
+        let state = scratch.0.join(".agenmux-version");
         fs::write(&destination, "old engine\n").unwrap();
         fs::write(&staged, "new engine\n").unwrap();
         fs::write(&state, "v0.1.1\nold-revision\n").unwrap();

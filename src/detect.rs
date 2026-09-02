@@ -89,7 +89,7 @@ mod tests {
     fn conf(body: &str) -> AgentConf {
         static N: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
-            "agents-mon-test-{}-{}.conf",
+            "agenmux-test-{}-{}.conf",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));

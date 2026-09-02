@@ -172,7 +172,7 @@ fn most_recent_client(rows: &str) -> Option<String> {
 
 pub fn deliver(tmux: &mut crate::tmux::Tmux, event: &AttentionEvent) -> DeliveryOutcome {
     let option = tmux
-        .run("show-option -gqv @agents-mon-notifications")
+        .run("show-option -gqv @agenmux-notifications")
         .unwrap_or_default();
     let outcome = deliver_if_enabled(&option, event, |payload| {
         #[cfg(target_os = "macos")]
@@ -378,7 +378,7 @@ mod tests {
             pane: "%7".into(),
             loc: "DOTFILES:3.2".into(),
             agent: "codex".into(),
-            cwd: "tmux-agents-mon".into(),
+            cwd: "agenmux".into(),
             title: "Implement\u{1b}]0;secret\u{7}\u{1b}[31m notifications\u{1b}]8;;https://example.test\u{1b}\\\nnow".into(),
         }
     }
@@ -389,7 +389,7 @@ mod tests {
             payload(&event(AttentionKind::Finished)),
             Payload {
                 title: "Codex finished".into(),
-                body: "Implement notifications now · tmux-agents-mon · DOTFILES:3.2".into(),
+                body: "Implement notifications now · agenmux · DOTFILES:3.2".into(),
             }
         );
         assert_eq!(
@@ -401,11 +401,11 @@ mod tests {
     #[test]
     fn macos_helper_receives_title_body_and_click_command() {
         let runner = FakeRunner::new(vec![Ok(true)]);
-        let helper = "/Users/me/Applications/AgentsMon.app/Contents/MacOS/agents-mon-notifier";
+        let helper = "/Users/me/Applications/Agenmux.app/Contents/MacOS/agenmux-notifier";
         let outcome = macos::deliver(
             &runner,
             &payload(&event(AttentionKind::Finished)),
-            Some("'agents-mon' 'notification-open'".into()),
+            Some("'agenmux' 'notification-open'".into()),
             Some(helper.into()),
         );
 
@@ -417,8 +417,8 @@ mod tests {
             commands[0].args,
             vec![
                 "Codex finished".to_string(),
-                "Implement notifications now · tmux-agents-mon · DOTFILES:3.2".to_string(),
-                "'agents-mon' 'notification-open'".to_string(),
+                "Implement notifications now · agenmux · DOTFILES:3.2".to_string(),
+                "'agenmux' 'notification-open'".to_string(),
             ]
         );
     }
@@ -429,7 +429,7 @@ mod tests {
         let outcome = macos::deliver(
             &runner,
             &payload(&event(AttentionKind::Finished)),
-            Some("'agents-mon' 'notification-open'".into()),
+            Some("'agenmux' 'notification-open'".into()),
             None,
         );
 
@@ -457,8 +457,8 @@ mod tests {
         let outcome = macos::deliver(
             &runner,
             &payload(&event(AttentionKind::Finished)),
-            Some("'agents-mon' 'notification-open'".into()),
-            Some("/Users/me/Applications/AgentsMon.app/Contents/MacOS/agents-mon-notifier".into()),
+            Some("'agenmux' 'notification-open'".into()),
+            Some("/Users/me/Applications/Agenmux.app/Contents/MacOS/agenmux-notifier".into()),
         );
 
         assert_eq!(outcome, DeliveryOutcome::Failed);

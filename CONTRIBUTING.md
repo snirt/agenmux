@@ -6,8 +6,8 @@ shell bootstrap — keep changes in that spirit.
 ## Setup
 
 ```sh
-git clone https://github.com/snirt/tmux-agents-mon
-cd tmux-agents-mon
+git clone https://github.com/snirt/agenmux
+cd agenmux
 cargo test
 tests/run.sh          # private-tmux and integration checks
 tests/sanity.sh       # Nix release/install smoke (network required)
@@ -39,12 +39,12 @@ config format.
 
 - Rust is the sole runtime. Keep bootstrap and packaging shell small and avoid
   new runtime dependencies.
-- Detection lives in `src/detect.rs`; `agents-mon list`/`status` TSV and status
+- Detection lives in `src/detect.rs`; `agenmux list`/`status` TSV and status
   output are contracts consumed by the sidebar and tmux status segment.
 - Runtime tmux integration lives in `src/input.rs`, `src/panes.rs`,
   `src/setup.rs`, and `src/toggle.rs`; preserve option names, hook indexes,
   processless panes, and exact-client targeting.
-- The only shell boundary is `agents-mon.tmux`, `scripts/install-bin.sh`,
+- The only shell boundary is `agenmux.tmux`, `scripts/install-bin.sh`,
   `scripts/install-app.sh`, and `scripts/version.sh`. Do not put runtime logic
   back into shell wrappers.
 - Match existing Rust and shell style, quote shell expansions, and prefer tmux

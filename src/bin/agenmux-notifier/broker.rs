@@ -23,8 +23,8 @@ const MAX_FIELD_BYTES: usize = 64 * 1024;
 const NONE_LENGTH: u32 = u32::MAX;
 const ACK_ACCEPTED: u8 = 1;
 const ACK_REJECTED: u8 = 0;
-const SOCKET_NAME: &str = "agents-mon-notifier.sock";
-const LOCK_NAME: &str = "agents-mon-notifier.lock";
+const SOCKET_NAME: &str = "agenmux-notifier.sock";
+const LOCK_NAME: &str = "agenmux-notifier.lock";
 const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const SUBMIT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const SUBMIT_RETRY_WINDOW: Duration = Duration::from_secs(5);
@@ -60,7 +60,7 @@ impl AuthorizationRequest {
         let state = Arc::new(Mutex::new(AuthorizationRequestState::default()));
         let worker_state = Arc::clone(&state);
         thread::Builder::new()
-            .name("agents-mon-authorization".into())
+            .name("agenmux-authorization".into())
             .spawn(move || {
                 let result = request();
                 let mut state = worker_state
@@ -108,7 +108,7 @@ impl ClickCommand {
         let state = Arc::new(Mutex::new(ClickCommandState::default()));
         let worker_state = Arc::clone(&state);
         thread::Builder::new()
-            .name("agents-mon-click".into())
+            .name("agenmux-click".into())
             .spawn(move || {
                 let result = Command::new("/bin/sh")
                     .args(["-c", &command])
@@ -402,7 +402,7 @@ pub(crate) fn serve() -> i32 {
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn serve() -> i32 {
-    eprintln!("agents-mon-notifier is macOS-only");
+    eprintln!("agenmux-notifier is macOS-only");
     2
 }
 
@@ -676,7 +676,7 @@ mod tests {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let suffix = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "agents-mon-notifier-{name}-{}-{suffix}",
+            "agenmux-notifier-{name}-{}-{suffix}",
             std::process::id()
         ));
         fs::create_dir(&dir).unwrap();
@@ -687,8 +687,8 @@ mod tests {
     fn request_round_trip_preserves_unicode_and_optional_click() {
         let expected = NotificationRequest {
             title: "Pi finished ✓".into(),
-            body: "subject · tmux-agents-mon:1.2".into(),
-            click: Some("'agents-mon' 'notification-open' '%12'".into()),
+            body: "subject · agenmux:1.2".into(),
+            click: Some("'agenmux' 'notification-open' '%12'".into()),
         };
         let (mut writer, mut reader) = UnixStream::pair().unwrap();
         write_request(&mut writer, &expected).unwrap();
@@ -698,7 +698,7 @@ mod tests {
     #[test]
     fn request_round_trip_preserves_missing_click() {
         let expected = NotificationRequest {
-            title: "AgentsMon".into(),
+            title: "Agenmux".into(),
             body: "ready".into(),
             click: None,
         };

@@ -33,7 +33,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Include AgentsMon version, OS, tmux version, and agent type.
+      description: Include Agenmux version, OS, tmux version, and agent type.
     validations:
       required: true
   - type: textarea

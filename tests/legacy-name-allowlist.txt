@@ -1,0 +1,49 @@
+.github/workflows/build.yml:              > "dist/$package/target/release/agents-mon-notifier"
+.github/workflows/build.yml:            > "dist/$package/target/release/agents-mon"
+.github/workflows/build.yml:            chmod +x "dist/$package/target/release/agents-mon-notifier"
+.github/workflows/build.yml:          chmod +x "dist/$package/target/release/agents-mon"
+agenmux.tmux:  legacy="${canonical/@agenmux-/@agents-mon-}"
+scripts/dev-bin.sh:  old_option_name="@agents-mon-bin"
+scripts/dev-bin.sh:  tmux set-option -gu @agents-mon-bin 2>/dev/null || true
+scripts/dev-bin.sh:  tmux set-option -gu @agents-mon-bin 2>/dev/null || true
+scripts/dev-bin.sh:LEGACY_RELEASE="$DIR/target/release/agents-mon"
+scripts/dev-bin.sh:[ -n "$old_control" ] || old_control="$(tmux show-option -gqv @agents-mon-control-client)"
+scripts/dev-bin.sh:[ -n "$was_on" ] || was_on="$(tmux show-option -gqv @agents-mon-on)"
+scripts/dev-bin.sh:elif [ -n "$(tmux show-options -gq @agents-mon-bin)" ]; then
+scripts/install-app.sh:bin="${AGENMUX_NOTIFIER_BIN:-${AGENTS_MON_NOTIFIER_BIN:-$DIR/target/release/agenmux-notifier}}"
+scripts/install-app.sh:legacy_app="$dest/AgentsMon.app"
+scripts/install-bin.sh:    [ -f "$notifier" ] || notifier="$pkg/target/release/agents-mon-notifier"
+scripts/install-bin.sh:    notifications="$(tmux show-option -gqv @agents-mon-notifications 2>/dev/null)"
+scripts/install-bin.sh:  [ "$version" = "agenmux ${2#v}" ] || [ "$version" = "agents-mon ${2#v}" ]
+scripts/install-bin.sh:  [ -f "$source" ] || source="$pkg/target/release/agents-mon"
+scripts/install-bin.sh:  for package in "agenmux-$platform" "tmux-agents-mon-$platform"; do
+scripts/install-bin.sh:LEGACY_STATE="$DIR/target/release/.agents-mon-version"
+scripts/install-bin.sh:REPO="${AGENMUX_REPO:-${AGENTS_MON_REPO:-https://github.com/snirt/agenmux}}"
+src/conf.rs:    let legacy_user_dir = config_home.join("tmux-agents-mon/agents");
+src/main.rs:    compat_env("AGENMUX_SELF", "AGENTS_MON_SELF").filter(|s| !s.is_empty())
+src/main.rs:    if let Some(d) = compat_env("AGENMUX_DIR", "AGENTS_MON_DIR") {
+src/notifications/macos.rs:    const LEGACY_APP: &str = "Applications/AgentsMon.app/Contents/MacOS/agents-mon-notifier";
+src/panes.rs:            || option.starts_with("@agents-mon-layout-@")
+src/panes.rs:            || option.starts_with("@agents-mon-winsize-@")
+src/panes.rs:        if !matches!(title, "agenmux" | "agents-mon") {
+src/panes.rs:    let _ = tmux::command_status(&["set-option", "-gu", "@agents-mon-control-client"]);
+src/panes.rs:    let _ = tmux::command_status(&["set-option", "-gu", "@agents-mon-on"]);
+src/panes.rs:    let legacy_option = format!("@agents-mon-layout-{window}");
+src/release.rs:                    || value == format!("agents-mon {version}")
+src/release.rs:        "agents-mon"
+src/release.rs:        package.join("target/release/agents-mon")
+src/release.rs:        || !tmux_value(&["show-option", "-gqv", "@agents-mon-sidebar"]).is_empty();
+src/release.rs:    crate::compat_env("AGENMUX_REPO", "AGENTS_MON_REPO").unwrap_or_else(|| DEFAULT_REPO.to_string())
+src/release.rs:    let legacy = name.replacen("@agenmux-", "@agents-mon-", 1);
+src/release.rs:    release_dir(plugin_dir).join(".agents-mon-latest")
+src/setup.rs:            "run-shell -b 'tmux if-shell -t \"#{pane_id}\" -F \"#{&&:#{||:#{==:#{pane_title},agenmux},#{==:#{pane_title},agents-mon}},#{window_zoomed_flag}}\" \"resize-pane -Z -t \\\"#{pane_id}\\\"\"'".to_string(),
+src/setup.rs:            .replace("#{agents_mon}", &segment);
+src/setup.rs:        let _ = tmux::command_status(&["set-option", "-wu", "-t", &window, "@agents-mon-sidebar"]);
+src/setup.rs:        let legacy = format!("@agents-mon-{suffix}");
+src/sidebar.rs:        .or_else(|_| std::fs::read_to_string(release_dir.join(".agents-mon-latest")))
+src/sidebar.rs:        .or_else(|_| std::fs::read_to_string(release_dir.join(".agents-mon-tags")))
+src/sidebar.rs:        popup_client: crate::compat_env("AGENMUX_POPUP_CLIENT", "AGENTS_MON_POPUP_CLIENT")
+src/sidebar.rs:    let pin = crate::compat_env("AGENMUX_PIN", "AGENTS_MON_PIN").filter(|p| !p.is_empty());
+src/tmux.rs:    let Some(path) = crate::compat_env("AGENMUX_DEBUG", "AGENTS_MON_DEBUG") else {
+src/tmux.rs:    let Some(path) = crate::compat_env("AGENMUX_DEBUG", "AGENTS_MON_DEBUG") else {
+src/toggle.rs:        .map(|suffix| format!("@agents-mon-{suffix}"))

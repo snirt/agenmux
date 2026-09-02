@@ -35,7 +35,7 @@ pub fn scan(
     let mut snap: Option<Snapshot> = None;
     let mut rows = Vec::new();
     let mut seen = IdentCache::new();
-    let buf = format!("agents-mon-{}", std::process::id());
+    let buf = format!("agenmux-{}", std::process::id());
     let cap = std::env::temp_dir().join(&buf);
     let mut captured_any = false;
     for line in panes.lines() {

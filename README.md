@@ -1,8 +1,11 @@
-# agenmux
+# Agenmux
 
 [![agenmux logo](site/logo.png)](https://snirt.github.io/agenmux/)
 
 Website: <https://snirt.github.io/agenmux/>
+
+**Rebranding note:** `agents-mon` is now **Agenmux**. Existing installations
+remain compatible for one release cycle; see [Upgrading from agents-mon](#upgrading-from-agents-mon).
 
 Monitor AI coding agents running in your tmux panes. A sidebar and a status-line
 segment show every detected agent and its state:
@@ -41,12 +44,31 @@ TPM updates, the native engine is refreshed without removing the old binary.
 
 ### Manual install
 
-Clone the repo and add `run-shell /path/to/agenmux/agents-mon.tmux` to
+Clone the repo and add `run-shell /path/to/agenmux/agenmux.tmux` to
 `~/.tmux.conf`, then reload tmux.
 
 Requirements: tmux and bash for TPM/bootstrap. `curl` and `tar` enable the
 automatic native download; without them, Cargo builds it when available. No
 required build step on a supported release platform.
+
+### Upgrading from agents-mon
+
+Existing installs continue working for one release cycle. `agents-mon.tmux`,
+`@agents-mon-*`, `#{agents_mon}`, `AGENTS_MON_*`, and
+`~/.config/tmux-agents-mon/agents/` are accepted as compatibility inputs;
+Agenmux writes only canonical names. Canonical values win when both exist.
+
+| Legacy | Canonical |
+| --- | --- |
+| `agents-mon.tmux` | `agenmux.tmux` |
+| `@agents-mon-*` | `@agenmux-*` |
+| `#{agents_mon}` | `#{agenmux}` |
+| `AGENTS_MON_*` | `AGENMUX_*` |
+| `~/.config/tmux-agents-mon/agents/` | `~/.config/agenmux/agents/` |
+
+macOS installs `Agenmux.app` under bundle ID `io.github.snirt.agenmux` and
+removes the old helper after successful installation. macOS asks for
+notification permission again because the bundle identity changed.
 
 ## Usage
 
@@ -88,28 +110,28 @@ long lists scroll to keep the selection visible.
 
 </details>
 
-Add `#{agents_mon}` to `status-right` or `status-left` for the compact summary,
+Add `#{agenmux}` to `status-right` or `status-left` for the compact summary,
 e.g. `⣿1 ⣾2 ⣿1` in red/yellow/green for blocked/working/idle. It stays empty
 when no agents are running.
 
 ```tmux
-set -g status-right '#{agents_mon} | %H:%M'
+set -g status-right '#{agenmux} | %H:%M'
 ```
 
 ### Options
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `@agents-mon-key` | `A` | Sidebar (`split`) key in prefix table |
-| `@agents-mon-popup-key` | unset | Dedicated popup key |
-| `@agents-mon-width` | sidebar: `30`; popup: `40` | Sidebar or popup width |
-| `@agents-mon-display` | `split` | Main-key display: `split` (sidebar) or `popup` |
-| `@agents-mon-height` | agent count, minimum `15` | Fixed popup height |
-| `@agents-mon-hide-windows` | `agents*` | Window-picker exclusion pattern; `''` restores default picker |
-| `@agents-mon-notifications` | `on` | Desktop notifications; set `off` to disable |
-| `@agents-mon-wheel-jump` | `0.3` | Seconds before wheel selection jumps; `off` moves cursor only |
+| `@agenmux-key` | `A` | Sidebar (`split`) key in prefix table |
+| `@agenmux-popup-key` | unset | Dedicated popup key |
+| `@agenmux-width` | sidebar: `30`; popup: `40` | Sidebar or popup width |
+| `@agenmux-display` | `split` | Main-key display: `split` (sidebar) or `popup` |
+| `@agenmux-height` | agent count, minimum `15` | Fixed popup height |
+| `@agenmux-hide-windows` | `agents*` | Window-picker exclusion pattern; `''` restores default picker |
+| `@agenmux-notifications` | `on` | Desktop notifications; set `off` to disable |
+| `@agenmux-wheel-jump` | `0.3` | Seconds before wheel selection jumps; `off` moves cursor only |
 
-With both keys set (e.g. `@agents-mon-key 'E'`, `@agents-mon-popup-key 'e'`)
+With both keys set (e.g. `@agenmux-key 'E'`, `@agenmux-popup-key 'e'`)
 you get `prefix+E` for the split sidebar and `prefix+e` for the floating popup.
 
 In popup mode the same keybinding opens a floating window; close it with
@@ -123,7 +145,7 @@ reopens over the selected agent after a jump.
 When a newer release exists, the sidebar header says so, and says what to do:
 
 ```text
-agents ↑0.1.8
+agenmux v0.1.7 ↑0.1.8
 u update · / search
 ```
 
@@ -142,7 +164,7 @@ Details worth knowing:
   It **refuses to run against a dirty working tree**; commit or stash first.
 - On a tarball install the verified release archive is extracted in place.
 - TPM's `prefix + U` still works and moves you to the tip of the default branch.
-- From a shell: `target/release/agents-mon update v0.1.5` (or `latest`).
+- From a shell: `target/release/agenmux update v0.1.5` (or `latest`).
   Rollbacks to older releases re-enter that release's own entrypoint, including
   its legacy toggle script when the target predates the Rust-only runtime.
 
@@ -167,7 +189,7 @@ set -g focus-events on
 
 The [tmux manual](https://man.openbsd.org/tmux.1#focus-events) notes that clients
 may need to detach and attach again after this option changes. With focus events
-off, agents-mon conservatively suppresses a notification whenever any real tmux
+off, agenmux conservatively suppresses a notification whenever any real tmux
 client has the pane selected. With them on, it suppresses only when at least one
 real client both selects the pane and reports itself focused; control-mode
 clients are ignored.
@@ -177,16 +199,16 @@ clients are ignored.
 Notifications are enabled by default. Disable them with:
 
 ```tmux
-set -g @agents-mon-notifications off
+set -g @agenmux-notifications off
 ```
 
-On macOS, agents-mon sends notifications natively through
+On macOS, agenmux sends notifications natively through
 `UNUserNotificationCenter` via a small helper app built from this repo — no
 Homebrew or other runtime dependency, and no setup: installing or updating
-the plugin automatically places a signed, background-only `AgentsMon.app`
-into `~/Applications` (skipped while `@agents-mon-notifications` is off).
-macOS asks for permission with the first notification; allow **AgentsMon**
-when prompted, or later under System Settings → Notifications → AgentsMon.
+the plugin automatically places a signed, background-only `Agenmux.app`
+into `~/Applications` (skipped while `@agenmux-notifications` is off).
+macOS asks for permission with the first notification; allow **Agenmux**
+when prompted, or later under System Settings → Notifications → Agenmux.
 Denying keeps notifications fully silent — there is no fallback around your
 choice. Plugin updates refresh the app automatically and the permission
 survives.
@@ -209,7 +231,7 @@ WezTerm, Apple Terminal, and Alacritty are recognized) and jumps the most
 recently active real tmux client to the exact pane. Panes that no longer exist
 are safe no-ops. Notifications play macOS's built-in `Glass` alert sound.
 
-Without the installed app, agents-mon falls back to the built-in `osascript`,
+Without the installed app, agenmux falls back to the built-in `osascript`,
 which displays notifications with the `Glass` sound but cannot handle clicks.
 
 Each notification keeps a small helper process waiting for its click; after 24
@@ -218,7 +240,7 @@ entries do nothing. If several notifications are pending at once, macOS may
 route a click to the newest helper only — the click is then ignored rather
 than jumping to the wrong pane.
 
-On Linux, agents-mon uses the optional `notify-send` command when a `DISPLAY`
+On Linux, agenmux uses the optional `notify-send` command when a `DISPLAY`
 or `WAYLAND_DISPLAY` session is available; Linux notifications are
 display-only. Without it, delivery is silently skipped—the rest of the plugin
 has no additional runtime requirement. Delivery is best effort and never
@@ -238,19 +260,19 @@ focus moves away.
 The Rust binary is the complete runtime (`scan` is an alias for `list`):
 
 ```text
-agents-mon --version
-agents-mon scan|list|status
-agents-mon detect <conf> <screen-file> [title]
-agents-mon sidebar|daemon
-agents-mon key <name>
-agents-mon click <pane> <row> <client>
-agents-mon wheel <pane> <up|down>
-agents-mon setup
-agents-mon toggle [split|popup] [client]
-agents-mon pane-add [window]|pane-orphan|pane-pin|teardown
-agents-mon releases refresh
-agents-mon update [latest|vX.Y.Z]
-agents-mon notification-open <socket> <pane> <bundle>
+agenmux --version
+agenmux scan|list|status
+agenmux detect <conf> <screen-file> [title]
+agenmux sidebar|daemon
+agenmux key <name>
+agenmux click <pane> <row> <client>
+agenmux wheel <pane> <up|down>
+agenmux setup
+agenmux toggle [split|popup] [client]
+agenmux pane-add [window]|pane-orphan|pane-pin|teardown
+agenmux releases refresh
+agenmux update [latest|vX.Y.Z]
+agenmux notification-open <socket> <pane> <bundle>
 ```
 
 `sidebar`, `daemon`, `key`, mouse, setup, pane lifecycle, and
@@ -259,11 +281,11 @@ the scanner and update commands are suitable for direct shell use.
 
 ## Adding / overriding agents
 
-Drop a `.conf` in `~/.config/tmux-agents-mon/agents/`. A file with the same name
+Drop a `.conf` in `~/.config/agenmux/agents/`. A file with the same name
 as a built-in (see `agents/`) replaces it wholesale. Example:
 
 ```bash
-# ~/.config/tmux-agents-mon/agents/aider.conf
+# ~/.config/agenmux/agents/aider.conf
 AGENT_BINS="aider"                 # process names that identify the agent
 AGENT_PATH_HINTS=""                # optional: substring of a wrapped script path
 BLOCKED_TITLE=''                   # grep -Ei pattern against #{pane_title}
@@ -295,11 +317,24 @@ tests/run.sh       # fast fixture and integration tests
 tests/sanity.sh    # release smoke + source build in an isolated tmux server
 ```
 
+For live local testing without overwriting the installed release binary:
+
+```sh
+make dev-use   # build target/debug and switch the running tmux server
+make dev-stop  # switch back to the existing target/release binary
+```
+
+`dev-use` builds with mise-managed `rust@latest`.
+Both commands preserve sidebar state. Debug builds show
+`agenmux dev (YYYY-MM-DD HH:MM)` with the local build time. `dev-stop` restores
+the existing local release binary; it does not
+download a newer GitHub release.
+
 The sanity test requires Nix and network access. It is the same end-to-end
 check run for pull requests. Rust integration tests also create private tmux
 servers for exact-client, pane lifecycle, setup, toggle, and release behavior.
 
-Only four shell entrypoints remain: `agents-mon.tmux` is TPM/pre-binary
+Only four shell entrypoints remain: `agenmux.tmux` is TPM/pre-binary
 bootstrap, `scripts/install-bin.sh` installs and verifies the engine,
 `scripts/install-app.sh` packages the macOS notification app, and
 `scripts/version.sh` validates manifest/release versions. All plugin runtime
@@ -320,13 +355,13 @@ The Rust engine is the sole runtime implementation. It runs the scan/sidebar
 hot path with one persistent tmux control-mode connection. The plugin downloads
 and verifies a prebuilt binary automatically; if one is unavailable and
 [cargo](https://rustup.rs) is installed, it builds the engine in the background. `make build` does the same
-by hand, and `@agents-mon-bin` overrides the binary path. Agent detection stays
+by hand, and `@agenmux-bin` overrides the binary path. Agent detection stays
 in `agents/*.conf`, so adding or tuning agents never needs a rebuild. Building
 on macOS needs rustc 1.90 or newer (for the native notification helper).
 
 Sidebar (`split`) mode preserves one empty tmux pane in each window, so
 switching windows never changes the layout. Those panes have no shell or
-`agents-mon` child process (`pane_pid=0`); the single daemon writes only to sidebar panes currently
+`agenmux` child process (`pane_pid=0`); the single daemon writes only to sidebar panes currently
 visible in attached clients. Hidden panes retain their last frame; with every
 client detached, one pane stays warm for the next attach.
 
@@ -335,7 +370,7 @@ Linux and macOS. The Linux binaries are statically linked for portability.
 Download the archive for your platform from the
 [latest GitHub Release](https://github.com/snirt/agenmux/releases/latest)
 and extract it; its native engine is already installed at
-`target/release/agents-mon`.
+`target/release/agenmux`.
 Each release includes `SHA256SUMS` for verification. Builds from untagged commits
 remain available as temporary artifacts on their **Build and Release** workflow
 run.

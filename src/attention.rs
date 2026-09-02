@@ -117,7 +117,7 @@ mod tests {
             loc: "work:2.1".into(),
             agent: "codex".into(),
             state: state.into(),
-            cwd: "tmux-agents-mon".into(),
+            cwd: "agenmux".into(),
             title: "Implement notifications".into(),
         }
     }

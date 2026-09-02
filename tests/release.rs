@@ -11,7 +11,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new(name: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "agents-mon-release-{name}-{}-{}",
+            "agenmux-release-{name}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -44,11 +44,11 @@ fn command(plugin: &Path, bin_dir: &Path, args: &[&str]) -> Command {
         bin_dir.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mut command = Command::new(env!("CARGO_BIN_EXE_agents-mon"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_agenmux"));
     command
         .args(args)
-        .env("AGENTS_MON_DIR", plugin)
-        .env("AGENTS_MON_REPO", "https://example.invalid/repo")
+        .env("AGENMUX_DIR", plugin)
+        .env("AGENMUX_REPO", "https://example.invalid/repo")
         .env("PATH", path);
     command
 }
@@ -88,32 +88,32 @@ fn write_release_tree(repo: &Path, version: &str, include_toggle: bool) {
     fs::create_dir_all(repo.join("scripts")).unwrap();
     fs::write(
         repo.join("Cargo.toml"),
-        format!("[package]\nname = \"agents-mon\"\nversion = \"{version}\"\n"),
+        format!("[package]\nname = \"agenmux\"\nversion = \"{version}\"\n"),
     )
     .unwrap();
     fs::write(repo.join(".gitignore"), "target/\n").unwrap();
     script(
-        &repo.join("agents-mon.tmux"),
+        &repo.join("agenmux.tmux"),
         r#"printf 'entrypoint\n' >> "$RESTART_LOG""#,
     );
     let install = format!(
         r#"write_bin() {{
   cat > "$1" <<'BIN'
 #!/usr/bin/env bash
-if [ "${{1:-}}" = --version ]; then printf 'agents-mon {version}\n'; elif [ "${{1:-}}" = toggle ]; then printf 'native-toggle\n' >> "$RESTART_LOG"; fi
+if [ "${{1:-}}" = --version ]; then printf 'agenmux {version}\n'; elif [ "${{1:-}}" = toggle ]; then printf 'native-toggle\n' >> "$RESTART_LOG"; fi
 BIN
   chmod +x "$1"
 }}
 if [ "${{1:-}}" = fetch ]; then
-  pkg="$3/tmux-agents-mon-test"
+  pkg="$3/agenmux-test"
   mkdir -p "$pkg/target/release"
-  write_bin "$pkg/target/release/agents-mon"
+  write_bin "$pkg/target/release/agenmux"
   printf '%s\n' "$pkg"
   exit 0
 fi
 mkdir -p "$DIR/../target/release"
-write_bin "$DIR/../target/release/agents-mon"
-printf 'v{version}\n%s\n' "$(git -C "$DIR/.." rev-parse HEAD 2>/dev/null || printf -)" > "$DIR/../target/release/.agents-mon-version""#
+write_bin "$DIR/../target/release/agenmux"
+printf 'v{version}\n%s\n' "$(git -C "$DIR/.." rev-parse HEAD 2>/dev/null || printf -)" > "$DIR/../target/release/.agenmux-version""#
     );
     script(
         &repo.join("scripts/install-bin.sh"),
@@ -149,13 +149,13 @@ fn make_wrong_engine_release(repo: &Path) {
     script(
         &repo.join("scripts/install-bin.sh"),
         r#"if [ "${1:-}" = fetch ]; then
-  pkg="$3/tmux-agents-mon-wrong"
+  pkg="$3/agenmux-wrong"
   mkdir -p "$pkg/target/release"
-  cat > "$pkg/target/release/agents-mon" <<'BIN'
+  cat > "$pkg/target/release/agenmux" <<'BIN'
 #!/usr/bin/env bash
-[ "${1:-}" = --version ] && printf 'agents-mon 9.9.9\n'
+[ "${1:-}" = --version ] && printf 'agenmux 9.9.9\n'
 BIN
-  chmod +x "$pkg/target/release/agents-mon"
+  chmod +x "$pkg/target/release/agenmux"
   printf '%s\n' "$pkg"
   exit 0
 fi
@@ -198,11 +198,11 @@ fn refresh_records_latest_and_published_tags() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(
-        fs::read_to_string(plugin.join("target/release/.agents-mon-latest")).unwrap(),
+        fs::read_to_string(plugin.join("target/release/.agenmux-latest")).unwrap(),
         "v1.2.0\n"
     );
     assert_eq!(
-        fs::read_to_string(plugin.join("target/release/.agents-mon-tags")).unwrap(),
+        fs::read_to_string(plugin.join("target/release/.agenmux-tags")).unwrap(),
         "v1.2.0\nv1.1.9\n"
     );
 }
@@ -223,7 +223,7 @@ fn installer_refresh_delegates_to_native_release_command() {
     )
     .unwrap();
     script(
-        &release.join("agents-mon"),
+        &release.join("agenmux"),
         r#"printf '%s\n' "$*" >> "$ARGS_LOG""#,
     );
 
@@ -247,7 +247,7 @@ fn git_update_switches_latest_and_refuses_dirty_or_unknown_targets() {
     make_git_releases(&repo);
     no_server_tmux(&bin);
     fs::create_dir_all(repo.join("target/release")).unwrap();
-    fs::write(repo.join("target/release/.agents-mon-latest"), "v0.1.0\n").unwrap();
+    fs::write(repo.join("target/release/.agenmux-latest"), "v0.1.0\n").unwrap();
 
     let back = run(&repo, &bin, &["update", "latest"]);
     assert!(
@@ -262,14 +262,14 @@ fn git_update_switches_latest_and_refuses_dirty_or_unknown_targets() {
     );
     assert_eq!(
         String::from_utf8_lossy(
-            &Command::new(repo.join("target/release/agents-mon"))
+            &Command::new(repo.join("target/release/agenmux"))
                 .arg("--version")
                 .output()
                 .unwrap()
                 .stdout
         )
         .trim(),
-        "agents-mon 0.1.0"
+        "agenmux 0.1.0"
     );
 
     fs::write(repo.join("scratch"), "dirty\n").unwrap();
@@ -322,7 +322,7 @@ exec "$REAL_GIT" "$@""#,
     );
     assert_eq!(
         fs::read_to_string(repo.join("Cargo.toml")).unwrap(),
-        "[package]\nname = \"agents-mon\"\nversion = \"0.1.1\"\n"
+        "[package]\nname = \"agenmux\"\nversion = \"0.1.1\"\n"
     );
 }
 
@@ -348,7 +348,7 @@ fn wrong_target_engine_restores_the_previous_git_source() {
     );
     assert_eq!(
         fs::read_to_string(repo.join("Cargo.toml")).unwrap(),
-        "[package]\nname = \"agents-mon\"\nversion = \"0.1.1\"\n"
+        "[package]\nname = \"agenmux\"\nversion = \"0.1.1\"\n"
     );
 }
 
@@ -401,8 +401,8 @@ fn update_waits_for_old_daemon_then_reenters_the_target_release() {
         r#"printf 'tmux %s\n' "$*" >> "$RESTART_LOG"
 case "$*" in
   info) exit 0 ;;
-  "show-option -gqv @agents-mon-on") printf '1\n' ;;
-  "show-option -gqv @agents-mon-control-client") printf 'old-control\n' ;;
+  "show-option -gqv @agenmux-on") printf '1\n' ;;
+  "show-option -gqv @agenmux-control-client") printf 'old-control\n' ;;
   "list-clients -F #{client_name}")
     n="$(cat "$CLIENT_POLLS" 2>/dev/null || printf 0)"
     n=$((n + 1)); printf '%s\n' "$n" > "$CLIENT_POLLS"
@@ -447,7 +447,7 @@ fn open_view_uses_native_toggle_when_target_has_no_legacy_script() {
         &bin.join("tmux"),
         r#"case "$*" in
   info) exit 0 ;;
-  "show-option -gqv @agents-mon-on") printf '1\n' ;;
+  "show-option -gqv @agenmux-on") printf '1\n' ;;
 esac
 exit 0"#,
     );
@@ -479,7 +479,7 @@ fn closed_view_restarts_entrypoint_without_reopening() {
         &bin.join("tmux"),
         r#"case "$*" in
   info) exit 0 ;;
-  "show-option -gqv @agents-mon-on"|"show-option -gqv @agents-mon-sidebar"|"show-option -gqv @agents-mon-control-client") ;;
+  "show-option -gqv @agenmux-on"|"show-option -gqv @agenmux-sidebar"|"show-option -gqv @agenmux-control-client") ;;
 esac
 exit 0"#,
     );
@@ -506,12 +506,12 @@ fn tarball_update_removes_stale_source_and_reopens_with_target_native_toggle() {
     fs::create_dir_all(&bin).unwrap();
     fs::write(
         plugin.join("Cargo.toml"),
-        "[package]\nname = \"agents-mon\"\nversion = \"0.1.1\"\n",
+        "[package]\nname = \"agenmux\"\nversion = \"0.1.1\"\n",
     )
     .unwrap();
     fs::write(plugin.join("target/release/preserved"), "keep\n").unwrap();
     fs::write(
-        plugin.join("target/release/.agents-mon-version"),
+        plugin.join("target/release/.agenmux-version"),
         "v0.1.1\nold\n",
     )
     .unwrap();
@@ -523,24 +523,24 @@ fn tarball_update_removes_stale_source_and_reopens_with_target_native_toggle() {
         &plugin.join("scripts/install-bin.sh"),
         r#"DIR="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "${1:-}" = fetch ]; then
-  pkg="$3/tmux-agents-mon-test"
+  pkg="$3/agenmux-test"
   mkdir -p "$pkg/scripts" "$pkg/target/release"
   cat > "$pkg/Cargo.toml" <<'TOML'
 [package]
-name = "agents-mon"
+name = "agenmux"
 version = "0.1.0"
 TOML
   printf 'verified source\n' > "$pkg/source-marker"
   cp "$0" "$pkg/scripts/install-bin.sh"
-  cat > "$pkg/agents-mon.tmux" <<'ENTRY'
+  cat > "$pkg/agenmux.tmux" <<'ENTRY'
 #!/usr/bin/env bash
 printf 'entrypoint\n' >> "$RESTART_LOG"
 ENTRY
-  cat > "$pkg/target/release/agents-mon" <<'BIN'
+  cat > "$pkg/target/release/agenmux" <<'BIN'
 #!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then printf 'agents-mon 0.1.0\n'; elif [ "${1:-}" = toggle ]; then printf 'native-toggle\n' >> "$RESTART_LOG"; fi
+if [ "${1:-}" = --version ]; then printf 'agenmux 0.1.0\n'; elif [ "${1:-}" = toggle ]; then printf 'native-toggle\n' >> "$RESTART_LOG"; fi
 BIN
-  chmod +x "$pkg/target/release/agents-mon"
+  chmod +x "$pkg/target/release/agenmux"
   printf '%s\n' "$pkg"
   exit 0
 fi
@@ -550,7 +550,7 @@ exit 1"#,
         &bin.join("tmux"),
         r#"case "$*" in
   info) exit 0 ;;
-  "show-option -gqv @agents-mon-on") printf '1\n' ;;
+  "show-option -gqv @agenmux-on") printf '1\n' ;;
 esac
 exit 0"#,
     );
@@ -572,16 +572,16 @@ exit 0"#,
     );
     assert!(!plugin.join("target/release/preserved").exists());
     assert_eq!(
-        fs::read_to_string(plugin.join("target/release/.agents-mon-version")).unwrap(),
+        fs::read_to_string(plugin.join("target/release/.agenmux-version")).unwrap(),
         "v0.1.0\n-\n"
     );
     assert_eq!(
-        Command::new(plugin.join("target/release/agents-mon"))
+        Command::new(plugin.join("target/release/agenmux"))
             .arg("--version")
             .output()
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
             .unwrap(),
-        "agents-mon 0.1.0"
+        "agenmux 0.1.0"
     );
     let events = fs::read_to_string(log).unwrap();
     assert!(events.contains("entrypoint"));
@@ -597,7 +597,7 @@ fn failed_source_copy_leaves_tarball_tree_untouched() {
     fs::create_dir_all(plugin.join("scripts")).unwrap();
     fs::create_dir_all(plugin.join("target/release")).unwrap();
     fs::create_dir_all(&bin).unwrap();
-    let manifest = "[package]\nname = \"agents-mon\"\nversion = \"0.1.1\"\n";
+    let manifest = "[package]\nname = \"agenmux\"\nversion = \"0.1.1\"\n";
     fs::write(plugin.join("Cargo.toml"), manifest).unwrap();
     fs::write(plugin.join("stale-source"), "untouched\n").unwrap();
     fs::write(plugin.join("target/release/preserved"), "keep\n").unwrap();
@@ -608,9 +608,9 @@ fn failed_source_copy_leaves_tarball_tree_untouched() {
     script(
         &plugin.join("scripts/install-bin.sh"),
         r#"if [ "${1:-}" = fetch ]; then
-  pkg="$3/tmux-agents-mon-test"
+  pkg="$3/agenmux-test"
   mkdir -p "$pkg/scripts"
-  printf '[package]\nname = "agents-mon"\nversion = "0.1.0"\n' > "$pkg/Cargo.toml"
+  printf '[package]\nname = "agenmux"\nversion = "0.1.0"\n' > "$pkg/Cargo.toml"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$pkg/scripts/install-bin.sh"
   printf '%s\n' "$pkg"
   exit 0
@@ -646,7 +646,7 @@ fn failed_verified_fetch_leaves_tarball_tree_untouched() {
     fs::create_dir_all(plugin.join("scripts")).unwrap();
     fs::create_dir_all(plugin.join("target/release")).unwrap();
     fs::create_dir_all(&bin).unwrap();
-    let manifest = "[package]\nname = \"agents-mon\"\nversion = \"0.1.1\"\n";
+    let manifest = "[package]\nname = \"agenmux\"\nversion = \"0.1.1\"\n";
     fs::write(plugin.join("Cargo.toml"), manifest).unwrap();
     fs::write(plugin.join("stale-source"), "untouched\n").unwrap();
     fs::write(plugin.join("target/release/preserved"), "keep\n").unwrap();
