@@ -5,12 +5,12 @@ set -euo pipefail
 export TERM=xterm
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="${AGENTS_MON_BIN:-$DIR/target/release/agents-mon}"
+BIN="${AGENMUX_BIN:-$DIR/target/release/agenmux}"
 [ -x "$BIN" ] || exit 0
 command -v tmux >/dev/null || exit 0
 command -v expect >/dev/null || exit 0
 
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/agents-mon-navigation.XXXXXX")"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/agenmux-navigation.XXXXXX")"
 sock="$tmp/sock"
 input="$tmp/client-input"
 client_pid=''
@@ -29,11 +29,11 @@ cleanup() {
   fi
   [ -z "$client_pid" ] || wait "$client_pid" 2>/dev/null || true
   [ -z "$secondary_pid" ] || wait "$secondary_pid" 2>/dev/null || true
-  rm -f "$input" "$sock" "$tmp/agents-mon-keys" \
-    "$tmp/agents-mon-rows" "$tmp/agents-mon-scan-cache" "$tmp/codex" \
+  rm -f "$input" "$sock" "$tmp/agenmux-keys" \
+    "$tmp/agenmux-rows" "$tmp/agenmux-scan-cache" "$tmp/codex" \
     "$tmp/script.log" "$tmp/secondary.log" \
     "$tmp/wheel-reader" "$tmp/wheel-key" "$tmp/wheel-ready" \
-    "$tmp/agents-mon-wheel"
+    "$tmp/agenmux-wheel"
   [ -z "$rows_own" ] || rm -f "$rows_own"
   [ -z "$vanished_rows" ] || rm -f "$vanished_rows"
   rmdir "$tmp" 2>/dev/null || true
@@ -48,8 +48,8 @@ mkfifo "$input"
 TMPDIR="$tmp" tmux -S "$sock" -f /dev/null new-session \
   -d -s navigation -x 120 -y 32 "$tmp/codex"
 tmux -S "$sock" new-window -d -t navigation: "$tmp/codex"
-tmux -S "$sock" set-option -g @agents-mon-bin "$BIN"
-tmux -S "$sock" set-option -g @agents-mon-width 30
+tmux -S "$sock" set-option -g @agenmux-bin "$BIN"
+tmux -S "$sock" set-option -g @agenmux-width 30
 tmux -S "$sock" set-option -g prefix M-a
 # The sidebar must behave like a regular pane for the user's root-table
 # bindings. This deliberately differs from tmux's defaults so the test proves
@@ -101,27 +101,27 @@ done
 
 server_pid="$(tmux -S "$sock" display-message -p '#{pid}')"
 # No client argument exercises native newest-real-client discovery.
-env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENTS_MON_DIR="$DIR" \
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" toggle split
 
 # Native toggle invokes setup, which must preserve the
 # user's root binding and install synchronous search delivery before use.
-normal_keys="$(tmux -S "$sock" list-keys -T agents-mon)"
-search_keys="$(tmux -S "$sock" list-keys -T agents-mon-search)"
-[ "$(tmux -S "$sock" show-option -gqv @agents-mon-nav-version)" = 12 ] \
-  && printf '%s' "$normal_keys" | grep -Fq 'C-l' \
-  && printf '%s' "$normal_keys" | grep -Fq " key 'search'" \
-  && printf '%s' "$search_keys" | grep -Fq 'text-6A' || {
-    echo "FAIL navigation-key-table: native setup contract missing"
-    exit 1
-  }
+normal_keys="$(tmux -S "$sock" list-keys -T agenmux)"
+search_keys="$(tmux -S "$sock" list-keys -T agenmux-search)"
+[ "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" = 12 ] &&
+  printf '%s' "$normal_keys" | grep -Fq 'C-l' &&
+  printf '%s' "$normal_keys" | grep -Fq " key 'search'" &&
+  printf '%s' "$search_keys" | grep -Fq 'text-6A' || {
+  echo "FAIL navigation-key-table: native setup contract missing"
+  exit 1
+}
 
 sidebar=''
 first=''
 for _ in $(seq 1 40); do
   sidebar="$(tmux -S "$sock" list-panes -t navigation: \
     -F '#{pane_id}	#{pane_title}' |
-    awk -F'\t' '$2 == "agents-mon" { print $1; exit }')"
+    awk -F'\t' '$2 == "agenmux" { print $1; exit }')"
   if [ -n "$sidebar" ]; then
     first="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
       sed -n '/❯/p' | head -n 1)"
@@ -139,8 +139,8 @@ initial_focus="$(tmux -S "$sock" display-message -p -c "$client" \
   '#{pane_title}')"
 initial_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
 inactive_hint_hidden=0
-if [ -n "$initial_hint" ] \
-  && ! printf '%s' "$initial_hint" | grep -Eq 'esc clear|f status|/ search'; then
+if [ -n "$initial_hint" ] &&
+  ! printf '%s' "$initial_hint" | grep -Eq 'esc clear|f status|/ search'; then
   inactive_hint_hidden=1
 fi
 
@@ -166,7 +166,7 @@ for _ in $(seq 1 20); do
   [ "$chooser_state" = 0/0 ] && break
   sleep 0.05
 done
-chooser_width="$(tmux -S "$sock" show-option -gqv @agents-mon-width)"
+chooser_width="$(tmux -S "$sock" show-option -gqv @agenmux-width)"
 
 # A configured root-table binding must work from the selected sidebar. C-l
 # moves right into the work pane and, because it does not re-enter the plugin
@@ -178,7 +178,7 @@ for _ in $(seq 1 20); do
     '#{client_key_table}')"
   ctrl_l_focus="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{pane_title}')"
-  if [ "$ctrl_l_table" = root ] && [ "$ctrl_l_focus" != agents-mon ]; then
+  if [ "$ctrl_l_table" = root ] && [ "$ctrl_l_focus" != agenmux ]; then
     ctrl_l_works=1
     break
   fi
@@ -187,7 +187,7 @@ done
 
 work="$(tmux -S "$sock" list-panes -t navigation: \
   -F '#{pane_id}	#{pane_title}' |
-  awk -F'\t' '$2 != "agents-mon" { print $1; exit }')"
+  awk -F'\t' '$2 != "agenmux" { print $1; exit }')"
 
 # A second real terminal client proves navigation is scoped to the client that
 # clicked, even though tmux shares the window's selected pane between viewers.
@@ -227,9 +227,9 @@ missing_client_table="$(tmux -S "$sock" display-message -p -c "$client" \
 missing_secondary_table="$(tmux -S "$sock" display-message -p -c "$secondary" \
   '#{client_key_table}')"
 missing_client_noop=0
-if [ "$missing_client_focus" = "$work" ] \
-  && [ "$missing_client_table" = root ] \
-  && [ "$missing_secondary_table" = root ]; then
+if [ "$missing_client_focus" = "$work" ] &&
+  [ "$missing_client_table" = root ] &&
+  [ "$missing_secondary_table" = root ]; then
   missing_client_noop=1
 fi
 
@@ -255,14 +255,14 @@ for _ in $(seq 1 40); do
   empty_click_cursor="$(tmux -S "$sock" capture-pane -e -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
   case "$empty_click_cursor" in
-    # the cursor row also carries a state background, so the green may sit a
-    # sequence away from the mark
-    *$'\033['*'32m'*'❯'*) empty_click_green=1 ;;
+  # the cursor row also carries a state background, so the green may sit a
+  # sequence away from the mark
+  *$'\033['*'32m'*'❯'*) empty_click_green=1 ;;
   esac
-  if [ "$empty_click_table" = agents-mon ] \
-    && [ "$empty_click_focus" = "$sidebar" ] \
-    && [ "$secondary_click_table" = root ] \
-    && [ "$empty_click_green" -eq 1 ]; then
+  if [ "$empty_click_table" = agenmux ] &&
+    [ "$empty_click_focus" = "$sidebar" ] &&
+    [ "$secondary_click_table" = root ] &&
+    [ "$empty_click_green" -eq 1 ]; then
     empty_click_works=1
     break
   fi
@@ -272,7 +272,7 @@ table="$empty_click_table"
 
 # A row can outlive its agent pane until the daemon's next scan. Treat that
 # stale record like open space instead of leaving the click dead.
-rows_own="$tmp/agents-mon-rows"
+rows_own="$tmp/agenmux-rows"
 cp "$rows_own" "$rows_own.saved"
 tmux -S "$sock" switch-client -c "$client" -T root
 tmux -S "$sock" select-pane -t "$work"
@@ -286,8 +286,8 @@ for _ in $(seq 1 20); do
     '#{client_key_table}')"
   stale_click_focus="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{pane_title}')"
-  if [ "$stale_click_table" = agents-mon ] \
-    && [ "$stale_click_focus" = agents-mon ]; then
+  if [ "$stale_click_table" = agenmux ] &&
+    [ "$stale_click_focus" = agenmux ]; then
     stale_click_works=1
     break
   fi
@@ -308,8 +308,8 @@ for non_agent_y in 0 1; do
       '#{client_key_table}')"
     location_focus="$(tmux -S "$sock" display-message -p -c "$client" \
       '#{pane_id}')"
-    if [ "$location_table" = agents-mon ] \
-      && [ "$location_focus" = "$sidebar" ]; then
+    if [ "$location_table" = agenmux ] &&
+      [ "$location_focus" = "$sidebar" ]; then
       location_works=1
       break
     fi
@@ -321,9 +321,9 @@ done
 # An actual agent record keeps the existing one-click direct jump. Pick a row
 # outside this window so merely leaving the work pane cannot satisfy the test.
 valid_row="$(awk -v work="$work" \
-  '$1 ~ /^%/ && $1 != work { print NR; exit }' "$tmp/agents-mon-rows")"
+  '$1 ~ /^%/ && $1 != work { print NR; exit }' "$tmp/agenmux-rows")"
 valid_target="$(awk -v work="$work" \
-  '$1 ~ /^%/ && $1 != work { print $1; exit }' "$tmp/agents-mon-rows")"
+  '$1 ~ /^%/ && $1 != work { print $1; exit }' "$tmp/agenmux-rows")"
 [ -n "$valid_row" ] && [ -n "$valid_target" ] || {
   echo "FAIL navigation-key-table: no cross-window agent row"
   exit 1
@@ -344,31 +344,31 @@ agent_missing_primary_table="$(tmux -S "$sock" display-message -p -c "$client" \
 agent_missing_secondary_table="$(tmux -S "$sock" display-message -p \
   -c "$secondary" '#{client_key_table}')"
 agent_missing_client_noop=0
-if [ "$agent_missing_focus" = "$work" ] \
-  && [ "$agent_missing_primary_table" = root ] \
-  && [ "$agent_missing_secondary_table" = root ]; then
+if [ "$agent_missing_focus" = "$work" ] &&
+  [ "$agent_missing_primary_table" = root ] &&
+  [ "$agent_missing_secondary_table" = root ]; then
   agent_missing_client_noop=1
 fi
 
 # Likewise, a delayed event from a sidebar pane that has already vanished must
 # not jump through a still-valid row map.
 vanished_pane='%999998'
-vanished_rows="$tmp/agents-mon-rows-${vanished_pane#%}"
+vanished_rows="$tmp/agenmux-rows-${vanished_pane#%}"
 tmux -S "$sock" switch-client -c "$client" -t "$work"
 tmux -S "$sock" switch-client -c "$client" -T root
 printf '%s\tlive-target\n' "$valid_target" >"$vanished_rows"
-tmux -S "$sock" set-option -g @agents-mon-on 0
+tmux -S "$sock" set-option -g @agenmux-on 0
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
   "$BIN" click "$vanished_pane" 2 "$client"
-tmux -S "$sock" set-option -g @agents-mon-on 1
+tmux -S "$sock" set-option -g @agenmux-on 1
 sleep 0.1
 vanished_sidebar_focus="$(tmux -S "$sock" display-message -p -c "$client" \
   '#{pane_id}')"
 vanished_sidebar_table="$(tmux -S "$sock" display-message -p -c "$client" \
   '#{client_key_table}')"
 vanished_sidebar_noop=0
-if [ "$vanished_sidebar_focus" = "$work" ] \
-  && [ "$vanished_sidebar_table" = root ]; then
+if [ "$vanished_sidebar_focus" = "$work" ] &&
+  [ "$vanished_sidebar_table" = root ]; then
   vanished_sidebar_noop=1
 fi
 
@@ -386,8 +386,8 @@ if [ -n "$valid_row" ] && [ -n "$valid_target" ]; then
       '#{client_key_table}')"
     valid_click_focus="$(tmux -S "$sock" display-message -p -c "$client" \
       '#{pane_id}')"
-    if [ "$valid_click_table" = root ] \
-      && [ "$valid_click_focus" = "$valid_target" ]; then
+    if [ "$valid_click_table" = root ] &&
+      [ "$valid_click_focus" = "$valid_target" ]; then
       valid_click_works=1
       break
     fi
@@ -397,18 +397,18 @@ fi
 
 # Restore the sidebar as the interaction target for the keyboard checks below.
 tmux -S "$sock" switch-client -c "$client" -t "$sidebar"
-tmux -S "$sock" switch-client -c "$client" -T agents-mon
+tmux -S "$sock" switch-client -c "$client" -T agenmux
 for _ in $(seq 1 20); do
   table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
-  [ "$table" = agents-mon ] && break
+  [ "$table" = agenmux ] && break
   sleep 0.05
 done
 
 control=''
 control_flags=''
 for _ in $(seq 1 20); do
-  control="$(tmux -S "$sock" show-option -gqv @agents-mon-control-client)"
+  control="$(tmux -S "$sock" show-option -gqv @agenmux-control-client)"
   control_flags="$(tmux -S "$sock" list-clients \
     -f "#{==:#{client_name},$control}" -F '#{client_flags}' 2>/dev/null)"
   printf '%s' "$control_flags" | grep -Fq control-mode && break
@@ -427,8 +427,11 @@ printf 'u' >&9
 picker_open=0
 for _ in $(seq 1 40); do
   picker_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
-  printf '%s\n' "$picker_frame" | grep -Fq 'agents — versions' \
-    && { picker_open=1; break; }
+  printf '%s\n' "$picker_frame" | grep -Eq 'no releases found|↵ switch' &&
+    {
+      picker_open=1
+      break
+    }
   sleep 0.05
 done
 printf 'q' >&9
@@ -439,7 +442,7 @@ for _ in $(seq 1 40); do
     '#{client_key_table}')"
   picker_return="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
-  if [ "$picker_table" = agents-mon ] && [ -n "$picker_return" ]; then
+  if [ "$picker_table" = agenmux ] && [ -n "$picker_return" ]; then
     picker_reclaimed=1
     break
   fi
@@ -466,7 +469,7 @@ done
 
 # Preserved-pane mode: the pane has no stdin, so the handler must reach the
 # daemon through its key FIFO. Settle-jump off — cursor movement alone here.
-tmux -S "$sock" set-option -g @agents-mon-wheel-jump off
+tmux -S "$sock" set-option -g @agenmux-wheel-jump off
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
   "$BIN" wheel "$sidebar" down
 wheel_down="$third"
@@ -499,7 +502,7 @@ for _ in $(seq 1 20); do
   [ "$real_clients" -eq 1 ] && break
   sleep 0.05
 done
-tmux -S "$sock" set-option -g @agents-mon-wheel-jump 0.5
+tmux -S "$sock" set-option -g @agenmux-wheel-jump 0.5
 wheel_client="$(tmux -S "$sock" list-clients \
   -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' \
   -F '#{client_activity} #{client_name}' | sort -n | tail -n 1 | cut -d' ' -f2-)"
@@ -517,7 +520,7 @@ for _ in $(seq 1 20); do
       awk '/❯/ { print NR; exit }')"
     if [ -n "$cursor_row" ] && [ "$cursor_row" -gt 1 ]; then
       map_row=$((cursor_row - 1)) # row map excludes the fixed header
-      wheel_delay_target="$(sed -n "${map_row}p" "$tmp/agents-mon-rows" |
+      wheel_delay_target="$(sed -n "${map_row}p" "$tmp/agenmux-rows" |
         awk '{ print $1 }')"
     fi
   fi
@@ -529,8 +532,11 @@ case "$wheel_delay_target" in
 %*)
   for _ in $(seq 1 30); do
     delay_focus="$(tmux -S "$sock" display-message -p -c "$wheel_client" '#{pane_id}')"
-    [ "$delay_focus" = "$wheel_delay_target" ] \
-      && { wheel_delay_jumped=1; break; }
+    [ "$delay_focus" = "$wheel_delay_target" ] &&
+      {
+        wheel_delay_jumped=1
+        break
+      }
     sleep 0.05
   done
   ;;
@@ -538,19 +544,19 @@ esac
 wheel_delay_works=0
 if [ "$wheel_delay_jumped" -eq 1 ]; then
   tmux -S "$sock" switch-client -c "$wheel_client" -t "$sidebar"
-  tmux -S "$sock" switch-client -c "$wheel_client" -T agents-mon
+  tmux -S "$sock" switch-client -c "$wheel_client" -T agenmux
   sleep 0.65
   delay_focus="$(tmux -S "$sock" display-message -p -c "$wheel_client" '#{pane_id}')"
   [ "$delay_focus" = "$sidebar" ] && wheel_delay_works=1
 fi
-tmux -S "$sock" set-option -g @agents-mon-wheel-jump off
+tmux -S "$sock" set-option -g @agenmux-wheel-jump off
 
 # Simulate leaving through an agent jump, then restoring the exact client's
 # processless-sidebar focus and navigation table.
 tmux -S "$sock" switch-client -c "$client" -T root
 tmux -S "$sock" switch-client -c "$client" -t "$work"
 tmux -S "$sock" switch-client -c "$client" -t "$sidebar"
-tmux -S "$sock" switch-client -c "$client" -T agents-mon
+tmux -S "$sock" switch-client -c "$client" -T agenmux
 return_table="$(tmux -S "$sock" display-message -p -c "$client" \
   '#{client_key_table}')"
 return_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -574,15 +580,15 @@ search_table=''
 search_frame=''
 for _ in $(seq 1 60); do
   search_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
-    "$tmp/agents-mon-rows")"
+    "$tmp/agenmux-rows")"
   search_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
   search_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
   search_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
-  if [ "$search_targets" -eq 2 ] \
-    && printf '%s' "$search_frame" | grep -Fq '/navigation' \
-    && printf '%s' "$search_hint" | grep -Fq 'esc clear' \
-    && [ "$search_table" = agents-mon-search ]; then
+  if [ "$search_targets" -eq 2 ] &&
+    printf '%s' "$search_frame" | grep -Fq '/navigation' &&
+    printf '%s' "$search_hint" | grep -Fq 'esc clear' &&
+    [ "$search_table" = agenmux-search ]; then
     search_works=1
     break
   fi
@@ -595,9 +601,9 @@ for _ in $(seq 1 20); do
     '#{client_key_table}')"
   accept_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
   accept_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
-  if [ "$accept_table" = agents-mon ] \
-    && printf '%s' "$accept_frame" | grep -Fq '/navigation' \
-    && printf '%s' "$accept_hint" | grep -Fq 'j/k'; then
+  if [ "$accept_table" = agenmux ] &&
+    printf '%s' "$accept_frame" | grep -Fq '/navigation' &&
+    printf '%s' "$accept_hint" | grep -Fq 'j/k'; then
     search_accept_works=1
     break
   fi
@@ -622,10 +628,10 @@ for _ in $(seq 1 20); do
   blur_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   blur_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
-    "$tmp/agents-mon-rows")"
+    "$tmp/agenmux-rows")"
   blur_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
-  if [ "$blur_table" = agents-mon ] && [ "$blur_targets" -eq 2 ] \
-    && ! printf '%s' "$blur_frame" | grep -Fq '/navigation'; then
+  if [ "$blur_table" = agenmux ] && [ "$blur_targets" -eq 2 ] &&
+    ! printf '%s' "$blur_frame" | grep -Fq '/navigation'; then
     search_blur_works=1
     break
   fi
@@ -638,12 +644,12 @@ printf 'f' >&9
 blocked_filter_works=0
 for _ in $(seq 1 20); do
   blocked_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
-    "$tmp/agents-mon-rows")"
+    "$tmp/agenmux-rows")"
   blocked_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
   blocked_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
-  if [ "$blocked_targets" -eq 0 ] \
-    && printf '%s' "$blocked_frame" | grep -Fq '[blocked]' \
-    && printf '%s' "$blocked_hint" | grep -Fq 'f status'; then
+  if [ "$blocked_targets" -eq 0 ] &&
+    printf '%s' "$blocked_frame" | grep -Fq '[blocked]' &&
+    printf '%s' "$blocked_hint" | grep -Fq 'f status'; then
     blocked_filter_works=1
     break
   fi
@@ -653,10 +659,10 @@ printf 'f' >&9
 working_filter_works=0
 for _ in $(seq 1 20); do
   working_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
-    "$tmp/agents-mon-rows")"
+    "$tmp/agenmux-rows")"
   working_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
-  if [ "$working_targets" -eq 0 ] \
-    && printf '%s' "$working_frame" | grep -Fq '[working]'; then
+  if [ "$working_targets" -eq 0 ] &&
+    printf '%s' "$working_frame" | grep -Fq '[working]'; then
     working_filter_works=1
     break
   fi
@@ -666,10 +672,10 @@ printf 'f' >&9
 idle_filter_works=0
 for _ in $(seq 1 20); do
   idle_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
-    "$tmp/agents-mon-rows")"
+    "$tmp/agenmux-rows")"
   idle_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
-  if [ "$idle_targets" -eq 2 ] \
-    && printf '%s' "$idle_frame" | grep -Fq '[idle]'; then
+  if [ "$idle_targets" -eq 2 ] &&
+    printf '%s' "$idle_frame" | grep -Fq '[idle]'; then
     idle_filter_works=1
     break
   fi
@@ -679,10 +685,10 @@ printf '\033' >&9
 all_filter_works=0
 for _ in $(seq 1 20); do
   all_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
-    "$tmp/agents-mon-rows")"
+    "$tmp/agenmux-rows")"
   all_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
-  if [ "$all_targets" -eq 2 ] \
-    && ! printf '%s' "$all_frame" | grep -Eq '/navigation:1|\[(blocked|working|idle|done)\]'; then
+  if [ "$all_targets" -eq 2 ] &&
+    ! printf '%s' "$all_frame" | grep -Eq '/navigation:1|\[(blocked|working|idle|done)\]'; then
     all_filter_works=1
     break
   fi
@@ -690,7 +696,7 @@ for _ in $(seq 1 20); do
 done
 
 printf 'q' >&9
-exit_table=agents-mon
+exit_table=agenmux
 q_left=0
 # teardown (kill pane + restore layout) is the slowest step: allow 3s
 for _ in $(seq 1 60); do
@@ -699,9 +705,9 @@ for _ in $(seq 1 60); do
   exit_focus="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{pane_title}')"
   sidebar_count="$(tmux -S "$sock" list-panes -a -F '#{pane_title}' \
-    2>/dev/null | awk '$0 == "agents-mon" { n++ } END { print n+0 }')"
-  if [ "$exit_table" = root ] && [ "$exit_focus" != agents-mon ] \
-    && [ "$sidebar_count" -eq 0 ]; then
+    2>/dev/null | awk '$0 == "agenmux" { n++ } END { print n+0 }')"
+  if [ "$exit_table" = root ] && [ "$exit_focus" != agenmux ] &&
+    [ "$sidebar_count" -eq 0 ]; then
     q_left=1
     break
   fi
@@ -710,7 +716,7 @@ done
 
 # Escape clears filters without closing. Reopen, create a blocked projection,
 # reset it with a literal escape byte, then close explicitly with q.
-env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENTS_MON_DIR="$DIR" \
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" toggle split "$client"
 escape_ready=0
 escape_sidebar=''
@@ -719,10 +725,13 @@ for _ in $(seq 1 40); do
     '#{client_key_table}')"
   escape_focus="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{pane_title}')"
-  if [ "$escape_table" = agents-mon ] && [ "$escape_focus" = agents-mon ]; then
+  if [ "$escape_table" = agenmux ] && [ "$escape_focus" = agenmux ]; then
     escape_sidebar="$(tmux -S "$sock" list-panes -a \
-      -f '#{==:#{pane_title},agents-mon}' -F '#{pane_id}' | head -n 1)"
-    [ -n "$escape_sidebar" ] || { sleep 0.05; continue; }
+      -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}' | head -n 1)"
+    [ -n "$escape_sidebar" ] || {
+      sleep 0.05
+      continue
+    }
     escape_ready=1
     break
   fi
@@ -742,8 +751,8 @@ for _ in $(seq 1 20); do
   escape_focus="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{pane_title}')"
   escape_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar" | head -n 1)"
-  if [ "$escape_table" = agents-mon ] && [ "$escape_focus" = agents-mon ] \
-    && ! printf '%s' "$escape_frame" | grep -Eq '\[(blocked|working|idle|done)\]'; then
+  if [ "$escape_table" = agenmux ] && [ "$escape_focus" = agenmux ] &&
+    ! printf '%s' "$escape_frame" | grep -Eq '\[(blocked|working|idle|done)\]'; then
     escape_reset=1
     break
   fi
@@ -757,9 +766,9 @@ for _ in $(seq 1 20); do
   escape_focus="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{pane_title}')"
   sidebar_count="$(tmux -S "$sock" list-panes -a -F '#{pane_title}' \
-    2>/dev/null | awk '$0 == "agents-mon" { n++ } END { print n+0 }')"
-  if [ "$escape_table" = root ] && [ "$escape_focus" != agents-mon ] \
-    && [ "$sidebar_count" -eq 0 ]; then
+    2>/dev/null | awk '$0 == "agenmux" { n++ } END { print n+0 }')"
+  if [ "$escape_table" = root ] && [ "$escape_focus" != agenmux ] &&
+    [ "$sidebar_count" -eq 0 ]; then
     escape_left=1
     break
   fi
@@ -767,7 +776,7 @@ for _ in $(seq 1 20); do
 done
 
 # Uppercase Q closes too (alias of q).
-env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENTS_MON_DIR="$DIR" \
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" toggle split "$client"
 close_ready=0
 for _ in $(seq 1 40); do
@@ -775,7 +784,7 @@ for _ in $(seq 1 40); do
     '#{client_key_table}')"
   close_focus="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{pane_title}')"
-  if [ "$close_table" = agents-mon ] && [ "$close_focus" = agents-mon ]; then
+  if [ "$close_table" = agenmux ] && [ "$close_focus" = agenmux ]; then
     close_ready=1
     break
   fi
@@ -787,7 +796,7 @@ for _ in $(seq 1 20); do
   close_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   sidebar_count="$(tmux -S "$sock" list-panes -a -F '#{pane_title}' \
-    2>/dev/null | awk '$0 == "agents-mon" { n++ } END { print n+0 }')"
+    2>/dev/null | awk '$0 == "agenmux" { n++ } END { print n+0 }')"
   if [ "$close_table" = root ] && [ "$sidebar_count" -eq 0 ]; then
     q_closed=1
     break
@@ -811,39 +820,39 @@ if [ -n "$notification_client" ]; then
   "$BIN" notification-open "$sock" '%999999' ''
   notification_after_stale="$(tmux -S "$sock" display-message -p \
     -c "$notification_client" '#{pane_id}')"
-  [ "$notification_after_stale" = "$notification_focus" ] \
-    && notification_stale_noop=1
+  [ "$notification_after_stale" = "$notification_focus" ] &&
+    notification_stale_noop=1
 fi
 
-if [ "$table" = agents-mon ] && [ "$initial_focus" = agents-mon ] \
-  && [ "$inactive_hint_hidden" -eq 1 ] \
-  && [ "$chooser_open_unzoomed" -eq 1 ] && [ "$chooser_width" = 30 ] \
-  && [ "$ctrl_l_works" -eq 1 ] \
-  && [ "$missing_client_noop" -eq 1 ] \
-  && [ "$empty_click_works" -eq 1 ] \
-  && [ "$stale_click_works" -eq 1 ] \
-  && [ "$non_agent_locations_work" -eq 1 ] \
-  && [ "$agent_missing_client_noop" -eq 1 ] \
-  && [ "$vanished_sidebar_noop" -eq 1 ] \
-  && [ "$valid_click_works" -eq 1 ] \
-  && [ "$picker_open" -eq 1 ] && [ "$picker_reclaimed" -eq 1 ] \
-  && [ "$table_after_j" = agents-mon ] \
-  && printf '%s' "$control_flags" | grep -Fq control-mode \
-  && [ "$second" != "$picker_return" ] && [ "$third" = "$picker_before" ] \
-  && [ "$wheel_down" != "$third" ] && [ "$wheel_up" = "$third" ] \
-  && [ "$wheel_delay_works" -eq 1 ] \
-  && [ "$return_table" = agents-mon ] && [ "$return_focus" = agents-mon ] \
-  && [ "$fourth" != "$third" ] && [ "$search_works" -eq 1 ] \
-  && [ "$search_accept_works" -eq 1 ] && [ "$search_jk_works" -eq 1 ] \
-  && [ "$search_blur_works" -eq 1 ] && [ "$blocked_filter_works" -eq 1 ] \
-  && [ "$working_filter_works" -eq 1 ] && [ "$idle_filter_works" -eq 1 ] \
-  && [ "$all_filter_works" -eq 1 ] \
-  && [ "$exit_table" = root ] && [ "$q_left" -eq 1 ] \
-  && [ "$escape_ready" -eq 1 ] && [ "$escape_reset" -eq 1 ] \
-  && [ "$escape_left" -eq 1 ] && [ "$close_ready" -eq 1 ] \
-  && [ "$q_closed" -eq 1 ] \
-  && [ "$notification_open_works" -eq 1 ] \
-  && [ "$notification_stale_noop" -eq 1 ]; then
+if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
+  [ "$inactive_hint_hidden" -eq 1 ] &&
+  [ "$chooser_open_unzoomed" -eq 1 ] && [ "$chooser_width" = 30 ] &&
+  [ "$ctrl_l_works" -eq 1 ] &&
+  [ "$missing_client_noop" -eq 1 ] &&
+  [ "$empty_click_works" -eq 1 ] &&
+  [ "$stale_click_works" -eq 1 ] &&
+  [ "$non_agent_locations_work" -eq 1 ] &&
+  [ "$agent_missing_client_noop" -eq 1 ] &&
+  [ "$vanished_sidebar_noop" -eq 1 ] &&
+  [ "$valid_click_works" -eq 1 ] &&
+  [ "$picker_open" -eq 1 ] && [ "$picker_reclaimed" -eq 1 ] &&
+  [ "$table_after_j" = agenmux ] &&
+  printf '%s' "$control_flags" | grep -Fq control-mode &&
+  [ "$second" != "$picker_return" ] && [ "$third" = "$picker_before" ] &&
+  [ "$wheel_down" != "$third" ] && [ "$wheel_up" = "$third" ] &&
+  [ "$wheel_delay_works" -eq 1 ] &&
+  [ "$return_table" = agenmux ] && [ "$return_focus" = agenmux ] &&
+  [ "$fourth" != "$third" ] && [ "$search_works" -eq 1 ] &&
+  [ "$search_accept_works" -eq 1 ] && [ "$search_jk_works" -eq 1 ] &&
+  [ "$search_blur_works" -eq 1 ] && [ "$blocked_filter_works" -eq 1 ] &&
+  [ "$working_filter_works" -eq 1 ] && [ "$idle_filter_works" -eq 1 ] &&
+  [ "$all_filter_works" -eq 1 ] &&
+  [ "$exit_table" = root ] && [ "$q_left" -eq 1 ] &&
+  [ "$escape_ready" -eq 1 ] && [ "$escape_reset" -eq 1 ] &&
+  [ "$escape_left" -eq 1 ] && [ "$close_ready" -eq 1 ] &&
+  [ "$q_closed" -eq 1 ] &&
+  [ "$notification_open_works" -eq 1 ] &&
+  [ "$notification_stale_noop" -eq 1 ]; then
   echo "ok   attached-client-jk-navigation"
 else
   echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/delay=$wheel_delay_works/target=$wheel_delay_target] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$blocked_filter_works/$blocked_targets/$blocked_frame/$blocked_hint/$working_filter_works/$working_targets/$working_frame/$idle_filter_works/$idle_targets/$idle_frame/$all_filter_works/$all_targets/$all_frame] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"

@@ -16,12 +16,17 @@ mod toggle;
 
 use std::path::{Path, PathBuf};
 
+pub(crate) fn compat_env(name: &str, legacy: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .or_else(|| std::env::var(legacy).ok())
+}
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let strs: Vec<&str> = args.iter().map(String::as_str).collect();
     let code = match strs.as_slice() {
         ["--version"] | ["-V"] => {
-            println!("agents-mon {}", env!("CARGO_PKG_VERSION"));
+            println!("agenmux {}", env!("CARGO_PKG_VERSION"));
             0
         }
         ["detect", conf_path, screen_file, rest @ ..] => {
@@ -52,7 +57,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: agents-mon [--version|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|setup|toggle [split|popup] [client]|releases refresh|update [latest|vX.Y.Z]|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
+                "usage: agenmux [--version|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|setup|toggle [split|popup] [client]|releases refresh|update [latest|vX.Y.Z]|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
             );
             2
         }
@@ -61,9 +66,9 @@ fn main() {
 }
 
 /// Repo root: the ancestor of the binary that contains agents/ (works from
-/// target/release and target/debug); AGENTS_MON_DIR overrides.
+/// target/release and target/debug); AGENMUX_DIR overrides.
 fn plugin_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("AGENTS_MON_DIR") {
+    if let Some(d) = compat_env("AGENMUX_DIR", "AGENTS_MON_DIR") {
         return d.into();
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -77,13 +82,11 @@ fn plugin_dir() -> PathBuf {
 }
 
 fn scan_cache_path() -> PathBuf {
-    std::env::temp_dir().join("agents-mon-scan-cache")
+    std::env::temp_dir().join("agenmux-scan-cache")
 }
 
 fn self_pane() -> Option<String> {
-    std::env::var("AGENTS_MON_SELF")
-        .ok()
-        .filter(|s| !s.is_empty())
+    compat_env("AGENMUX_SELF", "AGENTS_MON_SELF").filter(|s| !s.is_empty())
 }
 
 fn run_scan() -> Result<Vec<scan::PaneRow>, tmux::TmuxError> {
@@ -107,7 +110,7 @@ fn cmd_scan() -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("agents-mon: {e}");
+            eprintln!("agenmux: {e}");
             1
         }
     }
@@ -137,14 +140,14 @@ fn cmd_detect(conf_path: &str, screen_file: &str, title: &str) -> i32 {
     let c = match conf::load_conf(Path::new(conf_path)) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("agents-mon: {conf_path}: {e}");
+            eprintln!("agenmux: {conf_path}: {e}");
             return 1;
         }
     };
     let screen = match std::fs::read_to_string(screen_file) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("agents-mon: {screen_file}: {e}");
+            eprintln!("agenmux: {screen_file}: {e}");
             return 1;
         }
     };

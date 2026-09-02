@@ -6,7 +6,7 @@
 - Match stable UI structure (anchored activity glyphs, layout, timers, controls), never transient generated text such as rotating Claude activity verbs.
 - Add real fixtures covering at least two working variants plus an idle/completed negative case. A completed summary line must not match a working rule.
 - Test through the public detector used by the runtime. Verify both the target state and the transition back out of it.
-- Before live verification, inspect `@agents-mon-bin`, derive that binary's plugin root, and confirm its loaded `agents/*.conf`. Never assume the current checkout is deployed.
+- Before live verification, inspect `@agenmux-bin`, derive that binary's plugin root, and confirm its loaded `agents/*.conf`. Never assume the current checkout is deployed.
 - Restart the active daemon after config changes, then verify the monitored pane reports `working` during activity and `idle` after completion.
 
 ## Commits

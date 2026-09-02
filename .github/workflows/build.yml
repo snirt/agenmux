@@ -3,16 +3,16 @@ name: Build and Release
 on:
   push:
     branches: [master]
-    tags: ['v*']
+    tags: ["v*"]
     paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - 'site/**'
+      - "**/*.md"
+      - "docs/**"
+      - "site/**"
   pull_request:
     paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - 'site/**'
+      - "**/*.md"
+      - "docs/**"
+      - "site/**"
   workflow_dispatch:
 
 permissions:
@@ -57,21 +57,21 @@ jobs:
       matrix:
         include:
           - runner: ubuntu-latest
-            artifact: tmux-agents-mon-linux-x86_64
+            artifact: agenmux-linux-x86_64
             target: x86_64-unknown-linux-musl
-            binary: target/x86_64-unknown-linux-musl/release/agents-mon
+            binary: target/x86_64-unknown-linux-musl/release/agenmux
           - runner: ubuntu-24.04-arm
-            artifact: tmux-agents-mon-linux-aarch64
+            artifact: agenmux-linux-aarch64
             target: aarch64-unknown-linux-musl
-            binary: target/aarch64-unknown-linux-musl/release/agents-mon
+            binary: target/aarch64-unknown-linux-musl/release/agenmux
           - runner: macos-15-intel
-            artifact: tmux-agents-mon-macos-x86_64
+            artifact: agenmux-macos-x86_64
             target: x86_64-apple-darwin
-            binary: target/x86_64-apple-darwin/release/agents-mon
+            binary: target/x86_64-apple-darwin/release/agenmux
           - runner: macos-15
-            artifact: tmux-agents-mon-macos-aarch64
+            artifact: agenmux-macos-aarch64
             target: aarch64-apple-darwin
-            binary: target/aarch64-apple-darwin/release/agents-mon
+            binary: target/aarch64-apple-darwin/release/agenmux
 
     runs-on: ${{ matrix.runner }}
 
@@ -94,7 +94,7 @@ jobs:
         run: |
           cargo test --locked
           cargo build --release --locked --target "${{ matrix.target }}"
-          AGENTS_MON_BIN="${{ matrix.binary }}" ./tests/run.sh
+          AGENMUX_BIN="${{ matrix.binary }}" ./tests/run.sh
 
       - name: Package plugin
         shell: bash
@@ -102,12 +102,22 @@ jobs:
           package="${{ matrix.artifact }}"
           mkdir -p "dist/$package/target/release"
           git archive HEAD | tar -x -C "dist/$package"
-          cp "${{ matrix.binary }}" "dist/$package/target/release/agents-mon"
+          cp "${{ matrix.binary }}" "dist/$package/target/release/agenmux"
+          cat > "dist/$package/target/release/agents-mon" <<'SH'
+          #!/bin/sh
+          exec "$(dirname "$0")/agenmux" "$@"
+          SH
+          chmod +x "dist/$package/target/release/agents-mon"
           # macOS packages also ship the notification helper so
           # `make install-app` works without cargo
           if [ "$RUNNER_OS" = macOS ]; then
-            cp "target/${{ matrix.target }}/release/agents-mon-notifier" \
-              "dist/$package/target/release/agents-mon-notifier"
+            cp "target/${{ matrix.target }}/release/agenmux-notifier" \
+              "dist/$package/target/release/agenmux-notifier"
+            cat > "dist/$package/target/release/agents-mon-notifier" <<'SH'
+            #!/bin/sh
+            exec "$(dirname "$0")/agenmux-notifier" "$@"
+            SH
+            chmod +x "dist/$package/target/release/agents-mon-notifier"
           fi
           tar -czf "dist/$package.tar.gz" -C dist "$package"
 
@@ -138,9 +148,9 @@ jobs:
       - name: Create checksums
         shell: bash
         run: |
-          tar -xOf dist/tmux-agents-mon-linux-x86_64.tar.gz \
-            tmux-agents-mon-linux-x86_64/RELEASE_NOTES.md > RELEASE_NOTES.md
-          count="$(find dist -maxdepth 1 -name 'tmux-agents-mon-*.tar.gz' | wc -l)"
+          tar -xOf dist/agenmux-linux-x86_64.tar.gz \
+            agenmux-linux-x86_64/RELEASE_NOTES.md > RELEASE_NOTES.md
+          count="$(find dist -maxdepth 1 -name 'agenmux-*.tar.gz' | wc -l)"
           test "$count" -eq 4
           cd dist
           sha256sum ./*.tar.gz > SHA256SUMS
@@ -158,5 +168,5 @@ jobs:
             --draft \
             --verify-tag \
             --notes-file RELEASE_NOTES.md \
-            --title "tmux-agents-mon $GITHUB_REF_NAME"
+            --title "agenmux $GITHUB_REF_NAME"
           gh release edit "$GITHUB_REF_NAME" --draft=false

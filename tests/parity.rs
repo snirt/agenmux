@@ -6,7 +6,7 @@ use std::process::Command;
 #[test]
 fn fixtures_match_expected_state() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let bin = env!("CARGO_BIN_EXE_agents-mon");
+    let bin = env!("CARGO_BIN_EXE_agenmux");
     let mut checked = 0;
     for entry in std::fs::read_dir(root.join("tests/fixtures")).unwrap() {
         let path = entry.unwrap().path();

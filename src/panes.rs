@@ -41,7 +41,7 @@ fn newest_value(rows: &[String]) -> Option<String> {
 }
 
 pub fn pane_add(window: Option<&str>) -> i32 {
-    if !tmux::command(&["show-option", "-gqv", "@agents-mon-on"])
+    if !tmux::command(&["show-option", "-gqv", "@agenmux-on"])
         .is_ok_and(|value| value.trim() == "1")
     {
         return 0;
@@ -59,22 +59,22 @@ pub fn pane_add(window: Option<&str>) -> i32 {
         return 0;
     }
 
-    let lock_name = format!("agents-mon-add-{}", win.trim_start_matches('@'));
+    let lock_name = format!("agenmux-add-{}", win.trim_start_matches('@'));
     let Some(_lock) = TmuxLock::acquire(lock_name) else {
         return 0;
     };
-    if !tmux::command(&["show-option", "-gqv", "@agents-mon-on"])
+    if !tmux::command(&["show-option", "-gqv", "@agenmux-on"])
         .is_ok_and(|value| value.trim() == "1")
     {
         return 0;
     }
     if tmux::lines(&["list-panes", "-t", &win, "-F", "#{pane_title}"])
-        .is_ok_and(|titles| titles.iter().any(|title| title == "agents-mon"))
+        .is_ok_and(|titles| titles.iter().any(|title| title == "agenmux"))
     {
         return 0;
     }
 
-    let width = tmux::command(&["show-option", "-gqv", "@agents-mon-width"])
+    let width = tmux::command(&["show-option", "-gqv", "@agenmux-width"])
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -83,7 +83,7 @@ pub fn pane_add(window: Option<&str>) -> i32 {
         Ok(layout) => layout.trim_end().to_string(),
         Err(_) => return 1,
     };
-    let layout_option = format!("@agents-mon-layout-{win}");
+    let layout_option = format!("@agenmux-layout-{win}");
     if tmux::command_status(&["set-option", "-g", &layout_option, &layout]).is_err() {
         return 1;
     }
@@ -118,12 +118,12 @@ pub fn pane_add(window: Option<&str>) -> i32 {
         return 1;
     }
     let _ = tmux::command_status(&["set-option", "-p", "-t", &pane, "allow-rename", "off"]);
-    let _ = tmux::command_status(&["select-pane", "-t", &pane, "-T", "agents-mon"]);
+    let _ = tmux::command_status(&["select-pane", "-t", &pane, "-T", "agenmux"]);
     0
 }
 
 pub fn pane_pin() -> i32 {
-    let width = tmux::command(&["show-option", "-gqv", "@agents-mon-width"])
+    let width = tmux::command(&["show-option", "-gqv", "@agenmux-width"])
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -131,7 +131,7 @@ pub fn pane_pin() -> i32 {
     let panes =
         tmux::lines(&["list-panes", "-a", "-F", "#{pane_id}\t#{pane_title}"]).unwrap_or_default();
     for row in panes {
-        let Some((pane, "agents-mon")) = row.split_once('\t') else {
+        let Some((pane, "agenmux")) = row.split_once('\t') else {
             continue;
         };
         let _ = tmux::command_status(&["resize-pane", "-t", pane, "-x", &width]);
@@ -140,7 +140,7 @@ pub fn pane_pin() -> i32 {
 }
 
 pub fn pane_orphan() -> i32 {
-    if !tmux::command(&["show-option", "-gqv", "@agents-mon-on"])
+    if !tmux::command(&["show-option", "-gqv", "@agenmux-on"])
         .is_ok_and(|value| value.trim() == "1")
     {
         return 0;
@@ -160,7 +160,7 @@ pub fn pane_orphan() -> i32 {
         };
         let title =
             tmux::command(&["list-panes", "-t", win, "-F", "#{pane_title}"]).unwrap_or_default();
-        if title.trim() != "agents-mon" {
+        if title.trim() != "agenmux" {
             continue;
         }
 
@@ -204,7 +204,7 @@ pub fn pane_orphan() -> i32 {
                 let _ = tmux::command_status(&["switch-client", "-c", &client, "-p"]);
             }
         }
-        let option = format!("@agents-mon-layout-{win}");
+        let option = format!("@agenmux-layout-{win}");
         let _ = tmux::command_status(&["set-option", "-gu", &option]);
         let _ = tmux::command_status(&["kill-window", "-t", win]);
     }
@@ -216,8 +216,12 @@ fn layout_size(layout: &str) -> Option<&str> {
 }
 
 fn restore_layout(window: &str) {
-    let option = format!("@agents-mon-layout-{window}");
-    let layout = tmux::command(&["show-option", "-gqv", &option]).unwrap_or_default();
+    let option = format!("@agenmux-layout-{window}");
+    let legacy_option = format!("@agents-mon-layout-{window}");
+    let mut layout = tmux::command(&["show-option", "-gqv", &option]).unwrap_or_default();
+    if layout.trim_end().is_empty() {
+        layout = tmux::command(&["show-option", "-gqv", &legacy_option]).unwrap_or_default();
+    }
     let layout = layout.trim_end();
     if layout.is_empty() {
         return;
@@ -245,11 +249,13 @@ pub fn teardown() -> i32 {
     .unwrap_or_default();
     for row in panes {
         let mut fields = row.split('\t');
-        let (Some(pane), Some("agents-mon"), Some(window)) =
-            (fields.next(), fields.next(), fields.next())
+        let (Some(pane), Some(title), Some(window)) = (fields.next(), fields.next(), fields.next())
         else {
             continue;
         };
+        if !matches!(title, "agenmux" | "agents-mon") {
+            continue;
+        }
         let _ = tmux::command_status(&["kill-pane", "-t", pane]);
         restore_layout(window);
     }
@@ -259,11 +265,16 @@ pub fn teardown() -> i32 {
         let Some(option) = row.split_whitespace().next() else {
             continue;
         };
-        if option.starts_with("@agents-mon-layout-@") || option.starts_with("@agents-mon-winsize-@")
+        if option.starts_with("@agenmux-layout-@")
+            || option.starts_with("@agenmux-winsize-@")
+            || option.starts_with("@agents-mon-layout-@")
+            || option.starts_with("@agents-mon-winsize-@")
         {
             let _ = tmux::command_status(&["set-option", "-gu", option]);
         }
     }
+    let _ = tmux::command_status(&["set-option", "-gu", "@agenmux-on"]);
+    let _ = tmux::command_status(&["set-option", "-gu", "@agenmux-control-client"]);
     let _ = tmux::command_status(&["set-option", "-gu", "@agents-mon-on"]);
     let _ = tmux::command_status(&["set-option", "-gu", "@agents-mon-control-client"]);
     0

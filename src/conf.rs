@@ -118,7 +118,7 @@ fn compile(name: &str, key: &str, pat: &str) -> Option<Regex> {
     match Regex::new(pat) {
         Ok(r) => Some(r),
         Err(e) => {
-            eprintln!("agents-mon: {name}.conf {key}: bad regex: {e}");
+            eprintln!("agenmux: {name}.conf {key}: bad regex: {e}");
             None
         }
     }
@@ -186,11 +186,12 @@ pub fn load_conf(path: &Path) -> std::io::Result<AgentConf> {
 /// Builtin agents/, then user confs overriding by filename (position kept).
 pub fn load_all(plugin_dir: &Path) -> Vec<AgentConf> {
     let mut confs: Vec<AgentConf> = Vec::new();
-    let user_dir = std::env::var("XDG_CONFIG_HOME")
+    let config_home = std::env::var("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| Path::new(&std::env::var("HOME").unwrap_or_default()).join(".config"))
-        .join("tmux-agents-mon/agents");
-    for dir in [&plugin_dir.join("agents"), &user_dir] {
+        .unwrap_or_else(|_| Path::new(&std::env::var("HOME").unwrap_or_default()).join(".config"));
+    let legacy_user_dir = config_home.join("tmux-agents-mon/agents");
+    let user_dir = config_home.join("agenmux/agents");
+    for dir in [&plugin_dir.join("agents"), &legacy_user_dir, &user_dir] {
         let mut files: Vec<_> = match std::fs::read_dir(dir) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok().map(|e| e.path()))

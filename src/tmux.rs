@@ -239,9 +239,9 @@ fn block_tag(rest: &str) -> &str {
     rest.split_whitespace().nth(1).unwrap_or("")
 }
 
-/// AGENTS_MON_DEBUG=<file>: free-form trace line (timings, counters).
+/// AGENMUX_DEBUG=<file>: free-form trace line (timings, counters).
 pub fn debug_note(msg: &str) {
-    let Ok(path) = std::env::var("AGENTS_MON_DEBUG") else {
+    let Some(path) = crate::compat_env("AGENMUX_DEBUG", "AGENTS_MON_DEBUG") else {
         return;
     };
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -253,9 +253,9 @@ pub fn debug_note(msg: &str) {
     }
 }
 
-/// AGENTS_MON_DEBUG=<file>: trace every command/response pair with timing.
+/// AGENMUX_DEBUG=<file>: trace every command/response pair with timing.
 fn debug_log(cmd: &str, r: &Result<String, TmuxError>, took: std::time::Duration) {
-    let Ok(path) = std::env::var("AGENTS_MON_DEBUG") else {
+    let Some(path) = crate::compat_env("AGENMUX_DEBUG", "AGENTS_MON_DEBUG") else {
         return;
     };
     let summary = match r {
@@ -314,13 +314,11 @@ mod tests {
 
     #[test]
     fn spawned_tmux_command_does_not_wait_for_completion() {
-        let socket = format!("agents-mon-spawn-test-{}", std::process::id());
-        let Ok(status) = Command::new("tmux")
+        let socket = format!("agenmux-spawn-test-{}", std::process::id());
+        let status = Command::new("tmux")
             .args(["-L", &socket, "new-session", "-d"])
             .status()
-        else {
-            panic!("could not start private tmux server");
-        };
+            .unwrap_or_else(|error| panic!("could not start private tmux server: {error}"));
         assert!(status.success());
 
         let start = std::time::Instant::now();

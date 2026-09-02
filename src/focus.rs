@@ -91,7 +91,7 @@ pub fn parse_clients(rows: &str, focus_events: bool) -> ClientFocus {
     ClientFocus {
         active_pane,
         active_session,
-        plugin_selected: title == "agents-mon",
+        plugin_selected: title == "agenmux",
         focused_panes,
         focused_counts,
         focused_by_client,
@@ -107,7 +107,7 @@ mod tests {
         let rows = concat!(
             "20\tclient-1\t$1\t%2\twork\tattached,focused,utf8\n",
             "30\tclient-2\t$2\t%3\twork\tattached,utf8\n",
-            "40\tcontrol\t$3\t%4\tagents-mon\tattached,focused,control-mode,utf8\n",
+            "40\tcontrol\t$3\t%4\tagenmux\tattached,focused,control-mode,utf8\n",
         );
         let focus = parse_clients(rows, true);
 
@@ -121,7 +121,7 @@ mod tests {
     fn focus_events_off_treat_every_selected_real_client_pane_as_focused() {
         let rows = concat!(
             "20\tclient-1\t$1\t%2\twork\tattached,utf8\n",
-            "30\tclient-2\t$2\t%3\tagents-mon\tattached,utf8\n",
+            "30\tclient-2\t$2\t%3\tagenmux\tattached,utf8\n",
         );
         let focus = parse_clients(rows, false);
 
