@@ -112,8 +112,16 @@ fn split(plugin_dir: &Path, client: Option<String>) -> i32 {
 }
 
 fn window_has_sidebar(window: &str) -> bool {
-    tmux::lines(&["list-panes", "-t", window, "-F", "#{pane_title}"])
-        .is_ok_and(|titles| titles.iter().any(|title| title == "agenmux"))
+    tmux::lines(&[
+        "list-panes",
+        "-t",
+        window,
+        "-f",
+        panes::IS_SIDEBAR,
+        "-F",
+        "#{pane_id}",
+    ])
+    .is_ok_and(|panes| !panes.is_empty())
 }
 
 fn client_window(client: &str) -> Option<String> {
@@ -133,7 +141,7 @@ fn select_sidebar(client: Option<&str>) {
         "-t",
         &window,
         "-f",
-        "#{==:#{pane_title},agenmux}",
+        panes::IS_SIDEBAR,
         "-F",
         "#{pane_id}",
     ])

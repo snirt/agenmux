@@ -25,10 +25,10 @@ src/main.rs:    if let Some(d) = compat_env("AGENMUX_DIR", "AGENTS_MON_DIR") {
 src/notifications/macos.rs:    const LEGACY_APP: &str = "Applications/AgentsMon.app/Contents/MacOS/agents-mon-notifier";
 src/panes.rs:            || option.starts_with("@agents-mon-layout-@")
 src/panes.rs:            || option.starts_with("@agents-mon-winsize-@")
-src/panes.rs:        if !matches!(title, "agenmux" | "agents-mon") {
 src/panes.rs:    let _ = tmux::command_status(&["set-option", "-gu", "@agents-mon-control-client"]);
 src/panes.rs:    let _ = tmux::command_status(&["set-option", "-gu", "@agents-mon-on"]);
 src/panes.rs:    let legacy_option = format!("@agents-mon-layout-{window}");
+src/panes.rs:    let sidebar_filter = ["#{||:", IS_SIDEBAR, ",#{==:#{pane_title},agents-mon}}"].concat();
 src/release.rs:                    || value == format!("agents-mon {version}")
 src/release.rs:        "agents-mon"
 src/release.rs:        package.join("target/release/agents-mon")
