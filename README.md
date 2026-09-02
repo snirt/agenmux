@@ -377,6 +377,9 @@ run.
 
 ## Known limits
 
+- After a tmux server restart through a session-restore tool, restored sidebar
+  panes may return as idle shells. Press `prefix+A` to remove them and reopen
+  the sidebar. The original per-window layout cannot be recovered.
 - State is inferred from what's on screen; transient redraws can flicker
   (the sidebar debounces transitions to idle by one tick).
 - Pane titles are only used when the agent's OSC title escapes reach tmux.

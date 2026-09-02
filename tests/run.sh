@@ -373,7 +373,7 @@ printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
 case "$*" in
   "show-option -gqv @agenmux-on") printf '1\n' ;;
   "list-windows -a -F "*window_panes*) printf '@sb\t1\ts1\n' ;;
-  "list-panes -t @sb -F #{pane_title}") printf 'agenmux\n' ;;
+  "list-panes -t @sb -f "*" -F #{pane_id}") printf '%%1\n' ;;
   "list-clients "*"-F #{client_name}") printf 'c1\n' ;;
   "display-message -p -c c1 #{window_id}") printf '@other\n' ;;
   "list-windows -t s1 -F "*window_last_flag*) printf '@sb\t0\n@last\t1\n' ;;
@@ -401,7 +401,7 @@ printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
 case "$*" in
   "show-option -gqv @agenmux-on") printf '1\n' ;;
   "list-windows -a -F "*window_panes*) printf '@sb\t1\ts1\n' ;;
-  "list-panes -t @sb -F #{pane_title}") printf 'agenmux\n' ;;
+  "list-panes -t @sb -f "*" -F #{pane_id}") printf '%%1\n' ;;
   "list-clients "*"-F #{client_name}") printf 'c1\n' ;;
   "display-message -p -c c1 #{window_id}") printf '@sb\n' ;;
   "list-windows -t s1 -F "*window_last_flag*) printf '@sb\t0\n@last\t1\n' ;;

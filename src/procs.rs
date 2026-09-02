@@ -32,6 +32,12 @@ impl Snapshot {
         Snapshot { sys, children }
     }
 
+    pub fn has_children(&self, pid: u32) -> bool {
+        self.children
+            .get(&pid)
+            .is_some_and(|children| !children.is_empty())
+    }
+
     /// BFS over the pane's process tree, root included (agent may be the
     /// pane command itself); argv fetched for just this subtree.
     fn descendant_argvs(&mut self, root: u32) -> Vec<Vec<String>> {

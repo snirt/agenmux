@@ -1,6 +1,8 @@
 use crate::tmux::{self, TmuxError};
 use std::process::{Command, Stdio};
 
+pub const IS_SIDEBAR: &str = "#{||:#{==:#{pane_title},agenmux},#{==:#{@agenmux},1}}";
+
 struct TmuxLock(String);
 
 impl TmuxLock {
@@ -40,6 +42,73 @@ fn newest_value(rows: &[String]) -> Option<String> {
         .map(|(_, value)| value)
 }
 
+// Restore tools respawn processless sidebar panes as idle shells; remove them before splitting.
+fn kill_ghosts(win: &str, width: &str) {
+    let default_shell =
+        tmux::command(&["show-option", "-gqv", "default-shell"]).unwrap_or_default();
+    let default_shell = default_shell.trim().rsplit('/').next().unwrap_or_default();
+    let snapshot = crate::procs::Snapshot::take();
+    let panes = tmux::lines(&[
+        "list-panes",
+        "-t",
+        win,
+        "-F",
+        "#{pane_id}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{window_height}\t#{window_panes}\t#{pane_pid}\t#{pane_current_command}\t#{pane_title}",
+    ])
+    .unwrap_or_default();
+    for row in panes {
+        let mut fields = row.split('\t');
+        let (
+            Some(pane),
+            Some("0"),
+            Some("0"),
+            Some(pane_width),
+            Some(pane_height),
+            Some(window_height),
+            Some(window_panes),
+            Some(pid),
+            Some(command),
+            Some(title),
+        ) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        )
+        else {
+            continue;
+        };
+        let command = command
+            .trim_start_matches('-')
+            .rsplit('/')
+            .next()
+            .unwrap_or(command);
+        let is_shell = matches!(
+            command,
+            "sh" | "bash" | "zsh" | "fish" | "nu" | "dash" | "ksh" | "tcsh" | "csh"
+        ) || (!default_shell.is_empty() && command == default_shell);
+        let (Ok(pid), Ok(window_panes)) = (pid.parse::<u32>(), window_panes.parse::<u32>()) else {
+            continue;
+        };
+        if window_panes > 1
+            && pane_width == width
+            && pane_height == window_height
+            && pid != 0
+            && title != "agenmux"
+            && is_shell
+            && !snapshot.has_children(pid)
+        {
+            let _ = tmux::command_status(&["kill-pane", "-t", pane]);
+        }
+    }
+}
+
 pub fn pane_add(window: Option<&str>) -> i32 {
     if !tmux::command(&["show-option", "-gqv", "@agenmux-on"])
         .is_ok_and(|value| value.trim() == "1")
@@ -68,8 +137,16 @@ pub fn pane_add(window: Option<&str>) -> i32 {
     {
         return 0;
     }
-    if tmux::lines(&["list-panes", "-t", &win, "-F", "#{pane_title}"])
-        .is_ok_and(|titles| titles.iter().any(|title| title == "agenmux"))
+    if tmux::lines(&[
+        "list-panes",
+        "-t",
+        &win,
+        "-f",
+        IS_SIDEBAR,
+        "-F",
+        "#{pane_id}",
+    ])
+    .is_ok_and(|panes| !panes.is_empty())
     {
         return 0;
     }
@@ -79,6 +156,7 @@ pub fn pane_add(window: Option<&str>) -> i32 {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "30".to_string());
+    kill_ghosts(&win, &width);
     let layout = match tmux::command(&["display-message", "-p", "-t", &win, "#{window_layout}"]) {
         Ok(layout) => layout.trim_end().to_string(),
         Err(_) => return 1,
@@ -118,6 +196,7 @@ pub fn pane_add(window: Option<&str>) -> i32 {
         return 1;
     }
     let _ = tmux::command_status(&["set-option", "-p", "-t", &pane, "allow-rename", "off"]);
+    let _ = tmux::command_status(&["set-option", "-p", "-t", &pane, "@agenmux", "1"]);
     let _ = tmux::command_status(&["select-pane", "-t", &pane, "-T", "agenmux"]);
     0
 }
@@ -128,13 +207,10 @@ pub fn pane_pin() -> i32 {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "30".to_string());
-    let panes =
-        tmux::lines(&["list-panes", "-a", "-F", "#{pane_id}\t#{pane_title}"]).unwrap_or_default();
-    for row in panes {
-        let Some((pane, "agenmux")) = row.split_once('\t') else {
-            continue;
-        };
-        let _ = tmux::command_status(&["resize-pane", "-t", pane, "-x", &width]);
+    let panes = tmux::lines(&["list-panes", "-a", "-f", IS_SIDEBAR, "-F", "#{pane_id}"])
+        .unwrap_or_default();
+    for pane in panes {
+        let _ = tmux::command_status(&["resize-pane", "-t", &pane, "-x", &width]);
     }
     0
 }
@@ -158,9 +234,17 @@ pub fn pane_orphan() -> i32 {
         else {
             continue;
         };
-        let title =
-            tmux::command(&["list-panes", "-t", win, "-F", "#{pane_title}"]).unwrap_or_default();
-        if title.trim() != "agenmux" {
+        if !tmux::lines(&[
+            "list-panes",
+            "-t",
+            win,
+            "-f",
+            IS_SIDEBAR,
+            "-F",
+            "#{pane_id}",
+        ])
+        .is_ok_and(|panes| !panes.is_empty())
+        {
             continue;
         }
 
@@ -240,22 +324,20 @@ fn restore_layout(window: &str) {
 }
 
 pub fn teardown() -> i32 {
+    let sidebar_filter = ["#{||:", IS_SIDEBAR, ",#{==:#{pane_title},agents-mon}}"].concat();
     let panes = tmux::lines(&[
         "list-panes",
         "-a",
+        "-f",
+        &sidebar_filter,
         "-F",
-        "#{pane_id}\t#{pane_title}\t#{window_id}",
+        "#{pane_id}\t#{window_id}",
     ])
     .unwrap_or_default();
     for row in panes {
-        let mut fields = row.split('\t');
-        let (Some(pane), Some(title), Some(window)) = (fields.next(), fields.next(), fields.next())
-        else {
+        let Some((pane, window)) = row.split_once('\t') else {
             continue;
         };
-        if !matches!(title, "agenmux" | "agents-mon") {
-            continue;
-        }
         let _ = tmux::command_status(&["kill-pane", "-t", pane]);
         restore_layout(window);
     }

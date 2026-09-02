@@ -180,6 +180,113 @@ fn teardown_removes_legacy_sidebar_panes() {
 }
 
 #[test]
+fn pane_add_kills_restored_ghost_shell() {
+    let tmux = TestTmux::new("restored-ghost");
+    let window = tmux.text(&["display-message", "-p", "#{window_id}"]);
+    let original_panes = tmux
+        .text(&["list-panes", "-t", &window, "-F", "#{pane_id}"])
+        .lines()
+        .count();
+    let ghost = tmux.text(&[
+        "split-window",
+        "-hbf",
+        "-l",
+        "30",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "exec sh",
+    ]);
+    tmux.assert_tmux(&["set-option", "-g", "@agenmux-on", "1"]);
+    tmux.assert_tmux(&["set-option", "-g", "@agenmux-width", "30"]);
+
+    assert_success(tmux.bin(&["pane-add", &window]), "pane-add restored ghost");
+
+    let panes = tmux.text(&[
+        "list-panes",
+        "-t",
+        &window,
+        "-F",
+        "#{pane_id}\t#{pane_title}\t#{@agenmux}",
+    ]);
+    assert!(
+        !panes.lines().any(|line| line.starts_with(&ghost)),
+        "{panes}"
+    );
+    assert_eq!(panes.lines().count(), original_panes + 1, "{panes}");
+    assert_eq!(
+        panes
+            .lines()
+            .filter(|line| line.ends_with("\tagenmux\t1"))
+            .count(),
+        1,
+        "{panes}"
+    );
+}
+
+#[test]
+fn pane_add_keeps_leftmost_non_shell_pane() {
+    let tmux = TestTmux::new("leftmost-non-shell");
+    let window = tmux.text(&["display-message", "-p", "#{window_id}"]);
+    let pane = tmux.text(&[
+        "split-window",
+        "-hbf",
+        "-l",
+        "30",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "exec sleep 60",
+    ]);
+    tmux.assert_tmux(&["set-option", "-g", "@agenmux-on", "1"]);
+    tmux.assert_tmux(&["set-option", "-g", "@agenmux-width", "30"]);
+
+    assert_success(tmux.bin(&["pane-add", &window]), "pane-add non-shell");
+
+    let panes = tmux.text(&[
+        "list-panes",
+        "-t",
+        &window,
+        "-F",
+        "#{pane_id}\t#{pane_title}\t#{@agenmux}",
+    ]);
+    assert!(panes.lines().any(|line| line.starts_with(&pane)), "{panes}");
+    assert_eq!(
+        panes
+            .lines()
+            .filter(|line| line.ends_with("\tagenmux\t1"))
+            .count(),
+        1,
+        "{panes}"
+    );
+}
+
+#[test]
+fn teardown_finds_sidebar_by_pane_option() {
+    let tmux = TestTmux::new("option-teardown");
+    let window = tmux.text(&["display-message", "-p", "#{window_id}"]);
+    tmux.assert_tmux(&["set-option", "-g", "@agenmux-on", "1"]);
+    assert_success(tmux.bin(&["pane-add", &window]), "pane-add tagged sidebar");
+    let pane = tmux.text(&[
+        "list-panes",
+        "-t",
+        &window,
+        "-f",
+        "#{==:#{@agenmux},1}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    tmux.assert_tmux(&["select-pane", "-t", &pane, "-T", "retitled"]);
+
+    assert_success(tmux.bin(&["teardown"]), "teardown tagged sidebar");
+
+    let panes = tmux.text(&["list-panes", "-t", &window, "-F", "#{pane_id}"]);
+    assert!(!panes.lines().any(|candidate| candidate == pane));
+}
+
+#[test]
 fn mirror_add_is_idempotent_under_concurrent_calls() {
     let tmux = TestTmux::new("mirror-race");
     let window = tmux.text(&["display-message", "-p", "#{window_id}"]);
