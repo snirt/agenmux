@@ -4,6 +4,9 @@
 
 Website: <https://snirt.github.io/agenmux/>
 
+**Rebranding note:** `agents-mon` is now **Agenmux**. Existing installations
+remain compatible for one release cycle; see [Upgrading from agents-mon](#upgrading-from-agents-mon).
+
 Monitor AI coding agents running in your tmux panes. A sidebar and a status-line
 segment show every detected agent and its state:
 
