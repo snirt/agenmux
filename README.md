@@ -1,10 +1,10 @@
-# Agenmux
+# agenmux
 
 [![agenmux logo](site/logo.png)](https://snirt.github.io/agenmux/)
 
 Website: <https://snirt.github.io/agenmux/>
 
-**Rebranding note:** `agents-mon` is now **Agenmux**. Existing installations
+**Rebranding note:** `agents-mon` is now **agenmux**. Existing installations
 remain compatible for one release cycle; see [Upgrading from agents-mon](#upgrading-from-agents-mon).
 
 Monitor AI coding agents running in your tmux panes. A sidebar and a status-line
@@ -56,7 +56,7 @@ required build step on a supported release platform.
 Existing installs continue working for one release cycle. `agents-mon.tmux`,
 `@agents-mon-*`, `#{agents_mon}`, `AGENTS_MON_*`, and
 `~/.config/tmux-agents-mon/agents/` are accepted as compatibility inputs;
-Agenmux writes only canonical names. Canonical values win when both exist.
+agenmux writes only canonical names. Canonical values win when both exist.
 
 | Legacy | Canonical |
 | --- | --- |
@@ -207,8 +207,8 @@ On macOS, agenmux sends notifications natively through
 Homebrew or other runtime dependency, and no setup: installing or updating
 the plugin automatically places a signed, background-only `Agenmux.app`
 into `~/Applications` (skipped while `@agenmux-notifications` is off).
-macOS asks for permission with the first notification; allow **Agenmux**
-when prompted, or later under System Settings → Notifications → Agenmux.
+macOS asks for permission with the first notification; allow **agenmux**
+when prompted, or later under System Settings → Notifications → agenmux.
 Denying keeps notifications fully silent — there is no fallback around your
 choice. Plugin updates refresh the app automatically and the permission
 survives.

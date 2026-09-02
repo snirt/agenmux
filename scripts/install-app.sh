@@ -48,9 +48,9 @@ cat >"$stage/Contents/Info.plist" <<PLIST
 	<key>CFBundleIdentifier</key>
 	<string>io.github.snirt.agenmux</string>
 	<key>CFBundleName</key>
-	<string>Agenmux</string>
+	<string>agenmux</string>
 	<key>CFBundleDisplayName</key>
-	<string>Agenmux</string>
+	<string>agenmux</string>
 	<key>CFBundleExecutable</key>
 	<string>agenmux-notifier</string>
 	<key>CFBundlePackageType</key>
@@ -83,5 +83,5 @@ echo "installed $app"
 if "$app/Contents/MacOS/agenmux-notifier" --setup; then
 	echo "✓ notifications enabled"
 else
-	echo "Notifications are off. Enable: System Settings → Notifications → Agenmux."
+	echo "Notifications are off. Enable: System Settings → Notifications → agenmux."
 fi

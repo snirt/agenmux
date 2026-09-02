@@ -1,10 +1,10 @@
-# Agenmux v0.3.0
+# agenmux v0.3.0
 
 ## What's changed
 
-### Agenmux rebrand
+### agenmux rebrand
 
-- Renamed the runtime, binaries, tmux options, configuration path, release artifacts, and documentation to Agenmux ([#37](https://github.com/snirt/agenmux/pull/37)).
+- Renamed the runtime, binaries, tmux options, configuration path, release artifacts, and documentation to agenmux ([#37](https://github.com/snirt/agenmux/pull/37)).
 - Preserved `agents-mon` entrypoints, options, environment variables, config paths, package launchers, and release state as compatibility inputs for one release cycle.
 - Renamed the macOS notification helper to `Agenmux.app` with bundle ID `io.github.snirt.agenmux`.
 

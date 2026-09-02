@@ -76,7 +76,7 @@ fn setup() -> i32 {
         Ok(false) | Err(_) => return 4,
     }
     match noti::Notification::new()
-        .title("Agenmux")
+        .title("agenmux")
         .message("Notifications are ready.")
         .sound(noti::sound::GLASS)
         .send_blocking()

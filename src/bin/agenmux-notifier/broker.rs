@@ -698,7 +698,7 @@ mod tests {
     #[test]
     fn request_round_trip_preserves_missing_click() {
         let expected = NotificationRequest {
-            title: "Agenmux".into(),
+            title: "agenmux".into(),
             body: "ready".into(),
             click: None,
         };
