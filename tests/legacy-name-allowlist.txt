@@ -1,6 +1,6 @@
-.github/workflows/build.yml:            cat > "dist/$package/target/release/agents-mon-notifier" <<'SH'
+.github/workflows/build.yml:              > "dist/$package/target/release/agents-mon-notifier"
+.github/workflows/build.yml:            > "dist/$package/target/release/agents-mon"
 .github/workflows/build.yml:            chmod +x "dist/$package/target/release/agents-mon-notifier"
-.github/workflows/build.yml:          cat > "dist/$package/target/release/agents-mon" <<'SH'
 .github/workflows/build.yml:          chmod +x "dist/$package/target/release/agents-mon"
 agenmux.tmux:  legacy="${canonical/@agenmux-/@agents-mon-}"
 scripts/dev-bin.sh:  old_option_name="@agents-mon-bin"

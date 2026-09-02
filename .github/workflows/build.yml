@@ -103,20 +103,16 @@ jobs:
           mkdir -p "dist/$package/target/release"
           git archive HEAD | tar -x -C "dist/$package"
           cp "${{ matrix.binary }}" "dist/$package/target/release/agenmux"
-          cat > "dist/$package/target/release/agents-mon" <<'SH'
-          #!/bin/sh
-          exec "$(dirname "$0")/agenmux" "$@"
-          SH
+          printf '%s\n' '#!/bin/sh' 'exec "$(dirname "$0")/agenmux" "$@"' \
+            > "dist/$package/target/release/agents-mon"
           chmod +x "dist/$package/target/release/agents-mon"
           # macOS packages also ship the notification helper so
           # `make install-app` works without cargo
           if [ "$RUNNER_OS" = macOS ]; then
             cp "target/${{ matrix.target }}/release/agenmux-notifier" \
               "dist/$package/target/release/agenmux-notifier"
-            cat > "dist/$package/target/release/agents-mon-notifier" <<'SH'
-            #!/bin/sh
-            exec "$(dirname "$0")/agenmux-notifier" "$@"
-            SH
+            printf '%s\n' '#!/bin/sh' 'exec "$(dirname "$0")/agenmux-notifier" "$@"' \
+              > "dist/$package/target/release/agents-mon-notifier"
             chmod +x "dist/$package/target/release/agents-mon-notifier"
           fi
           tar -czf "dist/$package.tar.gz" -C dist "$package"

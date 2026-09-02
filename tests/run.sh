@@ -106,7 +106,8 @@ case "$*" in
   *) exit 1 ;;
 esac
 SH
-  chmod +x "$tmp/bin/uname" "$tmp/bin/curl" "$tmp/bin/git"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$tmp/bin/codesign"
+  chmod +x "$tmp/bin/uname" "$tmp/bin/curl" "$tmp/bin/git" "$tmp/bin/codesign"
   engine() { "$tmp/plugin/target/release/agenmux" 2>/dev/null; }
   marker() { sed -n '1p' "$tmp/plugin/target/release/.agenmux-version" 2>/dev/null; }
 
