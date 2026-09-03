@@ -585,6 +585,8 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   tmp="$(mktemp -d)"
   T="tmux -S $tmp/sock -f /dev/null"
   mkdir -p "$tmp/bin"
+  printf '#!/bin/sh\nwhile :; do sleep 10; done\n' >"$tmp/claude"
+  chmod +x "$tmp/claude"
   printf '#!/bin/sh\nexec %s -S %s "$@"\n' "$(command -v tmux)" "$tmp/sock" \
     >"$tmp/bin/tmux"
   chmod +x "$tmp/bin/tmux"
@@ -621,11 +623,14 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   live_sidebar="$($T list-panes -t t: -F '#{pane_id}	#{pane_title}' |
     awk -F'\t' '$2 == "agenmux" { print $1; exit }')"
   live_frame="$($T capture-pane -p -t "$live_sidebar")"
-  $T new-window -t t: 'exec sleep 60'
-  sleep 1.5
+  $T new-window -t t: "sh -c 'sleep 1; exec \"$tmp/claude\"'"
+  sleep 3
   neww="$($T display-message -p -t t: '#{window_id}')"
   new_ok=0
   $T list-panes -t "$neww" -F '#{pane_title}' | grep -qx agenmux && new_ok=1
+  delayed_sidebar="$($T list-panes -t "$neww" -F '#{pane_id}	#{pane_title}' |
+    awk -F'\t' '$2 == "agenmux" { print $1; exit }')"
+  delayed_frame="$($T capture-pane -p -t "$delayed_sidebar" -S -)"
   # concurrent adds must not double-split. One window switch fires two [43]
   # hooks, so racing pane-add commands are routine, and a check-then-split
   # without the native lock would let every one of them through.
@@ -673,12 +678,13 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
     [ "$keys_ok" -eq 1 ] && [ "$control_ok" -eq 1 ] && [ "$stayed" -gt 0 ] &&
     printf '%s\n' "$live_frame" | grep -Fq agents &&
     [ "$before" = "$after" ] && [ "$new_ok" -eq 1 ] &&
+    printf '%s\n' "$delayed_frame" | grep -Fq claude &&
     [ "$raced" -eq 1 ] && [ "$widths" = 45 ] && [ "$optw" = 45 ] &&
     [ "$optw2" = 45 ] &&
     [ "$left" -eq 0 ] && [ ! -f "$tmp/agenmux-frame" ]; then
     echo "ok   mirror-mode-no-bump-lifecycle"
   else
-    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors processless=$processless focus=$focus_kept keys=$keys_ok control=$control_ok stayed=$stayed live=$([ -n "$live_frame" ] && echo y || echo n) layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok raced=$raced widths=$widths optw=$optw optw2=$optw2 left=$left"
+    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors processless=$processless focus=$focus_kept keys=$keys_ok control=$control_ok stayed=$stayed live=$([ -n "$live_frame" ] && echo y || echo n) layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok delayed=$([ -n "$delayed_frame" ] && printf '%s\n' "$delayed_frame" | grep -Fq claude && echo y || echo n) raced=$raced widths=$widths optw=$optw optw2=$optw2 left=$left"
     fail=1
   fi
   $T kill-server 2>/dev/null || true
