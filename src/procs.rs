@@ -32,6 +32,12 @@ impl Snapshot {
         Snapshot { sys, children }
     }
 
+    pub fn has_children(&self, pid: u32) -> bool {
+        self.children
+            .get(&pid)
+            .is_some_and(|children| !children.is_empty())
+    }
+
     /// BFS over the pane's process tree, root included (agent may be the
     /// pane command itself); argv fetched for just this subtree.
     fn descendant_argvs(&mut self, root: u32) -> Vec<Vec<String>> {
@@ -124,9 +130,9 @@ pub fn identify(
     None
 }
 
-/// (pane_id, pane_pid, cmd) -> agent name or None; invalidates itself when
-/// the pane's foreground command changes.
-pub type IdentCache = HashMap<(String, u32, String), Option<String>>;
+/// (pane_id, pane_pid, cmd) -> identified agent name; unidentified panes retry
+/// on the next scan because wrappers can spawn an agent without changing this key.
+pub type IdentCache = HashMap<(String, u32, String), String>;
 
 #[cfg(test)]
 mod tests {

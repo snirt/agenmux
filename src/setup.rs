@@ -3,27 +3,59 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-const NORMAL_TABLE: &str = "agents-mon";
-const SEARCH_TABLE: &str = "agents-mon-search";
+const NORMAL_TABLE: &str = "agenmux";
+const SEARCH_TABLE: &str = "agenmux-search";
 
 pub fn run(plugin_dir: &Path) -> i32 {
     match setup(plugin_dir) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("agents-mon: {e}");
+            eprintln!("agenmux: {e}");
             1
         }
     }
 }
 
+fn migrate_legacy_options() -> Result<(), TmuxError> {
+    for suffix in [
+        "bin",
+        "key",
+        "popup-key",
+        "width",
+        "display",
+        "height",
+        "hide-windows",
+        "wheel-jump",
+        "notifications",
+    ] {
+        let canonical = format!("@agenmux-{suffix}");
+        if !tmux::command(&["show-options", "-gq", &canonical])?
+            .trim()
+            .is_empty()
+        {
+            continue;
+        }
+        let legacy = format!("@agents-mon-{suffix}");
+        if tmux::command(&["show-options", "-gq", &legacy])?
+            .trim()
+            .is_empty()
+        {
+            continue;
+        }
+        let value = tmux::command(&["show-option", "-gqv", &legacy])?;
+        tmux::command_status(&["set-option", "-g", &canonical, value.trim_end()])?;
+    }
+    Ok(())
+}
 fn setup(plugin_dir: &Path) -> Result<(), TmuxError> {
-    let default_bin = plugin_dir.join("target/release/agents-mon");
-    let configured_bin = tmux::command(&["show-option", "-gqv", "@agents-mon-bin"])?;
-    let bin = configured_bin
-        .trim_end()
-        .is_empty()
-        .then(|| default_bin.to_string_lossy().into_owned())
-        .unwrap_or_else(|| configured_bin.trim_end().to_string());
+    migrate_legacy_options()?;
+    let default_bin = plugin_dir.join("target/release/agenmux");
+    let configured_bin = tmux::command(&["show-option", "-gqv", "@agenmux-bin"])?;
+    let bin = if configured_bin.trim_end().is_empty() {
+        default_bin.to_string_lossy().into_owned()
+    } else {
+        configured_bin.trim_end().to_string()
+    };
 
     clear_legacy_options_and_hooks()?;
     install_hooks(&bin)?;
@@ -37,11 +69,12 @@ fn setup(plugin_dir: &Path) -> Result<(), TmuxError> {
     install_wheel_keys(&bin)?;
     install_picker_filter()?;
     install_status(&bin)?;
-    tmux::command_status(&["set-option", "-g", "@agents-mon-nav-version", "12"])
+    tmux::command_status(&["set-option", "-g", "@agenmux-nav-version", "12"])
 }
 
 fn clear_legacy_options_and_hooks() -> Result<(), TmuxError> {
     for window in tmux::lines(&["list-windows", "-a", "-F", "#{window_id}"])? {
+        let _ = tmux::command_status(&["set-option", "-wu", "-t", &window, "@agenmux-sidebar"]);
         let _ = tmux::command_status(&["set-option", "-wu", "-t", &window, "@agents-mon-sidebar"]);
     }
     for hook in [
@@ -75,14 +108,14 @@ fn install_hooks(bin: &str) -> Result<(), TmuxError> {
         ),
         (
             "pane-mode-changed[44]",
-            "run-shell -b 'tmux if-shell -t \"#{pane_id}\" -F \"#{&&:#{==:#{pane_title},agents-mon},#{window_zoomed_flag}}\" \"resize-pane -Z -t \\\"#{pane_id}\\\"\"'".to_string(),
+            "run-shell -b 'tmux if-shell -t \"#{pane_id}\" -F \"#{&&:#{||:#{==:#{pane_title},agenmux},#{==:#{pane_title},agents-mon}},#{window_zoomed_flag}}\" \"resize-pane -Z -t \\\"#{pane_id}\\\"\"'".to_string(),
         ),
     ] {
         tmux::command_status(&["set-hook", "-g", hook, &command])?;
     }
 
     let add = format!(
-        "if -F '#{{!=:#{{@agents-mon-on}},}}' {{ run-shell -b \"{bin} pane-add #{{window_id}}\" }}"
+        "if -F '#{{!=:#{{@agenmux-on}},}}' {{ run-shell -b \"{bin} pane-add #{{window_id}}\" }}"
     );
     for hook in [
         "after-select-window[43]",
@@ -96,7 +129,7 @@ fn install_hooks(bin: &str) -> Result<(), TmuxError> {
         "set-hook",
         "-g",
         "after-select-pane[44]",
-        "if -F '#{==:#{pane_title},agents-mon}' { switch-client -T agents-mon }",
+        "if -F '#{==:#{pane_title},agenmux}' { switch-client -T agenmux }",
     ])
 }
 
@@ -204,7 +237,7 @@ fn install_search_keys(bin: &str) -> Result<(), TmuxError> {
     ] {
         bind(SEARCH_TABLE, key, &key_command(bin, action, next, false))?;
     }
-    bind(SEARCH_TABLE, "Any", "switch-client -T agents-mon-search")
+    bind(SEARCH_TABLE, "Any", "switch-client -T agenmux-search")
 }
 
 fn install_wheel_keys(bin: &str) -> Result<(), TmuxError> {
@@ -219,7 +252,7 @@ fn install_wheel_keys(bin: &str) -> Result<(), TmuxError> {
             ("WheelDownPane", "down", "send-keys -M"),
         ] {
             let command = format!(
-                "if-shell -F '#{{==:#{{pane_title}},agents-mon}}' \"run-shell -b \\\"{bin} wheel '#{{pane_id}}' {direction}\\\" ; switch-client -T {table}\" \"{native}\""
+                "if-shell -F '#{{==:#{{pane_title}},agenmux}}' \"run-shell -b \\\"{bin} wheel '#{{pane_id}}' {direction}\\\" ; switch-client -T {table}\" \"{native}\""
             );
             bind(table, key, &command)?;
         }
@@ -256,7 +289,7 @@ fn install_mouse(bin: &str) -> Result<(), TmuxError> {
             "-n",
             key,
             &format!(
-                "if-shell -F '#{{==:#{{pane_title}},agents-mon}}' \"{plugin}\" \"{native}\""
+                "if-shell -F '#{{==:#{{pane_title}},agenmux}}' \"{plugin}\" \"{native}\""
             ),
         ])?;
     }
@@ -264,7 +297,7 @@ fn install_mouse(bin: &str) -> Result<(), TmuxError> {
 }
 
 fn install_picker_filter() -> Result<(), TmuxError> {
-    let hide = tmux::command(&["show-option", "-gqv", "@agents-mon-hide-windows"])?;
+    let hide = tmux::command(&["show-option", "-gqv", "@agenmux-hide-windows"])?;
     let hide = hide.trim_end();
     if !hide.is_empty() {
         let escaped = hide
@@ -279,7 +312,7 @@ fn install_picker_filter() -> Result<(), TmuxError> {
             "-f",
             &format!("#{{?#{{m:{escaped},#{{window_name}}}},0,1}}"),
         ])
-    } else if !tmux::command(&["show-options", "-gq", "@agents-mon-hide-windows"])?
+    } else if !tmux::command(&["show-options", "-gq", "@agenmux-hide-windows"])?
         .trim_end()
         .is_empty()
     {
@@ -294,13 +327,11 @@ fn install_status(bin: &str) -> Result<(), TmuxError> {
     for option in ["status-left", "status-right"] {
         let value = tmux::command(&["show-option", "-gqv", option])?;
         let value = value.trim_end_matches(['\r', '\n']);
-        if value.contains("#{agents_mon}") {
-            tmux::command_status(&[
-                "set-option",
-                "-g",
-                option,
-                &value.replace("#{agents_mon}", &segment),
-            ])?;
+        let replaced = value
+            .replace("#{agenmux}", &segment)
+            .replace("#{agents_mon}", &segment);
+        if replaced != value {
+            tmux::command_status(&["set-option", "-g", option, &replaced])?;
         }
     }
     Ok(())

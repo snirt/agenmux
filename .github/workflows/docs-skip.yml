@@ -1,0 +1,38 @@
+name: Docs-only checks
+
+# build.yml ignores these paths, but master's branch protection still
+# requires its check contexts. This no-op twin reports the same context
+# names as instant successes so docs/site-only PRs can merge.
+on:
+  pull_request:
+    paths:
+      - '**/*.md'
+      - 'docs/**'
+      - 'site/**'
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Validate version
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only change, skipped"
+  sanity:
+    name: Real tmux sanity
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only change, skipped"
+  build:
+    name: ${{ matrix.artifact }}
+    strategy:
+      matrix:
+        artifact:
+          - agenmux-linux-x86_64
+          - agenmux-linux-aarch64
+          - agenmux-macos-x86_64
+          - agenmux-macos-aarch64
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only change, skipped"

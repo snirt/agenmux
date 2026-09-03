@@ -1,18 +1,17 @@
-# tmux-agents-mon v0.2.1
+# agenmux v0.3.0
 
 ## What's changed
 
-### Fixes
+### agenmux rebrand
 
-- Improved Claude working-state detection for live activity lines ([#14](https://github.com/snirt/tmux-agents-mon/pull/14)).
-- Fixed concurrent macOS notifications with a shared broker ([#18](https://github.com/snirt/tmux-agents-mon/pull/18)).
-- Improved notification authorization, click handling, retries, and shutdown behavior.
+- Renamed the runtime, binaries, tmux options, configuration path, release artifacts, and documentation to agenmux ([#37](https://github.com/snirt/agenmux/pull/37)).
+- Preserved `agents-mon` entrypoints, options, environment variables, config paths, package launchers, and release state as compatibility inputs for one release cycle.
+- Renamed the macOS notification helper to `Agenmux.app` with bundle ID `io.github.snirt.agenmux`.
 
-### Release tooling
+### Developer workflow
 
-- Added safer version bump and release scripts.
-- Added release-process tests and stronger tmux sanity checks.
-- Updated version to `0.2.1` ([#19](https://github.com/snirt/tmux-agents-mon/pull/19)).
+- Added `make dev-use` and `make dev-stop` for switching the active tmux server between local debug and release binaries.
+- Added debug build timestamps to sidebar titles while keeping release titles versioned.
 
 ### Assets
 
@@ -22,4 +21,4 @@
 - macOS aarch64
 - SHA-256 checksums
 
-**Full changelog:** <https://github.com/snirt/tmux-agents-mon/compare/v0.2.0...v0.2.1>
+**Full changelog:** <https://github.com/snirt/agenmux/compare/v0.2.1...v0.3.0>

@@ -8,19 +8,20 @@
 set -u
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$DIR/target/release/agents-mon"
-STATE="$DIR/target/release/.agents-mon-version"
-LATEST="$DIR/target/release/.agents-mon-latest"
-TAGS="$DIR/target/release/.agents-mon-tags"
-REPO="${AGENTS_MON_REPO:-https://github.com/snirt/tmux-agents-mon}"
+BIN="$DIR/target/release/agenmux"
+STATE="$DIR/target/release/.agenmux-version"
+LATEST="$DIR/target/release/.agenmux-latest"
+TAGS="$DIR/target/release/.agenmux-tags"
+LEGACY_STATE="$DIR/target/release/.agents-mon-version"
+REPO="${AGENMUX_REPO:-${AGENTS_MON_REPO:-https://github.com/snirt/agenmux}}"
 tmp=""
 
 case "$(uname -s):$(uname -m)" in
-  Darwin:arm64)  platform="macos-aarch64" ;;
-  Darwin:x86_64) platform="macos-x86_64" ;;
-  Linux:aarch64|Linux:arm64) platform="linux-aarch64" ;;
-  Linux:x86_64|Linux:amd64)  platform="linux-x86_64" ;;
-  *) platform="" ;;
+Darwin:arm64) platform="macos-aarch64" ;;
+Darwin:x86_64) platform="macos-x86_64" ;;
+Linux:aarch64 | Linux:arm64) platform="linux-aarch64" ;;
+Linux:x86_64 | Linux:amd64) platform="linux-x86_64" ;;
+*) platform="" ;;
 esac
 
 # Download the release archive for $1, verify its checksum, extract the whole
@@ -33,28 +34,30 @@ fetch_pkg() {
   [ -n "$platform" ] && command -v curl >/dev/null && command -v tar >/dev/null || return 1
   command -v sha256sum >/dev/null || command -v shasum >/dev/null || return 1
 
-  local package="tmux-agents-mon-$platform"
-  local archive="$package.tar.gz"
-  local base="$REPO/releases/download/$tag"
-  local expected actual
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/agents-mon.XXXXXX")" || return 1
+  local package archive base expected actual
+  base="$REPO/releases/download/$tag"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/agenmux.XXXXXX")" || return 1
   trap 'rm -rf "$tmp"' EXIT
-
-  curl -fsSL "$base/$archive" -o "$tmp/$archive" || return 1
   curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || return 1
-  expected="$(awk -v file="$archive" '$2 == file || $2 == "./" file { print $1 }' "$tmp/SHA256SUMS")"
-  [ "${#expected}" -eq 64 ] || return 1
-  if command -v sha256sum >/dev/null; then
-    actual="$(sha256sum "$tmp/$archive" | awk '{ print $1 }')"
-  else
-    actual="$(shasum -a 256 "$tmp/$archive" | awk '{ print $1 }')"
-  fi
-  [ "$actual" = "$expected" ] || return 1
 
-  mkdir -p "$dest" || return 1
-  tar -xzf "$tmp/$archive" -C "$dest" || return 1
-  [ -d "$dest/$package" ] || return 1
-  printf '%s\n' "$dest/$package"
+  for package in "agenmux-$platform" "tmux-agents-mon-$platform"; do
+    archive="$package.tar.gz"
+    curl -fsSL "$base/$archive" -o "$tmp/$archive" || continue
+    expected="$(awk -v file="$archive" '$2 == file || $2 == "./" file { print $1 }' "$tmp/SHA256SUMS")"
+    [ "${#expected}" -eq 64 ] || continue
+    if command -v sha256sum >/dev/null; then
+      actual="$(sha256sum "$tmp/$archive" | awk '{ print $1 }')"
+    else
+      actual="$(shasum -a 256 "$tmp/$archive" | awk '{ print $1 }')"
+    fi
+    [ "$actual" = "$expected" ] || continue
+    mkdir -p "$dest" || return 1
+    tar -xzf "$tmp/$archive" -C "$dest" || return 1
+    [ -d "$dest/$package" ] || return 1
+    printf '%s\n' "$dest/$package"
+    return 0
+  done
+  return 1
 }
 
 if [ "${1:-}" = "fetch" ]; then
@@ -63,8 +66,10 @@ if [ "${1:-}" = "fetch" ]; then
 fi
 
 current_rev="$(git -C "$DIR" rev-parse HEAD 2>/dev/null || printf '-')"
-installed_tag="$(sed -n '1p' "$STATE" 2>/dev/null)"
-installed_rev="$(sed -n '2p' "$STATE" 2>/dev/null)"
+state_read="$STATE"
+[ -f "$state_read" ] || state_read="$LEGACY_STATE"
+installed_tag="$(sed -n '1p' "$state_read" 2>/dev/null)"
+installed_rev="$(sed -n '2p' "$state_read" 2>/dev/null)"
 # the release this checkout's source belongs to — Cargo.toml is the sole
 # version source, so a rollback to v0.1.5 pins the v0.1.5 binary with no
 # extra state to track
@@ -73,12 +78,14 @@ want="$(bash "$DIR/scripts/version.sh" tag 2>/dev/null)"
 write_state() {
   local staged="$STATE.$$"
   mkdir -p "$(dirname "$STATE")"
-  printf '%s\n%s\n' "$1" "$current_rev" > "$staged" && mv -f "$staged" "$STATE"
+  printf '%s\n%s\n' "$1" "$current_rev" >"$staged" && mv -f "$staged" "$STATE"
 }
 
 binary_matches() {
   [ -x "$1" ] || return 1
-  [ "$("$1" --version 2>/dev/null)" = "agents-mon ${2#v}" ]
+  local version
+  version="$("$1" --version 2>/dev/null)"
+  [ "$version" = "agenmux ${2#v}" ] || [ "$version" = "agents-mon ${2#v}" ]
 }
 
 # A git checkout not exactly at its Cargo.toml tag is source ahead of (or
@@ -104,7 +111,7 @@ record_releases() {
   mkdir -p "$(dirname "$LATEST")"
   tag="$(latest_tag)" || return 0
   staged="$LATEST.$$"
-  printf '%s\n' "$tag" > "$staged" && mv -f "$staged" "$LATEST"
+  printf '%s\n' "$tag" >"$staged" && mv -f "$staged" "$LATEST"
   command -v git >/dev/null 2>&1 || return 0
   staged="$TAGS.$$"
   # ls-remote needs no API token and has no rate limit, unlike the releases API.
@@ -114,19 +121,24 @@ record_releases() {
   git ls-remote --tags --refs "$REPO" 2>/dev/null |
     awk '{ sub(/^refs\/tags\//, "", $2); if ($2 ~ /^v[0-9]/) print $2 }' |
     sort -V -r |
-    awk -v top="$tag" 'seen || $0 == top { seen = 1 } seen' > "$staged"
+    awk -v top="$tag" 'seen || $0 == top { seen = 1 } seen' >"$staged"
   if [ -s "$staged" ]; then mv -f "$staged" "$TAGS"; else rm -f "$staged"; fi
 }
 
 # Install the release archive's engine for $1 (verified), atomically.
 download_bin() {
-  local tag="$1" pkg scratch staged rc=1
-  scratch="$(mktemp -d "${TMPDIR:-/tmp}/agents-mon-pkg.XXXXXX")" || return 1
-  pkg="$(fetch_pkg "$tag" "$scratch")" || { rm -rf "$scratch"; return 1; }
-  if [ -f "$pkg/target/release/agents-mon" ]; then
+  local tag="$1" pkg scratch staged source notifier rc=1
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/agenmux-pkg.XXXXXX")" || return 1
+  pkg="$(fetch_pkg "$tag" "$scratch")" || {
+    rm -rf "$scratch"
+    return 1
+  }
+  source="$pkg/target/release/agenmux"
+  [ -f "$source" ] || source="$pkg/target/release/agents-mon"
+  if [ -f "$source" ]; then
     mkdir -p "$(dirname "$BIN")"
     staged="$BIN.$$"
-    if cp "$pkg/target/release/agents-mon" "$staged"; then
+    if cp "$source" "$staged"; then
       chmod +x "$staged"
       if binary_matches "$staged" "$tag"; then
         mv -f "$staged" "$BIN" && write_state "$tag" && rc=0
@@ -134,11 +146,13 @@ download_bin() {
     fi
     [ "$rc" -eq 0 ] || rm -f "$staged"
     # macOS packages also carry the notification helper (see install-app.sh)
-    if [ "$rc" -eq 0 ] && [ -f "$pkg/target/release/agents-mon-notifier" ]; then
-      staged="$(dirname "$BIN")/agents-mon-notifier.$$"
-      if cp "$pkg/target/release/agents-mon-notifier" "$staged"; then
+    notifier="$pkg/target/release/agenmux-notifier"
+    [ -f "$notifier" ] || notifier="$pkg/target/release/agents-mon-notifier"
+    if [ "$rc" -eq 0 ] && [ -f "$notifier" ]; then
+      staged="$(dirname "$BIN")/agenmux-notifier.$$"
+      if cp "$notifier" "$staged"; then
         chmod +x "$staged"
-        mv -f "$staged" "$(dirname "$BIN")/agents-mon-notifier" || rm -f "$staged"
+        mv -f "$staged" "$(dirname "$BIN")/agenmux-notifier" || rm -f "$staged"
       fi
     fi
   fi
@@ -157,16 +171,21 @@ if [ "${1:-}" = "refresh" ]; then
   exit 0
 fi
 
-# macOS: keep the AgentsMon.app notification helper installed and current, on
+# macOS: keep the Agenmux.app notification helper installed and current, on
 # every engine install path below. Quiet: notification permission is requested
 # by the first real notification, not here.
 sync_app() {
-  local notifier="$DIR/target/release/agents-mon-notifier"
-  local app_bin="$HOME/Applications/AgentsMon.app/Contents/MacOS/agents-mon-notifier"
+  local notifier="$DIR/target/release/agenmux-notifier" notifications
+  local app="$HOME/Applications/Agenmux.app/Contents"
   [ "$(uname -s)" = Darwin ] && [ -x "$notifier" ] || return 0
-  cmp -s "$notifier" "$app_bin" 2>/dev/null && return 0
-  case "$(tmux show-option -gqv @agents-mon-notifications 2>/dev/null)" in
-    off | false | 0) return 0 ;;
+  cmp -s "$notifier" "$app/MacOS/agenmux-notifier" 2>/dev/null &&
+    cmp -s "$DIR/site/favicon.icns" "$app/Resources/Agenmux.icns" 2>/dev/null && return 0
+  notifications="$(tmux show-option -gqv @agenmux-notifications 2>/dev/null)"
+  if [ -z "$(tmux show-options -gq @agenmux-notifications 2>/dev/null)" ]; then
+    notifications="$(tmux show-option -gqv @agents-mon-notifications 2>/dev/null)"
+  fi
+  case "$notifications" in
+  off | false | 0) return 0 ;;
   esac
   bash "$DIR/scripts/install-app.sh" --quiet >/dev/null 2>&1 || true
 }
@@ -176,25 +195,25 @@ trap sync_app EXIT
 # questions with separate throttles. Gating the first behind the second left an
 # up-to-date install with no release list at all — and so no update notice and
 # an empty version picker — until its install marker aged past a day.
-if command -v curl >/dev/null 2>&1 \
-   && [ -z "$(find "$LATEST" -mtime -1 -print 2>/dev/null)" ]; then
+if command -v curl >/dev/null 2>&1 &&
+  [ -z "$(find "$LATEST" -mtime -1 -print 2>/dev/null)" ]; then
   record_releases
 fi
 
 # Avoid work on every toggle only when source revision, manifest version, and
 # executable all agree. Existence alone is not enough after a source upgrade.
-if [ "$installed_tag" = "$want" ] && [ "$installed_rev" = "$current_rev" ] \
-   && binary_matches "$BIN" "$want" \
-   && [ -n "$(find "$STATE" -mtime -1 -print 2>/dev/null)" ]; then
+if [ "$installed_tag" = "$want" ] && [ "$installed_rev" = "$current_rev" ] &&
+  binary_matches "$BIN" "$want" &&
+  [ -n "$(find "$STATE" -mtime -1 -print 2>/dev/null)" ]; then
   exit 0
 fi
 
 # Untagged/development git source must be built from this exact revision. A
 # release asset with the same Cargo version can still have an older CLI.
 if [ "$source_is_release" = 0 ]; then
-  if command -v cargo >/dev/null 2>&1 \
-     && (cd "$DIR" && cargo build --release) \
-     && binary_matches "$BIN" "$want"; then
+  if command -v cargo >/dev/null 2>&1 &&
+    (cd "$DIR" && cargo build --release) &&
+    binary_matches "$BIN" "$want"; then
     write_state "$want"
     exit 0
   fi
@@ -206,9 +225,9 @@ fi
 if [ -n "$want" ] && download_bin "$want"; then
   exit 0
 fi
-if command -v cargo >/dev/null 2>&1 \
-   && (cd "$DIR" && cargo build --release) \
-   && binary_matches "$BIN" "$want"; then
+if command -v cargo >/dev/null 2>&1 &&
+  (cd "$DIR" && cargo build --release) &&
+  binary_matches "$BIN" "$want"; then
   write_state "$want"
   exit 0
 fi

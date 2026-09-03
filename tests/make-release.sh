@@ -16,7 +16,7 @@ git -C "$work" remote add origin "$origin"
 cp "$DIR/Makefile" "$work/Makefile"
 cp "$DIR/scripts/version.sh" "$DIR/scripts/release.sh" "$work/scripts/"
 chmod +x "$work/scripts/version.sh" "$work/scripts/release.sh"
-printf '[package]\nname = "agents-mon"\nversion = "0.2.0"\n' >"$work/Cargo.toml"
+printf '[package]\nname = "agenmux"\nversion = "0.2.0"\n' >"$work/Cargo.toml"
 printf '0.2.0 notes\n' >"$work/RELEASE_NOTES.md"
 git -C "$work" add Makefile Cargo.toml RELEASE_NOTES.md scripts/version.sh scripts/release.sh
 git -C "$work" commit -qm initial

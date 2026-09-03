@@ -4,10 +4,21 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub fn run(plugin_dir: &Path, requested_mode: Option<&str>, requested_client: Option<&str>) -> i32 {
+    // tmux ignores a TMUX value that names no socket and silently falls back to
+    // the default server. A repro script with an empty socket variable must not
+    // tear down and re-own the user's live sidebar.
+    if let Ok(env) = std::env::var("TMUX") {
+        if !env.is_empty() && !env.starts_with('/') {
+            eprintln!(
+                "agenmux: TMUX={env:?} names no socket; refusing to touch the default server"
+            );
+            return 1;
+        }
+    }
     let mode = requested_mode
         .filter(|mode| !mode.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| option("@agents-mon-display"));
+        .unwrap_or_else(|| option("@agenmux-display"));
     let client = requested_client
         .filter(|client| !client.is_empty())
         .map(str::to_string)
@@ -20,51 +31,72 @@ pub fn run(plugin_dir: &Path, requested_mode: Option<&str>, requested_client: Op
 }
 
 fn option(name: &str) -> String {
-    tmux::command(&["show-option", "-gqv", name])
+    let canonical = tmux::command(&["show-option", "-gqv", name])
+        .unwrap_or_default()
+        .trim_end()
+        .to_string();
+    if !canonical.is_empty() {
+        return canonical;
+    }
+    if !tmux::command(&["show-options", "-gq", name])
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        return String::new();
+    }
+    let legacy = name
+        .strip_prefix("@agenmux-")
+        .map(|suffix| format!("@agents-mon-{suffix}"))
+        .unwrap_or_else(|| name.to_string());
+    tmux::command(&["show-option", "-gqv", &legacy])
         .unwrap_or_default()
         .trim_end()
         .to_string()
 }
 
 fn binary(plugin_dir: &Path) -> PathBuf {
-    let configured = option("@agents-mon-bin");
+    let configured = option("@agenmux-bin");
     if configured.is_empty() {
-        plugin_dir.join("target/release/agents-mon")
+        plugin_dir.join("target/release/agenmux")
     } else {
         configured.into()
     }
 }
 
 fn control_alive() -> bool {
-    let control = option("@agents-mon-control-client");
+    let control = option("@agenmux-control-client");
     !control.is_empty()
         && tmux::lines(&["list-clients", "-F", "#{client_name}"])
             .is_ok_and(|clients| clients.iter().any(|client| client == &control))
+        // control client up but FIFO gone = deaf daemon; treat as dead so the
+        // caller tears down and starts fresh instead of re-selecting a zombie
+        && tmux::runtime_dir().join("agenmux-keys").exists()
 }
 
 fn split(plugin_dir: &Path, client: Option<String>) -> i32 {
     let window = client.as_deref().and_then(client_window);
-    let mut reuse = option("@agents-mon-on") == "1" && control_alive();
+    let mut reuse = option("@agenmux-on") == "1" && control_alive();
     if reuse {
         if panes::pane_add(window.as_deref()) != 0 {
             return 1;
         }
-        // A close can remove its panes just before publishing @agents-mon-on=off.
+        // A close can remove its panes just before publishing @agenmux-on=off.
         // Let that short teardown finish instead of attaching to its dying daemon.
         std::thread::sleep(std::time::Duration::from_millis(100));
-        reuse = option("@agents-mon-on") == "1"
+        reuse = option("@agenmux-on") == "1"
             && control_alive()
             && window.as_deref().is_none_or(window_has_sidebar);
     }
     if !reuse {
         panes::teardown();
-        if tmux::command_status(&["set-option", "-g", "@agents-mon-on", "1"]).is_err() {
+        if tmux::command_status(&["set-option", "-g", "@agenmux-on", "1"]).is_err() {
             return 1;
         }
         let bin = binary(plugin_dir);
         if Command::new(&bin)
             .arg("daemon")
-            .env("AGENTS_MON_DIR", plugin_dir)
+            .env("AGENMUX_DIR", plugin_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -86,7 +118,7 @@ fn split(plugin_dir: &Path, client: Option<String>) -> i32 {
             return 1;
         }
     }
-    if option("@agents-mon-nav-version") != "12" && setup::run(plugin_dir) != 0 {
+    if option("@agenmux-nav-version") != "12" && setup::run(plugin_dir) != 0 {
         return 1;
     }
     select_sidebar(client.as_deref());
@@ -94,8 +126,16 @@ fn split(plugin_dir: &Path, client: Option<String>) -> i32 {
 }
 
 fn window_has_sidebar(window: &str) -> bool {
-    tmux::lines(&["list-panes", "-t", window, "-F", "#{pane_title}"])
-        .is_ok_and(|titles| titles.iter().any(|title| title == "agents-mon"))
+    tmux::lines(&[
+        "list-panes",
+        "-t",
+        window,
+        "-f",
+        panes::IS_SIDEBAR,
+        "-F",
+        "#{pane_id}",
+    ])
+    .is_ok_and(|panes| !panes.is_empty())
 }
 
 fn client_window(client: &str) -> Option<String> {
@@ -115,7 +155,7 @@ fn select_sidebar(client: Option<&str>) {
         "-t",
         &window,
         "-f",
-        "#{==:#{pane_title},agents-mon}",
+        panes::IS_SIDEBAR,
         "-F",
         "#{pane_id}",
     ])
@@ -124,11 +164,11 @@ fn select_sidebar(client: Option<&str>) {
     if let Some(pane) = pane.filter(|pane| !pane.is_empty()) {
         let _ = tmux::command_status(&["select-pane", "-t", &pane]);
     }
-    let _ = tmux::command_status(&["switch-client", "-c", client, "-T", "agents-mon"]);
+    let _ = tmux::command_status(&["switch-client", "-c", client, "-T", "agenmux"]);
 }
 
 fn popup(plugin_dir: &Path, client: Option<String>) -> i32 {
-    let pin = std::env::temp_dir().join("agents-mon-pin");
+    let pin = std::env::temp_dir().join("agenmux-pin");
     if pin.exists() {
         let _ = std::fs::remove_file(pin);
         return 0;
@@ -137,8 +177,8 @@ fn popup(plugin_dir: &Path, client: Option<String>) -> i32 {
         return 1;
     }
 
-    let width = nonempty_option("@agents-mon-width").unwrap_or_else(|| "40".to_string());
-    let height = nonempty_option("@agents-mon-height")
+    let width = nonempty_option("@agenmux-width").unwrap_or_else(|| "40".to_string());
+    let height = nonempty_option("@agenmux-height")
         .unwrap_or_else(|| popup_height(&scan_cache(), client.as_deref()).to_string());
     let bin = binary(plugin_dir);
     let command = format!(
@@ -148,7 +188,7 @@ fn popup(plugin_dir: &Path, client: Option<String>) -> i32 {
     let jump = PathBuf::from(format!("{}.jump", pin.to_string_lossy()));
 
     while pin.exists() {
-        let pin_env = format!("AGENTS_MON_PIN={}", pin.to_string_lossy());
+        let pin_env = format!("AGENMUX_PIN={}", pin.to_string_lossy());
         let mut args = vec![
             "display-popup".to_string(),
             "-E".to_string(),
@@ -164,7 +204,7 @@ fn popup(plugin_dir: &Path, client: Option<String>) -> i32 {
                 "-c".to_string(),
                 owner.to_string(),
                 "-e".to_string(),
-                format!("AGENTS_MON_POPUP_CLIENT={owner}"),
+                format!("AGENMUX_POPUP_CLIENT={owner}"),
             ]);
         }
         args.push(command.clone());
@@ -201,7 +241,7 @@ fn nonempty_option(name: &str) -> Option<String> {
 }
 
 fn scan_cache() -> PathBuf {
-    std::env::temp_dir().join("agents-mon-scan-cache")
+    std::env::temp_dir().join("agenmux-scan-cache")
 }
 
 fn popup_height(cache: &Path, client: Option<&str>) -> usize {

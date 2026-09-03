@@ -1,0 +1,31 @@
+name: Refactor
+description: Propose an internal change that preserves behavior
+labels:
+  - refactor
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What makes the current design hard to change?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Proposed scope
+      description: Name responsibilities or boundaries to change; avoid prescribing speculative abstractions.
+    validations:
+      required: true
+  - type: textarea
+    id: preserved
+    attributes:
+      label: What behavior must remain unchanged?
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: List tests and manual checks that should prove behavior stayed intact.
+    validations:
+      required: true

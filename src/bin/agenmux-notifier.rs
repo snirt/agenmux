@@ -1,9 +1,9 @@
-//! AgentsMon.app helper: posts native macOS notifications through
+//! Agenmux.app helper: posts native macOS notifications through
 //! UNUserNotificationCenter and runs the click command when the body is
-//! clicked. Must run from inside the installed, signed AgentsMon.app bundle
+//! clicked. Must run from inside the installed, signed Agenmux.app bundle
 //! (see scripts/install-app.sh); macOS refuses notifications otherwise.
 //!
-//! usage: agents-mon-notifier [--setup|--broker] | <title> <body> [click-command]
+//! usage: agenmux-notifier [--setup|--broker] | <title> <body> [click-command]
 //!
 //! Normal invocations submit a request to the shared broker and return
 //! immediately. Denied permission exits 4 without posting — denial means
@@ -13,7 +13,7 @@
 //! user's answer to the prompt, and posts a test notification when granted;
 //! exit 0 = granted, 4 = denied.
 
-#[path = "agents-mon-notifier/broker.rs"]
+#[path = "agenmux-notifier/broker.rs"]
 mod broker;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +56,7 @@ fn main() {
         Some(Mode::Notify(request)) => run(request),
         None => {
             eprintln!(
-                "usage: agents-mon-notifier [--setup|--broker] | <title> <body> [click-command]"
+                "usage: agenmux-notifier [--setup|--broker] | <title> <body> [click-command]"
             );
             2
         }
@@ -76,7 +76,7 @@ fn setup() -> i32 {
         Ok(false) | Err(_) => return 4,
     }
     match noti::Notification::new()
-        .title("AgentsMon")
+        .title("agenmux")
         .message("Notifications are ready.")
         .sound(noti::sound::GLASS)
         .send_blocking()
@@ -88,7 +88,7 @@ fn setup() -> i32 {
 
 #[cfg(not(target_os = "macos"))]
 fn setup() -> i32 {
-    eprintln!("agents-mon-notifier is macOS-only");
+    eprintln!("agenmux-notifier is macOS-only");
     2
 }
 
@@ -111,7 +111,7 @@ fn run(request: NotificationRequest) -> i32 {
 
 #[cfg(not(target_os = "macos"))]
 fn run(_: NotificationRequest) -> i32 {
-    eprintln!("agents-mon-notifier is macOS-only");
+    eprintln!("agenmux-notifier is macOS-only");
     2
 }
 
@@ -134,11 +134,11 @@ mod tests {
             }))
         );
         assert_eq!(
-            parse(&args(&["t", "b", "'agents-mon' 'notification-open'"])),
+            parse(&args(&["t", "b", "'agenmux' 'notification-open'"])),
             Some(Mode::Notify(NotificationRequest {
                 title: "t".into(),
                 body: "b".into(),
-                click: Some("'agents-mon' 'notification-open'".into()),
+                click: Some("'agenmux' 'notification-open'".into()),
             }))
         );
     }

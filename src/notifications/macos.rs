@@ -1,14 +1,20 @@
 use super::{CommandSpec, DeliveryOutcome, Payload, Runner};
 
-/// Locate the installed AgentsMon.app helper. Resolved on every delivery so
+/// Locate the installed Agenmux.app helper. Resolved on every delivery so
 /// installing the app takes effect without restarting the sidebar.
 pub(super) fn helper_program() -> Option<String> {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    const IN_APP: &str = "Applications/AgentsMon.app/Contents/MacOS/agents-mon-notifier";
-    if let Some(home) = std::env::var_os("HOME") {
-        candidates.push(std::path::Path::new(&home).join(IN_APP));
+    const IN_APP: &str = "Applications/Agenmux.app/Contents/MacOS/agenmux-notifier";
+    const LEGACY_APP: &str = "Applications/AgentsMon.app/Contents/MacOS/agents-mon-notifier";
+    let home = std::env::var_os("HOME");
+    if let Some(home) = &home {
+        candidates.push(std::path::Path::new(home).join(IN_APP));
     }
     candidates.push(std::path::Path::new("/").join(IN_APP));
+    if let Some(home) = &home {
+        candidates.push(std::path::Path::new(home).join(LEGACY_APP));
+    }
+    candidates.push(std::path::Path::new("/").join(LEGACY_APP));
     candidates
         .into_iter()
         .find(|path| path.is_file())

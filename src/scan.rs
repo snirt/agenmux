@@ -35,7 +35,7 @@ pub fn scan(
     let mut snap: Option<Snapshot> = None;
     let mut rows = Vec::new();
     let mut seen = IdentCache::new();
-    let buf = format!("agents-mon-{}", std::process::id());
+    let buf = format!("agenmux-{}", std::process::id());
     let cap = std::env::temp_dir().join(&buf);
     let mut captured_any = false;
     for line in panes.lines() {
@@ -50,11 +50,12 @@ pub fn scan(
         }
         let pid: u32 = pid.parse().unwrap_or(0);
         let key = (pane.to_string(), pid, cmd.to_string());
-        let name = cache.get(&key).cloned().unwrap_or_else(|| {
-            procs::identify(confs, &mut snap, pid, cmd).map(|i| confs[i].name.clone())
-        });
-        seen.insert(key, name.clone());
+        let name = cache
+            .get(&key)
+            .cloned()
+            .or_else(|| procs::identify(confs, &mut snap, pid, cmd).map(|i| confs[i].name.clone()));
         let Some(name) = name else { continue };
+        seen.insert(key, name.clone());
         let Some(idx) = confs.iter().position(|c| c.name == name) else {
             continue; // conf removed since cached
         };

@@ -1,4 +1,4 @@
-.PHONY: test build bump release install-app
+.PHONY: test build dev-use dev-stop bump release install-app
 
 test:
 	./tests/run.sh
@@ -7,7 +7,13 @@ test:
 build:
 	cargo build --release
 
-# macOS: build, sign, and install the AgentsMon.app notification helper
+dev-use:
+	mise exec rust@latest -- ./scripts/dev-bin.sh use
+
+dev-stop:
+	./scripts/dev-bin.sh stop
+
+# macOS: build, sign, and install the Agenmux.app notification helper
 install-app:
 	./scripts/install-app.sh
 

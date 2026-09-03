@@ -2,6 +2,7 @@
 // responses out. Replaces one fork per tmux command with a write+read.
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 pub enum TmuxError {
@@ -38,6 +39,18 @@ pub fn command(args: &[&str]) -> Result<String, TmuxError> {
         ));
     }
     String::from_utf8(output.stdout).map_err(|e| TmuxError::Error(e.to_string()))
+}
+
+/// Where the daemon keeps its key FIFO and row map. The daemon publishes its
+/// own temp dir as @agenmux-runtime-dir so key/click/wheel senders find it even
+/// when tmux spawns them with a different TMPDIR than the daemon inherited.
+pub fn runtime_dir() -> PathBuf {
+    command(&["show-option", "-gqv", "@agenmux-runtime-dir"])
+        .ok()
+        .map(|dir| dir.trim_end().to_string())
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 pub fn command_status(args: &[&str]) -> Result<(), TmuxError> {
@@ -239,9 +252,9 @@ fn block_tag(rest: &str) -> &str {
     rest.split_whitespace().nth(1).unwrap_or("")
 }
 
-/// AGENTS_MON_DEBUG=<file>: free-form trace line (timings, counters).
+/// AGENMUX_DEBUG=<file>: free-form trace line (timings, counters).
 pub fn debug_note(msg: &str) {
-    let Ok(path) = std::env::var("AGENTS_MON_DEBUG") else {
+    let Some(path) = crate::compat_env("AGENMUX_DEBUG", "AGENTS_MON_DEBUG") else {
         return;
     };
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -253,9 +266,9 @@ pub fn debug_note(msg: &str) {
     }
 }
 
-/// AGENTS_MON_DEBUG=<file>: trace every command/response pair with timing.
+/// AGENMUX_DEBUG=<file>: trace every command/response pair with timing.
 fn debug_log(cmd: &str, r: &Result<String, TmuxError>, took: std::time::Duration) {
-    let Ok(path) = std::env::var("AGENTS_MON_DEBUG") else {
+    let Some(path) = crate::compat_env("AGENMUX_DEBUG", "AGENTS_MON_DEBUG") else {
         return;
     };
     let summary = match r {
@@ -314,13 +327,11 @@ mod tests {
 
     #[test]
     fn spawned_tmux_command_does_not_wait_for_completion() {
-        let socket = format!("agents-mon-spawn-test-{}", std::process::id());
-        let Ok(status) = Command::new("tmux")
+        let socket = format!("agenmux-spawn-test-{}", std::process::id());
+        let status = Command::new("tmux")
             .args(["-L", &socket, "new-session", "-d"])
             .status()
-        else {
-            panic!("could not start private tmux server");
-        };
+            .unwrap_or_else(|error| panic!("could not start private tmux server: {error}"));
         assert!(status.success());
 
         let start = std::time::Instant::now();

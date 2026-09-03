@@ -1,6 +1,6 @@
 [package]
-name = "agents-mon"
-version = "0.2.1"
+name = "agenmux"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]
@@ -8,7 +8,7 @@ regex = "1"
 libc = "0.2"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
-# native notifications for the AgentsMon.app helper (src/bin/agents-mon-notifier.rs)
+# native notifications for the Agenmux.app helper (src/bin/agenmux-notifier.rs)
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-usernotifications = "0.3.1"
 

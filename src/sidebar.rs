@@ -328,7 +328,7 @@ fn read_search_key(fd: libc::c_int) -> Key {
 
 /// Deliver one key-table action to the daemon without waiting for a FIFO
 /// reader. Each invocation is intentionally short-lived; the daemon remains
-/// the only persistent agents-mon process.
+/// the only persistent agenmux process.
 pub fn send_key(name: &str) -> i32 {
     let bytes: Vec<u8> = if let Some(hex) = name.strip_prefix("text-") {
         let Ok(byte) = u8::from_str_radix(hex, 16) else {
@@ -362,7 +362,7 @@ pub fn send_key(name: &str) -> i32 {
             _ => return 2,
         }
     };
-    let path = std::env::temp_dir().join("agents-mon-keys");
+    let path = crate::tmux::runtime_dir().join("agenmux-keys");
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
         return 1;
     };
@@ -395,13 +395,26 @@ fn current_tag() -> String {
     format!("v{}", env!("CARGO_PKG_VERSION"))
 }
 
+fn app_title() -> String {
+    if cfg!(debug_assertions) {
+        format!(
+            "agenmux dev ({})",
+            option_env!("AGENMUX_BUILD_TIMESTAMP").unwrap_or("unknown")
+        )
+    } else {
+        format!("agenmux {}", current_tag())
+    }
+}
+
 /// Newest release, as recorded by install-bin.sh's (at most daily) check.
 /// None unless it is strictly newer than what is running: a checkout ahead of
 /// every release (master, or a just-bumped manifest) must not be told to
 /// "update" to the older tag behind it.
 fn update_available(plugin_dir: &PathBuf) -> Option<String> {
-    let latest =
-        std::fs::read_to_string(plugin_dir.join("target/release/.agents-mon-latest")).ok()?;
+    let release_dir = plugin_dir.join("target/release");
+    let latest = std::fs::read_to_string(release_dir.join(".agenmux-latest"))
+        .or_else(|_| std::fs::read_to_string(release_dir.join(".agents-mon-latest")))
+        .ok()?;
     let latest = latest.trim();
     (is_tag(latest) && newer_than(latest, &current_tag())).then(|| latest.to_string())
 }
@@ -430,14 +443,16 @@ fn newer_than(a: &str, b: &str) -> bool {
 
 /// Releases install-bin.sh saw on the remote, newest first.
 fn known_tags(plugin_dir: &PathBuf) -> Vec<String> {
-    let mut tags: Vec<String> =
-        std::fs::read_to_string(plugin_dir.join("target/release/.agents-mon-tags"))
-            .unwrap_or_default()
-            .lines()
-            .map(str::trim)
-            .filter(|t| is_tag(t))
-            .map(String::from)
-            .collect();
+    let release_dir = plugin_dir.join("target/release");
+    let raw = std::fs::read_to_string(release_dir.join(".agenmux-tags"))
+        .or_else(|_| std::fs::read_to_string(release_dir.join(".agents-mon-tags")))
+        .unwrap_or_default();
+    let mut tags: Vec<String> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|t| is_tag(t))
+        .map(String::from)
+        .collect();
     tags.truncate(10);
     tags
 }
@@ -557,7 +572,7 @@ fn suicide(seen_mirror: bool, since_start: Duration, empty_ticks: u32) -> bool {
     (seen_mirror || since_start >= Duration::from_secs(30)) && empty_ticks >= 2
 }
 
-/// Has `@agents-mon-control-client` named someone else? Only a claim counts:
+/// Has `@agenmux-control-client` named someone else? Only a claim counts:
 /// teardown.sh's unset can land after the next daemon claimed it, and treating
 /// empty as "replaced" makes a reopened sidebar kill its own daemon.
 fn superseded(mine: &str, current: &str) -> bool {
@@ -664,7 +679,8 @@ fn new_sidebar(
         tick: 0,
         self_pane,
         pin: None,
-        popup_client: std::env::var("AGENTS_MON_POPUP_CLIENT").unwrap_or_default(),
+        popup_client: crate::compat_env("AGENMUX_POPUP_CLIENT", "AGENTS_MON_POPUP_CLIENT")
+            .unwrap_or_default(),
         plugin_dir,
         rows_file,
         cache_file,
@@ -684,11 +700,9 @@ fn new_sidebar(
 
 pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     let self_pane = std::env::var("TMUX_PANE").unwrap_or_default();
-    let pin = std::env::var("AGENTS_MON_PIN")
-        .ok()
-        .filter(|p| !p.is_empty());
+    let pin = crate::compat_env("AGENMUX_PIN", "AGENTS_MON_PIN").filter(|p| !p.is_empty());
     let rows_file = std::env::temp_dir().join(format!(
-        "agents-mon-rows-{}",
+        "agenmux-rows-{}",
         self_pane.trim_start_matches('%')
     ));
 
@@ -727,9 +741,9 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
     }
     let tmp = std::env::temp_dir();
-    let keys_path = tmp.join("agents-mon-keys");
+    let keys_path = tmp.join("agenmux-keys");
     // A previous mirror-based daemon used this as its liveness heartbeat.
-    let _ = std::fs::remove_file(tmp.join("agents-mon-frame"));
+    let _ = std::fs::remove_file(tmp.join("agenmux-frame"));
     let _ = std::fs::remove_file(&keys_path);
     let c = std::ffi::CString::new(keys_path.as_os_str().as_encoded_bytes()).unwrap();
     // O_RDWR: the FIFO never hits EOF as key senders come and go
@@ -750,7 +764,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         tmux,
         plugin_dir,
         cache_file,
-        tmp.join("agents-mon-rows"),
+        tmp.join("agenmux-rows"),
         String::new(),
     );
     // `display-message '#{client_name}'` can briefly be empty when a busy
@@ -772,14 +786,18 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
             });
         if let Some(client) = client {
             let quoted = client.replace('\'', "\\'");
-            let _ = sb.tmux.run(&format!(
-                "set-option -g @agents-mon-control-client '{quoted}'"
-            ));
+            let _ = sb
+                .tmux
+                .run(&format!("set-option -g @agenmux-control-client '{quoted}'"));
             control_client = client;
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+    let quoted_tmp = tmp.to_string_lossy().replace('\'', "\\'");
+    let _ = sb.tmux.run(&format!(
+        "set-option -g @agenmux-runtime-dir '{quoted_tmp}'"
+    ));
     sb.daemon = Some(Daemon {
         keys_path,
         keys_fd,
@@ -847,6 +865,9 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             }
             if sb.daemon.is_some() && !sb.mirror_tick() {
                 break; // all preserved panes gone — nothing left to display
+            }
+            if sb.daemon.as_ref().is_some_and(|d| !d.keys_path.exists()) {
+                break; // runtime dir vanished: deaf to keys, better gone than a zombie
             }
             sb.render(false);
             // a scan takes tens of ms — with the pre-scan `now`, a tick due
@@ -991,7 +1012,7 @@ impl Sidebar {
         parse_wheel_delay(
             &self
                 .tmux
-                .run("show-option -gqv @agents-mon-wheel-jump")
+                .run("show-option -gqv @agenmux-wheel-jump")
                 .unwrap_or_default(),
         )
     }
@@ -1261,7 +1282,7 @@ impl Sidebar {
     }
 
     fn dot(&self, state: &str) -> String {
-        let on = self.tick / 2 % 2 == 0;
+        let on = (self.tick / 2).is_multiple_of(2);
         match state {
             "blocked" => {
                 if on {
@@ -1300,7 +1321,7 @@ impl Sidebar {
         if self.tmux.sync().is_err() {
             return false;
         }
-        match self.tmux.run("show-option -gqv @agents-mon-control-client") {
+        match self.tmux.run("show-option -gqv @agenmux-control-client") {
             Ok(current) => superseded(&mine, &current),
             Err(_) => false, // a broken pipe is not a takeover; the loop exits elsewhere
         }
@@ -1312,7 +1333,7 @@ impl Sidebar {
         let _ = self.tmux.sync();
         let out = self
             .tmux
-            .run("list-panes -a -f '#{==:#{pane_title},agents-mon}' -F '#{pane_id}\t#{window_id}\t#{pane_width}\t#{pane_height}\t#{window_width} #{window_height}\t#{window_panes}\t#{window_active}\t#{session_id}'")
+            .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}\t#{window_id}\t#{pane_width}\t#{pane_height}\t#{window_width} #{window_height}\t#{window_panes}\t#{window_active}\t#{session_id}'")
             .unwrap_or_default();
         let mut w = usize::MAX;
         let mut ms: Vec<M> = Vec::new();
@@ -1353,7 +1374,7 @@ impl Sidebar {
         self.daemon.as_mut().unwrap().empty_ticks = 0;
         let wopt: usize = self
             .tmux
-            .run("show-option -gqv @agents-mon-width")
+            .run("show-option -gqv @agenmux-width")
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(30);
@@ -1419,7 +1440,7 @@ impl Sidebar {
         if let Some((src_pane, width)) = drag {
             let _ = self
                 .tmux
-                .run(&format!("set-option -g @agents-mon-width {width}"));
+                .run(&format!("set-option -g @agenmux-width {width}"));
             // resize the OTHER sidebars via forked tmux (hook run-shell
             // echoes on the control pipe would desync it); the dragged pane
             // stays untouched so nothing ever fights the user's drag
@@ -1564,8 +1585,14 @@ impl Sidebar {
         }
         let filter: String = filter
             .chars()
-            .take(cols.saturating_sub(6 + notice_len))
+            .take(cols.saturating_sub(notice_len))
             .collect();
+        let filter_len = filter.chars().count();
+        let title: String = app_title()
+            .chars()
+            .take(cols.saturating_sub(filter_len + notice_len))
+            .collect();
+        let title_len = title.chars().count();
         let hint = if self.search_focused {
             "↵ nav · ^u clear · esc clear"
         } else if self.state_filter.is_some() {
@@ -1581,13 +1608,13 @@ impl Sidebar {
         let has_hint = !hint.is_empty();
         let space = cap.saturating_sub(1 + usize::from(has_hint));
         let (hdr, hdr_pad) = if self.plugin_selected {
-            let used = 6 + filter.chars().count() + notice_len;
+            let used = title_len + filter.chars().count() + notice_len;
             (BAR_BG, " ".repeat(cols.saturating_sub(used)))
         } else {
             ("", String::new())
         };
         let mut frame = format!(
-            "{E}[H{hdr}{E}[1magents{E}[22m{E}[2m{filter}{E}[22m{notice}{hdr_pad}{E}[0m{E}[K\n"
+            "{E}[H{hdr}{E}[1m{title}{E}[22m{E}[2m{filter}{E}[22m{notice}{hdr_pad}{E}[0m{E}[K\n"
         );
         let mut vis = String::new();
         if has_hint {
@@ -1626,7 +1653,7 @@ impl Sidebar {
                 let selected = Some(n) == cursor;
                 let mark = cursor_mark(selected, self.plugin_selected, &r.state);
                 let dot = self.dot(&r.state);
-                let win = r.loc.splitn(2, ':').nth(1).unwrap_or("");
+                let win = r.loc.split_once(':').map(|x| x.1).unwrap_or("");
                 let mut rest = format!("{win} {}", r.cwd);
                 let agent_len = r.agent.chars().count();
                 let avail = cols.saturating_sub(6 + agent_len);
@@ -1706,11 +1733,12 @@ impl Sidebar {
     }
 
     fn render_overlay(&mut self, force: bool) {
+        let title = app_title();
         let text = match &mut self.overlay {
             Some(Overlay::Help) => {
                 let quit_keys = " q        close sidebar";
                 format!(
-                    "{E}[2J{E}[H{E}[1magents — help{E}[0m {E}[2m{}{E}[0m\n\n\
+                    "{E}[2J{E}[H{E}[1m{title} — help{E}[0m\n\n\
 {E}[1mstatus{E}[0m\n\
  {E}[32m⣿{E}[0m  idle\n\
  {E}[33m⠹{E}[0m  working (spinner)\n\
@@ -1725,16 +1753,14 @@ impl Sidebar {
  u        update / switch version\n\
 {quit_keys}\n\
  ?        this help\n\n\
-{E}[2mpress any key to return{E}[0m",
-                    current_tag()
+{E}[2mpress any key to return{E}[0m"
                 )
             }
             Some(Overlay::Versions { sel, chosen }) => {
                 let cur = current_tag();
                 let tags = known_tags(&self.plugin_dir);
                 *sel = picker_sel(&tags, &cur, chosen.as_deref(), *sel);
-                let mut text =
-                    format!("{E}[2J{E}[H{E}[1magents — versions{E}[0m {E}[2m{cur}{E}[0m\n\n");
+                let mut text = format!("{E}[2J{E}[H{E}[1m{title} — versions{E}[0m\n\n");
                 if tags.is_empty() {
                     text.push_str(&format!(
                         " {E}[2mno releases found — checking…{E}[0m\n\n\
@@ -1811,8 +1837,8 @@ impl Sidebar {
             let Some((client, title)) = line.split_once('\t') else {
                 continue;
             };
-            if title == "agents-mon" {
-                let _ = command_spawn(&["switch-client", "-c", client, "-T", "agents-mon"]);
+            if title == "agenmux" {
+                let _ = command_spawn(&["switch-client", "-c", client, "-T", "agenmux"]);
             }
         }
     }
@@ -1865,6 +1891,20 @@ mod tests {
             panes: 2,
             active,
         }
+    }
+
+    #[test]
+    fn app_title_identifies_dev_and_release_builds() {
+        let expected = if cfg!(debug_assertions) {
+            let timestamp = option_env!("AGENMUX_BUILD_TIMESTAMP").expect("debug timestamp");
+            assert!(regex::Regex::new(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+                .unwrap()
+                .is_match(timestamp));
+            format!("agenmux dev ({timestamp})")
+        } else {
+            format!("agenmux v{}", env!("CARGO_PKG_VERSION"))
+        };
+        assert_eq!(app_title(), expected);
     }
 
     #[test]
@@ -2042,8 +2082,8 @@ mod tests {
 
     #[test]
     fn update_notice_only_for_a_newer_release() {
-        let dir = std::env::temp_dir().join(format!("agents-mon-test-{}", std::process::id()));
-        let file = dir.join("target/release/.agents-mon-latest");
+        let dir = std::env::temp_dir().join(format!("agenmux-test-{}", std::process::id()));
+        let file = dir.join("target/release/.agenmux-latest");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
 
         assert_eq!(update_available(&dir), None); // no check has run yet

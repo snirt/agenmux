@@ -4,5 +4,7 @@
 /.pi/
 
 # Local README capture artifacts; the published demo is hosted on GitHub.
+/agenmux-demo.mp4
+/agenmux-screenshot.png
 /tmux-agents-mon-demo.mp4
 /tmux-agents-mon-screenshot.png

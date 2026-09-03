@@ -27,7 +27,7 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
     let target = y
         .checked_sub(1)
         .and_then(|line| {
-            std::fs::read_to_string(std::env::temp_dir().join("agents-mon-rows"))
+            std::fs::read_to_string(tmux::runtime_dir().join("agenmux-rows"))
                 .ok()?
                 .lines()
                 .nth(line)
@@ -42,7 +42,7 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
         let _ = tmux::command_status(&["select-window", "-t", &target]);
         let _ = tmux::command_status(&["select-pane", "-t", &target]);
     } else if tmux::command_status(&["switch-client", "-c", client, "-t", pane]).is_ok() {
-        let _ = tmux::command_status(&["switch-client", "-c", client, "-T", "agents-mon"]);
+        let _ = tmux::command_status(&["switch-client", "-c", client, "-T", "agenmux"]);
     }
     0
 }
