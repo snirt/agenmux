@@ -1,17 +1,19 @@
-# agenmux v0.3.0
+# agenmux v0.3.1
 
 ## What's changed
 
-### agenmux rebrand
+### Fixes
 
-- Renamed the runtime, binaries, tmux options, configuration path, release artifacts, and documentation to agenmux ([#37](https://github.com/snirt/agenmux/pull/37)).
-- Preserved `agents-mon` entrypoints, options, environment variables, config paths, package launchers, and release state as compatibility inputs for one release cycle.
-- Renamed the macOS notification helper to `Agenmux.app` with bundle ID `io.github.snirt.agenmux`.
+- Made runtime paths survive `TMPDIR` changes and rejected malformed `TMUX` values ([#41](https://github.com/snirt/agenmux/pull/41)).
+- Removed restored ghost panes from the sidebar ([#42](https://github.com/snirt/agenmux/pull/42)).
+- Fixed delayed agent discovery and stabilized sidebar navigation input ([#43](https://github.com/snirt/agenmux/pull/43)).
+- Resolved each Pi pane's subject independently instead of sharing session metadata ([#46](https://github.com/snirt/agenmux/pull/46)).
 
-### Developer workflow
+### Website
 
-- Added `make dev-use` and `make dev-stop` for switching the active tmux server between local debug and release binaries.
-- Added debug build timestamps to sidebar titles while keeping release titles versioned.
+- Standardized lowercase agenmux branding across documentation ([#39](https://github.com/snirt/agenmux/pull/39)).
+- Added agenmux icons and favicon assets ([#44](https://github.com/snirt/agenmux/pull/44)).
+- Improved search metadata and added Google site verification ([#47](https://github.com/snirt/agenmux/pull/47), [#48](https://github.com/snirt/agenmux/pull/48)).
 
 ### Assets
 
@@ -21,4 +23,4 @@
 - macOS aarch64
 - SHA-256 checksums
 
-**Full changelog:** <https://github.com/snirt/agenmux/compare/v0.2.1...v0.3.0>
+**Full changelog:** <https://github.com/snirt/agenmux/compare/v0.3.0...v0.3.1>
