@@ -39,7 +39,7 @@ stage="$dest/.Agenmux.app.$$"
 backup="$dest/.Agenmux.app.backup.$$"
 trap 'rm -rf "$stage" "$backup"' EXIT
 rm -rf "$stage" "$backup"
-mkdir -p "$stage/Contents/MacOS"
+mkdir -p "$stage/Contents/MacOS" "$stage/Contents/Resources"
 cat >"$stage/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -51,6 +51,8 @@ cat >"$stage/Contents/Info.plist" <<PLIST
 	<string>agenmux</string>
 	<key>CFBundleDisplayName</key>
 	<string>agenmux</string>
+	<key>CFBundleIconFile</key>
+	<string>Agenmux.icns</string>
 	<key>CFBundleExecutable</key>
 	<string>agenmux-notifier</string>
 	<key>CFBundlePackageType</key>
@@ -65,6 +67,7 @@ cat >"$stage/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 cp -f "$bin" "$stage/Contents/MacOS/agenmux-notifier"
+cp -f "$DIR/site/favicon.icns" "$stage/Contents/Resources/Agenmux.icns"
 codesign --force --sign - "$stage"
 if [ -e "$app" ]; then
     mv "$app" "$backup"

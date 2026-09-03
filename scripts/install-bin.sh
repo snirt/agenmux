@@ -176,9 +176,10 @@ fi
 # by the first real notification, not here.
 sync_app() {
   local notifier="$DIR/target/release/agenmux-notifier" notifications
-  local app_bin="$HOME/Applications/Agenmux.app/Contents/MacOS/agenmux-notifier"
+  local app="$HOME/Applications/Agenmux.app/Contents"
   [ "$(uname -s)" = Darwin ] && [ -x "$notifier" ] || return 0
-  cmp -s "$notifier" "$app_bin" 2>/dev/null && return 0
+  cmp -s "$notifier" "$app/MacOS/agenmux-notifier" 2>/dev/null &&
+    cmp -s "$DIR/site/favicon.icns" "$app/Resources/Agenmux.icns" 2>/dev/null && return 0
   notifications="$(tmux show-option -gqv @agenmux-notifications 2>/dev/null)"
   if [ -z "$(tmux show-options -gq @agenmux-notifications 2>/dev/null)" ]; then
     notifications="$(tmux show-option -gqv @agents-mon-notifications 2>/dev/null)"

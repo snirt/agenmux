@@ -37,9 +37,10 @@ fi
 if [ "$fail" -eq 0 ]; then
   tmp="$(mktemp -d)"
   package="agenmux-macos-aarch64"
-  mkdir -p "$tmp/plugin/scripts" "$tmp/downloads" "$tmp/bin"
+  mkdir -p "$tmp/plugin/scripts" "$tmp/plugin/site" "$tmp/downloads" "$tmp/bin"
   cp "$DIR/scripts/install-bin.sh" "$DIR/scripts/version.sh" \
     "$DIR/scripts/install-app.sh" "$tmp/plugin/scripts/"
+  cp "$DIR/site/favicon.icns" "$tmp/plugin/site/"
   # a release whose engine prints its own tag, so which one got installed is
   # visible in the assertions below
   mk_release() {
@@ -746,8 +747,11 @@ if [ "$fail" -eq 0 ] && [ "$(uname -s)" = Darwin ] &&
   if AGENMUX_NOTIFIER_BIN="$DIR/target/release/agenmux-notifier" \
     bash "$DIR/scripts/install-app.sh" --quiet "$tmp/apps" >/dev/null 2>&1 &&
     [ -x "$tmp/apps/Agenmux.app/Contents/MacOS/agenmux-notifier" ] &&
+    cmp -s "$DIR/site/favicon.icns" \
+      "$tmp/apps/Agenmux.app/Contents/Resources/Agenmux.icns" &&
     [ ! -e "$tmp/apps/AgentsMon.app" ] &&
     grep -q 'io.github.snirt.agenmux' "$plist" &&
+    grep -q 'Agenmux.icns' "$plist" &&
     grep -q 'LSUIElement' "$plist" &&
     codesign --verify "$tmp/apps/Agenmux.app" 2>/dev/null; then
     echo "ok   install-app-assembles-signed-bundle"
