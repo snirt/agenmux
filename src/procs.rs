@@ -130,9 +130,9 @@ pub fn identify(
     None
 }
 
-/// (pane_id, pane_pid, cmd) -> agent name or None; invalidates itself when
-/// the pane's foreground command changes.
-pub type IdentCache = HashMap<(String, u32, String), Option<String>>;
+/// (pane_id, pane_pid, cmd) -> identified agent name; unidentified panes retry
+/// on the next scan because wrappers can spawn an agent without changing this key.
+pub type IdentCache = HashMap<(String, u32, String), String>;
 
 #[cfg(test)]
 mod tests {
