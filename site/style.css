@@ -110,6 +110,7 @@ h2.glance { animation: title-glow 1.1s ease-out; }
 .tagline {
   color: var(--fg);
   font-size: clamp(1.1rem, 3vw, 1.5rem);
+  font-weight: 400;
   margin: 0 auto 1.2rem;
   max-width: 40rem;
 }

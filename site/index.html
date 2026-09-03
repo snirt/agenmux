@@ -3,11 +3,27 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>agenmux — monitor AI coding agents in tmux</title>
+    <title>agenmux — tmux plugin for monitoring AI coding agents</title>
     <meta
       name="description"
-      content="Monitor AI coding agents (Claude Code, Codex, OpenCode, Pi…) in your tmux panes — sidebar + status-line segment. No hooks, nothing runs inside your agents."
+      content="agenmux (formerly tmux-agents-mon) is a tmux plugin for monitoring Claude Code, Codex, OpenCode, Pi, and other AI coding agents."
     />
+    <link rel="canonical" href="https://snirt.github.io/agenmux/" />
+    <meta property="og:type" content="website" />
+    <meta
+      property="og:title"
+      content="agenmux — tmux plugin for monitoring AI coding agents"
+    />
+    <meta
+      property="og:description"
+      content="agenmux (formerly tmux-agents-mon) is a tmux plugin for monitoring Claude Code, Codex, OpenCode, Pi, and other AI coding agents."
+    />
+    <meta property="og:url" content="https://snirt.github.io/agenmux/" />
+    <meta
+      property="og:image"
+      content="https://snirt.github.io/agenmux/logo.png"
+    />
+    <meta property="og:image:alt" content="agenmux logo" />
     <link rel="icon" type="image/png" href="favicon.png" />
     <link rel="stylesheet" href="style.css" />
   </head>
@@ -39,12 +55,13 @@
     </nav>
 
     <section class="hero">
-      <p class="tagline">
-        Every AI coding agent in your tmux, one glance.<br />
+      <h1 class="tagline">
+        agenmux: monitor every AI coding agent in tmux.<br />
         Who's <span class="c-red">blocked</span>, who's
         <span class="c-yellow">working</span>, who's
         <span class="c-green">done</span> — without switching panes.
-      </p>
+      </h1>
+      <p class="muted">Previously named <code>tmux-agents-mon</code>.</p>
       <div class="badges">
         <a href="https://github.com/snirt/agenmux">agenmux on github</a>
         <span class="sep">·</span>
