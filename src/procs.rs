@@ -41,6 +41,11 @@ impl Snapshot {
     /// BFS over the pane's process tree, root included (agent may be the
     /// pane command itself); argv fetched for just this subtree.
     fn descendant_argvs(&mut self, root: u32) -> Vec<Vec<String>> {
+        self.descendants(root).into_iter().map(|(_, a)| a).collect()
+    }
+
+    /// (start epoch secs, argv) per process in the pane's subtree.
+    fn descendants(&mut self, root: u32) -> Vec<(u64, Vec<String>)> {
         let mut queue = vec![root];
         let mut i = 0;
         while i < queue.len() {
@@ -58,14 +63,30 @@ impl Snapshot {
         pids.iter()
             .filter_map(|pid| self.sys.process(*pid))
             .map(|p| {
-                p.cmd()
+                let argv = p
+                    .cmd()
                     .iter()
                     .map(|s| s.to_string_lossy().into_owned())
-                    .collect::<Vec<String>>()
+                    .collect::<Vec<String>>();
+                (p.start_time(), argv)
             })
-            .filter(|argv| !argv.is_empty())
+            .filter(|(_, argv)| !argv.is_empty())
             .collect()
     }
+}
+
+/// Start time (epoch secs) of the agent process in a pane's subtree — the
+/// earliest one when wrappers re-exec the same bin.
+pub fn agent_start(conf: &AgentConf, snap: &mut Option<Snapshot>, pane_pid: u32) -> Option<u64> {
+    let snap = snap.get_or_insert_with(Snapshot::take);
+    snap.descendants(pane_pid)
+        .into_iter()
+        .filter(|(_, argv)| {
+            conf.bins.iter().any(|b| b == normalize_bin(&argv[0]))
+                || agent_for_argv(std::slice::from_ref(conf), argv).is_some()
+        })
+        .map(|(t, _)| t)
+        .min()
 }
 
 /// path/wrapper -> bare name (strip dir, .js/.cmd/.exe)

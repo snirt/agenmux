@@ -76,7 +76,9 @@ pub fn scan(
                 Some((_, s)) => subject = s.clone(),
                 None => {
                     let t0 = std::time::Instant::now();
-                    subject = crate::detect::subject_cmd(&confs[idx], path).unwrap_or_default();
+                    let started = procs::agent_start(&confs[idx], &mut snap, pid);
+                    subject = crate::detect::subject_cmd(&confs[idx], pane, path, started)
+                        .unwrap_or_default();
                     crate::tmux::debug_note(&format!(
                         "subject_cmd {pane} {}ms",
                         t0.elapsed().as_millis()

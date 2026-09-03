@@ -63,14 +63,23 @@ pub fn subject(conf: &AgentConf, title: &str, screen: &str, path: &str) -> Strin
     t.replace('\t', " ")
 }
 
-/// Run SUBJECT_CMD ($path = pane cwd). One bash fork — callers must cache
-/// (scan.rs SubjectCache); forking per scan tick stalls the sidebar loop.
-pub fn subject_cmd(conf: &AgentConf, path: &str) -> Option<String> {
+/// Run SUBJECT_CMD ($pane = tmux pane id, $path = pane cwd, $started = agent
+/// process start as UTC YYYY-MM-DDTHH-MM-SS, empty when unknown). One bash
+/// fork — callers must cache (scan.rs SubjectCache); forking per scan tick
+/// stalls the sidebar loop.
+pub fn subject_cmd(
+    conf: &AgentConf,
+    pane: &str,
+    path: &str,
+    started: Option<u64>,
+) -> Option<String> {
     let cmd = conf.subject_cmd.as_ref()?;
     let out = std::process::Command::new("bash")
         .arg("-c")
         .arg(cmd)
+        .env("pane", pane)
         .env("path", path)
+        .env("started", started.map(utc_stamp).unwrap_or_default())
         .output()
         .ok()?;
     Some(
@@ -80,10 +89,40 @@ pub fn subject_cmd(conf: &AgentConf, path: &str) -> Option<String> {
     )
 }
 
+/// Epoch secs -> "YYYY-MM-DDTHH-MM-SS" UTC, the prefix pi uses for session
+/// file names, so confs can compare by plain string order.
+fn utc_stamp(secs: u64) -> String {
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    // civil-from-days (H. Hinnant), proleptic Gregorian
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}-{:02}-{:02}",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::conf::load_conf;
+
+    #[test]
+    fn utc_stamp_matches_pi_session_prefix() {
+        assert_eq!(utc_stamp(0), "1970-01-01T00-00-00");
+        // 2026-09-03T10:25:01Z
+        assert_eq!(utc_stamp(1_788_431_101), "2026-09-03T10-25-01");
+        assert_eq!(utc_stamp(951_782_400), "2000-02-29T00-00-00");
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn conf(body: &str) -> AgentConf {
