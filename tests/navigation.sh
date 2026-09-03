@@ -446,9 +446,10 @@ picker_return=''
 for _ in $(seq 1 40); do
   picker_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
-  picker_return="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
-    sed -n '/❯/p' | head -n 1)"
-  if [ "$picker_table" = agenmux ] && [ "$picker_return" = "$picker_before" ]; then
+  picker_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+  picker_return="$(printf '%s\n' "$picker_frame" | sed -n '/❯/p' | head -n 1)"
+  if [ "$picker_table" = agenmux ] && [ -n "$picker_return" ] &&
+    ! printf '%s\n' "$picker_frame" | grep -Eq 'no releases found|↵ switch'; then
     picker_reclaimed=1
     break
   fi
@@ -469,7 +470,7 @@ third="$second"
 for _ in $(seq 1 20); do
   third="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
-  [ "$third" = "$picker_before" ] && break
+  [ "$third" = "$picker_return" ] && break
   sleep 0.1
 done
 
@@ -844,7 +845,7 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   [ "$picker_open" -eq 1 ] && [ "$picker_reclaimed" -eq 1 ] &&
   [ "$table_after_j" = agenmux ] &&
   printf '%s' "$control_flags" | grep -Fq control-mode &&
-  [ "$second" != "$picker_return" ] && [ "$third" = "$picker_before" ] &&
+  [ "$second" != "$picker_return" ] && [ "$third" = "$picker_return" ] &&
   [ "$wheel_down" != "$third" ] && [ "$wheel_up" = "$third" ] &&
   [ "$wheel_delay_works" -eq 1 ] &&
   [ "$return_table" = agenmux ] && [ "$return_focus" = agenmux ] &&
