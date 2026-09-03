@@ -9,6 +9,11 @@
 - Before live verification, inspect `@agenmux-bin`, derive that binary's plugin root, and confirm its loaded `agents/*.conf`. Never assume the current checkout is deployed.
 - Restart the active daemon after config changes, then verify the monitored pane reports `working` during activity and `idle` after completion.
 
+## Module boundaries
+
+- Before splitting an existing file into multiple modules, ask for approval unless the task explicitly requests the split.
+- Recommend splitting when a file owns multiple responsibilities that change independently, not based on line count alone. Prefer cohesive modules; avoid tiny wrappers and speculative abstractions.
+
 ## Commits
 
 - Write concise, informative commit messages that describe the change and its intent.
