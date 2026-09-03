@@ -414,15 +414,21 @@ for _ in $(seq 1 20); do
   printf '%s' "$control_flags" | grep -Fq control-mode && break
   sleep 0.05
 done
+picker_start="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+  sed -n '/❯/p' | head -n 1)"
 printf 'k' >&9
+picker_reset="$picker_start"
 for _ in $(seq 1 20); do
   picker_reset="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
-  [ "$picker_reset" = "$first" ] && break
+  [ -n "$picker_reset" ] && [ "$picker_reset" != "$picker_start" ] && break
   sleep 0.1
 done
-picker_before="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
-  sed -n '/❯/p' | head -n 1)"
+[ "$picker_reset" != "$picker_start" ] || {
+  echo "FAIL navigation-key-table: pre-picker cursor did not move"
+  exit 1
+}
+picker_before="$picker_reset"
 printf 'u' >&9
 picker_open=0
 for _ in $(seq 1 40); do
@@ -442,7 +448,7 @@ for _ in $(seq 1 40); do
     '#{client_key_table}')"
   picker_return="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
-  if [ "$picker_table" = agenmux ] && [ -n "$picker_return" ]; then
+  if [ "$picker_table" = agenmux ] && [ "$picker_return" = "$picker_before" ]; then
     picker_reclaimed=1
     break
   fi
