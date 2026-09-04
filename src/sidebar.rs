@@ -1525,9 +1525,11 @@ impl Sidebar {
         let _ = std::fs::remove_file(&self.rows_file);
     }
 
-    /// Frame sink: stdout in tty mode; direct writes to the visible empty panes
-    /// in daemon mode.
-    fn emit(&mut self, frame: String, force: bool) {
+    /// Frame and click-row sink: stdout in tty mode; direct writes to visible
+    /// empty panes in daemon mode.
+    fn emit(&mut self, frame: String, rows: &str, force: bool) {
+        // Rows map must match what the click helper sees under each rendered row.
+        let _ = std::fs::write(&self.rows_file, rows);
         let changed = force || frame != self.last_frame;
         match &mut self.daemon {
             None => {
@@ -1711,8 +1713,7 @@ impl Sidebar {
             }
         }
         frame.push_str(&format!("{E}[J"));
-        let _ = std::fs::write(&self.rows_file, &vis);
-        self.emit(frame, force);
+        self.emit(frame, &vis, force);
     }
 
     /// Version picker: update or roll back to any release the last check saw.
@@ -1782,7 +1783,7 @@ impl Sidebar {
             }
             None => return,
         };
-        self.emit(text, force);
+        self.emit(text, "", force);
     }
 
     fn overlay_key(&mut self, key: Key) {
