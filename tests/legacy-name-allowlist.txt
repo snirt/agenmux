@@ -2,6 +2,7 @@
 .github/workflows/build.yml:            > "dist/$package/target/release/agents-mon"
 .github/workflows/build.yml:            chmod +x "dist/$package/target/release/agents-mon-notifier"
 .github/workflows/build.yml:          chmod +x "dist/$package/target/release/agents-mon"
+agenmux.tmux:    tmux set-option -gu @agents-mon-bin 2>/dev/null || true
 agenmux.tmux:  legacy="${canonical/@agenmux-/@agents-mon-}"
 scripts/dev-bin.sh:  old_option_name="@agents-mon-bin"
 scripts/dev-bin.sh:  tmux set-option -gu @agents-mon-bin 2>/dev/null || true

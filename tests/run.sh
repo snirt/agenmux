@@ -21,6 +21,9 @@ fi
 if ! "$DIR/tests/make-release.sh"; then
   fail=1
 fi
+if ! "$DIR/tests/stale-dev-bin-recovery.sh"; then
+  fail=1
+fi
 
 if [ "$fail" -eq 0 ]; then
   version="$(bash "$DIR/scripts/version.sh")"
