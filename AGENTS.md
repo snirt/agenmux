@@ -9,6 +9,10 @@
 - Before live verification, inspect `@agenmux-bin`, derive that binary's plugin root, and confirm its loaded `agents/*.conf`. Never assume the current checkout is deployed.
 - Restart the active daemon after config changes, then verify the monitored pane reports `working` during activity and `idle` after completion.
 
+## Plans
+
+- Store implementation plans in `docs/plans/`. Never write plans under `docs/superpowers/`.
+
 ## Module boundaries
 
 - Before splitting an existing file into multiple modules, ask for approval unless the task explicitly requests the split.

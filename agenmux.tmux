@@ -13,6 +13,7 @@ option() {
   fi
 }
 DEFAULT_BIN="$CURRENT_DIR/target/release/agenmux"
+DEBUG_BIN="$CURRENT_DIR/target/debug/agenmux"
 BIN="$(option @agenmux-bin)"
 [ -n "$BIN" ] || BIN="$DEFAULT_BIN"
 
@@ -32,6 +33,17 @@ engine_current() {
 # beat the eager installer, so serialize with it before handing runtime control
 # to Rust. This is bootstrap, not a second sidebar/toggle implementation.
 if [ "${1:-}" = activate ]; then
+  if [ "$BIN" != "$DEFAULT_BIN" ] && [ ! -x "$BIN" ]; then
+    tmux set-option -gu @agenmux-bin 2>/dev/null || true
+    tmux set-option -gu @agents-mon-bin 2>/dev/null || true
+    if [ -x "$DEBUG_BIN" ]; then
+      BIN="$DEBUG_BIN"
+      tmux set-option -g @agenmux-bin "$BIN"
+      AGENMUX_DIR="$CURRENT_DIR" "$BIN" setup || exit 1
+    else
+      BIN="$DEFAULT_BIN"
+    fi
+  fi
   mode="${2:-}"
   client="${3:-}"
   if ! engine_current; then

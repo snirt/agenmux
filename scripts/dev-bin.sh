@@ -34,10 +34,6 @@ fi
 old_option=""
 [ -z "$old_option_name" ] || old_option="$(tmux show-option -gqv "$old_option_name")"
 current="${old_option:-$RELEASE}"
-[ -x "$current" ] || {
-  echo "agenmux: current binary not found: $current" >&2
-  exit 1
-}
 was_on="$(tmux show-option -gqv @agenmux-on)"
 [ -n "$was_on" ] || was_on="$(tmux show-option -gqv @agents-mon-on)"
 old_control="$(tmux show-option -gqv @agenmux-control-client)"
@@ -57,12 +53,14 @@ start_bin() {
     { [ -z "$was_on" ] || AGENMUX_DIR="$DIR" "$1" toggle; }
 }
 
-"$current" teardown || exit 1
-if [ -n "$old_control" ]; then
-  for ((i = 0; i < 80; i++)); do
-    tmux list-clients -F '#{client_name}' 2>/dev/null | grep -Fxq "$old_control" || break
-    sleep 0.1
-  done
+if [ -x "$current" ]; then
+  "$current" teardown || exit 1
+  if [ -n "$old_control" ]; then
+    for ((i = 0; i < 80; i++)); do
+      tmux list-clients -F '#{client_name}' 2>/dev/null | grep -Fxq "$old_control" || break
+      sleep 0.1
+    done
+  fi
 fi
 
 select_bin "$next" || exit 1
@@ -70,9 +68,13 @@ if ! start_bin "$next"; then
   "$next" teardown >/dev/null 2>&1 || true
   tmux set-option -gu @agenmux-bin 2>/dev/null || true
   tmux set-option -gu @agents-mon-bin 2>/dev/null || true
-  [ -z "$old_option_name" ] || tmux set-option -g "$old_option_name" "$old_option"
-  start_bin "$current" >/dev/null 2>&1 || true
-  echo "agenmux: switch failed; restored previous binary" >&2
+  if [ -x "$current" ]; then
+    [ -z "$old_option_name" ] || tmux set-option -g "$old_option_name" "$old_option"
+    start_bin "$current" >/dev/null 2>&1 || true
+    echo "agenmux: switch failed; restored previous binary" >&2
+  else
+    echo "agenmux: switch failed; previous binary unavailable" >&2
+  fi
   exit 1
 fi
 
