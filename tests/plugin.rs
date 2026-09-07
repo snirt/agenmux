@@ -126,7 +126,19 @@ impl TestTmux {
 
 impl Drop for TestTmux {
     fn drop(&mut self) {
+        // kill-server leaves the socket file behind, so ask the live server
+        // where it is before taking it down. Thousands of dead sockets
+        // otherwise pile up in the shared tmux socket directory.
+        let socket_path = self.tmux(&["display-message", "-p", "#{socket_path}"]);
         let _ = self.tmux(&["kill-server"]);
+        if socket_path.status.success() {
+            let path = String::from_utf8_lossy(&socket_path.stdout)
+                .trim_end()
+                .to_string();
+            if !path.is_empty() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
         let _ = std::fs::remove_dir_all(&self.tmp);
     }
 }

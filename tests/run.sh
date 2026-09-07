@@ -285,7 +285,12 @@ esac
 exit 0
 SH
   chmod +x "$tmp/bin/tmux"
-  TMUX_STUB_LOG="$tmp/tmux.log" PATH="$tmp/bin:$PATH" bash "$DIR/agenmux.tmux"
+  # Only the key bindings are under test here. Left enabled, the eager
+  # background installer outlives this block, and the cleanup below removes the
+  # stub out from under it — its remaining tmux calls then resolve to the real
+  # binary with no server in $TMUX and land on the user's default server.
+  AGENMUX_INSTALL_REFRESH=1 TMUX_STUB_LOG="$tmp/tmux.log" \
+    PATH="$tmp/bin:$PATH" bash "$DIR/agenmux.tmux"
   if grep -q "^bind-key E run-shell -b " "$tmp/tmux.log" &&
     grep -q "^bind-key e run-shell -b " "$tmp/tmux.log" &&
     grep -Fq '/agenmux.tmux' "$tmp/tmux.log" &&
