@@ -320,10 +320,19 @@ done
 
 # An actual agent record keeps the existing one-click direct jump. Pick a row
 # outside this window so merely leaving the work pane cannot satisfy the test.
-valid_row="$(awk -v work="$work" \
-  '$1 ~ /^%/ && $1 != work { print NR; exit }' "$tmp/agenmux-rows")"
-valid_target="$(awk -v work="$work" \
-  '$1 ~ /^%/ && $1 != work { print $1; exit }' "$tmp/agenmux-rows")"
+# The daemon rewrites the row map on its own schedule, so a read here can land
+# before the second window's agent is in it — retry rather than call that a
+# missing row.
+valid_row=''
+valid_target=''
+for _ in $(seq 1 60); do
+  valid_row="$(awk -v work="$work" \
+    '$1 ~ /^%/ && $1 != work { print NR; exit }' "$tmp/agenmux-rows")"
+  valid_target="$(awk -v work="$work" \
+    '$1 ~ /^%/ && $1 != work { print $1; exit }' "$tmp/agenmux-rows")"
+  [ -n "$valid_row" ] && [ -n "$valid_target" ] && break
+  sleep 0.05
+done
 [ -n "$valid_row" ] && [ -n "$valid_target" ] || {
   echo "FAIL navigation-key-table: no cross-window agent row"
   exit 1
@@ -414,6 +423,30 @@ for _ in $(seq 1 20); do
   printf '%s' "$control_flags" | grep -Fq control-mode && break
   sleep 0.05
 done
+# `k` is Up, and Up clamps at the top row rather than wrapping, so it can only
+# be seen to move the cursor when the cursor is below that row. The earlier
+# cross-window click puts it there: the daemon snaps the cursor onto the pane
+# the click focused. It samples focus on its own schedule instead of queueing
+# it, so wait for the snap rather than assuming it has already landed.
+cursor_snapped=0
+for _ in $(seq 1 60); do
+  cursor_row="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+    awk '/❯/ { print NR; exit }')"
+  if [ -n "$cursor_row" ] && [ "$cursor_row" -gt 1 ]; then
+    # the row map excludes the fixed header
+    cursor_pane="$(sed -n "$((cursor_row - 1))p" "$tmp/agenmux-rows" |
+      awk '{ print $1 }')"
+    [ "$cursor_pane" = "$valid_target" ] && {
+      cursor_snapped=1
+      break
+    }
+  fi
+  sleep 0.05
+done
+[ "$cursor_snapped" -eq 1 ] || {
+  echo "FAIL navigation-key-table: cursor never reached the clicked row"
+  exit 1
+}
 picker_start="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
   sed -n '/❯/p' | head -n 1)"
 printf 'k' >&9
@@ -471,7 +504,7 @@ fi
 printf 'q' >&9
 picker_reclaimed=0
 picker_return=''
-for _ in $(seq 1 40); do
+for _ in $(seq 1 60); do
   picker_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   picker_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
@@ -485,7 +518,7 @@ for _ in $(seq 1 40); do
 done
 printf 'j' >&9
 second="$picker_return"
-for _ in $(seq 1 20); do
+for _ in $(seq 1 30); do
   second="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
   [ -n "$second" ] && [ "$second" != "$picker_return" ] && break
@@ -495,7 +528,7 @@ table_after_j="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_t
 
 printf 'k' >&9
 third="$second"
-for _ in $(seq 1 20); do
+for _ in $(seq 1 30); do
   third="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
   [ "$third" = "$picker_return" ] && break
