@@ -1,0 +1,15 @@
+────────────────────────────────────────────────────────────────────────────────
+
+  Choice
+
+ Select one option.
+
+❯ 1. First
+     Select first option.
+  2. Second
+     Select second option.
+  3. Type something.
+
+────────────────────────────────────────────────────────────────────────────────
+
+ Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel · Ctrl+] to collapse

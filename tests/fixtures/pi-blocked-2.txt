@@ -1,0 +1,18 @@
+────────────────────────────────────────────────────────────────────────────────
+
+  Choice
+
+ Select one option.
+
+  1. First
+     Select first option.
+  2. Second
+     Select second option.
+  3. Type something.
+
+ Notes:
+────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+ Enter to select · ↑/↓ to navigate · Esc to cancel · Ctrl+] to collapse · Shift+Enter for newline
