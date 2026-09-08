@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 regex = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 libc = "0.2"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 

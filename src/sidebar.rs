@@ -8,6 +8,7 @@
 //    processless panes visible in attached clients; keys arrive over a FIFO.
 //    The panes never move between windows, so switching causes no join-pane
 //    reflow (the "bump").
+use crate::app_config::{action_for, Action, KeyChord, KeyMode, Keymap, Palette};
 use crate::attention::Tracker;
 use crate::conf::AgentConf;
 use crate::pane_writers::PaneWriters;
@@ -34,19 +35,16 @@ extern "C" fn on_term(_: libc::c_int) {
 }
 
 pub(crate) const E: &str = "\x1b";
-/// Focused-sidebar title bar: one step lighter than a dark terminal background.
-const BAR_BG: &str = "\x1b[48;5;236m";
 const SPIN: [char; 8] = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
 
-fn state_bg(state: &str, focused: bool) -> &'static str {
-    match (state, focused) {
-        ("blocked", true) => "\x1b[48;2;42;16;16m",
-        ("blocked", false) => "\x1b[48;2;32;12;12m",
-        ("working", true) => "\x1b[48;2;38;32;16m",
-        ("working", false) => "\x1b[48;2;29;24;12m",
-        (_, true) => "\x1b[48;2;15;36;16m",
-        (_, false) => "\x1b[48;2;11;27;12m",
-    }
+/// " · "-separated hint segments, skipping unbound (empty) ones.
+fn join(parts: &[String]) -> String {
+    parts
+        .iter()
+        .filter(|p| !p.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
@@ -57,20 +55,62 @@ fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
     format!("{bg}{body}{}{E}[0m", " ".repeat(cols.saturating_sub(width)))
 }
 
-fn cursor_mark(selected: bool, plugin_selected: bool, state: &str) -> String {
+fn cursor_mark(palette: &Palette, selected: bool, plugin_selected: bool, state: &str) -> String {
     if !selected {
         return "  ".into();
     }
-    let fg = match state {
-        "blocked" => 31,
-        "working" => 33,
-        _ => 32,
-    };
-    if plugin_selected {
-        format!("{E}[1;{fg}m❯{E}[0m ")
-    } else {
-        format!("{E}[{fg}m❯{E}[0m ")
+    let fg = palette
+        .state_fg(state)
+        .fg(if plugin_selected { "1" } else { "" });
+    format!("{fg}❯{E}[0m ")
+}
+
+/// Clip generated SGR/CSI frames without splitting an escape or wrapping a
+/// logical click row. Layout elsewhere uses the same character-cell metric.
+fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
+    if cols == 0 || cap == 0 {
+        return format!("{E}[H{E}[0m{E}[J");
     }
+    let mut out = String::new();
+    let mut row = 0;
+    let mut col = 0;
+    let mut chars = frame.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            out.push(c);
+            if let Some(next) = chars.next() {
+                out.push(next);
+                if next == '[' {
+                    for parameter in chars.by_ref() {
+                        out.push(parameter);
+                        if ('@'..='~').contains(&parameter) {
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if c == '\n' {
+            out.push(c);
+            col = 0;
+            row += 1;
+            if row >= cap {
+                let tail: String = chars.collect();
+                // Keep the historical clear-to-end suffix when already fitted.
+                if tail == format!("{E}[J") {
+                    out.push_str(&tail);
+                } else {
+                    out.push_str(&format!("{E}[0m{E}[J"));
+                }
+                break;
+            }
+        } else {
+            if col < cols {
+                out.push(c);
+            }
+            col += 1;
+        }
+    }
+    out
 }
 
 pub(crate) struct RawMode(Option<libc::termios>);
@@ -290,113 +330,180 @@ fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMod
     }
 }
 
-fn read_key(fd: libc::c_int) -> Key {
+/// Physical byte(s) → chord. `next` yields escape-tail bytes, None once
+/// nothing more arrives.
+fn chord(first: u8, next: impl FnMut() -> Option<u8>) -> Option<KeyChord> {
+    Some(match first {
+        0x1b => return escape_chord(next),
+        0x09 => KeyChord::Tab,
+        0x0a | 0x0d => KeyChord::Enter,
+        0x08 | 0x7f => KeyChord::Backspace,
+        0x00..=0x1f => KeyChord::Control(first),
+        0x20..=0x7e => KeyChord::Printable(first),
+        _ => return None,
+    })
+}
+
+/// Decode the tail of an escape sequence: CSI (ESC [ A) normally, SS3
+/// (ESC O A) in application-cursor mode, tilde forms for Home/End/PgUp/PgDn.
+/// No tail is a bare Esc; an incomplete or unknown tail is nothing.
+fn escape_chord(mut next: impl FnMut() -> Option<u8>) -> Option<KeyChord> {
+    let Some(a) = next() else {
+        return Some(KeyChord::Escape);
+    };
+    if a != b'[' && a != b'O' {
+        return None;
+    }
+    Some(match next()? {
+        b'A' => KeyChord::Up,
+        b'B' => KeyChord::Down,
+        b'C' => KeyChord::Right,
+        b'D' => KeyChord::Left,
+        b'H' => KeyChord::Home,
+        b'F' => KeyChord::End,
+        digit @ b'1'..=b'8' if a == b'[' && next()? == b'~' => match digit {
+            b'1' | b'7' => KeyChord::Home,
+            b'4' | b'8' => KeyChord::End,
+            b'5' => KeyChord::PageUp,
+            b'6' => KeyChord::PageDown,
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// Logical action → dispatcher key. Popup input maps chords through the
+/// user's keymap; the daemon maps fixed FIFO protocol bytes through defaults.
+fn action_key(keys: &Keymap, chord: KeyChord) -> Option<Key> {
+    Some(match action_for(keys, chord)? {
+        Action::Down => Key::Down,
+        Action::Up => Key::Up,
+        Action::Jump | Action::Accept => Key::Jump,
+        Action::Search => Key::Search,
+        Action::Filter => Key::CycleState,
+        Action::Reset | Action::Cancel => Key::AllStates,
+        Action::Help => Key::Help,
+        Action::Versions => Key::Versions,
+        Action::Close => Key::Close,
+        Action::Backspace => Key::Backspace,
+        Action::Clear => Key::ClearSearch,
+    })
+}
+
+/// Keys the daemon decodes with. Its FIFO carries the fixed `agenmux key`
+/// protocol, not physical keys: the tmux tables already resolved the user's
+/// chords into action names. The user's own keymap stays the one hints and
+/// help are named from, so both modes advertise the keys that actually work.
+fn protocol_keys(mode: KeyMode) -> &'static Keymap {
+    static KEYS: std::sync::OnceLock<(Keymap, Keymap)> = std::sync::OnceLock::new();
+    let (normal, search) = KEYS.get_or_init(|| {
+        (
+            crate::app_config::resolved_keys(KeyMode::Normal, None).unwrap(),
+            crate::app_config::resolved_keys(KeyMode::Search, None).unwrap(),
+        )
+    });
+    match mode {
+        KeyMode::Normal => normal,
+        KeyMode::Search => search,
+    }
+}
+
+fn read_key(fd: libc::c_int, keys: &Keymap) -> Key {
     let Some(b) = read_byte(fd) else {
         return Key::Quit;
     }; // EOF: explicit close
-    match b {
-        b'G' => Key::Last,
-        b'g' => Key::Sequence('g'),
-        0x06 => poll_fd(fd, Some(Duration::from_millis(50)))
+    // Every byte of the tail goes through the same polling reader. In mirror
+    // mode keys arrive over a non-blocking FIFO that the key sender feeds one
+    // byte at a time, so the tail is routinely still in flight; reading it
+    // without polling hit EAGAIN and dropped every other arrow.
+    let next = || {
+        poll_fd(fd, Some(Duration::from_millis(50)))
             .then(|| read_byte(fd))
             .flatten()
-            .filter(|b| (0x20..=0x7e).contains(b))
-            .map(|b| Key::Sequence(char::from(b)))
-            .unwrap_or(Key::Other),
-        b'j' => Key::Down,
-        b'k' => Key::Up,
-        0x01 => Key::WheelUp,
-        0x02 => Key::WheelDown,
+    };
+    match b {
+        0x01 => return Key::WheelUp,
+        0x02 => return Key::WheelDown,
+        0x0c => return Key::AllStates, // private clear packet used by tmux/click helpers
+        // Search-table printable keys use a NUL-prefixed packet so normal-mode
+        // actions such as `j`, `q`, and `f` remain query text while typing.
+        0x00 => {
+            return next()
+                .filter(|b| (0x20..=0x7e).contains(b))
+                .map(|b| Key::Text(char::from(b).to_string()))
+                .unwrap_or(Key::Other)
+        }
+        // Click target: a four-byte row index the mouse helper sends.
         0x05 => {
             let mut index = [0u8; 4];
             for byte in &mut index {
-                let Some(next) = poll_fd(fd, Some(Duration::from_millis(50)))
-                    .then(|| read_byte(fd))
-                    .flatten()
-                else {
+                let Some(got) = next() else {
                     return Key::Other;
                 };
-                *byte = next;
+                *byte = got;
             }
-            Key::Select(u32::from_be_bytes(index) as usize)
+            return Key::Select(u32::from_be_bytes(index) as usize);
         }
-        b'q' | 0x03 | 0x04 => Key::Quit, // q, Ctrl-C, Ctrl-D
-        b'Q' => Key::Close,
-        b'l' | b'\r' | b'\n' => Key::Jump,
-        b'?' => Key::Help,
-        b'u' => Key::Versions,
-        b'/' => Key::Search,
-        b'f' => Key::CycleState,
-        0x0c => Key::AllStates, // private clear packet used by tmux/click helpers
-        0x08 | 0x7f => Key::Backspace,
-        0x15 => Key::ClearSearch,
-        // Search-table printable keys use a NUL-prefixed packet so normal-mode
-        // actions such as `j`, `q`, and `f` remain query text while typing.
-        0x00 => poll_fd(fd, Some(Duration::from_millis(50)))
-            .then(|| read_byte(fd))
-            .flatten()
-            .filter(|b| (0x20..=0x7e).contains(b))
-            .map(|b| Key::Text(char::from(b).to_string()))
-            .unwrap_or(Key::Other),
-        // Every byte of the tail goes through the same polling reader. In mirror
-        // mode keys arrive over a non-blocking FIFO that the key sender feeds one
-        // byte at a time, so the tail is routinely still in flight; reading it
-        // without polling hit EAGAIN and dropped every other arrow.
-        0x1b => escape_key(|| {
-            poll_fd(fd, Some(Duration::from_millis(50)))
-                .then(|| read_byte(fd))
-                .flatten()
-        }),
-        _ => Key::Other,
+        // Multi-key sequence such as `gg`, delivered as one packet.
+        0x06 => {
+            return next()
+                .filter(|b| (0x20..=0x7e).contains(b))
+                .map(|b| Key::Sequence(char::from(b)))
+                .unwrap_or(Key::Other)
+        }
+        _ => {}
     }
+    // Configured chords win; the fixed edge keys are the default underneath.
+    chord(b, next)
+        .and_then(|chord| action_key(keys, chord))
+        .unwrap_or(match b {
+            b'G' => Key::Last,
+            b'g' => Key::Sequence('g'),
+            0x03 | 0x04 => Key::Quit, // Ctrl-C, Ctrl-D: emergency exit
+            _ => Key::Other,
+        })
 }
 
 /// Popup/tty search owns printable input. Daemon search receives printable
 /// bytes through NUL-prefixed packets decoded by read_key instead.
-fn read_search_key(fd: libc::c_int) -> Key {
+fn read_search_key(fd: libc::c_int, keys: &Keymap) -> Key {
     let Some(first) = read_byte(fd) else {
         return Key::Quit;
     };
-    match first {
-        b'\r' | b'\n' => Key::Jump,
-        0x03 | 0x04 => Key::Quit,
-        0x08 | 0x7f => Key::Backspace,
-        0x15 => Key::ClearSearch,
-        0x0e => Key::Down, // Ctrl-N
-        0x10 => Key::Up,   // Ctrl-P
-        0x1b => escape_key(|| {
-            poll_fd(fd, Some(Duration::from_millis(50)))
-                .then(|| read_byte(fd))
-                .flatten()
-        }),
-        b if b >= 0x20 => {
-            let len = if b < 0x80 {
-                1
-            } else if b & 0xe0 == 0xc0 {
-                2
-            } else if b & 0xf0 == 0xe0 {
-                3
-            } else if b & 0xf8 == 0xf0 {
-                4
-            } else {
+    let next = || {
+        poll_fd(fd, Some(Duration::from_millis(50)))
+            .then(|| read_byte(fd))
+            .flatten()
+    };
+    if first >= 0x20 && first != 0x7f {
+        let len = if first < 0x80 {
+            1
+        } else if first & 0xe0 == 0xc0 {
+            2
+        } else if first & 0xf0 == 0xe0 {
+            3
+        } else if first & 0xf8 == 0xf0 {
+            4
+        } else {
+            return Key::Other;
+        };
+        let mut bytes = vec![first];
+        for _ in 1..len {
+            let Some(b) = next() else {
                 return Key::Other;
             };
-            let mut bytes = vec![b];
-            for _ in 1..len {
-                let Some(next) = poll_fd(fd, Some(Duration::from_millis(50)))
-                    .then(|| read_byte(fd))
-                    .flatten()
-                else {
-                    return Key::Other;
-                };
-                bytes.push(next);
-            }
-            String::from_utf8(bytes)
-                .map(Key::Text)
-                .unwrap_or(Key::Other)
+            bytes.push(b);
         }
-        _ => Key::Other,
+        return String::from_utf8(bytes)
+            .map(Key::Text)
+            .unwrap_or(Key::Other);
     }
+    chord(first, next)
+        .and_then(|chord| action_key(keys, chord))
+        .unwrap_or(match first {
+            0x03 | 0x04 => Key::Quit,
+            _ => Key::Other,
+        })
 }
 
 /// Deliver one key-table action to the daemon without waiting for a FIFO
@@ -437,7 +544,9 @@ pub fn send_key(name: &str) -> i32 {
             "wheel-up" => vec![0x01],
             "wheel-down" => vec![0x02],
             "l" => b"l".to_vec(),
-            "q" => b"q".to_vec(),
+            // Legacy alias for the popup-only quit: the daemon ignores it like
+            // Ctrl-C, whereas a printable `q` would now resolve to close.
+            "q" => vec![0x03],
             "close" => b"Q".to_vec(),
             "help" => b"?".to_vec(),
             "versions" => b"u".to_vec(),
@@ -470,20 +579,6 @@ fn send_bytes(bytes: &[u8]) -> i32 {
     (wrote != bytes.len() as isize) as i32
 }
 
-/// Decode the tail of an escape sequence. `next` yields the next byte, or None
-/// once nothing more arrives — a bare Esc, which clears filtering.
-fn escape_key(mut next: impl FnMut() -> Option<u8>) -> Key {
-    let Some(a) = next() else {
-        return Key::AllStates;
-    };
-    // CSI (ESC [ A) normally, SS3 (ESC O A) in application-cursor mode
-    match (a, next()) {
-        (b'[' | b'O', Some(b'A')) => Key::Up,
-        (b'[' | b'O', Some(b'B')) => Key::Down,
-        _ => Key::Other,
-    }
-}
-
 /// The release this engine belongs to. install-bin.sh installs the binary that
 /// matches the checkout's Cargo.toml, so this is also the plugin's version.
 fn current_tag() -> String {
@@ -491,6 +586,12 @@ fn current_tag() -> String {
 }
 
 fn app_title() -> String {
+    // The isolated renderer fixture child needs identical title geometry in
+    // debug/release builds. Production builds have no test override.
+    #[cfg(test)]
+    if std::env::var_os("AGENMUX_THEME_TEST_CHILD").is_some() {
+        return "agenmux dev (2000-01-01 00:00)".into();
+    }
     if cfg!(debug_assertions) {
         format!(
             "agenmux dev ({})",
@@ -698,6 +799,10 @@ struct Daemon {
 
 pub struct Sidebar {
     tmux: Tmux,
+    settings: crate::app_config::LiveConfig,
+    palette: Palette, // immutable startup snapshot shared by popup and split
+    normal_keys: Keymap, // startup snapshot: keys never change while running
+    search_keys: Keymap,
     confs: Vec<AgentConf>,
     ident: IdentCache,
     subj: scan::SubjectCache,
@@ -738,6 +843,7 @@ fn new_sidebar(
     cache_file: PathBuf,
     rows_file: PathBuf,
     self_pane: String,
+    settings: crate::app_config::AppConfig,
 ) -> Sidebar {
     let confs = crate::conf::load_all(&plugin_dir);
     // read once: the check behind it runs at most daily, and switching version
@@ -745,6 +851,10 @@ fn new_sidebar(
     let update = update_available(&plugin_dir);
     let mut sb = Sidebar {
         tmux,
+        palette: Palette::resolve(&settings.theme),
+        normal_keys: settings.normal.clone(),
+        search_keys: settings.search.clone(),
+        settings: crate::app_config::LiveConfig::new(settings),
         confs,
         ident: IdentCache::new(),
         subj: scan::SubjectCache::new(),
@@ -786,6 +896,20 @@ fn new_sidebar(
 }
 
 pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
+    // Catch termination during startup validation too; no terminal or tmux
+    // mutation happens until configuration has passed validation.
+    unsafe {
+        libc::signal(libc::SIGWINCH, on_winch as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
+    }
+    let settings = match crate::app_config::current(None) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("agenmux: {e}");
+            return e.exit_code();
+        }
+    };
     let self_pane = std::env::var("TMUX_PANE").unwrap_or_default();
     let pin = crate::compat_env("AGENMUX_PIN", "AGENTS_MON_PIN").filter(|p| !p.is_empty());
     let rows_file = std::env::temp_dir().join(format!(
@@ -793,10 +917,9 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         self_pane.trim_start_matches('%')
     ));
 
-    unsafe {
-        libc::signal(libc::SIGWINCH, on_winch as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
+    if QUIT.load(Ordering::Relaxed) {
+        cleanup(&rows_file, &pin);
+        return 0;
     }
     let _raw = RawMode::enable();
     print!("{E}[?25l{E}[2J");
@@ -809,7 +932,7 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
             return 0;
         }
     };
-    let mut sb = new_sidebar(tmux, plugin_dir, cache_file, rows_file, self_pane);
+    let mut sb = new_sidebar(tmux, plugin_dir, cache_file, rows_file, self_pane, settings);
     sb.pin = pin;
     // tty mode is the popup: while it is visible it owns input.
     sb.plugin_selected = true;
@@ -823,6 +946,13 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
 /// reads keys from a FIFO, and sizes itself from the preserved panes. Exits
 /// (with full teardown) when the last pane disappears.
 pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
+    let settings = match crate::app_config::current(None) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("agenmux: {e}");
+            return e.exit_code();
+        }
+    };
     unsafe {
         libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
@@ -843,7 +973,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     }
     let tmux = match Tmux::connect() {
         Ok(t) => t,
-        Err(_) => return 0,
+        Err(_) => return 1,
     };
     // "" not TMUX_PANE: toggle.sh launches the daemon from the pane the user
     // pressed the key in, and adopting that pane would hide its agent
@@ -853,6 +983,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         cache_file,
         tmp.join("agenmux-rows"),
         String::new(),
+        settings,
     );
     // `display-message '#{client_name}'` can briefly be empty when a busy
     // server already has a focused terminal client. Match the control client
@@ -873,18 +1004,20 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
             });
         if let Some(client) = client {
             let quoted = client.replace('\'', "\\'");
-            let _ = sb
-                .tmux
-                .run(&format!("set-option -g @agenmux-control-client '{quoted}'"));
+            if sb.tmux.run(&format!("set-option -g @agenmux-control-client '{quoted}'")).is_err() {
+                return 1;
+            }
             control_client = client;
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     let quoted_tmp = tmp.to_string_lossy().replace('\'', "\\'");
-    let _ = sb.tmux.run(&format!(
+    if control_client.is_empty() || sb.tmux.run(&format!(
         "set-option -g @agenmux-runtime-dir '{quoted_tmp}'"
-    ));
+    )).is_err() {
+        return 1;
+    }
     sb.daemon = Some(Daemon {
         keys_path,
         keys_fd,
@@ -910,6 +1043,16 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         std::thread::sleep(Duration::from_millis(50));
     }
     sb.render(true);
+    if std::env::var_os("AGENMUX_STARTUP_ACK").is_some() {
+        use std::io::Write;
+        if sb.daemon.as_ref().is_none_or(|d| d.client.is_empty() || !d.seen_mirror)
+            || std::io::stdout().write_all(b"R").is_err()
+            || std::io::stdout().flush().is_err()
+        {
+            sb.quiet_exit();
+            return 1;
+        }
+    }
     if event_loop(&mut sb) {
         sb.quiet_exit();
     } else {
@@ -979,10 +1122,22 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             }
         }
         if key_ready {
-            let key = if sb.search_focused && sb.daemon.is_none() {
-                read_search_key(key_fd)
+            let mode = if sb.search_focused {
+                KeyMode::Search
             } else {
-                read_key(key_fd)
+                KeyMode::Normal
+            };
+            let keys = if sb.daemon.is_some() {
+                protocol_keys(mode)
+            } else if sb.search_focused {
+                &sb.search_keys
+            } else {
+                &sb.normal_keys
+            };
+            let key = if sb.search_focused && sb.daemon.is_none() {
+                read_search_key(key_fd, keys)
+            } else {
+                read_key(key_fd, keys)
             };
             match sb.dispatch_key(key) {
                 DispatchResult::Continue => {}
@@ -1015,6 +1170,40 @@ impl Sidebar {
     /// Route every logical key through the active UI mode. Mouse selection is
     /// handled before mode dispatch; overlays clear their row map, so they cannot
     /// receive a stale click on the hidden list.
+    /// "<first chord> <what>", or nothing when the action is unbound.
+    fn hint(&self, keys: &Keymap, action: Action, what: &str) -> String {
+        keys[&action]
+            .first()
+            .map_or(String::new(), |c| format!("{} {what}", c.label(true)))
+    }
+    fn hints(&self, parts: &[(Action, &str)]) -> String {
+        join(&parts
+            .iter()
+            .map(|(action, what)| self.hint(&self.normal_keys, *action, what))
+            .collect::<Vec<_>>())
+    }
+    /// Every chord of an action, "/"-joined: "Enter/l".
+    fn labels(&self, keys: &Keymap, action: Action, short: bool) -> String {
+        keys[&action]
+            .iter()
+            .map(|c| c.label(short))
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+    /// Down/up pairs: "j/k" (first pair) or "j/k ↓/↑" (all pairs).
+    fn nav_label(&self, short: bool, all: bool) -> String {
+        let (down, up) = (&self.normal_keys[&Action::Down], &self.normal_keys[&Action::Up]);
+        let pairs = if all { down.len().max(up.len()) } else { 1 };
+        (0..pairs)
+            .filter_map(|i| match (down.get(i), up.get(i)) {
+                (Some(d), Some(u)) => Some(format!("{}/{}", d.label(short), u.label(short))),
+                (Some(c), None) | (None, Some(c)) => Some(c.label(short)),
+                (None, None) => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     fn dispatch_key(&mut self, key: Key) -> DispatchResult {
         if let Key::Sequence(key) = key {
             return match self
@@ -1089,7 +1278,24 @@ impl Sidebar {
         DispatchResult::Continue
     }
 
+    /// Adopt whatever a `config reload` just published. Keys the tmux tables
+    /// own were reinstalled by the reload itself; these are the parts this
+    /// process holds: how it paints, and which chords it names in its hints.
+    fn adopt_reload(&mut self, refreshed: crate::app_config::Refreshed) {
+        if !refreshed.reloaded {
+            return;
+        }
+        self.palette = Palette::resolve(&self.settings.settings.theme);
+        self.normal_keys = self.settings.settings.normal.clone();
+        self.search_keys = self.settings.settings.search.clone();
+        self.last_frame.clear(); // colors changed: no diff against old bytes
+    }
+
     fn scan_tick(&mut self) -> Result<(), TmuxError> {
+        if self.daemon.is_none() {
+            let refreshed = self.settings.refresh(&mut self.tmux);
+            self.adopt_reload(refreshed);
+        }
         let t0 = Instant::now();
         let scanned = scan::scan(
             &mut self.tmux,
@@ -1129,7 +1335,7 @@ impl Sidebar {
         let update = self.tracker.update(scanned, &focus.focused_panes);
         self.rows = update.rows;
         for event in &update.events {
-            let _ = crate::notifications::deliver(&mut self.tmux, event);
+            let _ = crate::notifications::deliver(self.settings.settings.notifications, event);
         }
         self.rebuild_visible(false);
         // single cursor: focus landing on a visible agent pane snaps selection
@@ -1370,23 +1576,24 @@ impl Sidebar {
 
     fn dot(&self, state: &str) -> String {
         let on = (self.tick / 2).is_multiple_of(2);
+        let fg = self.palette.state_fg(state).fg("");
         match state {
             "blocked" => {
                 if on {
-                    format!("{E}[31m⣿{E}[0m")
+                    format!("{fg}⣿{E}[0m")
                 } else {
                     " ".into()
                 }
             }
-            "working" => format!("{E}[33m{}{E}[0m", SPIN[(self.tick % 8) as usize]),
+            "working" => format!("{fg}{}{E}[0m", SPIN[(self.tick % 8) as usize]),
             "done" => {
                 if on {
-                    format!("{E}[32m⣿{E}[0m")
+                    format!("{fg}⣿{E}[0m")
                 } else {
                     " ".into()
                 }
             }
-            _ => format!("{E}[32m⣿{E}[0m"),
+            _ => format!("{fg}⣿{E}[0m"),
         }
     }
 
@@ -1418,6 +1625,9 @@ impl Sidebar {
         // same barrier as active_pane: reading zero panes off a desynced
         // pipe used to tear the whole mirror set down
         let _ = self.tmux.sync();
+        let refreshed = self.settings.refresh(&mut self.tmux);
+        self.adopt_reload(refreshed);
+        let width_changed = refreshed.width_changed;
         let out = self
             .tmux
             .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}\t#{window_id}\t#{pane_width}\t#{pane_height}\t#{window_width} #{window_height}\t#{window_panes}\t#{window_active}\t#{session_id}'")
@@ -1459,12 +1669,16 @@ impl Sidebar {
             return !suicide(d.seen_mirror, d.started.elapsed(), d.empty_ticks);
         }
         self.daemon.as_mut().unwrap().empty_ticks = 0;
-        let wopt: usize = self
-            .tmux
-            .run("show-option -gqv @agenmux-width")
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(30);
+        let wopt = self.settings.settings.sidebar_width as usize;
+        if width_changed {
+            for m in &mut ms {
+                let width = wopt.min(m.win_size.0.saturating_sub(2).max(1));
+                if command_status(&["resize-pane", "-t", &m.pane, "-x", &width.to_string()]).is_ok()
+                {
+                    m.w = width;
+                }
+            }
+        }
         // One sidebar per window. mirror-add.sh claims atomically now, but servers
         // that ran the old racy version still carry duplicates. Keep the first —
         // a -hbf split takes index 0, so that's the newest and the one actually at
@@ -1518,16 +1732,23 @@ impl Sidebar {
             let d = self.daemon.as_ref().unwrap();
             ms.iter()
                 .find(|m| {
-                    m.active
-                        && m.w != wopt
+                    !width_changed
+                        && m.active
+                        && m.w != wopt.min(m.win_size.0.saturating_sub(2).max(1))
                         && d.win_sizes.get(&m.win) == Some(&(m.win_size, m.panes))
                 })
                 .map(|m| (m.pane.clone(), m.w))
         };
         if let Some((src_pane, width)) = drag {
-            let _ = self
-                .tmux
-                .run(&format!("set-option -g @agenmux-width {width}"));
+            if (1..=10000).contains(&width)
+                && self
+                    .tmux
+                    .run(&format!("set-option -g @agenmux-width {width}"))
+                    .is_ok()
+            {
+                self.settings.settings.sidebar_width = width as u16;
+                self.settings.settings.popup_width = width as u16;
+            }
             // resize the OTHER sidebars via forked tmux (hook run-shell
             // echoes on the control pipe would desync it); the dragged pane
             // stays untouched so nothing ever fights the user's drag
@@ -1615,8 +1836,31 @@ impl Sidebar {
     /// Frame and click-row sink: stdout in tty mode; direct writes to visible
     /// empty panes in daemon mode.
     fn emit(&mut self, frame: String, rows: &str, force: bool) {
+        let (cols, height) = self
+            .daemon
+            .as_ref()
+            .map(|d| d.size)
+            .unwrap_or_else(term_size);
+        let cap = if cols == 0 { 0 } else { height.saturating_sub(1) };
+        let frame = clip_frame(&frame, cols, cap);
+        let rows: String = rows
+            .lines()
+            .take(cap.saturating_sub(1))
+            .map(|r| format!("{r}\n"))
+            .collect();
+        // Restore the normal foreground after glyph/attribute resets, including
+        // inside filled rows. Inherited dark foreground adds no bytes.
+        let fg = self.palette.text_fg.fg("");
+        let frame = if fg.is_empty() {
+            frame
+        } else {
+            format!(
+                "{fg}{}",
+                frame.replace(&format!("{E}[0m"), &format!("{E}[0m{fg}"))
+            )
+        };
         // Rows map must match what the click helper sees under each rendered row.
-        let _ = std::fs::write(&self.rows_file, rows);
+        let _ = std::fs::write(&self.rows_file, &rows);
         let changed = force || frame != self.last_frame;
         match &mut self.daemon {
             None => {
@@ -1647,15 +1891,19 @@ impl Sidebar {
         };
         let cap = trows.saturating_sub(1); // last row's newline would scroll
 
+        let muted = self.palette.muted_fg.fg("2");
+        let header_fg = self.palette.header_fg.fg("");
+        let header_bg = self.palette.header_bg.bg();
+        let accent = self.palette.accent_fg.fg("1");
         // Update notice rides the header. Nonempty contextual/update hints add
         // one row; vis records it so mouse coordinates stay exact.
         let (notice, notice_len, update_hint) = match &self.update {
             Some(t) => {
                 let plain = format!(" ↑{}", t.trim_start_matches('v'));
                 (
-                    format!(" {E}[2m↑{}{E}[0m", t.trim_start_matches('v')),
+                    format!(" {muted}↑{}{E}[0m", t.trim_start_matches('v')),
                     plain.chars().count(),
-                    "u update · / search".to_string(),
+                    self.hints(&[(Action::Versions, "update"), (Action::Search, "search")]),
                 )
             }
             None => (String::new(), 0, String::new()),
@@ -1682,32 +1930,53 @@ impl Sidebar {
             .take(cols.saturating_sub(filter_len + notice_len))
             .collect();
         let title_len = title.chars().count();
+        let nav = self.nav_label(true, false);
         let hint = if self.search_focused {
-            "↵ nav · ^u clear · esc clear"
+            join(&[
+                self.hint(&self.search_keys, Action::Accept, "nav"),
+                self.hint(&self.search_keys, Action::Clear, "clear"),
+                self.hint(&self.search_keys, Action::Cancel, "clear"),
+            ])
         } else if self.state_filter.is_some() {
-            "f status · j/k · esc clear"
+            join(&[
+                self.hint(&self.normal_keys, Action::Filter, "status"),
+                nav,
+                self.hint(&self.normal_keys, Action::Reset, "clear"),
+            ])
         } else if !self.query.trim().is_empty() {
-            "j/k · ↵ open · esc clear"
-        } else if !update_hint.is_empty() {
-            &update_hint
+            join(&[
+                nav,
+                self.hint(&self.normal_keys, Action::Jump, "open"),
+                self.hint(&self.normal_keys, Action::Reset, "clear"),
+            ])
         } else {
-            ""
+            update_hint
         };
         let hint: String = hint.chars().take(cols).collect();
         let has_hint = !hint.is_empty();
         let space = cap.saturating_sub(1 + usize::from(has_hint));
         let (hdr, hdr_pad) = if self.plugin_selected {
             let used = title_len + filter.chars().count() + notice_len;
-            (BAR_BG, " ".repeat(cols.saturating_sub(used)))
+            (header_bg.as_str(), " ".repeat(cols.saturating_sub(used)))
         } else {
             ("", String::new())
         };
+        // Preserve historical header bytes regardless of unrelated role overrides.
+        // Only non-default header styles need restoration after the notice reset.
+        let default_header = Palette::default();
+        let notice = if self.palette.header_fg == default_header.header_fg
+            && self.palette.header_bg == default_header.header_bg
+        {
+            notice
+        } else {
+            notice.replace(&format!("{E}[0m"), &format!("{E}[0m{hdr}{header_fg}"))
+        };
         let mut frame = format!(
-            "{E}[H{hdr}{E}[1m{title}{E}[22m{E}[2m{filter}{E}[22m{notice}{hdr_pad}{E}[0m{E}[K\n"
+            "{E}[H{hdr}{header_fg}{E}[1m{title}{E}[22m{muted}{filter}{E}[22m{notice}{hdr_pad}{E}[0m{E}[K\n"
         );
         let mut vis = String::new();
         if has_hint {
-            frame.push_str(&format!("{E}[2m{hint}{E}[0m{E}[K\n"));
+            frame.push_str(&format!("{muted}{hint}{E}[0m{E}[K\n"));
             vis.push_str("-\n");
         }
         let cursor = cursor_row(
@@ -1718,9 +1987,13 @@ impl Sidebar {
             &self.active,
         );
         if self.rows.is_empty() {
-            frame.push_str(&format!("{E}[2mno agents{E}[0m{E}[K\n"));
+            frame.push_str(&format!("{muted}no agents{E}[0m{E}[K\n"));
         } else if self.visible.is_empty() {
-            frame.push_str(&format!("{E}[2mno matches · Esc shows all{E}[0m{E}[K\n"));
+            let reset = self.normal_keys[&Action::Reset]
+                .first()
+                .map(|c| format!(" · {} shows all", c.label(false)))
+                .unwrap_or_default();
+            frame.push_str(&format!("{muted}no matches{reset}{E}[0m{E}[K\n"));
         } else {
             // build filtered agents plus their session context, then window it
             let mut lines: Vec<(String, &str, usize, bool)> = Vec::new();
@@ -1735,7 +2008,7 @@ impl Sidebar {
                     // below it and breaks the click→rows-file mapping
                     let sess_clipped: String = sess.chars().take(cols).collect();
                     lines.push((
-                        format!("{E}[1;34m{sess_clipped}{E}[0m{E}[K\n"),
+                        format!("{accent}{sess_clipped}{E}[0m{E}[K\n"),
                         "-",
                         0,
                         false,
@@ -1745,7 +2018,7 @@ impl Sidebar {
                     sel_top = lines.len();
                 }
                 let selected = Some(n) == cursor;
-                let mark = cursor_mark(selected, self.plugin_selected, &r.state);
+                let mark = cursor_mark(&self.palette, selected, self.plugin_selected, &r.state);
                 let dot = self.dot(&r.state);
                 let win = r.loc.split_once(':').map(|x| x.1).unwrap_or("");
                 let mut rest = format!("{win} {}", r.cwd);
@@ -1755,24 +2028,24 @@ impl Sidebar {
                     rest = rest.chars().take(avail).collect();
                 }
                 let row_bg = if selected {
-                    state_bg(&r.state, self.plugin_selected)
+                    self.palette.state_bg(&r.state, self.plugin_selected)
                 } else {
-                    ""
+                    String::new()
                 };
-                let row = format!(" {mark}{dot} {E}[1m{}{E}[0m {E}[2m{rest}{E}[0m", r.agent);
+                let row = format!(" {mark}{dot} {E}[1m{}{E}[0m {muted}{rest}{E}[0m", r.agent);
                 let width = 6 + agent_len + rest.chars().count();
                 lines.push((
-                    format!("{}{E}[K\n", bar(&row, row_bg, cols, width)),
+                    format!("{}{E}[K\n", bar(&row, &row_bg, cols, width)),
                     &r.pane,
                     n + 1,
                     selected,
                 ));
                 if !r.title.is_empty() {
                     let t: String = r.title.chars().take(cols.saturating_sub(5)).collect();
-                    let line = format!("     {E}[2m{t}{E}[0m");
+                    let line = format!("     {muted}{t}{E}[0m");
                     let width = 5 + t.chars().count();
                     lines.push((
-                        format!("{}{E}[K\n", bar(&line, row_bg, cols, width)),
+                        format!("{}{E}[K\n", bar(&line, &row_bg, cols, width)),
                         &r.pane,
                         n + 1,
                         selected,
@@ -1860,54 +2133,101 @@ impl Sidebar {
 
     fn render_overlay(&mut self, force: bool) {
         let title = app_title();
+        let header = self.palette.header_fg.fg("1");
+        let muted = self.palette.muted_fg.fg("2");
+        let idle = self.palette.idle_fg.fg("");
+        let working = self.palette.working_fg.fg("");
+        let blocked = self.palette.blocked_fg.fg("");
+        let done = self.palette.done_fg.fg("");
+        let error = self.palette.error_fg.fg("2");
         let text = match &mut self.overlay {
             Some(Overlay::Help) => {
-                let quit_keys = " q        close sidebar";
+                let accept = self.search_keys[&Action::Accept]
+                    .first()
+                    .map_or(String::new(), |c| format!("; {} enables {}", c.label(false), self.nav_label(false, false)));
+                let mut keys = vec![(self.nav_label(false, true), "move selection".to_string())];
+                for (action, what) in [
+                    (Action::Jump, "jump to agent".to_string()),
+                    (Action::Search, format!("live search{accept}")),
+                    (Action::Filter, "select next state filter".into()),
+                    (Action::Reset, "clear filters / show all".into()),
+                    (Action::Versions, "update / switch version".into()),
+                    (Action::Close, "close sidebar".into()),
+                    (Action::Help, "this help".into()),
+                ] {
+                    keys.push((self.labels(&self.normal_keys, action, false), what));
+                }
+                let keys: String = keys
+                    .iter()
+                    .filter(|(label, _)| !label.is_empty())
+                    .map(|(label, what)| format!("{label:<8} {what}\n"))
+                    .collect();
                 format!(
-                    "{E}[2J{E}[H{E}[1m{title} — help{E}[0m\n\n\
+                    "{E}[2J{E}[H{header}{title} — help{E}[0m\n\n\
 {E}[1mstatus{E}[0m\n\
- {E}[32m⣿{E}[0m  idle\n\
- {E}[33m⠹{E}[0m  working (spinner)\n\
- {E}[31m⣿{E}[0m  blocked, waiting for input (blinks)\n\
- {E}[32m⣿{E}[0m  done, not viewed yet (blinks)\n\n\
-{E}[1mkeys{E}[0m\n\
- j/k ↑/↓  move selection\n\
- gg/G     first/last visible agent\n\
- Enter/l  jump to agent\n\
- /        live search; Enter enables j/k\n\
- f        select next state filter\n\
- Esc      clear filters / show all\n\
- u        update / switch version\n\
-{quit_keys}\n\
- ?        this help\n\n\
-{E}[2mpress any key to return{E}[0m"
+ {idle}⣿{E}[0m  idle\n\
+ {working}⠹{E}[0m  working (spinner)\n\
+ {blocked}⣿{E}[0m  blocked, waiting for input (blinks)\n\
+ {done}⣿{E}[0m  done, not viewed yet (blinks)\n\n\
+{E}[1mkeys{E}[0m\n{keys}\n\
+{muted}press any key to return{E}[0m"
                 )
             }
             Some(Overlay::Versions { sel, chosen }) => {
                 let cur = current_tag();
                 let tags = known_tags(&self.plugin_dir);
                 *sel = picker_sel(&tags, &cur, chosen.as_deref(), *sel);
-                let mut text = format!("{E}[2J{E}[H{E}[1m{title} — versions{E}[0m\n\n");
+                let mut text = format!("{E}[2J{E}[H{header}{title} — versions{E}[0m\n\n");
                 if tags.is_empty() {
                     text.push_str(&format!(
-                        " {E}[2mno releases found — checking…{E}[0m\n\n\
-                         {E}[2mq back{E}[0m"
+                        " {error}no releases found — checking…{E}[0m\n\n\
+                         {muted}{}{E}[0m",
+                        self.hint(&self.normal_keys, Action::Close, "back")
                     ));
                 } else {
                     for (i, t) in tags.iter().enumerate() {
-                        let mark = cursor_mark(i == *sel, true, "idle");
+                        let mark = cursor_mark(&self.palette, i == *sel, true, "idle");
                         let tail = if *t == cur {
-                            format!(" {E}[2m(current){E}[0m")
+                            format!(" {muted}(current){E}[0m")
                         } else {
                             String::new()
                         };
                         text.push_str(&format!("{mark}{t}{tail}\n"));
                     }
-                    text.push_str(&format!("\n{E}[2m↵ switch · j/k ↑/↓ · q back{E}[0m"));
+                    let hint = join(&[
+                        self.hint(&self.normal_keys, Action::Jump, "switch"),
+                        self.nav_label(true, true),
+                        self.hint(&self.normal_keys, Action::Close, "back"),
+                    ]);
+                    text.push_str(&format!("\n{muted}{hint}{E}[0m"));
                 }
                 text
             }
             None => return,
+        };
+        let text = if self.palette.header_bg == Palette::default().header_bg {
+            text
+        } else {
+            let (header, body) = text.split_once('\n').unwrap_or((&text, ""));
+            // Clear with the canvas background, not the header fill.
+            let header = header
+                .strip_prefix(&format!("{E}[2J{E}[H"))
+                .unwrap_or(header);
+            let cols = self
+                .daemon
+                .as_ref()
+                .map(|d| d.size.0)
+                .unwrap_or_else(|| term_size().0);
+            let width = title.chars().count()
+                + if matches!(self.overlay, Some(Overlay::Help)) {
+                    7
+                } else {
+                    11
+                };
+            format!(
+                "{E}[2J{E}[H{}\n{body}",
+                bar(header, &self.palette.header_bg.bg(), cols, width)
+            )
         };
         self.emit(text, "", force);
     }
@@ -1996,6 +2316,465 @@ impl Sidebar {
 mod tests {
     use super::*;
 
+    // Run the real renderer with a control connection isolated from every user
+    // server. The child process owns TMUX, avoiding parallel-test env races.
+    #[test]
+    fn semantic_renderer_frames() {
+        use std::process::Command;
+        if std::env::var_os("AGENMUX_THEME_TEST_CHILD").is_none() {
+            let socket =
+                std::env::temp_dir().join(format!("agenmux-theme-{}.sock", std::process::id()));
+            let socket = socket.to_str().unwrap();
+            assert!(Command::new("tmux")
+                .args([
+                    "-S",
+                    socket,
+                    "-f",
+                    "/dev/null",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    "theme",
+                    "/bin/bash",
+                    "-c",
+                    "sleep 120"
+                ])
+                .status()
+                .unwrap()
+                .success());
+            let result = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "sidebar::tests::semantic_renderer_frames",
+                    "--nocapture",
+                ])
+                .env("AGENMUX_THEME_TEST_CHILD", "1")
+                .env("TMUX", format!("{socket},0,0"))
+                .output()
+                .unwrap();
+            let _ = Command::new("tmux")
+                .args(["-S", socket, "kill-server"])
+                .status();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("agenmux-theme-frames-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("target/release")).unwrap();
+        std::fs::write(dir.join("target/release/.agenmux-tags"), "v9.9.9\nv0.0.1\n").unwrap();
+        let settings =
+            crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+        let mut sb = new_sidebar(
+            Tmux::connect().unwrap_or_else(|e| panic!("{e}")),
+            dir.clone(),
+            dir.join("cache"),
+            dir.join("rows"),
+            String::new(),
+            settings,
+        );
+        sb.daemon = Some(Daemon {
+            keys_path: dir.join("keys"),
+            keys_fd: -1,
+            writers: PaneWriters::new(),
+            size: (80, 40),
+            seen_mirror: false,
+            empty_ticks: 0,
+            client: String::new(),
+            started: Instant::now(),
+            win_sizes: HashMap::new(),
+            attached: String::new(),
+        });
+        sb.rows = ["blocked", "working", "idle", "done"]
+            .iter()
+            .enumerate()
+            .map(|(i, state)| {
+                let mut r = row(&format!("%{}", i + 1));
+                r.state = (*state).into();
+                r.title = "Synthetic task".into();
+                r
+            })
+            .collect();
+        sb.visible = (0..4).collect();
+        let mut frames = String::new();
+        for focused in [false, true] {
+            sb.plugin_selected = focused;
+            for selected in 1..=4 {
+                sb.sel = selected;
+                sb.active = format!("%{selected}");
+                for tick in [0, 2, 7] {
+                    sb.tick = tick;
+                    sb.render(true);
+                    frames.push_str(&format!(
+                        "focus={focused} selected={selected} tick={tick}\n{}\nrows={}\n",
+                        sb.last_frame
+                            .replace(&app_title(), "agenmux TEST")
+                            .escape_default(),
+                        std::fs::read_to_string(&sb.rows_file)
+                            .unwrap()
+                            .escape_default()
+                    ));
+                }
+            }
+        }
+        for mode in 0..7 {
+            sb.query.clear();
+            sb.state_filter = None;
+            sb.search_focused = false;
+            sb.overlay = None;
+            sb.update = None;
+            match mode {
+                0 => {
+                    sb.query = "repo".into();
+                    sb.search_focused = true;
+                }
+                1 => sb.state_filter = Some(StateFilter::Working),
+                2 => sb.update = Some("v9.9.9".into()),
+                3 => sb.overlay = Some(Overlay::Help),
+                4 => {
+                    sb.overlay = Some(Overlay::Versions {
+                        sel: 0,
+                        chosen: None,
+                    })
+                }
+                5 => sb.query = "absent".into(),
+                _ => sb.rows.clear(),
+            }
+            sb.rebuild_visible(false);
+            sb.render(true);
+            frames.push_str(&format!(
+                "mode={mode}\n{}\nrows={}\n",
+                sb.last_frame
+                    .replace(&app_title(), "agenmux TEST")
+                    .escape_default(),
+                std::fs::read_to_string(&sb.rows_file)
+                    .unwrap()
+                    .escape_default()
+            ));
+        }
+        if std::env::var_os("AGENMUX_UPDATE_FIXTURES").is_some() {
+            std::fs::write("tests/fixtures/sidebar/dark.frames", &frames).unwrap();
+        }
+        assert_eq!(
+            frames,
+            std::fs::read_to_string("tests/fixtures/sidebar/dark.frames").unwrap()
+        );
+        themed_frames(&mut sb);
+        custom_key_hints(&mut sb);
+        if let Some(output) = std::env::var_os("AGENMUX_THEME_VISUAL_DIR") {
+            visual_frames(&mut sb, &PathBuf::from(output));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // Optional, synthetic-only private tmux screen inspection. The production
+    // binary's activation/snapshot path is separately exercised in plugin.rs.
+    fn visual_frames(sb: &mut Sidebar, output: &std::path::Path) {
+        use std::process::Command;
+        std::fs::create_dir_all(output).unwrap();
+        for base in ["light", "terminal"] {
+            let file = crate::app_config::parse(&format!("[theme]\nbase='{base}'")).unwrap();
+            sb.palette = Palette::resolve(file.theme.as_ref().unwrap());
+            sb.rows = ["blocked", "working", "idle", "done"]
+                .iter()
+                .enumerate()
+                .map(|(i, state)| {
+                    let mut r = row(&format!("%{}", i + 1));
+                    r.state = (*state).into();
+                    r.title = "Synthetic task".into();
+                    r
+                })
+                .collect();
+            sb.visible = (0..4).collect();
+            sb.sel = 2;
+            sb.active = "%2".into();
+            sb.plugin_selected = true;
+            sb.tick = 0;
+            sb.query.clear();
+            sb.state_filter = None;
+            sb.search_focused = false;
+            sb.update = Some("v9.9.9".into());
+            sb.overlay = None;
+            sb.daemon.as_mut().unwrap().size = (80, 40);
+            sb.render(true);
+            let result = Command::new("tmux")
+                .args([
+                    "new-window",
+                    "-d",
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    "-n",
+                    "theme-preview",
+                    "/bin/bash",
+                    "-c",
+                    "printf '%s' \"$1\"; exec sleep 30",
+                    "_",
+                    &sb.last_frame,
+                ])
+                .output()
+                .unwrap();
+            assert!(result.status.success());
+            let pane = String::from_utf8(result.stdout).unwrap();
+            let pane = pane.trim();
+            let mut captured = String::new();
+            for _ in 0..50 {
+                let result = Command::new("tmux")
+                    .args(["capture-pane", "-p", "-e", "-t", pane])
+                    .output()
+                    .unwrap();
+                assert!(result.status.success());
+                captured = String::from_utf8(result.stdout).unwrap();
+                if captured.contains("Synthetic task") {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(captured.contains("Synthetic task"));
+            if base == "light" {
+                assert!(captured.contains("38;2;32;32;32"));
+                assert!(captured.contains("48;2;255;240;204"));
+            } else {
+                assert!(!captured.contains("48;2;") && !captured.contains("48;5;"));
+            }
+            // Normalize the build timestamp before retaining scratch evidence.
+            std::fs::write(
+                output.join(format!("{base}.capture")),
+                captured.replace(&app_title(), "agenmux TEST"),
+            )
+            .unwrap();
+            assert!(Command::new("tmux")
+                .args(["kill-pane", "-t", pane])
+                .status()
+                .unwrap()
+                .success());
+        }
+    }
+
+    /// Split mode installs the user's chords into the tmux tables, so its help
+    /// and hints must name those. The daemon decodes its FIFO with the protocol
+    /// defaults, which must not leak back into what the sidebar advertises.
+    fn custom_key_hints(sb: &mut Sidebar) {
+        assert!(sb.daemon.is_some(), "this covers the daemon render path");
+        let file = crate::app_config::parse(
+            "[keys.normal]\ndown = ['n']\nup = ['e']\njump = ['Tab']\nclose = []\n",
+        )
+        .unwrap();
+        let settings = crate::app_config::resolve(&file, &Default::default()).unwrap();
+        sb.normal_keys = settings.normal.clone();
+        sb.search_keys = settings.search.clone();
+        sb.rows = vec![row("%1")];
+        sb.rows[0].state = "working".into();
+        sb.visible = vec![0];
+        sb.sel = 1;
+        sb.query.clear();
+        sb.search_focused = false;
+
+        sb.overlay = Some(Overlay::Help);
+        sb.render(true);
+        let help = sb.last_frame.clone();
+        assert!(help.contains("n/e"), "{help}");
+        assert!(help.contains("Tab"), "{help}");
+        assert!(!help.contains("j/k"), "{help}");
+        // An unbound action leaves no row behind rather than a stale default.
+        assert!(!help.contains("close sidebar"), "{help}");
+
+        sb.overlay = None;
+        sb.state_filter = Some(StateFilter::Working);
+        sb.rebuild_visible(false);
+        sb.render(true);
+        let footer = sb.last_frame.clone();
+        assert!(footer.contains("n/e"), "{footer}");
+        assert!(!footer.contains("j/k"), "{footer}");
+        sb.state_filter = None;
+    }
+
+    fn themed_frames(sb: &mut Sidebar) {
+        let tags = format!("v9.9.9\n{}\n", current_tag());
+        std::fs::write(sb.plugin_dir.join("target/release/.agenmux-tags"), &tags).unwrap();
+        let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap();
+        let plain = |frame: &str| {
+            ansi.replace_all(frame, "")
+                .lines()
+                .map(str::trim_end)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let sources = [
+            "[theme]\nbase = 'light'",
+            "[theme]\nbase = 'terminal'",
+            "[theme.colors]\nworking_fg = '#123456'\nworking_bg = 123\nworking_bg_unfocused = 'default'",
+            "[theme.colors]\nworking_bg = 123",
+            "[theme.colors]\nheader_fg = 17",
+            "[theme.colors]\nheader_bg = 123",
+            "[theme]\nbase = 'light'\n[theme.colors]\nheader_fg = 17\nheader_bg = 'default'\ntext_fg = '#123456'\nmuted_fg = 99\naccent_fg = 100\nerror_fg = 101\nblocked_fg = 102\nblocked_bg = 103\nblocked_bg_unfocused = 104\nworking_fg = 105\nworking_bg = 106\nworking_bg_unfocused = 107\nidle_fg = 108\nidle_bg = 109\nidle_bg_unfocused = 110\ndone_fg = 111\ndone_bg = 112\ndone_bg_unfocused = 113",
+        ];
+        for source in sources {
+            let file = crate::app_config::parse(source).unwrap();
+            let p = Palette::resolve(file.theme.as_ref().unwrap());
+            for focused in [false, true] {
+                for state in ["blocked", "working", "idle", "done"] {
+                    for tick in [0, 2, 7] {
+                        sb.rows = vec![row("%1")];
+                        sb.rows[0].state = state.into();
+                        sb.rows[0].title = "Synthetic task".into();
+                        sb.visible = vec![0];
+                        sb.sel = 1;
+                        sb.active = "%1".into();
+                        sb.plugin_selected = focused;
+                        sb.tick = tick;
+                        for mode in 0..10 {
+                            sb.query.clear();
+                            sb.state_filter = None;
+                            sb.search_focused = false;
+                            sb.overlay = None;
+                            sb.update = None;
+                            match mode {
+                                1 => {
+                                    sb.query = "repo".into();
+                                    sb.search_focused = true;
+                                }
+                                2 => sb.query = "repo".into(),
+                                3 => sb.state_filter = Some(match state {
+                                    "blocked" => StateFilter::Blocked,
+                                    "working" => StateFilter::Working,
+                                    "done" => StateFilter::Done,
+                                    _ => StateFilter::Idle,
+                                }),
+                                4 => sb.update = Some("v9.9.9".into()),
+                                5 => sb.overlay = Some(Overlay::Help),
+                                6 => {
+                                    sb.overlay = Some(Overlay::Versions {
+                                        sel: 0,
+                                        chosen: None,
+                                    })
+                                }
+                                7 => sb.query = "absent".into(),
+                                8 => sb.rows.clear(),
+                                9 => {
+                                    sb.overlay = Some(Overlay::Versions {
+                                        sel: 0,
+                                        chosen: None,
+                                    });
+                                    std::fs::remove_file(
+                                        sb.plugin_dir.join("target/release/.agenmux-tags"),
+                                    )
+                                    .unwrap();
+                                }
+                                _ => {}
+                            }
+                            sb.rebuild_visible(false);
+                            sb.palette = Palette::default();
+                            sb.render(true);
+                            let old_frame = sb.last_frame.clone();
+                            let old_text = plain(&old_frame);
+                            let old_map = std::fs::read_to_string(&sb.rows_file).unwrap();
+                            sb.palette = p.clone();
+                            sb.render(true);
+                            assert_eq!(
+                                plain(&sb.last_frame),
+                                old_text,
+                                "{source} {state} mode={mode}"
+                            );
+                            assert_eq!(std::fs::read_to_string(&sb.rows_file).unwrap(), old_map);
+                            if mode == 0 {
+                                if source == sources[2] && state != "working" {
+                                    assert_eq!(sb.last_frame, old_frame, "working overrides leave other rows byte-identical");
+                                }
+                                assert!(sb.last_frame.contains(&p.state_bg(state, focused)));
+                                assert!(sb.last_frame.contains(
+                                    &p.state_fg(state).fg(if focused { "1" } else { "" })
+                                ));
+                                assert!(sb.last_frame.contains(&p.accent_fg.fg("1")));
+                                let restore = format!(
+                                    "{E}[0m{}{}",
+                                    p.text_fg.fg(""),
+                                    p.state_bg(state, focused)
+                                );
+                                assert!(
+                                    sb.last_frame.contains(&restore),
+                                    "row restores foreground and fill"
+                                );
+                            }
+                            if [1, 2, 3, 4, 5, 6, 7, 8, 9].contains(&mode) {
+                                assert!(sb.last_frame.contains(&p.muted_fg.fg("2")));
+                            }
+                            if mode == 5 || mode == 6 {
+                                assert!(sb.last_frame.contains(&p.header_fg.fg("1")));
+                                if p.header_bg != Palette::default().header_bg {
+                                    assert!(sb.last_frame.starts_with(&format!("{}{E}[2J{E}[H{}", p.text_fg.fg(""), p.header_bg.bg())));
+                                }
+                            }
+                            if mode == 6 { assert!(sb.last_frame.contains("(current)")); }
+                            if mode == 9 {
+                                assert!(sb.last_frame.contains(&p.error_fg.fg("2")));
+                                std::fs::write(
+                                    sb.plugin_dir.join("target/release/.agenmux-tags"),
+                                    &tags,
+                                )
+                                .unwrap();
+                            }
+                            if mode == 4
+                                && (source == sources[2] || source == sources[3])
+                            {
+                                assert_eq!(
+                                    sb.last_frame.lines().next(),
+                                    old_frame.lines().next(),
+                                    "working-only overrides leave update-header bytes unchanged: {source} focused={focused}"
+                                );
+                            }
+                            if mode == 4
+                                && (p.header_fg != Palette::default().header_fg
+                                    || p.header_bg != Palette::default().header_bg)
+                            {
+                                let hdr = if focused {
+                                    p.header_bg.bg()
+                                } else {
+                                    String::new()
+                                };
+                                assert!(sb.last_frame.lines().next().unwrap().contains(&format!(
+                                    "{E}[0m{}{hdr}{}",
+                                    p.text_fg.fg(""),
+                                    p.header_fg.fg("")
+                                )));
+                            }
+                            // Same engine/output bytes for tty popup and daemon at
+                            // matching dimensions. Only the sink and row file differ.
+                            {
+                                let d = sb.daemon.take().unwrap();
+                                let size = term_size();
+                                sb.render(true);
+                                let popup = sb.last_frame.clone();
+                                sb.daemon = Some(d);
+                                sb.daemon.as_mut().unwrap().size = size;
+                                sb.render(true);
+                                assert_eq!(sb.last_frame, popup);
+                                sb.daemon.as_mut().unwrap().size = (80, 40);
+                            }
+                            for size in [(0, 0), (0, 4), (1, 1), (1, 3), (5, 6), (12, 4)] {
+                                sb.daemon.as_mut().unwrap().size = size;
+                                sb.render(true);
+                                let text = plain(&sb.last_frame);
+                                assert!(text.lines().all(|l| l.chars().count() <= size.0));
+                                assert!(text.lines().count() <= size.1.saturating_sub(1));
+                                assert!(
+                                    std::fs::read_to_string(&sb.rows_file)
+                                        .unwrap()
+                                        .lines()
+                                        .count()
+                                        <= size.1.saturating_sub(2)
+                                );
+                            }
+                            sb.daemon.as_mut().unwrap().size = (80, 40);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn row(pane: &str) -> PaneRow {
         PaneRow {
             pane: pane.into(),
@@ -2059,15 +2838,21 @@ mod tests {
     #[test]
     fn cursor_uses_state_hue_and_focus_bold() {
         assert_eq!(
-            cursor_mark(true, true, "idle"),
+            cursor_mark(&Palette::default(), true, true, "idle"),
             format!("{E}[1;32m❯{E}[0m ")
         );
-        assert_eq!(cursor_mark(true, false, "idle"), format!("{E}[32m❯{E}[0m "));
         assert_eq!(
-            cursor_mark(true, true, "working"),
+            cursor_mark(&Palette::default(), true, false, "idle"),
+            format!("{E}[32m❯{E}[0m ")
+        );
+        assert_eq!(
+            cursor_mark(&Palette::default(), true, true, "working"),
             format!("{E}[1;33m❯{E}[0m ")
         );
-        assert_eq!(cursor_mark(false, true, "blocked"), "  ");
+        assert_eq!(
+            cursor_mark(&Palette::default(), false, true, "blocked"),
+            "  "
+        );
     }
 
     #[test]
@@ -2088,30 +2873,59 @@ mod tests {
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         let feed = |b: &[u8]| unsafe { libc::write(fds[1], b.as_ptr().cast(), b.len()) };
 
+        let keys = default_keys(crate::app_config::KeyMode::Normal);
         for seq in [b"\x1b[A".as_slice(), b"\x1bOA".as_slice()] {
             feed(seq);
-            assert!(matches!(read_key(fds[0]), Key::Up), "up: {seq:?}");
+            assert!(matches!(read_key(fds[0], &keys), Key::Up), "up: {seq:?}");
         }
         for seq in [b"\x1b[B".as_slice(), b"\x1bOB".as_slice()] {
             feed(seq);
-            assert!(matches!(read_key(fds[0]), Key::Down), "down: {seq:?}");
+            assert!(matches!(read_key(fds[0], &keys), Key::Down), "down: {seq:?}");
         }
         feed(b"j");
-        assert!(matches!(read_key(fds[0]), Key::Down));
+        assert!(matches!(read_key(fds[0], &keys), Key::Down));
         feed(b"g");
-        assert!(matches!(read_key(fds[0]), Key::Sequence('g')));
+        assert!(matches!(read_key(fds[0], &keys), Key::Sequence('g')));
         feed(&[0x06, b'g']);
-        assert!(matches!(read_key(fds[0]), Key::Sequence('g')));
+        assert!(matches!(read_key(fds[0], &keys), Key::Sequence('g')));
         feed(b"G");
-        assert!(matches!(read_key(fds[0]), Key::Last));
+        assert!(matches!(read_key(fds[0], &keys), Key::Last));
         feed(&[0x01]);
-        assert!(matches!(read_key(fds[0]), Key::WheelUp));
+        assert!(matches!(read_key(fds[0], &keys), Key::WheelUp));
         feed(&[0x02]);
-        assert!(matches!(read_key(fds[0]), Key::WheelDown));
+        assert!(matches!(read_key(fds[0], &keys), Key::WheelDown));
         feed(b"u");
-        assert!(matches!(read_key(fds[0]), Key::Versions));
+        assert!(matches!(read_key(fds[0], &keys), Key::Versions));
         feed(&[0, b'q']);
-        assert!(matches!(read_key(fds[0]), Key::Text(s) if s == "q"));
+        assert!(matches!(read_key(fds[0], &keys), Key::Text(s) if s == "q"));
+        feed(&[0x03]);
+        assert!(matches!(read_key(fds[0], &keys), Key::Quit));
+
+        // Remapped popup input: the user's chords decide, defaults are gone,
+        // and search text/emergency keys stay outside the keymap.
+        let file = crate::app_config::parse(
+            "[keys.normal]\ndown = ['n', 'PageDown']\nup = ['p']\nclose = []\n[keys.search]\ncancel = ['C-g']\n",
+        )
+        .unwrap();
+        let custom = crate::app_config::resolve(&file, &Default::default()).unwrap();
+        feed(b"n");
+        assert!(matches!(read_key(fds[0], &custom.normal), Key::Down));
+        feed(b"\x1b[6~");
+        assert!(matches!(read_key(fds[0], &custom.normal), Key::Down));
+        feed(b"j");
+        assert!(matches!(read_key(fds[0], &custom.normal), Key::Other));
+        feed(b"q");
+        assert!(matches!(read_key(fds[0], &custom.normal), Key::Other));
+        feed(&[0x04]);
+        assert!(matches!(read_key(fds[0], &custom.normal), Key::Quit));
+        feed(&[0x07]);
+        assert!(matches!(read_search_key(fds[0], &custom.search), Key::AllStates));
+        feed(&[0x03]);
+        assert!(matches!(read_search_key(fds[0], &custom.search), Key::Quit));
+        feed("é".as_bytes());
+        assert!(matches!(read_search_key(fds[0], &custom.search), Key::Text(s) if s == "é"));
+        feed(b"n");
+        assert!(matches!(read_search_key(fds[0], &custom.search), Key::Text(s) if s == "n"));
         unsafe {
             libc::close(fds[0]);
             libc::close(fds[1]);
@@ -2167,22 +2981,36 @@ mod tests {
     /// non-blocking FIFO one byte at a time, so a tail byte that has not
     /// arrived yet must be waited for, not read blind. Reading the pair
     /// without polling hit EAGAIN and dropped every other arrow.
-    fn decode(tail: &[Option<u8>]) -> Key {
+    fn decode(tail: &[Option<u8>]) -> Option<KeyChord> {
         let mut it = tail.iter().copied();
-        escape_key(move || it.next().flatten())
+        escape_chord(move || it.next().flatten())
+    }
+    fn default_keys(mode: crate::app_config::KeyMode) -> Keymap {
+        crate::app_config::resolved_keys(mode, None).unwrap()
     }
 
     #[test]
     fn escape_tails_decode_in_both_cursor_key_modes() {
-        assert!(matches!(decode(&[Some(b'['), Some(b'A')]), Key::Up));
-        assert!(matches!(decode(&[Some(b'['), Some(b'B')]), Key::Down));
-        assert!(matches!(decode(&[Some(b'O'), Some(b'A')]), Key::Up)); // SS3
-        assert!(matches!(decode(&[Some(b'O'), Some(b'B')]), Key::Down));
-        assert!(matches!(decode(&[]), Key::AllStates)); // bare Esc resets
-        assert!(matches!(decode(&[None]), Key::AllStates));
+        assert_eq!(decode(&[Some(b'['), Some(b'A')]), Some(KeyChord::Up));
+        assert_eq!(decode(&[Some(b'['), Some(b'B')]), Some(KeyChord::Down));
+        assert_eq!(decode(&[Some(b'O'), Some(b'A')]), Some(KeyChord::Up)); // SS3
+        assert_eq!(decode(&[Some(b'O'), Some(b'B')]), Some(KeyChord::Down));
+        assert_eq!(decode(&[Some(b'['), Some(b'H')]), Some(KeyChord::Home));
+        assert_eq!(decode(&[Some(b'['), Some(b'1'), Some(b'~')]), Some(KeyChord::Home));
+        assert_eq!(decode(&[Some(b'['), Some(b'5'), Some(b'~')]), Some(KeyChord::PageUp));
+        assert_eq!(decode(&[]), Some(KeyChord::Escape)); // bare Esc
+        assert_eq!(decode(&[None]), Some(KeyChord::Escape));
         // a tail that never completes is not a close — Esc already decided that
-        assert!(matches!(decode(&[Some(b'['), None]), Key::Other));
-        assert!(matches!(decode(&[Some(b'['), Some(b'Z')]), Key::Other));
+        assert_eq!(decode(&[Some(b'['), None]), None);
+        assert_eq!(decode(&[Some(b'['), Some(b'Z')]), None);
+        assert_eq!(decode(&[Some(b'['), Some(b'5'), None]), None);
+        // bare Esc is the normal reset and the search cancel by default
+        let normal = default_keys(crate::app_config::KeyMode::Normal);
+        let search = default_keys(crate::app_config::KeyMode::Search);
+        assert!(matches!(action_key(&normal, KeyChord::Escape), Some(Key::AllStates)));
+        assert!(matches!(action_key(&search, KeyChord::Escape), Some(Key::AllStates)));
+        assert!(matches!(action_key(&search, KeyChord::Control(21)), Some(Key::ClearSearch)));
+        assert!(action_key(&normal, KeyChord::Control(21)).is_none());
     }
 
     #[test]
@@ -2240,7 +3068,7 @@ mod tests {
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) };
         unsafe { libc::write(fds[1], [0x1bu8].as_ptr().cast(), 1) };
-        assert!(matches!(read_key(fds[0]), Key::AllStates));
+        assert!(matches!(read_key(fds[0], &default_keys(crate::app_config::KeyMode::Normal)), Key::AllStates));
         unsafe {
             libc::close(fds[0]);
             libc::close(fds[1]);
@@ -2276,14 +3104,21 @@ mod tests {
     #[test]
     fn bar_reasserts_the_background_after_every_reset() {
         let line = format!("{E}[1mcodex{E}[0m {E}[2mwork{E}[0m");
-        let painted = bar(&line, BAR_BG, 14, 10);
+        let bg = Palette::default().header_bg.bg();
+        let painted = bar(&line, &bg, 14, 10);
         assert!(!painted
             .split(&format!("{E}[0m"))
-            .any(|part| { !part.is_empty() && !part.starts_with(BAR_BG) }));
+            .any(|part| { !part.is_empty() && !part.starts_with(&bg) }));
         assert!(painted.ends_with(&format!("    {E}[0m")));
         assert_eq!(bar(&line, "", 14, 10), line);
-        assert_eq!(state_bg("blocked", true), "\x1b[48;2;42;16;16m");
-        assert_eq!(state_bg("blocked", false), "\x1b[48;2;32;12;12m");
+        assert_eq!(
+            Palette::default().state_bg("blocked", true),
+            "\x1b[48;2;42;16;16m"
+        );
+        assert_eq!(
+            Palette::default().state_bg("blocked", false),
+            "\x1b[48;2;32;12;12m"
+        );
     }
 
     #[test]

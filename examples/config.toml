@@ -1,0 +1,41 @@
+# agenmux application configuration.
+# Copy to $XDG_CONFIG_HOME/agenmux/config.toml (or ~/.config/agenmux/config.toml).
+# Every key is optional; omitted keys keep the built-in defaults. Values shown
+# are the defaults unless a comment says otherwise. Validate with
+# `agenmux config check`, then run `agenmux setup` and reopen the sidebar.
+version = 1
+
+[display]
+mode = "split"        # split | popup
+sidebar_width = 30    # cells, 1..=10000
+popup_width = 40
+popup_height = "auto" # "auto" or cells
+
+[behavior]
+notifications = true
+# hide_windows = "agents*" # filter the prefix+w picker; omitted leaves it alone
+
+[theme]
+base = "dark"         # dark | light | terminal
+[theme.colors]        # semantic overrides: "default", 0..255, or "#RRGGBB"
+# working_bg = "#fff0cc"
+# header_bg = "default"
+
+[keys.normal]         # each list replaces the default list; [] unbinds
+down = ["j", "Down"]
+up = ["k", "Up"]
+jump = ["Enter", "l"]
+search = ["/"]
+filter = ["f"]
+reset = ["Escape"]
+help = ["?"]
+versions = ["u"]
+close = ["q", "Q"]
+
+[keys.search]         # printable keys are query text and cannot be bound
+up = ["Up", "C-p"]
+down = ["Down", "C-n"]
+accept = ["Enter"]
+cancel = ["Escape", "C-c"]
+backspace = ["BSpace"]
+clear = ["C-u"]

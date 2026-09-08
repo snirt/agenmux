@@ -36,8 +36,9 @@ fetch_pkg() {
 
   local package archive base expected actual
   base="$REPO/releases/download/$tag"
+  # No trap here: bash EXIT traps are global, so installing one would silently
+  # drop whatever the caller registered. Callers own cleanup of $tmp.
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/agenmux.XXXXXX")" || return 1
-  trap 'rm -rf "$tmp"' EXIT
   curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || return 1
 
   for package in "agenmux-$platform" "tmux-agents-mon-$platform"; do
@@ -60,7 +61,10 @@ fetch_pkg() {
   return 1
 }
 
+discard_tmp() { [ -z "${tmp:-}" ] || rm -rf "$tmp"; }
+
 if [ "${1:-}" = "fetch" ]; then
+  trap discard_tmp EXIT
   fetch_pkg "${2:-}" "${3:-}" || exit 1
   exit 0
 fi
@@ -172,24 +176,39 @@ if [ "${1:-}" = "refresh" ]; then
 fi
 
 # macOS: keep the Agenmux.app notification helper installed and current, on
-# every engine install path below. Quiet: notification permission is requested
-# by the first real notification, not here.
+# every engine install path below. Notification permission is requested by the
+# first real notification, not here. Eligibility errors are safe and visible;
+# this EXIT hook never changes the primary engine installation result.
 sync_app() {
-  local notifier="$DIR/target/release/agenmux-notifier" notifications
+  local notifier="$DIR/target/release/agenmux-notifier" eligibility=0
   local app="$HOME/Applications/Agenmux.app/Contents"
   [ "$(uname -s)" = Darwin ] && [ -x "$notifier" ] || return 0
+  # Never ask an old/unverified executable to interpret new config. The Rust
+  # command returns 0 enabled, 3 disabled, 1 I/O or 2 invalid; all nonzero
+  # statuses skip helper installation, but only disabled is silently skipped.
+  # Re-read rather than trust the pre-install snapshot, but keep the same
+  # fallback the freshness check uses: an upgraded machine that is already
+  # current never writes the canonical marker.
+  local state_now="$STATE"
+  [ -f "$state_now" ] || state_now="$LEGACY_STATE"
+  [ "$(sed -n '1p' "$state_now" 2>/dev/null)" = "$want" ] &&
+    [ "$(sed -n '2p' "$state_now" 2>/dev/null)" = "$current_rev" ] &&
+    binary_matches "$BIN" "$want" || return 0
+  AGENMUX_DIR="$DIR" "$BIN" internal notification-eligible >/dev/null 2>&1 || eligibility=$?
+  case "$eligibility" in
+    0) ;;
+    3) return 0 ;;
+    *)
+      # Never relay command output: it may contain private config or controls.
+      printf 'agenmux: notification helper sync skipped (eligibility status %s); run agenmux config check --effective; if unsupported, rebuild the engine and retry installation.\n' "$eligibility" >&2
+      return 0
+      ;;
+  esac
   cmp -s "$notifier" "$app/MacOS/agenmux-notifier" 2>/dev/null &&
     cmp -s "$DIR/site/favicon.icns" "$app/Resources/Agenmux.icns" 2>/dev/null && return 0
-  notifications="$(tmux show-option -gqv @agenmux-notifications 2>/dev/null)"
-  if [ -z "$(tmux show-options -gq @agenmux-notifications 2>/dev/null)" ]; then
-    notifications="$(tmux show-option -gqv @agents-mon-notifications 2>/dev/null)"
-  fi
-  case "$notifications" in
-  off | false | 0) return 0 ;;
-  esac
   bash "$DIR/scripts/install-app.sh" --quiet >/dev/null 2>&1 || true
 }
-trap sync_app EXIT
+trap 'discard_tmp; sync_app' EXIT
 
 # "what is released" and "does the engine need installing" are separate
 # questions with separate throttles. Gating the first behind the second left an

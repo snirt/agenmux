@@ -2,6 +2,10 @@
 # Shell/integration checks; Rust fixture detection is owned by tests/parity.rs.
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0
+# Never let a developer's application file affect isolated harness fixtures.
+config_home="$(mktemp -d)"
+export XDG_CONFIG_HOME="$config_home"
+trap 'rm -rf "$config_home"' EXIT
 
 BIN="${AGENMUX_BIN:-$DIR/target/release/agenmux}"
 if [ ! -x "$BIN" ]; then
@@ -49,7 +53,7 @@ if [ "$fail" -eq 0 ]; then
   mk_release() {
     local t="$1" d="$tmp/downloads/$1"
     mkdir -p "$d/$package/target/release"
-    printf '#!/usr/bin/env bash\nif [ "${1:-}" = --version ]; then printf "agenmux %s\\n"; else printf "%s\\n"; fi\n' "${t#v}" "$t" \
+    printf '#!/usr/bin/env bash\ncase "$*" in\n--version) printf "agenmux %s\\n" ;;\n"internal notification-eligible") printf "%%s\\n" "${ELIGIBILITY_NOISE:-}" >&2; exit "${ELIGIBILITY_STATUS:-0}" ;;\n"") printf "%s\\n" ;;\n*) exit 2 ;;\nesac\n' "${t#v}" "$t" \
       >"$d/$package/target/release/agenmux"
     printf '#!/usr/bin/env bash\nexit 0\n' \
       >"$d/$package/target/release/agenmux-notifier"
@@ -165,6 +169,49 @@ SH
     fail=1
   fi
 
+  # Eligibility is exclusively Rust-owned. Only disabled is a quiet skip.
+  # Exercise both successful and failed engine installation through the EXIT
+  # hook, with a verified engine still present after a failed refresh.
+  printf '#!/usr/bin/env bash\nprintf "engine build failed\\n" >&2\nexit 1\n' >"$tmp/bin/cargo"
+  chmod +x "$tmp/bin/cargo"
+  eligibility_noise=$'synthetic-private-value\n\033[31muntrusted diagnostic'
+  for engine_status in 0 1; do
+    if [ "$engine_status" -eq 1 ]; then
+      mv "$tmp/downloads/v0.1.0/$package.tar.gz" "$tmp/saved-release.tar.gz"
+      touch -t 200001010000 "$tmp/plugin/target/release/.agenmux-version"
+    fi
+    for eligibility in 0 3 1 2 64 127 255; do
+      rm -rf "$tmp/home/Applications/Agenmux.app"
+      : >"$tmp/expected-diagnostic"
+      if [ "$engine_status" -eq 1 ]; then
+        printf 'engine build failed\n' >>"$tmp/expected-diagnostic"
+      fi
+      case "$eligibility" in
+        0 | 3) ;;
+        *) printf 'agenmux: notification helper sync skipped (eligibility status %s); run agenmux config check --effective; if unsupported, rebuild the engine and retry installation.\n' "$eligibility" >>"$tmp/expected-diagnostic" ;;
+      esac
+      eligibility_rc=0
+      ELIGIBILITY_STATUS="$eligibility" ELIGIBILITY_NOISE="$eligibility_noise" \
+        install_bin v0.1.1 >"$tmp/eligibility-out" 2>"$tmp/eligibility-err" || eligibility_rc=$?
+      helper_ok=0
+      if [ "$eligibility" -eq 0 ]; then
+        [ -x "$tmp/home/Applications/Agenmux.app/Contents/MacOS/agenmux-notifier" ] && helper_ok=1
+      else
+        [ ! -e "$tmp/home/Applications/Agenmux.app" ] && helper_ok=1
+      fi
+      if [ "$eligibility_rc" -eq "$engine_status" ] && [ "$helper_ok" -eq 1 ] &&
+        [ ! -s "$tmp/eligibility-out" ] &&
+        cmp -s "$tmp/expected-diagnostic" "$tmp/eligibility-err"; then
+        echo "ok   notification-eligibility-$eligibility-engine-$engine_status-safe-diagnostic-and-sync"
+      else
+        echo "FAIL notification-eligibility-$eligibility-engine-$engine_status-safe-diagnostic-and-sync"
+        fail=1
+      fi
+    done
+  done
+  mv "$tmp/saved-release.tar.gz" "$tmp/downloads/v0.1.0/$package.tar.gz"
+  touch "$tmp/plugin/target/release/.agenmux-version"
+
   # 5. a checksum mismatch cannot install or execute the staged engine.
   mk_release v0.2.0
   bad="$tmp/downloads/v0.2.0"
@@ -210,8 +257,10 @@ TOML
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--version") {
         println!("agenmux 9.9.9");
-    } else {
+    } else if std::env::args().len() == 1 {
         println!("cargo-fallback");
+    } else {
+        std::process::exit(2);
     }
 }
 RS
@@ -272,34 +321,41 @@ if [ "$fail" -eq 0 ]; then
 fi
 if [ "$fail" -eq 0 ]; then
   tmp="$(mktemp -d)"
-  mkdir -p "$tmp/bin"
+  mkdir -p "$tmp/bin" "$tmp/plugin/scripts" "$tmp/plugin/target/release"
+  cp "$DIR/agenmux.tmux" "$tmp/plugin/agenmux.tmux"
+  cp "$DIR/scripts/version.sh" "$tmp/plugin/scripts/version.sh"
+  cp "$DIR/Cargo.toml" "$tmp/plugin/Cargo.toml"
+  version="$(bash "$DIR/scripts/version.sh")"
   cat >"$tmp/bin/tmux" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
-case "$1 $2 $3" in
-  "show-options -gq @agenmux-key") printf '@agenmux-key E\n' ;;
-  "show-options -gq @agenmux-popup-key") printf '@agenmux-popup-key e\n' ;;
-  "show-option -gqv @agenmux-key") printf 'E\n' ;;
-  "show-option -gqv @agenmux-popup-key") printf 'e\n' ;;
-esac
 exit 0
 SH
   chmod +x "$tmp/bin/tmux"
-  # Only the key bindings are under test here. Left enabled, the eager
-  # background installer outlives this block, and the cleanup below removes the
-  # stub out from under it — its remaining tmux calls then resolve to the real
-  # binary with no server in $TMUX and land on the user's default server.
-  AGENMUX_INSTALL_REFRESH=1 TMUX_STUB_LOG="$tmp/tmux.log" \
-    PATH="$tmp/bin:$PATH" bash "$DIR/agenmux.tmux"
-  if grep -q "^bind-key E run-shell -b " "$tmp/tmux.log" &&
-    grep -q "^bind-key e run-shell -b " "$tmp/tmux.log" &&
-    grep -Fq '/agenmux.tmux' "$tmp/tmux.log" &&
-    grep -Fq ' activate ' "$tmp/tmux.log" &&
-    ! grep -Fq '/scripts/toggle.sh' "$tmp/tmux.log"; then
-    echo "ok   entrypoint-binds-native-toggle-bootstrap-in-background"
+  TMUX_STUB_LOG="$tmp/tmux.log" PATH="$tmp/bin:$PATH" AGENMUX_INSTALL_REFRESH=1 bash "$tmp/plugin/agenmux.tmux"
+  if grep -Fq 'installation pending' "$tmp/tmux.log" && [ "$(grep -c '^bind-key -T prefix' "$tmp/tmux.log")" -eq 2 ] && ! grep -Eq '^(set-hook|.*@agenmux-prefix-owned)' "$tmp/tmux.log"; then
+    echo "ok   pending-engine-has-launchers-without-app-setup"
   else
-    echo "FAIL entrypoint-binds-native-toggle-bootstrap-in-background"
-    cat "$tmp/tmux.log"
+    echo "FAIL pending-engine-has-launchers-without-app-setup"
+    fail=1
+  fi
+  cat >"$tmp/plugin/target/release/agenmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+--version) printf 'agenmux $version\\n' ;;
+setup) printf 'setup\\n' >>"$tmp/engine.log"; exit "\${SETUP_STATUS:-0}" ;;
+*) exit 2 ;;
+esac
+SH
+  chmod +x "$tmp/plugin/target/release/agenmux"
+  printf 'v%s\n-\n' "$version" >"$tmp/plugin/target/release/.agenmux-version"
+  TMUX_STUB_LOG="$tmp/tmux.log" PATH="$tmp/bin:$PATH" AGENMUX_INSTALL_REFRESH=1 bash "$tmp/plugin/agenmux.tmux"
+  setup_rc=0
+  TMUX_STUB_LOG="$tmp/tmux.log" PATH="$tmp/bin:$PATH" AGENMUX_INSTALL_REFRESH=1 SETUP_STATUS=2 bash "$tmp/plugin/agenmux.tmux" || setup_rc=$?
+  if [ "$(grep -cx setup "$tmp/engine.log")" -eq 2 ] && [ "$setup_rc" -eq 2 ] && grep -Fq 'setup failed' "$tmp/tmux.log" && [ "$(grep -c '^bind-key -T prefix' "$tmp/tmux.log")" -eq 6 ] && ! grep -q '@agenmux-prefix-owned' "$tmp/tmux.log"; then
+    echo "ok   verified-engine-owns-setup-and-bootstrap-reports-failure"
+  else
+    echo "FAIL verified-engine-owns-setup-and-bootstrap-reports-failure"
     fail=1
   fi
   rm -rf "$tmp"
@@ -325,7 +381,11 @@ SH
 printf 'install\\n' >>"$tmp/runtime.log"
 cat >"$tmp/plugin/target/release/agenmux" <<'BIN'
 #!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then printf 'agenmux $version\\n'; else printf 'new %s\\n' "\$*" >>"$tmp/runtime.log"; fi
+case "\${1:-}" in
+--version) printf 'agenmux $version\\n' ;;
+setup|toggle) printf 'new %s\\n' "\$*" >>"$tmp/runtime.log" ;;
+*) exit 2 ;;
+esac
 BIN
 chmod +x "$tmp/plugin/target/release/agenmux"
 printf 'v$version\\n-\\n' >"$tmp/plugin/target/release/.agenmux-version"
@@ -437,6 +497,7 @@ if [ "$fail" -eq 0 ]; then
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
 case "$*" in
+  "show-options -g") printf '@agenmux-width 41\n@agenmux-height 19\n' ;;
   "show-option -gqv @agenmux-width") printf '41\n' ;;
   "show-option -gqv @agenmux-height") printf '19\n' ;;
   display-popup*) exit 0 ;;
@@ -481,11 +542,15 @@ if [ "$fail" -eq 0 ]; then
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
 case "$*" in
-  "show-option -gqv @agenmux-width"|"show-option -gqv @agenmux-height") ;;
+  "show-options -g") printf '@agenmux-width present\n' ;;
+  "show-option -gqv @agenmux-width")
+    count="$(grep -c '^display-popup' "$TMUX_STUB_LOG")"
+    case "$count" in 0) printf '41\n' ;; 1) printf '45\n' ;; *) printf 'invalid\n' ;; esac
+    ;;
   "list-clients -f "*) printf '20\tnewest-client\n' ;;
   display-popup*)
     count="$(grep -c '^display-popup' "$TMUX_STUB_LOG")"
-    [ "$count" -ne 1 ] || printf '%%42\n' >"$TMPDIR/agenmux-pin.jump"
+    [ "$count" -gt 2 ] || printf '%%42\n' >"$TMPDIR/agenmux-pin.jump"
     ;;
 esac
 exit 0
@@ -495,12 +560,14 @@ SH
     "$BIN" toggle popup popup-client
   popups="$(grep -c '^display-popup' "$tmp/tmux.log")"
   owner_popups="$(grep '^display-popup' "$tmp/tmux.log" | grep -Fc -- '-c popup-client')"
-  if [ "$popups" -eq 2 ] && [ "$owner_popups" -eq 2 ] &&
+  if [ "$popups" -eq 3 ] && [ "$owner_popups" -eq 3 ] &&
+    [ "$(grep '^display-popup' "$tmp/tmux.log" | grep -c -- ' -w 41 ')" -eq 1 ] &&
+    [ "$(grep '^display-popup' "$tmp/tmux.log" | grep -c -- ' -w 45 ')" -eq 2 ] &&
     grep -Fq 'switch-client -c popup-client -t %42' "$tmp/tmux.log" &&
     ! grep -Fq 'switch-client -c newest-client' "$tmp/tmux.log" &&
     grep -Fq 'select-window -t %42' "$tmp/tmux.log" &&
     grep -Fq 'select-pane -t %42' "$tmp/tmux.log"; then
-    echo "ok   popup-jump-keeps-owner"
+    echo "ok   popup-jump-keeps-owner-and-last-valid-live-width"
   else
     echo "FAIL popup-jump-keeps-owner"
     cat "$tmp/tmux.log"
