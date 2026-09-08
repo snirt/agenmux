@@ -390,18 +390,40 @@ if [ -n "$valid_row" ] && [ -n "$valid_target" ]; then
   tmux -S "$sock" select-pane -t "$work"
   env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
     "$BIN" click "$sidebar" "$valid_row" "$client"
-  for _ in $(seq 1 20); do
+  first_click_selects=0
+  for _ in $(seq 1 40); do
     valid_click_table="$(tmux -S "$sock" display-message -p -c "$client" \
       '#{client_key_table}')"
     valid_click_focus="$(tmux -S "$sock" display-message -p -c "$client" \
       '#{pane_id}')"
-    if [ "$valid_click_table" = root ] &&
-      [ "$valid_click_focus" = "$valid_target" ]; then
-      valid_click_works=1
+    selected_row="$(awk -v target="$valid_target" '$1 == target { print NR; exit }' \
+      "$tmp/agenmux-rows")"
+    cursor_row="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+      awk '/❯/ { print NR - 1; exit }')"
+    if [ "$valid_click_table" = agenmux ] &&
+      [ "$valid_click_focus" = "$sidebar" ] &&
+      [ -n "$selected_row" ] && [ "$cursor_row" = "$selected_row" ]; then
+      first_click_selects=1
       break
     fi
     sleep 0.05
   done
+  if [ "$first_click_selects" -eq 1 ]; then
+    env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
+      "$BIN" click "$sidebar" "$selected_row" "$client"
+    for _ in $(seq 1 20); do
+      valid_click_table="$(tmux -S "$sock" display-message -p -c "$client" \
+        '#{client_key_table}')"
+      valid_click_focus="$(tmux -S "$sock" display-message -p -c "$client" \
+        '#{pane_id}')"
+      if [ "$valid_click_table" = root ] &&
+        [ "$valid_click_focus" = "$valid_target" ]; then
+        valid_click_works=1
+        break
+      fi
+      sleep 0.05
+    done
+  fi
 fi
 
 # Restore the sidebar as the interaction target for the keyboard checks below.
@@ -535,32 +557,9 @@ for _ in $(seq 1 30); do
   sleep 0.1
 done
 
-# Preserved-pane mode: the pane has no stdin, so the handler must reach the
-# daemon through its key FIFO. Settle-jump off — cursor movement alone here.
-tmux -S "$sock" set-option -g @agenmux-wheel-jump off
-env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
-  "$BIN" wheel "$sidebar" down
-wheel_down="$third"
-for _ in $(seq 1 20); do
-  wheel_down="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
-    sed -n '/❯/p' | head -n 1)"
-  [ -n "$wheel_down" ] && [ "$wheel_down" != "$third" ] && break
-  sleep 0.1
-done
-env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
-  "$BIN" wheel "$sidebar" up
-wheel_up="$wheel_down"
-for _ in $(seq 1 20); do
-  wheel_up="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
-    sed -n '/❯/p' | head -n 1)"
-  [ "$wheel_up" = "$third" ] && break
-  sleep 0.1
-done
-
-# Rapid native wheel ticks overwrite one settle deadline. After the one jump,
-# returning to the sidebar must stay there—no older timer may fire later.
-# Leave one real client so the daemon's established newest-client jump policy
-# has one deterministic recipient.
+# Wheel input scrolls an overflowing viewport without moving selection or
+# opening an agent. Add temporary agent windows, then remove them before the
+# search assertions below.
 kill "$secondary_pid" 2>/dev/null || true
 wait "$secondary_pid" 2>/dev/null || true
 secondary_pid=''
@@ -570,54 +569,69 @@ for _ in $(seq 1 20); do
   [ "$real_clients" -eq 1 ] && break
   sleep 0.05
 done
-tmux -S "$sock" set-option -g @agenmux-wheel-jump 0.5
-wheel_client="$(tmux -S "$sock" list-clients \
-  -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' \
-  -F '#{client_activity} #{client_name}' | sort -n | tail -n 1 | cut -d' ' -f2-)"
-env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" "$BIN" wheel "$sidebar" down
-sleep 0.05
-env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" "$BIN" wheel "$sidebar" up
-sleep 0.05
-env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" "$BIN" wheel "$sidebar" down
-wheel_delay_target=''
+for i in $(seq 1 40); do
+  tmux -S "$sock" new-window -d -t navigation: -n "overflow-$i" "$tmp/codex"
+done
+for _ in $(seq 1 80); do
+  overflow_agents="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { print length(seen) }' \
+    "$tmp/agenmux-scan-cache")"
+  [ "$overflow_agents" -gt 32 ] && break
+  sleep 0.1
+done
+scrollbar_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+scrollbar_works=0
+if printf '%s\n' "$scrollbar_frame" | grep -Fq '▐'; then
+  scrollbar_works=1
+fi
 for _ in $(seq 1 20); do
-  custom_cursor="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+  wheel_up="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
-  if [ -n "$custom_cursor" ] && [ "$custom_cursor" != "$third" ]; then
-    cursor_row="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
-      awk '/❯/ { print NR; exit }')"
-    if [ -n "$cursor_row" ] && [ "$cursor_row" -gt 1 ]; then
-      map_row=$((cursor_row - 1)) # row map excludes the fixed header
-      wheel_delay_target="$(sed -n "${map_row}p" "$tmp/agenmux-rows" |
-        awk '{ print $1 }')"
-    fi
-  fi
-  case "$wheel_delay_target" in %*) break ;; esac
+  [ -n "$wheel_up" ] && break
   sleep 0.05
 done
-wheel_delay_jumped=0
-case "$wheel_delay_target" in
-%*)
-  for _ in $(seq 1 30); do
-    delay_focus="$(tmux -S "$sock" display-message -p -c "$wheel_client" '#{pane_id}')"
-    [ "$delay_focus" = "$wheel_delay_target" ] &&
-      {
-        wheel_delay_jumped=1
-        break
-      }
-    sleep 0.05
-  done
-  ;;
-esac
+wheel_selected="$wheel_up"
+wheel_top_before="$(sed -n '1p' "$tmp/agenmux-rows")"
+tmux -S "$sock" set-option -g @agenmux-wheel-jump 0.05
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
+  "$BIN" wheel "$sidebar" down
+wheel_top_after="$wheel_top_before"
+for _ in $(seq 1 20); do
+  wheel_top_after="$(sed -n '1p' "$tmp/agenmux-rows")"
+  [ "$wheel_top_after" != "$wheel_top_before" ] && break
+  sleep 0.05
+done
+sleep 0.15
+wheel_down="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+  sed -n '/❯/p' | head -n 1)"
+wheel_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
+  "$BIN" wheel "$sidebar" up
+for _ in $(seq 1 20); do
+  wheel_top_restored="$(sed -n '1p' "$tmp/agenmux-rows")"
+  wheel_up="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+    sed -n '/❯/p' | head -n 1)"
+  [ "$wheel_top_restored" = "$wheel_top_before" ] &&
+    [ "$wheel_up" = "$wheel_selected" ] && break
+  sleep 0.05
+done
 wheel_delay_works=0
-if [ "$wheel_delay_jumped" -eq 1 ]; then
-  tmux -S "$sock" switch-client -c "$wheel_client" -t "$sidebar"
-  tmux -S "$sock" switch-client -c "$wheel_client" -T agenmux
-  sleep 0.65
-  delay_focus="$(tmux -S "$sock" display-message -p -c "$wheel_client" '#{pane_id}')"
-  [ "$delay_focus" = "$sidebar" ] && wheel_delay_works=1
+if [ "$overflow_agents" -gt 32 ] &&
+  [ "$wheel_top_after" != "$wheel_top_before" ] &&
+  [ "$wheel_down" = "$wheel_selected" ] && [ "$wheel_focus" = "$sidebar" ] &&
+  [ "$wheel_top_restored" = "$wheel_top_before" ] &&
+  [ "$wheel_up" = "$wheel_selected" ]; then
+  wheel_delay_works=1
 fi
-tmux -S "$sock" set-option -g @agenmux-wheel-jump off
+tmux -S "$sock" set-option -gu @agenmux-wheel-jump
+tmux -S "$sock" list-windows -t navigation -F '#{window_id}	#{window_name}' |
+  awk -F '\t' '$2 ~ /^overflow-/ { print $1 }' |
+  while IFS= read -r window; do tmux -S "$sock" kill-window -t "$window"; done
+for _ in $(seq 1 80); do
+  remaining_agents="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { print length(seen) }' \
+    "$tmp/agenmux-rows")"
+  [ "$remaining_agents" -eq 2 ] && break
+  sleep 0.1
+done
 
 # Simulate leaving through an agent jump, then restoring the exact client's
 # processless-sidebar focus and navigation table.
@@ -908,8 +922,10 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   [ "$table_after_j" = agenmux ] &&
   printf '%s' "$control_flags" | grep -Fq control-mode &&
   [ "$second" != "$picker_return" ] && [ "$third" = "$picker_return" ] &&
-  [ "$wheel_down" != "$third" ] && [ "$wheel_up" = "$third" ] &&
+  [ "$wheel_down" = "$wheel_selected" ] &&
+  [ "$wheel_up" = "$wheel_selected" ] &&
   [ "$wheel_delay_works" -eq 1 ] &&
+  [ "$scrollbar_works" -eq 1 ] &&
   [ "$return_table" = agenmux ] && [ "$return_focus" = agenmux ] &&
   [ "$fourth" != "$third" ] && [ "$search_works" -eq 1 ] &&
   [ "$search_accept_works" -eq 1 ] && [ "$search_jk_works" -eq 1 ] &&
@@ -924,6 +940,6 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   [ "$notification_stale_noop" -eq 1 ]; then
   echo "ok   attached-client-jk-navigation"
 else
-  echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/delay=$wheel_delay_works/target=$wheel_delay_target] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$blocked_filter_works/$blocked_targets/$blocked_frame/$blocked_hint/$working_filter_works/$working_targets/$working_frame/$idle_filter_works/$idle_targets/$idle_frame/$all_filter_works/$all_targets/$all_frame] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
+  echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$blocked_filter_works/$blocked_targets/$blocked_frame/$blocked_hint/$working_filter_works/$working_targets/$working_frame/$idle_filter_works/$idle_targets/$idle_frame/$all_filter_works/$all_targets/$all_frame] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
   exit 1
 fi
