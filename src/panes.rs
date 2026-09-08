@@ -1,21 +1,83 @@
 use crate::tmux::{self, TmuxError};
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub const IS_SIDEBAR: &str = "#{||:#{==:#{pane_title},agenmux},#{==:#{@agenmux},1}}";
 
-struct TmuxLock(String);
-
-impl TmuxLock {
-    fn acquire(name: String) -> Option<Self> {
-        tmux::command_status(&["wait-for", "-L", &name])
-            .ok()
-            .map(|()| Self(name))
-    }
+// tmux wait-for locks survive owner death and can hand off to cancelled
+// waiters. The kernel instead releases this lock on close/SIGKILL. File uses
+// CLOEXEC (including tmux children); do not unlink it, even after unlocking:
+// a waiter may already have opened the inode.
+struct PaneLock {
+    _file: File,
 }
 
-impl Drop for TmuxLock {
-    fn drop(&mut self) {
-        let _ = tmux::command_status(&["wait-for", "-U", &self.0]);
+impl PaneLock {
+    fn acquire(server: &str, started: &str, window: &str) -> io::Result<Self> {
+        let uid = unsafe { libc::geteuid() };
+        // /tmp is system-owned, unlike caller-specific TMPDIR/HOME/runtime
+        // options. All callers of one server must open the same inode.
+        let directory = format!("/tmp/agenmux-pane-locks-{uid}");
+        match std::fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        let dir = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(directory)?;
+        let metadata = dir.metadata()?;
+        if metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
+            return Err(io::Error::other("unsafe pane lock directory"));
+        }
+        let name = std::ffi::CString::new(format!("{server}-{started}-{window}.lock"))?;
+        // Open relative to the validated directory descriptor, not its path.
+        // NONBLOCK prevents a substituted FIFO from blocking before validation.
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != uid
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.nlink() != 1
+        {
+            return Err(io::Error::other("unsafe pane lock file"));
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Self { _file: file });
+            }
+            let error = io::Error::last_os_error();
+            if !matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) {
+                return Err(error);
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "pane lock acquisition timed out",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
@@ -110,27 +172,62 @@ fn kill_ghosts(win: &str, width: &str) {
 }
 
 pub fn pane_add(window: Option<&str>) -> i32 {
+    match crate::app_config::current(None) {
+        Ok(config) => pane_add_config(window, &config),
+        Err(e) => {
+            eprintln!("agenmux: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+pub fn pane_add_config(window: Option<&str>, config: &crate::app_config::AppConfig) -> i32 {
+    pane_add_record(window, config, &mut Vec::new())
+}
+
+/// Record actual split-window results while holding the pane-add lock. Startup
+/// rollback must not infer ownership from panes created by concurrent callers.
+pub(crate) fn pane_add_record(
+    window: Option<&str>,
+    config: &crate::app_config::AppConfig,
+    created: &mut Vec<(String, String)>,
+) -> i32 {
     if !tmux::command(&["show-option", "-gqv", "@agenmux-on"])
         .is_ok_and(|value| value.trim() == "1")
     {
         return 0;
     }
-    let win = match window {
-        Some(win) => win.to_string(),
-        None => match tmux::command(&["display-message", "-p", "#{window_id}"]) {
-            Ok(win) => win.trim().to_string(),
-            Err(_) => return 0,
-        },
+    // Resolve aliases before locking. Read identity from the contacted server,
+    // not TMUX's possibly stale PID or a caller-selected temporary directory.
+    let mut args = vec!["display-message", "-p"];
+    if let Some(window) = window {
+        args.extend(["-t", window]);
+    }
+    args.push("#{pid}\t#{start_time}\t#{window_id}");
+    let identity = tmux::command(&args).unwrap_or_default();
+    let fields = identity.trim().split('\t').collect::<Vec<_>>();
+    let numeric = |value: &str| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit());
+    let [server, started, win] = fields.as_slice() else {
+        eprintln!("agenmux: cannot resolve pane lock identity");
+        return 1;
     };
+    if !numeric(server) || !numeric(started) || !win.strip_prefix('@').is_some_and(numeric) {
+        eprintln!("agenmux: invalid pane lock identity");
+        return 1;
+    }
+    let win = win.to_string();
     if tmux::command(&["display-message", "-p", "-t", &win, "#{session_name}"])
         .is_ok_and(|session| session.trim() == "pi")
     {
         return 0;
     }
 
-    let lock_name = format!("agenmux-add-{}", win.trim_start_matches('@'));
-    let Some(_lock) = TmuxLock::acquire(lock_name) else {
-        return 0;
+    let _lock = match PaneLock::acquire(server, started, &win) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("agenmux: cannot acquire pane-add lock for {win}: {error}");
+            return 1;
+        }
     };
     if !tmux::command(&["show-option", "-gqv", "@agenmux-on"])
         .is_ok_and(|value| value.trim() == "1")
@@ -151,11 +248,7 @@ pub fn pane_add(window: Option<&str>) -> i32 {
         return 0;
     }
 
-    let width = tmux::command(&["show-option", "-gqv", "@agenmux-width"])
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "30".to_string());
+    let width = bounded_width(config.sidebar_width, &win).to_string();
     kill_ghosts(&win, &width);
     let layout = match tmux::command(&["display-message", "-p", "-t", &win, "#{window_layout}"]) {
         Ok(layout) => layout.trim_end().to_string(),
@@ -195,6 +288,7 @@ pub fn pane_add(window: Option<&str>) -> i32 {
         let _ = tmux::command_status(&["set-option", "-gu", &layout_option]);
         return 1;
     }
+    created.push((pane.clone(), win));
     let _ = tmux::command_status(&["set-option", "-p", "-t", &pane, "allow-rename", "off"]);
     let _ = tmux::command_status(&["set-option", "-p", "-t", &pane, "@agenmux", "1"]);
     let _ = tmux::command_status(&["select-pane", "-t", &pane, "-T", "agenmux"]);
@@ -202,17 +296,28 @@ pub fn pane_add(window: Option<&str>) -> i32 {
 }
 
 pub fn pane_pin() -> i32 {
-    let width = tmux::command(&["show-option", "-gqv", "@agenmux-width"])
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "30".to_string());
+    let config = match crate::app_config::current(None) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("agenmux: {e}");
+            return e.exit_code();
+        }
+    };
     let panes = tmux::lines(&["list-panes", "-a", "-f", IS_SIDEBAR, "-F", "#{pane_id}"])
         .unwrap_or_default();
     for pane in panes {
+        let width = bounded_width(config.sidebar_width, &pane).to_string();
         let _ = tmux::command_status(&["resize-pane", "-t", &pane, "-x", &width]);
     }
     0
+}
+
+fn bounded_width(width: u16, target: &str) -> u16 {
+    let available = tmux::command(&["display-message", "-p", "-t", target, "#{window_width}"])
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .unwrap_or(width.saturating_add(2));
+    width.min(available.saturating_sub(2).max(1))
 }
 
 pub fn pane_orphan() -> i32 {
@@ -299,7 +404,7 @@ fn layout_size(layout: &str) -> Option<&str> {
     layout.split_once(',')?.1.split(',').next()
 }
 
-fn restore_layout(window: &str) {
+pub(crate) fn restore_layout(window: &str) {
     let option = format!("@agenmux-layout-{window}");
     let legacy_option = format!("@agents-mon-layout-{window}");
     let mut layout = tmux::command(&["show-option", "-gqv", &option]).unwrap_or_default();

@@ -14,12 +14,17 @@ scripts/dev-bin.sh:elif [ -n "$(tmux show-options -gq @agents-mon-bin)" ]; then
 scripts/install-app.sh:bin="${AGENMUX_NOTIFIER_BIN:-${AGENTS_MON_NOTIFIER_BIN:-$DIR/target/release/agenmux-notifier}}"
 scripts/install-app.sh:legacy_app="$dest/AgentsMon.app"
 scripts/install-bin.sh:    [ -f "$notifier" ] || notifier="$pkg/target/release/agents-mon-notifier"
-scripts/install-bin.sh:    notifications="$(tmux show-option -gqv @agents-mon-notifications 2>/dev/null)"
 scripts/install-bin.sh:  [ "$version" = "agenmux ${2#v}" ] || [ "$version" = "agents-mon ${2#v}" ]
 scripts/install-bin.sh:  [ -f "$source" ] || source="$pkg/target/release/agents-mon"
 scripts/install-bin.sh:  for package in "agenmux-$platform" "tmux-agents-mon-$platform"; do
 scripts/install-bin.sh:LEGACY_STATE="$DIR/target/release/.agents-mon-version"
 scripts/install-bin.sh:REPO="${AGENMUX_REPO:-${AGENTS_MON_REPO:-https://github.com/snirt/agenmux}}"
+src/app_config.rs:                (format!("@agents-mon-{suffix}"), invalid.into()),
+src/app_config.rs:        options.insert("@agents-mon-popup-key".into(), "E".into());
+src/app_config.rs:        options.insert("@agents-mon-width".into(), "44".into());
+src/app_config.rs:        options.insert("@agents-mon-width".into(), "77".into());
+src/app_config.rs:    for prefix in ["@agenmux-", "@agents-mon-"] {
+src/app_config.rs:    for prefix in ["@agents-mon-", "@agenmux-"] {
 src/conf.rs:    let legacy_user_dir = config_home.join("tmux-agents-mon/agents");
 src/main.rs:    compat_env("AGENMUX_SELF", "AGENTS_MON_SELF").filter(|s| !s.is_empty())
 src/main.rs:    if let Some(d) = compat_env("AGENMUX_DIR", "AGENTS_MON_DIR") {
@@ -39,6 +44,7 @@ src/release.rs:    let legacy = name.replacen("@agenmux-", "@agents-mon-", 1);
 src/release.rs:    release_dir(plugin_dir).join(".agents-mon-latest")
 src/setup.rs:            "run-shell -b 'tmux if-shell -t \"#{pane_id}\" -F \"#{&&:#{||:#{==:#{pane_title},agenmux},#{==:#{pane_title},agents-mon}},#{window_zoomed_flag}}\" \"resize-pane -Z -t \\\"#{pane_id}\\\"\"'".to_string(),
 src/setup.rs:            .replace("#{agents_mon}", &segment);
+src/setup.rs:        for name in ["@agenmux-sidebar", "@agents-mon-sidebar"] {
 src/setup.rs:        let _ = tmux::command_status(&["set-option", "-wu", "-t", &window, "@agents-mon-sidebar"]);
 src/setup.rs:        let legacy = format!("@agents-mon-{suffix}");
 src/sidebar.rs:        .or_else(|_| std::fs::read_to_string(release_dir.join(".agents-mon-latest")))

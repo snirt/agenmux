@@ -11,6 +11,12 @@ command -v tmux >/dev/null || exit 0
 command -v expect >/dev/null || exit 0
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/agenmux-navigation.XXXXXX")"
+# Never let a developer's application file decide this harness's keys, and
+# remap one navigation key so the split-mode hints are proven to come from the
+# configured keymap rather than the daemon's protocol defaults.
+export XDG_CONFIG_HOME="$tmp/xdg"
+mkdir -p "$XDG_CONFIG_HOME/agenmux"
+printf '[keys.normal]\nup = ["K"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
 sock="$tmp/sock"
 input="$tmp/client-input"
 client_pid=''
@@ -36,6 +42,7 @@ cleanup() {
     "$tmp/agenmux-wheel"
   [ -z "$rows_own" ] || rm -f "$rows_own"
   [ -z "$vanished_rows" ] || rm -f "$vanished_rows"
+  rm -rf "$tmp/xdg"
   rmdir "$tmp" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -108,7 +115,7 @@ env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
 # user's root binding and install synchronous search delivery before use.
 normal_keys="$(tmux -S "$sock" list-keys -T agenmux)"
 search_keys="$(tmux -S "$sock" list-keys -T agenmux-search)"
-[ "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" = 13 ] &&
+tmux -S "$sock" show-option -gqv @agenmux-nav-version | grep -Eq '^14\.[0-9a-f]{16}$' &&
   printf '%s' "$normal_keys" | grep -Fq 'C-l' &&
   printf '%s' "$normal_keys" | grep -Fq " key 'sequence-67'" &&
   printf '%s' "$normal_keys" | grep -Fq " key 'last'" &&
@@ -428,13 +435,17 @@ if [ -n "$valid_row" ] && [ -n "$valid_target" ]; then
   fi
 fi
 
-# Restore the sidebar as the interaction target for the keyboard checks below.
+# Restore the sidebar and wait for its writer to publish the observed cursor;
+# inactive windows deliberately retain their old frame while not displayed.
+valid_location="$(tmux -S "$sock" display-message -p -t "$valid_target" \
+  '#{window_index}.#{pane_index}')"
 tmux -S "$sock" switch-client -c "$client" -t "$sidebar"
 tmux -S "$sock" switch-client -c "$client" -T agenmux
-for _ in $(seq 1 20); do
+for _ in $(seq 1 60); do
   table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
-  [ "$table" = agenmux ] && break
+  restored_cursor="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '/❯/p' | head -n 1)"
+  [ "$table" = agenmux ] && printf '%s' "$restored_cursor" | grep -Fq " $valid_location " && break
   sleep 0.05
 done
 
@@ -473,7 +484,7 @@ done
 }
 picker_start="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
   sed -n '/❯/p' | head -n 1)"
-printf 'k' >&9
+printf 'K' >&9
 picker_reset="$picker_start"
 for _ in $(seq 1 20); do
   picker_reset="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
@@ -550,7 +561,7 @@ for _ in $(seq 1 30); do
 done
 table_after_j="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
 
-printf 'k' >&9
+printf 'K' >&9
 third="$second"
 for _ in $(seq 1 30); do
   third="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
@@ -722,7 +733,7 @@ for _ in $(seq 1 20); do
   accept_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
   if [ "$accept_table" = agenmux ] &&
     printf '%s' "$accept_frame" | grep -Fq '/navigation' &&
-    printf '%s' "$accept_hint" | grep -Fq 'j/k'; then
+    printf '%s' "$accept_hint" | grep -Fq 'j/K'; then
     search_accept_works=1
     break
   fi
@@ -786,7 +797,8 @@ for _ in $(seq 1 20); do
   blocked_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
   if [ "$blocked_targets" -eq 0 ] &&
     printf '%s' "$blocked_frame" | grep -Fq '[blocked]' &&
-    printf '%s' "$blocked_hint" | grep -Fq 'f status'; then
+    printf '%s' "$blocked_hint" | grep -Fq 'f status' &&
+    printf '%s' "$blocked_hint" | grep -Fq 'j/K'; then
     blocked_filter_works=1
     break
   fi
@@ -847,6 +859,46 @@ for _ in $(seq 1 20); do
   if [ "$all_targets" -eq 2 ] &&
     ! printf '%s' "$all_frame" | grep -Eq '/navigation:1|\[(blocked|working|idle|done)\]'; then
     all_filter_works=1
+    break
+  fi
+  sleep 0.05
+done
+
+# `config reload` must reach the running daemon, not just the key tables: set a
+# filter so the navigation hint is on screen, edit the file, and watch the hint
+# rename itself without the sidebar being reopened.
+printf 'f' >&9
+reload_hint_follows=0
+printf '[keys.normal]\nup = ["Z"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
+  "$BIN" config reload >/dev/null 2>&1 || true
+for _ in $(seq 1 40); do
+  reload_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
+  reload_key="$(tmux -S "$sock" list-keys -T agenmux |
+    awk '$4 == "Z" { print $4; exit }')"
+  if printf '%s' "$reload_hint" | grep -Fq 'j/Z' && [ "$reload_key" = Z ]; then
+    reload_hint_follows=1
+    break
+  fi
+  sleep 0.1
+done
+# Reinstalling the tables briefly drops the client to root; wait for the
+# reclaim before sending more keys, or they land in the wrong table.
+for _ in $(seq 1 40); do
+  reload_table="$(tmux -S "$sock" display-message -p -c "$client" \
+    '#{client_key_table}')"
+  [ "$reload_table" = agenmux ] && break
+  sleep 0.05
+done
+printf '\033' >&9
+# Let the filter clear and the client settle back before the closing key, the
+# way every other step here waits for its own effect.
+for _ in $(seq 1 40); do
+  reload_cleared="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
+  reload_table="$(tmux -S "$sock" display-message -p -c "$client" \
+    '#{client_key_table}')"
+  if ! printf '%s' "$reload_cleared" | grep -Fq '[' &&
+    [ "$reload_table" = agenmux ]; then
     break
   fi
   sleep 0.05
@@ -1010,7 +1062,7 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   [ "$search_blur_works" -eq 1 ] && [ "$blocked_filter_works" -eq 1 ] &&
   [ "$working_filter_works" -eq 1 ] && [ "$idle_filter_works" -eq 1 ] &&
   [ "$state_edges_work" -eq 1 ] &&
-  [ "$all_filter_works" -eq 1 ] &&
+  [ "$all_filter_works" -eq 1 ] && [ "$reload_hint_follows" -eq 1 ] &&
   [ "$exit_table" = root ] && [ "$q_left" -eq 1 ] &&
   [ "$escape_ready" -eq 1 ] && [ "$escape_reset" -eq 1 ] &&
   [ "$escape_left" -eq 1 ] && [ "$close_ready" -eq 1 ] &&
@@ -1020,6 +1072,6 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   echo "ok   attached-client-jk-navigation"
 else
   echo "edge-nav: long=$edge_long_list_works slow=$slow_gg_expires search=$search_edges_work state=$state_edges_work"
-  echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$blocked_filter_works/$blocked_targets/$blocked_frame/$blocked_hint/$working_filter_works/$working_targets/$working_frame/$idle_filter_works/$idle_targets/$idle_frame/$all_filter_works/$all_targets/$all_frame] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
+  echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$blocked_filter_works/$blocked_targets/$blocked_frame/$blocked_hint/$working_filter_works/$working_targets/$working_frame/$idle_filter_works/$idle_targets/$idle_frame/$all_filter_works/$all_targets/$all_frame] reload=[$reload_hint_follows/$reload_hint] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
   exit 1
 fi

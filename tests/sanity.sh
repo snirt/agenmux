@@ -266,7 +266,10 @@ for _ in $(seq 1 80); do
 done
 [ -x "$plugin/target/release/agenmux" ]
 tmux -L "$bootstrap_socket" list-panes -a -F '#{pane_title}' | grep -qx agenmux
-tmux -L "$bootstrap_socket" show-option -gqv status-right | grep -Fq 'agenmux status'
+# The status segment runs the engine through tmux options rather than a baked
+# path, so the installed value names the option, not the binary.
+tmux -L "$bootstrap_socket" show-option -gqv status-right |
+  grep -Fq '#{q:@agenmux-runtime-bin} status'
 printf 'ok   clean checkout first activation installs and opens native split\n'
 tmux -L "$bootstrap_socket" kill-server
 active_socket=""
