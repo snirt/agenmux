@@ -27,20 +27,25 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
     let target = y
         .checked_sub(1)
         .and_then(|line| {
-            std::fs::read_to_string(tmux::runtime_dir().join("agenmux-rows"))
-                .ok()?
-                .lines()
-                .nth(line)
-                .and_then(|row| row.split_whitespace().next())
-                .map(str::to_string)
+            let rows = std::fs::read_to_string(tmux::runtime_dir().join("agenmux-rows")).ok()?;
+            let mut fields = rows.lines().nth(line)?.split_whitespace();
+            let target = fields.next()?.to_string();
+            let index = fields.next()?.parse::<usize>().ok()?;
+            let selected = fields.next() == Some("1");
+            Some((target, index, selected))
         })
-        .filter(|target| target.starts_with('%') && panes.iter().any(|id| id == target));
+        .filter(|(target, _, _)| target.starts_with('%') && panes.iter().any(|id| id == target));
 
-    if let Some(target) = target {
-        let _ = sidebar::send_key("all");
-        let _ = tmux::command_status(&["switch-client", "-c", client, "-t", &target]);
-        let _ = tmux::command_status(&["select-window", "-t", &target]);
-        let _ = tmux::command_status(&["select-pane", "-t", &target]);
+    if let Some((target, index, selected)) = target {
+        if selected {
+            let _ = sidebar::send_key("all");
+            let _ = tmux::command_status(&["switch-client", "-c", client, "-t", &target]);
+            let _ = tmux::command_status(&["select-window", "-t", &target]);
+            let _ = tmux::command_status(&["select-pane", "-t", &target]);
+        } else if tmux::command_status(&["switch-client", "-c", client, "-t", pane]).is_ok() {
+            let _ = tmux::command_status(&["switch-client", "-c", client, "-T", "agenmux"]);
+            let _ = sidebar::select(index);
+        }
     } else if tmux::command_status(&["switch-client", "-c", client, "-t", pane]).is_ok() {
         let _ = tmux::command_status(&["switch-client", "-c", client, "-T", "agenmux"]);
     }

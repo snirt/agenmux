@@ -192,6 +192,7 @@ impl StateFilter {
 
 enum Key {
     Up,
+    Select(usize),
     Down,
     WheelUp,
     WheelDown,
@@ -247,6 +248,19 @@ fn read_key(fd: libc::c_int) -> Key {
         b'k' => Key::Up,
         0x01 => Key::WheelUp,
         0x02 => Key::WheelDown,
+        0x05 => {
+            let mut index = [0u8; 4];
+            for byte in &mut index {
+                let Some(next) = poll_fd(fd, Some(Duration::from_millis(50)))
+                    .then(|| read_byte(fd))
+                    .flatten()
+                else {
+                    return Key::Other;
+                };
+                *byte = next;
+            }
+            Key::Select(u32::from_be_bytes(index) as usize)
+        }
         b'q' | 0x03 | 0x04 => Key::Quit, // q, Ctrl-C, Ctrl-D
         b'Q' => Key::Close,
         b'l' | b'\r' | b'\n' => Key::Jump,
@@ -362,6 +376,19 @@ pub fn send_key(name: &str) -> i32 {
             _ => return 2,
         }
     };
+    send_bytes(&bytes)
+}
+
+pub fn select(index: usize) -> i32 {
+    let Ok(index) = u32::try_from(index) else {
+        return 2;
+    };
+    let mut bytes = vec![0x05];
+    bytes.extend(index.to_be_bytes());
+    send_bytes(&bytes)
+}
+
+fn send_bytes(bytes: &[u8]) -> i32 {
     let path = crate::tmux::runtime_dir().join("agenmux-keys");
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
         return 1;
@@ -580,18 +607,6 @@ fn superseded(mine: &str, current: &str) -> bool {
     !mine.is_empty() && !current.is_empty() && current != mine
 }
 
-fn parse_wheel_delay(value: &str) -> Option<Duration> {
-    match value.trim() {
-        "off" => None,
-        "" => Some(Duration::from_millis(300)),
-        value => value
-            .parse::<f64>()
-            .ok()
-            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-            .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok()),
-    }
-}
-
 /// Headless-mode state: frames → visible panes, keys ← FIFO, size ← panes.
 struct Daemon {
     keys_path: PathBuf,
@@ -625,7 +640,8 @@ pub struct Sidebar {
     state_filter: Option<StateFilter>,
     search_focused: bool,
     sel: usize,    // 1-based index into visible, like the bash script
-    scroll: usize, // first visible list line — follows the selection
+    scroll: usize, // first visible list line
+    follow_selection: bool,
     sel_pane: String,
     last_active: String,
     active: String,
@@ -672,6 +688,7 @@ fn new_sidebar(
         sel: 1,
         scroll: 0,
         sel_pane: String::new(),
+        follow_selection: true,
         last_active: String::new(),
         active: String::new(),
         active_session: String::new(),
@@ -836,22 +853,11 @@ fn event_loop(sb: &mut Sidebar) -> bool {
     let key_fd = sb.daemon.as_ref().map_or(0, |d| d.keys_fd);
     let mut next_scan = Instant::now(); // scan immediately
     let mut next_tick = Instant::now();
-    let mut wheel_jump_at: Option<Instant> = None;
     loop {
         if QUIT.load(Ordering::Relaxed) {
             break;
         }
         let mut now = Instant::now();
-        if wheel_jump_at.is_some_and(|deadline| now >= deadline) {
-            wheel_jump_at = None;
-            match sb.dispatch_key(Key::Jump) {
-                DispatchResult::Continue => {}
-                DispatchResult::Break => break,
-                DispatchResult::QuietExit => return true,
-            }
-            sb.render(false);
-            now = Instant::now();
-        }
         if now >= next_scan {
             match sb.scan_tick() {
                 Ok(()) => {}
@@ -887,14 +893,11 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             sb.render(false);
         }
         // animated states need ticks; all-idle sleeps until the next scan
-        let mut wake = if animating {
+        let wake = if animating {
             next_tick.saturating_duration_since(now)
         } else {
             next_scan.saturating_duration_since(now)
         };
-        if let Some(deadline) = wheel_jump_at {
-            wake = wake.min(deadline.saturating_duration_since(now));
-        }
         let (key_ready, pipe_ready) = poll_inputs(key_fd, sb.tmux.fd(), sb.tmux.buffered(), wake);
         if pipe_ready {
             // focus notification (%window-pane-changed etc.) — rescan now so
@@ -911,16 +914,6 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             } else {
                 read_key(key_fd)
             };
-            let (key, wheel) = match key {
-                Key::WheelUp => (Key::Up, true),
-                Key::WheelDown => (Key::Down, true),
-                key => (key, false),
-            };
-            if wheel {
-                wheel_jump_at = sb
-                    .wheel_jump_delay()
-                    .and_then(|delay| Instant::now().checked_add(delay));
-            }
             match sb.dispatch_key(key) {
                 DispatchResult::Continue => {}
                 DispatchResult::Break => break,
@@ -949,10 +942,17 @@ fn cleanup(rows_file: &PathBuf, pin: &Option<String>) {
 }
 
 impl Sidebar {
-    /// Route every logical key through the active UI mode. Delayed wheel jumps
-    /// use this too, so search accepts before jumping and overlays consume the
-    /// key instead of acting on the hidden list.
+    /// Route every logical key through the active UI mode. Mouse selection is
+    /// handled before mode dispatch; overlays clear their row map, so they cannot
+    /// receive a stale click on the hidden list.
     fn dispatch_key(&mut self, key: Key) -> DispatchResult {
+        if let Key::Select(index) = &key {
+            self.sel = (*index).max(1);
+            self.follow_selection = true;
+            self.clamp_sel();
+            self.sync_sel_pane();
+            return DispatchResult::Continue;
+        }
         match dispatch_mode(self.overlay.as_ref(), self.search_focused) {
             DispatchMode::Overlay => {
                 self.overlay_key(key);
@@ -967,6 +967,8 @@ impl Sidebar {
         match key {
             Key::Down => self.move_sel(1),
             Key::Up => self.move_sel(-1),
+            Key::WheelUp => self.scroll_viewport(-1),
+            Key::WheelDown => self.scroll_viewport(1),
             Key::Jump => {
                 if self.jump() {
                     return DispatchResult::Break;
@@ -998,23 +1000,9 @@ impl Sidebar {
                 }
                 return DispatchResult::Break;
             }
-            Key::Backspace
-            | Key::ClearSearch
-            | Key::Text(_)
-            | Key::WheelUp
-            | Key::WheelDown
-            | Key::Other => {}
+            Key::Backspace | Key::ClearSearch | Key::Text(_) | Key::Select(_) | Key::Other => {}
         }
         DispatchResult::Continue
-    }
-
-    fn wheel_jump_delay(&mut self) -> Option<Duration> {
-        parse_wheel_delay(
-            &self
-                .tmux
-                .run("show-option -gqv @agenmux-wheel-jump")
-                .unwrap_or_default(),
-        )
     }
 
     fn scan_tick(&mut self) -> Result<(), TmuxError> {
@@ -1069,6 +1057,7 @@ impl Sidebar {
                 .position(|&i| self.rows[i].pane == self.active)
             {
                 self.sel = i + 1;
+                self.follow_selection = true;
                 self.sel_pane = self.active.clone();
             }
             self.last_active = self.active.clone();
@@ -1095,8 +1084,14 @@ impl Sidebar {
 
     fn move_sel(&mut self, d: i64) {
         self.sel = (self.sel as i64 + d).max(1) as usize;
+        self.follow_selection = true;
         self.clamp_sel();
         self.sync_sel_pane();
+    }
+
+    fn scroll_viewport(&mut self, d: i64) {
+        self.scroll = (self.scroll as i64 + d).max(0) as usize;
+        self.follow_selection = false;
     }
 
     fn clamp_sel(&mut self) {
@@ -1141,6 +1136,7 @@ impl Sidebar {
         self.visible = filtered_indices(&self.rows, &self.query, self.state_filter);
         if select_first {
             self.sel = 1;
+            self.follow_selection = true;
             self.sync_sel_pane();
         } else {
             self.clamp_sel();
@@ -1149,7 +1145,6 @@ impl Sidebar {
         if self.visible.is_empty() {
             self.sel_pane.clear();
         }
-        self.scroll = 0;
     }
 
     fn focus_search(&mut self) {
@@ -1197,9 +1192,10 @@ impl Sidebar {
                     .extend(text.chars().filter(|c| !c.is_control()).take(room));
                 self.rebuild_visible(true);
             }
+            Key::WheelUp => self.scroll_viewport(-1),
+            Key::WheelDown => self.scroll_viewport(1),
             Key::AllStates => self.clear_filter(),
-            Key::WheelUp
-            | Key::WheelDown
+            Key::Select(_)
             | Key::Search
             | Key::CycleState
             | Key::Help
@@ -1636,7 +1632,7 @@ impl Sidebar {
             frame.push_str(&format!("{E}[2mno matches · Esc shows all{E}[0m{E}[K\n"));
         } else {
             // build filtered agents plus their session context, then window it
-            let mut lines: Vec<(String, &str)> = Vec::new(); // (text, vis pane)
+            let mut lines: Vec<(String, &str, usize, bool)> = Vec::new();
             let (mut sel_top, mut sel_bot) = (0usize, 0usize);
             let mut session = "";
             for (n, &row_i) in self.visible.iter().enumerate() {
@@ -1647,7 +1643,12 @@ impl Sidebar {
                     // clip to pane width — a wrapped header shifts every row
                     // below it and breaks the click→rows-file mapping
                     let sess_clipped: String = sess.chars().take(cols).collect();
-                    lines.push((format!("{E}[1;34m{sess_clipped}{E}[0m{E}[K\n"), "-"));
+                    lines.push((
+                        format!("{E}[1;34m{sess_clipped}{E}[0m{E}[K\n"),
+                        "-",
+                        0,
+                        false,
+                    ));
                 }
                 if Some(n) == cursor {
                     sel_top = lines.len();
@@ -1672,6 +1673,8 @@ impl Sidebar {
                 lines.push((
                     format!("{}{E}[K\n", bar(&row, row_bg, cols, width)),
                     &r.pane,
+                    n + 1,
+                    selected,
                 ));
                 if !r.title.is_empty() {
                     let t: String = r.title.chars().take(cols.saturating_sub(5)).collect();
@@ -1680,6 +1683,8 @@ impl Sidebar {
                     lines.push((
                         format!("{}{E}[K\n", bar(&line, row_bg, cols, width)),
                         &r.pane,
+                        n + 1,
+                        selected,
                     ));
                 }
                 if Some(n) == cursor {
@@ -1687,7 +1692,7 @@ impl Sidebar {
                 }
             }
             // cursor's session header gives context — drag it into view
-            if cursor.is_some() {
+            if self.follow_selection && cursor.is_some() {
                 if sel_top > 0 && lines[sel_top - 1].1 == "-" {
                     sel_top -= 1;
                 }
@@ -1700,16 +1705,45 @@ impl Sidebar {
                     }
                 }
             }
+            self.follow_selection = false;
             if space > 0 {
                 self.scroll = self.scroll.min(lines.len().saturating_sub(space));
             } else {
                 self.scroll = 0;
             }
             let end = (self.scroll + space).min(lines.len());
-            for (text, pane) in &lines[self.scroll..end] {
-                frame.push_str(text);
-                vis.push_str(pane);
-                vis.push('\n');
+            let overflow = lines.len() > space && space > 0 && cols > 0;
+            let thumb_len = if overflow {
+                space
+                    .saturating_mul(space)
+                    .checked_div(lines.len())
+                    .unwrap_or(1)
+                    .max(1)
+            } else {
+                0
+            };
+            let thumb_start = if overflow {
+                self.scroll.saturating_mul(space - thumb_len) / lines.len().saturating_sub(space)
+            } else {
+                0
+            };
+            for (row, (text, pane, index, selected)) in lines[self.scroll..end].iter().enumerate() {
+                if overflow {
+                    frame.push_str(text.trim_end_matches('\n'));
+                    let glyph = if (thumb_start..thumb_start + thumb_len).contains(&row) {
+                        '▐'
+                    } else {
+                        '│'
+                    };
+                    frame.push_str(&format!("{E}[{cols}G{E}[2m{glyph}{E}[0m\n"));
+                } else {
+                    frame.push_str(text);
+                }
+                if *pane == "-" {
+                    vis.push_str("-\n");
+                } else {
+                    vis.push_str(&format!("{pane}\t{index}\t{}\n", usize::from(*selected)));
+                }
             }
         }
         frame.push_str(&format!("{E}[J"));
@@ -2010,17 +2044,7 @@ mod tests {
     }
 
     #[test]
-    fn wheel_jump_delay_preserves_option_contract() {
-        assert_eq!(parse_wheel_delay(""), Some(Duration::from_millis(300)));
-        assert_eq!(parse_wheel_delay("0.5"), Some(Duration::from_millis(500)));
-        assert_eq!(parse_wheel_delay("0"), Some(Duration::ZERO));
-        assert_eq!(parse_wheel_delay("off"), None);
-        assert_eq!(parse_wheel_delay("-1"), None);
-        assert_eq!(parse_wheel_delay("invalid"), None);
-    }
-
-    #[test]
-    fn delayed_wheel_jump_uses_search_help_and_versions_routes() {
+    fn input_modes_route_search_help_and_versions() {
         assert_eq!(dispatch_mode(None, true), DispatchMode::Search);
         assert_eq!(
             dispatch_mode(Some(&Overlay::Help), false),

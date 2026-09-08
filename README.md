@@ -79,8 +79,8 @@ every two seconds.
 | Input | Action |
 | --- | --- |
 | `prefix + A` | Open the sidebar or enter navigation |
-| Click an agent row | Jump to its pane (requires `set -g mouse on`) |
-| Mouse wheel | Move selection; jump after scrolling stops |
+| Click an agent row | Select it; click the selected row again to open it (requires `set -g mouse on`) |
+| Mouse wheel | Scroll the agent list without changing selection |
 | `j` / `k`, `↑` / `↓` | Move selection |
 | `Enter` / `l` | Jump to selected agent |
 | `/` | Search agent and session names |
@@ -94,9 +94,9 @@ every two seconds.
 <summary>Search, mouse, and navigation details</summary>
 
 Clicks outside agent rows enter navigation; clicks in regular panes retain
-tmux behavior. Wheel scrolling moves one row per tick and delays the pane jump,
-so fast scrolling causes one window switch. Regular panes retain tmux
-scrollback behavior.
+tmux behavior. The first click on an agent selects it, and a second click opens
+the selected agent. Wheel scrolling moves the list viewport without changing
+selection or switching panes.
 
 During search, type normally, then press `Enter` to accept the query and restore
 `j`/`k` navigation; press `Enter` again to jump. `↑`/`↓` or
@@ -129,14 +129,13 @@ set -g status-right '#{agenmux} | %H:%M'
 | `@agenmux-height` | agent count, minimum `15` | Fixed popup height |
 | `@agenmux-hide-windows` | `agents*` | Window-picker exclusion pattern; `''` restores default picker |
 | `@agenmux-notifications` | `on` | Desktop notifications; set `off` to disable |
-| `@agenmux-wheel-jump` | `0.3` | Seconds before wheel selection jumps; `off` moves cursor only |
 
 With both keys set (e.g. `@agenmux-key 'E'`, `@agenmux-popup-key 'e'`)
 you get `prefix+E` for the split sidebar and `prefix+e` for the floating popup.
 
 In popup mode the same keybinding opens a floating window; close it with
 `q` or `Esc` inside (there is no outside toggle — the popup grabs the client).
-Click-to-jump and wheel scrolling work in split mode only (tmux does not
+Mouse clicks and wheel scrolling work in split mode only (tmux does not
 forward mouse events into a popup); keyboard jump works in both, and the popup
 reopens over the selected agent after a jump.
 
