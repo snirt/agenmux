@@ -1,19 +1,22 @@
-# agenmux v0.3.1
+# agenmux v0.4.0
 
 ## What's changed
 
+### Navigation
+
+- Added `gg` / `G` shortcuts to select the first or last visible agent ([#60](https://github.com/snirt/agenmux/pull/60)).
+- Improved mouse navigation with click-to-select, second-click-to-open, independent wheel scrolling, and a scrollbar ([#59](https://github.com/snirt/agenmux/pull/59)).
+
 ### Fixes
 
-- Made runtime paths survive `TMPDIR` changes and rejected malformed `TMUX` values ([#41](https://github.com/snirt/agenmux/pull/41)).
-- Removed restored ghost panes from the sidebar ([#42](https://github.com/snirt/agenmux/pull/42)).
-- Fixed delayed agent discovery and stabilized sidebar navigation input ([#43](https://github.com/snirt/agenmux/pull/43)).
-- Resolved each Pi pane's subject independently instead of sharing session metadata ([#46](https://github.com/snirt/agenmux/pull/46)).
+- Preserved normal tmux mouse behavior when clicking outside agent rows and over sidebar overlays ([#50](https://github.com/snirt/agenmux/pull/50)).
+- Recovered cleanly when a previously selected development binary no longer exists ([#52](https://github.com/snirt/agenmux/pull/52)).
+- Updated Pi detection for current working indicators and interactive question prompts ([#53](https://github.com/snirt/agenmux/pull/53), [#56](https://github.com/snirt/agenmux/pull/56)).
+- Prevented idle macOS notifications from causing sustained broker and `usernotificationd` CPU usage ([#62](https://github.com/snirt/agenmux/pull/62)).
 
-### Website
+### Maintenance
 
-- Standardized lowercase agenmux branding across documentation ([#39](https://github.com/snirt/agenmux/pull/39)).
-- Added agenmux icons and favicon assets ([#44](https://github.com/snirt/agenmux/pull/44)).
-- Improved search metadata and added Google site verification ([#47](https://github.com/snirt/agenmux/pull/47), [#48](https://github.com/snirt/agenmux/pull/48)).
+- Improved navigation test synchronization and isolated test tmux servers ([#57](https://github.com/snirt/agenmux/pull/57)).
 
 ### Assets
 
@@ -23,4 +26,4 @@
 - macOS aarch64
 - SHA-256 checksums
 
-**Full changelog:** <https://github.com/snirt/agenmux/compare/v0.3.0...v0.3.1>
+**Full changelog:** <https://github.com/snirt/agenmux/compare/v0.3.1...v0.4.0>
