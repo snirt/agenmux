@@ -29,6 +29,10 @@ const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const SUBMIT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const SUBMIT_RETRY_WINDOW: Duration = Duration::from_secs(5);
 const BROKER_RESPAWN_INTERVAL: Duration = Duration::from_secs(1);
+/// Auto-close untouched notifications. Without a timeout, buttonless
+/// notifications fall back to polling every delivered notification over XPC
+/// every 500ms, per notification -- O(N^2) work that pinned usernotificationd.
+const NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[cfg(any(target_os = "macos", test))]
 type PendingNotification = Pin<Box<dyn Future<Output = PendingResult>>>;
@@ -360,7 +364,8 @@ fn pending(request: NotificationRequest) -> PendingNotification {
         let notification = noti::Notification::new()
             .title(&request.title)
             .message(&request.body)
-            .sound(noti::sound::GLASS);
+            .sound(noti::sound::GLASS)
+            .timeout(NOTIFICATION_TIMEOUT);
         let response = match notification.send().await {
             Ok(handle) => handle.response().await,
             Err(error) => Err(error),
