@@ -137,13 +137,6 @@ fn skip_control_string(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
     }
 }
 
-fn notifications_enabled(value: &str) -> bool {
-    !matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "off" | "false" | "0"
-    )
-}
-
 fn build_click_command(exe: &str, socket: &str, pane: &str, bundle: &str) -> String {
     [exe, "notification-open", socket, pane, bundle]
         .into_iter()
@@ -170,11 +163,8 @@ fn most_recent_client(rows: &str) -> Option<String> {
         .map(|(_, name)| name)
 }
 
-pub fn deliver(tmux: &mut crate::tmux::Tmux, event: &AttentionEvent) -> DeliveryOutcome {
-    let option = tmux
-        .run("show-option -gqv @agenmux-notifications")
-        .unwrap_or_default();
-    let outcome = deliver_if_enabled(&option, event, |payload| {
+pub fn deliver(enabled: bool, event: &AttentionEvent) -> DeliveryOutcome {
+    let outcome = deliver_if_enabled(enabled, event, |payload| {
         #[cfg(target_os = "macos")]
         return macos::deliver(
             &SystemRunner,
@@ -199,11 +189,11 @@ pub fn deliver(tmux: &mut crate::tmux::Tmux, event: &AttentionEvent) -> Delivery
     outcome
 }
 
-fn deliver_if_enabled<F>(option: &str, event: &AttentionEvent, adapter: F) -> DeliveryOutcome
+fn deliver_if_enabled<F>(enabled: bool, event: &AttentionEvent, adapter: F) -> DeliveryOutcome
 where
     F: FnOnce(&Payload) -> DeliveryOutcome,
 {
-    if !notifications_enabled(option) {
+    if !enabled {
         DeliveryOutcome::Disabled
     } else {
         adapter(&payload(event))
@@ -525,19 +515,9 @@ mod tests {
     }
 
     #[test]
-    fn notifications_default_on_and_accept_common_off_values() {
-        assert!(notifications_enabled(""));
-        assert!(notifications_enabled("on"));
-        assert!(notifications_enabled("anything-else"));
-        assert!(!notifications_enabled("off"));
-        assert!(!notifications_enabled(" FALSE "));
-        assert!(!notifications_enabled("0"));
-    }
-
-    #[test]
     fn disabled_option_never_invokes_a_platform_adapter() {
         let invoked = std::cell::Cell::new(false);
-        let outcome = deliver_if_enabled("off", &event(AttentionKind::Finished), |_| {
+        let outcome = deliver_if_enabled(false, &event(AttentionKind::Finished), |_| {
             invoked.set(true);
             DeliveryOutcome::Delivered
         });

@@ -122,22 +122,160 @@ set -g status-right '#{agenmux} | %H:%M'
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `@agenmux-key` | `A` | Sidebar (`split`) key in prefix table |
-| `@agenmux-popup-key` | unset | Dedicated popup key |
+| `@agenmux-key` | `A` | Main launcher in prefix table (resolved display mode); empty disables installation |
+| `@agenmux-popup-key` | `e` | Dedicated popup launcher; empty disables installation |
 | `@agenmux-width` | sidebar: `30`; popup: `40` | Sidebar or popup width |
 | `@agenmux-display` | `split` | Main-key display: `split` (sidebar) or `popup` |
-| `@agenmux-height` | agent count, minimum `15` | Fixed popup height |
-| `@agenmux-hide-windows` | `agents*` | Window-picker exclusion pattern; `''` restores default picker |
+| `@agenmux-height` | auto, up to available height | Fixed popup height; auto prefers at least `15` rows when they fit |
+| `@agenmux-hide-windows` | unset | Leave the picker unchanged; a glob excludes matches, `''` restores default picker |
 | `@agenmux-notifications` | `on` | Desktop notifications; set `off` to disable |
 
-With both keys set (e.g. `@agenmux-key 'E'`, `@agenmux-popup-key 'e'`)
-you get `prefix+E` for the split sidebar and `prefix+e` for the floating popup.
+**Opening bindings belong to tmux configuration, not app TOML.** Bootstrap
+reads `@agenmux-key` and `@agenmux-popup-key` (legacy `@agents-mon-*` aliases
+accepted). Missing options default to A/e; canonical presence wins over legacy,
+including an explicit empty value. Bindings use normal tmux **last-writer-wins**
+semantics: plugin loading overwrites an existing binding on the same key, and a
+later user binding overwrites the plugin's. No collision registry or migration
+is used. Rust setup/toggle neither installs nor removes opening bindings.
+
+For manual opening bindings, disable both plugin launchers **before TPM**:
+
+```tmux
+set -g @agenmux-key ''
+set -g @agenmux-popup-key ''
+# Your plugin declarations go here, before the TPM initialization:
+run '~/.tmux/plugins/tpm/tpm'
+# Bootstrap publishes this trusted plugin path even while installation is pending.
+bind-key A run-shell -b "bash #{q:@agenmux-plugin-dir}/agenmux.tmux activate '' #{q:client_name}"
+bind-key e run-shell -b "bash #{q:@agenmux-plugin-dir}/agenmux.tmux activate 'popup' #{q:client_name}"
+```
+
+These entrypoints verify the engine and serialize installation before activation;
+do not bypass them with a direct binary binding. To customize plugin launchers
+instead, set nonempty options before TPM (e.g. `@agenmux-key 'E'`). Reload tmux
+configuration to install the new keys. Changing or disabling an option does not
+remove any previously installed binding: explicitly `unbind-key A` / `unbind-key e`
+(or the old custom keys) when needed, then reload. Invalid app TOML does not
+prevent launcher installation; activation still validates before app mutation.
 
 In popup mode the same keybinding opens a floating window; close it with
 `q` or `Esc` inside (there is no outside toggle — the popup grabs the client).
 Mouse clicks and wheel scrolling work in split mode only (tmux does not
 forward mouse events into a popup); keyboard jump works in both, and the popup
 reopens over the selected agent after a jump.
+
+### Application configuration
+
+Optional `$XDG_CONFIG_HOME/agenmux/config.toml` (absolute, nonempty XDG root),
+otherwise `$HOME/.config/agenmux/config.toml` (absolute HOME):
+
+```toml
+version = 1
+[display]
+mode = "split"
+sidebar_width = 30
+popup_width = 40
+popup_height = "auto"
+[behavior]
+notifications = true
+# hide_windows = "agents*" # omitted: leave your picker alone
+```
+
+`agenmux config --help` prints every configurable key with its accepted values
+and default. A complete annotated example ships as
+[`examples/config.toml`](examples/config.toml).
+
+After editing the file, run `agenmux config reload`. It validates the file,
+reinstalls the key tables when the keymap moved, and tells running views to
+re-read; an invalid file is refused and changes nothing, so a typo cannot take
+a live sidebar down. Open sidebars pick up the new settings, theme and hints
+within a moment, with no reopen. There is still no file watcher, and nothing
+re-reads the file on its own: a process that starts without a reload keeps the
+snapshot it read at startup. Plain `agenmux config check` needs no tmux server;
+`agenmux config check --effective` also validates current tmux options and
+reports their sources. Themes and keys apply to both split and popup renderers.
+
+```toml
+[theme]
+base = "light" # dark (default), light, or terminal
+[theme.colors]
+working_bg = "#fff0cc" # override only this semantic role
+# working_fg = 136    # indexed terminal color, 0..255
+# header_bg = "default"
+```
+
+The selected base supplies every omitted role. `dark` preserves the original
+appearance; `light` uses explicit dark foregrounds and pale selected-row fills
+(for a light terminal background); `terminal` uses terminal-default backgrounds.
+Colors accept only `"default"`, integers 0..255, or exact `"#RRGGBB"` values—not
+ANSI strings. Roles are `header_fg/bg`, `text_fg`, `muted_fg`, `accent_fg`,
+`error_fg`, and `blocked`, `working`, `idle`, `done` each with `_fg`, `_bg`,
+`_bg_unfocused`. Foregrounds color status/cursor marks independently of their
+unchanged glyphs, spinner, and blink. Overrides affect hints, help, and version
+views too. No global tmux colors are changed. Close/reopen running views after
+activation to consume the new palette.
+
+```toml
+[keys.normal]
+down = ["n", "PageDown"] # replaces the whole default list ["j", "Down"]
+up = ["p", "PageUp"]
+close = []               # unbind; Ctrl-C/Ctrl-D still close the popup
+[keys.search]
+cancel = ["Escape", "C-g"]
+```
+
+Normal actions: `down`, `up`, `jump`, `search`, `filter`, `reset`, `help`,
+`versions`, `close`. Search actions: `up`, `down`, `accept`, `cancel`,
+`backspace`, `clear`. Each value replaces that action's default list (at most
+16 chords); `[]` unbinds it and drops it from hints and help. Chords are one
+printable ASCII character, `Space`, `Up`/`Down`/`Left`/`Right`, `Home`/`End`,
+`PageUp`/`PageDown`, `Enter`, `Escape`, `Tab`, `BSpace`, or a `C-x` control
+chord the terminal does not intercept (`C-c`/`C-d` are reserved, except `C-c`
+for search cancel; `C-@`, `C-a`, `C-b` and `C-l` are reserved by the sidebar's
+own key transport; `C-i`/`C-m`/`C-[`/`C-?` are the Tab/Enter/Escape/BSpace
+aliases). A chord may serve one action per mode; search chords cannot be
+printable because typing owns them. Keys are data: the split-mode tables bind
+each chord to a fixed internal action, never to a command from the file.
+`agenmux config reload` reinstalls the tables and updates the hints of running
+views; the next toggle does the same for the tables on its own.
+
+Precedence per field: explicit CLI mode > present canonical `@agenmux-*`
+option > present legacy `@agents-mon-*` option > file > defaults. Every supplied
+layer is validated, even when shadowed. Legacy behavioral options are **not**
+copied into canonical options. Explicit empty CLI mode (bootstrap) means use
+the resolved mode; other CLI modes must be `split` or `popup`.
+
+An empty canonical option blocks legacy and file values: width resets to
+30/40, height to auto, display to split, notifications to on, wheel delay to
+300 ms, and picker to the unfiltered picker. Launcher options are separate:
+either empty launcher option disables installation. An absent picker setting
+never takes over your binding. Notifications accept on/off, true/false, yes/no,
+1/0 (case insensitive, surrounding whitespace
+ignored). Compatibility display additionally accepts `float`; wheel options
+accept finite seconds in 0..=60 or `off`. Width/height integers are 1..=10000
+cells, clamped to available space.
+
+`keys.prefix` is rejected as unknown; configure opening keys in tmux instead.
+The application still manages panes, private navigation/search tables, mouse
+bindings, hooks and the explicitly configured window picker. Setup snapshots
+its touched bindings and attempts restoration on failure; rollback errors are
+reported too. This is not an atomic tmux transaction.
+
+Width, wheel delay and notifications retain live tmux overrides using the
+startup file snapshot. Invalid live overrides retain the last valid settings
+with bounded, deduplicated diagnostics. Border dragging writes only the live
+`@agenmux-width` override; unsetting it returns to the startup file/default.
+Teardown, key/click/wheel delivery, notification-open and existing-popup close
+remain available with an invalid file. Ctrl-C/Ctrl-D remain emergency popup
+exit paths; split close removes the sidebar panes, not your agent panes.
+
+The TOML file is data, not code: no includes, expansion, shell commands or
+agent hooks. Existing `agents/*.conf` and their `SUBJECT_CMD` hooks remain
+separate **trusted executable customization**. Bootstrap installs opening
+bindings even with an engine installation pending, and verifies the engine
+before handing application setup/activation to Rust. The installer uses the
+verified engine's internal `notification-eligible` command (0 enabled, 3 disabled, 1 read failure, 2 invalid)
+and skips helper installation for every nonzero result.
 
 ## Updating
 

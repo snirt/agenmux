@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# agenmux TPM entry point. Keep this pre-binary bootstrap small: once
-# the native engine exists, `agenmux setup` owns all tmux integration.
+# agenmux TPM entry point. Keep this pre-binary bootstrap small:
+# tmux configuration owns launchers; the engine owns app integration.
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 option() {
@@ -8,8 +8,10 @@ option() {
   legacy="${canonical/@agenmux-/@agents-mon-}"
   if [ -n "$(tmux show-options -gq "$canonical")" ]; then
     tmux show-option -gqv "$canonical"
-  else
+  elif [ -n "$(tmux show-options -gq "$legacy")" ]; then
     tmux show-option -gqv "$legacy"
+  else
+    printf '%s' "${2:-}"
   fi
 }
 DEFAULT_BIN="$CURRENT_DIR/target/release/agenmux"
@@ -17,10 +19,20 @@ DEBUG_BIN="$CURRENT_DIR/target/debug/agenmux"
 BIN="$(option @agenmux-bin)"
 [ -n "$BIN" ] || BIN="$DEFAULT_BIN"
 
+# Set when activation recovers to the local debug build because @agenmux-bin
+# pointed at a removed worktree. That binary is this checkout's own, and a
+# developer build is not required to match the released tag.
+RECOVERED=""
+
 engine_current() {
   [ -x "$BIN" ] || return 1
-  [ "$BIN" != "$DEFAULT_BIN" ] && return 0
+  [ -n "$RECOVERED" ] && return 0
   want="$(bash "$CURRENT_DIR/scripts/version.sh" tag 2>/dev/null)" || return 1
+  # A configured binary is verified too: a stale one must not activate silently.
+  if [ "$BIN" != "$DEFAULT_BIN" ]; then
+    [ "$("$BIN" --version 2>/dev/null)" = "agenmux ${want#v}" ]
+    return $?
+  fi
   state="$CURRENT_DIR/target/release/.agenmux-version"
   installed_tag="$(sed -n '1p' "$state" 2>/dev/null)"
   installed_rev="$(sed -n '2p' "$state" 2>/dev/null)"
@@ -38,6 +50,7 @@ if [ "${1:-}" = activate ]; then
     tmux set-option -gu @agents-mon-bin 2>/dev/null || true
     if [ -x "$DEBUG_BIN" ]; then
       BIN="$DEBUG_BIN"
+      RECOVERED=1
       tmux set-option -g @agenmux-bin "$BIN"
       AGENMUX_DIR="$CURRENT_DIR" "$BIN" setup || exit 1
     else
@@ -65,33 +78,41 @@ if [ "${1:-}" = activate ]; then
       tmux display-message 'agenmux: native engine installation failed' 2>/dev/null || true
       exit 1
     fi
-    # Let the freshly installed version own bindings/hooks before retrying the
+    # Let the freshly installed version set up app integration before retrying the
     # action that triggered installation.
-    AGENMUX_INSTALL_REFRESH=1 bash "$CURRENT_DIR/agenmux.tmux"
+    AGENMUX_INSTALL_REFRESH=1 bash "$CURRENT_DIR/agenmux.tmux" || exit $?
   fi
   exec env AGENMUX_DIR="$CURRENT_DIR" "$BIN" toggle "$mode" "$client"
 fi
 
-key="$(option @agenmux-key)"
-tmux bind-key "${key:-A}" run-shell -b \
-  "bash '$CURRENT_DIR/agenmux.tmux' activate '' '#{client_name}'"
+# Launchers are tmux preferences, independent of application TOML/validation.
+# Native last-writer-wins: empty disables installation, never unbinds old keys.
+# Expand trusted path/client identities with tmux's shell quoting at execution
+# time, not by interpolating them into shell or tmux command-language text.
+tmux set-option -g @agenmux-plugin-dir "$CURRENT_DIR" || exit $?
+install_launcher() {
+  local key="$1" action="$2"
+  [ -n "$key" ] || return 0
+  [ "$key" != ';' ] || key='\;'
+  tmux bind-key -T prefix "$key" run-shell -b "$action" || {
+    tmux display-message 'agenmux: launcher binding failed; check @agenmux-key and @agenmux-popup-key' 2>/dev/null || true
+    return 1
+  }
+}
+install_launcher "$(option @agenmux-key A)" \
+  "bash #{q:@agenmux-plugin-dir}/agenmux.tmux activate '' #{q:client_name}" || exit $?
+install_launcher "$(option @agenmux-popup-key e)" \
+  "bash #{q:@agenmux-plugin-dir}/agenmux.tmux activate 'popup' #{q:client_name}" || exit $?
 
-# optional dedicated popup key, e.g. set -g @agenmux-popup-key 'e'
-popup_key="$(option @agenmux-popup-key)"
-[ -n "$popup_key" ] && tmux bind-key "$popup_key" run-shell -b \
-  "bash '$CURRENT_DIR/agenmux.tmux' activate popup '#{client_name}'"
-
-# Live servers may retain deleted moving-sidebar hooks across an upgrade. This
-# cleanup must work before Rust is installed.
-tmux set-hook -gu 'after-select-window[42]' 2>/dev/null || true
-tmux set-hook -gu 'client-session-changed[42]' 2>/dev/null || true
-tmux set-hook -gu 'session-window-changed[42]' 2>/dev/null || true
-
-# A source update can briefly leave the previous release's binary here; it may
-# not know `setup` yet. The installer refresh below re-enters with the matching
-# binary, so keep this compatibility probe quiet.
+# Only a verified engine performs application setup and validation.
 if engine_current; then
-  AGENMUX_DIR="$CURRENT_DIR" "$BIN" setup >/dev/null 2>&1 || true
+  AGENMUX_DIR="$CURRENT_DIR" "$BIN" setup || {
+    rc=$?
+    tmux display-message 'agenmux: setup failed; run agenmux config check --effective and agenmux setup for diagnostics' 2>/dev/null || true
+    exit "$rc"
+  }
+else
+  tmux display-message 'agenmux: native engine installation pending; source plugin again after installation if setup fails' 2>/dev/null || true
 fi
 
 # The source checkout has no binary, so eagerly install the default in the

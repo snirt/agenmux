@@ -1,3 +1,4 @@
+mod app_config;
 mod attention;
 mod conf;
 mod detect;
@@ -32,6 +33,25 @@ fn main() {
         ["detect", conf_path, screen_file, rest @ ..] => {
             cmd_detect(conf_path, screen_file, rest.first().copied().unwrap_or(""))
         }
+        ["config", "check"] => app_config::check(),
+        ["config", "check", "--effective"] => app_config::effective_check(false),
+        ["config", "check", "--effective", "--all"] => app_config::effective_check(true),
+        ["config", "reload"] => app_config::reload(&plugin_dir()),
+        ["config"] | ["config", "-h" | "--help" | "help"] => app_config::help(),
+        // Installer contract: 0 enabled, 3 disabled, 1 I/O, 2 invalid.
+        ["internal", "notification-eligible"] => match app_config::current(None) {
+            Ok(config) => {
+                if config.notifications {
+                    0
+                } else {
+                    3
+                }
+            }
+            Err(e) => {
+                eprintln!("agenmux: {e}");
+                e.exit_code()
+            }
+        },
         ["scan"] | ["list"] => cmd_scan(),
         ["status"] => cmd_status(),
         ["sidebar"] => sidebar::run(plugin_dir(), scan_cache_path()),
@@ -57,7 +77,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: agenmux [--version|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|setup|toggle [split|popup] [client]|releases refresh|update [latest|vX.Y.Z]|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
+                "usage: agenmux [--version|config [--help|check [--effective]|reload]|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|setup|toggle [split|popup] [client]|releases refresh|update [latest|vX.Y.Z]|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
             );
             2
         }
