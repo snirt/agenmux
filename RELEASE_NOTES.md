@@ -2,6 +2,12 @@
 
 ## What's changed
 
+### Application configuration
+
+- Added optional XDG configuration for display, behavior, themes, and key bindings ([#61](https://github.com/snirt/agenmux/pull/61)).
+- Added dark, light, and terminal themes with per-color overrides across split and popup views.
+- Added strict validation, effective-value reporting, and live `config reload` without reopening sidebars.
+
 ### Navigation
 
 - Added `gg` / `G` shortcuts to select the first or last visible agent ([#60](https://github.com/snirt/agenmux/pull/60)).
