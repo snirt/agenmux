@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 static WINCH: AtomicBool = AtomicBool::new(false);
 static QUIT: AtomicBool = AtomicBool::new(false);
 
+const KEY_SEQUENCE_TIMEOUT: Duration = Duration::from_secs(1);
 extern "C" fn on_winch(_: libc::c_int) {
     WINCH.store(true, Ordering::Relaxed);
 }
@@ -190,7 +191,11 @@ impl StateFilter {
     }
 }
 
+#[derive(Clone)]
 enum Key {
+    First,
+    Last,
+    Sequence(char),
     Up,
     Select(usize),
     Down,
@@ -208,6 +213,52 @@ enum Key {
     AllStates,
     Text(String),
     Other,
+}
+
+#[derive(Default)]
+struct KeySequence {
+    pending: String,
+    last: Option<Instant>,
+}
+
+enum SequenceResult {
+    Pending,
+    Match(Key),
+    Miss,
+}
+
+impl KeySequence {
+    fn push(&mut self, key: char, now: Instant, bindings: &[(&str, Key)]) -> SequenceResult {
+        if self
+            .last
+            .is_some_and(|last| now.duration_since(last) > KEY_SEQUENCE_TIMEOUT)
+        {
+            self.clear();
+        }
+        self.pending.push(key);
+        self.last = Some(now);
+        if let Some((_, action)) = bindings
+            .iter()
+            .find(|(sequence, _)| *sequence == self.pending)
+        {
+            let action = action.clone();
+            self.clear();
+            SequenceResult::Match(action)
+        } else if bindings
+            .iter()
+            .any(|(sequence, _)| sequence.starts_with(&self.pending))
+        {
+            SequenceResult::Pending
+        } else {
+            self.clear();
+            SequenceResult::Miss
+        }
+    }
+
+    fn clear(&mut self) {
+        self.pending.clear();
+        self.last = None;
+    }
 }
 
 enum Overlay {
@@ -244,6 +295,14 @@ fn read_key(fd: libc::c_int) -> Key {
         return Key::Quit;
     }; // EOF: explicit close
     match b {
+        b'G' => Key::Last,
+        b'g' => Key::Sequence('g'),
+        0x06 => poll_fd(fd, Some(Duration::from_millis(50)))
+            .then(|| read_byte(fd))
+            .flatten()
+            .filter(|b| (0x20..=0x7e).contains(b))
+            .map(|b| Key::Sequence(char::from(b)))
+            .unwrap_or(Key::Other),
         b'j' => Key::Down,
         b'k' => Key::Up,
         0x01 => Key::WheelUp,
@@ -352,8 +411,17 @@ pub fn send_key(name: &str) -> i32 {
             return 2;
         }
         vec![0, byte]
+    } else if let Some(hex) = name.strip_prefix("sequence-") {
+        let Ok(byte) = u8::from_str_radix(hex, 16) else {
+            return 2;
+        };
+        if !(0x20..=0x7e).contains(&byte) {
+            return 2;
+        }
+        vec![0x06, byte]
     } else {
         match name {
+            "last" => b"G".to_vec(),
             "up" => b"\x1b[A".to_vec(),
             "down" => b"\x1b[B".to_vec(),
             "enter" => b"\r".to_vec(),
@@ -639,6 +707,7 @@ pub struct Sidebar {
     query: String,
     state_filter: Option<StateFilter>,
     search_focused: bool,
+    key_sequence: KeySequence,
     sel: usize,    // 1-based index into visible, like the bash script
     scroll: usize, // first visible list line
     follow_selection: bool,
@@ -685,6 +754,7 @@ fn new_sidebar(
         query: String::new(),
         state_filter: None,
         search_focused: false,
+        key_sequence: KeySequence::default(),
         sel: 1,
         scroll: 0,
         sel_pane: String::new(),
@@ -946,11 +1016,18 @@ impl Sidebar {
     /// handled before mode dispatch; overlays clear their row map, so they cannot
     /// receive a stale click on the hidden list.
     fn dispatch_key(&mut self, key: Key) -> DispatchResult {
+        if let Key::Sequence(key) = key {
+            return match self
+                .key_sequence
+                .push(key, Instant::now(), &[("gg", Key::First)])
+            {
+                SequenceResult::Match(action) => self.dispatch_key(action),
+                SequenceResult::Pending | SequenceResult::Miss => DispatchResult::Continue,
+            };
+        }
+        self.key_sequence.clear();
         if let Key::Select(index) = &key {
-            self.sel = (*index).max(1);
-            self.follow_selection = true;
-            self.clamp_sel();
-            self.sync_sel_pane();
+            self.select_index(*index);
             return DispatchResult::Continue;
         }
         match dispatch_mode(self.overlay.as_ref(), self.search_focused) {
@@ -965,6 +1042,8 @@ impl Sidebar {
             DispatchMode::Normal => {}
         }
         match key {
+            Key::First => self.select_index(1),
+            Key::Last => self.select_index(self.visible.len()),
             Key::Down => self.move_sel(1),
             Key::Up => self.move_sel(-1),
             Key::WheelUp => self.scroll_viewport(-1),
@@ -1000,7 +1079,12 @@ impl Sidebar {
                 }
                 return DispatchResult::Break;
             }
-            Key::Backspace | Key::ClearSearch | Key::Text(_) | Key::Select(_) | Key::Other => {}
+            Key::Sequence(_)
+            | Key::Backspace
+            | Key::ClearSearch
+            | Key::Text(_)
+            | Key::Select(_)
+            | Key::Other => {}
         }
         DispatchResult::Continue
     }
@@ -1082,11 +1166,15 @@ impl Sidebar {
         Some(crate::focus::parse_clients(&out, focus_events))
     }
 
-    fn move_sel(&mut self, d: i64) {
-        self.sel = (self.sel as i64 + d).max(1) as usize;
+    fn select_index(&mut self, index: usize) {
+        self.sel = index.max(1);
         self.follow_selection = true;
         self.clamp_sel();
         self.sync_sel_pane();
+    }
+
+    fn move_sel(&mut self, d: i64) {
+        self.select_index((self.sel as i64 + d).max(1) as usize);
     }
 
     fn scroll_viewport(&mut self, d: i64) {
@@ -1195,7 +1283,10 @@ impl Sidebar {
             Key::WheelUp => self.scroll_viewport(-1),
             Key::WheelDown => self.scroll_viewport(1),
             Key::AllStates => self.clear_filter(),
-            Key::Select(_)
+            Key::First
+            | Key::Last
+            | Key::Select(_)
+            | Key::Sequence(_)
             | Key::Search
             | Key::CycleState
             | Key::Help
@@ -1781,6 +1872,7 @@ impl Sidebar {
  {E}[32m⣿{E}[0m  done, not viewed yet (blinks)\n\n\
 {E}[1mkeys{E}[0m\n\
  j/k ↑/↓  move selection\n\
+ gg/G     first/last visible agent\n\
  Enter/l  jump to agent\n\
  /        live search; Enter enables j/k\n\
  f        select next state filter\n\
@@ -2006,6 +2098,12 @@ mod tests {
         }
         feed(b"j");
         assert!(matches!(read_key(fds[0]), Key::Down));
+        feed(b"g");
+        assert!(matches!(read_key(fds[0]), Key::Sequence('g')));
+        feed(&[0x06, b'g']);
+        assert!(matches!(read_key(fds[0]), Key::Sequence('g')));
+        feed(b"G");
+        assert!(matches!(read_key(fds[0]), Key::Last));
         feed(&[0x01]);
         assert!(matches!(read_key(fds[0]), Key::WheelUp));
         feed(&[0x02]);
@@ -2018,6 +2116,50 @@ mod tests {
             libc::close(fds[0]);
             libc::close(fds[1]);
         }
+    }
+
+    #[test]
+    fn timed_key_sequences_support_arbitrary_bindings_and_expiry() {
+        let bindings = [("gg", Key::First), ("gd", Key::Last)];
+        let start = Instant::now();
+        let mut sequence = KeySequence::default();
+
+        assert!(matches!(
+            sequence.push('g', start, &bindings),
+            SequenceResult::Pending
+        ));
+        assert!(matches!(
+            sequence.push('d', start + Duration::from_millis(10), &bindings),
+            SequenceResult::Match(Key::Last)
+        ));
+        assert!(matches!(
+            sequence.push('g', start + Duration::from_millis(20), &bindings),
+            SequenceResult::Pending
+        ));
+        assert!(matches!(
+            sequence.push('x', start + Duration::from_millis(30), &bindings),
+            SequenceResult::Miss
+        ));
+        assert!(matches!(
+            sequence.push('g', start + Duration::from_millis(40), &bindings),
+            SequenceResult::Pending
+        ));
+        assert!(matches!(
+            sequence.push(
+                'g',
+                start + KEY_SEQUENCE_TIMEOUT + Duration::from_millis(41),
+                &bindings
+            ),
+            SequenceResult::Pending
+        ));
+        assert!(matches!(
+            sequence.push(
+                'g',
+                start + KEY_SEQUENCE_TIMEOUT + Duration::from_millis(50),
+                &bindings
+            ),
+            SequenceResult::Match(Key::First)
+        ));
     }
 
     /// Feed escape_key a scripted tail. Every byte goes through the same
