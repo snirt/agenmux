@@ -118,7 +118,7 @@ fn split(plugin_dir: &Path, client: Option<String>) -> i32 {
             return 1;
         }
     }
-    if option("@agenmux-nav-version") != "12" && setup::run(plugin_dir) != 0 {
+    if option("@agenmux-nav-version") != "13" && setup::run(plugin_dir) != 0 {
         return 1;
     }
     select_sidebar(client.as_deref());

@@ -557,6 +557,8 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
         normal.contains("run-shell -b") && normal.contains(" key \'j\'"),
         "{normal}"
     );
+    assert!(normal.contains(" key \'sequence-67\'"), "{normal}");
+    assert!(normal.contains(" key \'last\'"), "{normal}");
     let search_action = normal
         .lines()
         .find(|line| line.contains(" key \'search\'"))
@@ -589,7 +591,7 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
     assert!(!text_action.contains("run-shell -b"), "{text_action}");
     assert_eq!(
         tmux.text(&["show-option", "-gqv", "@agenmux-nav-version"]),
-        "12"
+        "13"
     );
     let status = tmux.tmux(&["show-option", "-gqv", "status-right"]);
     assert_success(status.clone(), "show status-right");

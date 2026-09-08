@@ -69,7 +69,7 @@ fn setup(plugin_dir: &Path) -> Result<(), TmuxError> {
     install_wheel_keys(&bin)?;
     install_picker_filter()?;
     install_status(&bin)?;
-    tmux::command_status(&["set-option", "-g", "@agenmux-nav-version", "12"])
+    tmux::command_status(&["set-option", "-g", "@agenmux-nav-version", "13"])
 }
 
 fn clear_legacy_options_and_hooks() -> Result<(), TmuxError> {
@@ -179,6 +179,8 @@ fn key_command(bin: &str, action: &str, next: &str, background: bool) -> String 
 
 fn install_normal_keys(bin: &str) -> Result<(), TmuxError> {
     for (key, action, next) in [
+        ("G", "last", NORMAL_TABLE),
+        ("g", "sequence-67", NORMAL_TABLE),
         ("j", "j", NORMAL_TABLE),
         ("k", "k", NORMAL_TABLE),
         ("Down", "down", NORMAL_TABLE),

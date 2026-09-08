@@ -108,8 +108,10 @@ env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
 # user's root binding and install synchronous search delivery before use.
 normal_keys="$(tmux -S "$sock" list-keys -T agenmux)"
 search_keys="$(tmux -S "$sock" list-keys -T agenmux-search)"
-[ "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" = 12 ] &&
+[ "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" = 13 ] &&
   printf '%s' "$normal_keys" | grep -Fq 'C-l' &&
+  printf '%s' "$normal_keys" | grep -Fq " key 'sequence-67'" &&
+  printf '%s' "$normal_keys" | grep -Fq " key 'last'" &&
   printf '%s' "$normal_keys" | grep -Fq " key 'search'" &&
   printf '%s' "$search_keys" | grep -Fq 'text-6A' || {
   echo "FAIL navigation-key-table: native setup contract missing"
@@ -583,6 +585,28 @@ scrollbar_works=0
 if printf '%s\n' "$scrollbar_frame" | grep -Fq '▐'; then
   scrollbar_works=1
 fi
+edge_first="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
+edge_top="$(sed -n '1p' "$tmp/agenmux-rows")"
+printf 'G' >&9
+edge_long_list_works=0
+for _ in $(seq 1 30); do
+  edge_last="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
+  edge_last_top="$(sed -n '1p' "$tmp/agenmux-rows")"
+  [ -n "$edge_last" ] && [ "$edge_last" != "$edge_first" ] &&
+    [ "$edge_last_top" != "$edge_top" ] && break
+  sleep 0.05
+done
+printf 'gg' >&9
+for _ in $(seq 1 30); do
+  edge_restored="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
+  edge_restored_top="$(sed -n '1p' "$tmp/agenmux-rows")"
+  if [ -n "$edge_first" ] && [ "$edge_restored" = "$edge_first" ] &&
+    [ "$edge_restored_top" = "$edge_top" ]; then
+    edge_long_list_works=1
+    break
+  fi
+  sleep 0.05
+done
 for _ in $(seq 1 20); do
   wheel_up="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
@@ -622,6 +646,19 @@ if [ "$overflow_agents" -gt 32 ] &&
   [ "$wheel_up" = "$wheel_selected" ]; then
   wheel_delay_works=1
 fi
+printf 'j' >&9
+for _ in $(seq 1 20); do
+  slow_gg_before="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
+  [ -n "$slow_gg_before" ] && [ "$slow_gg_before" != "$edge_first" ] && break
+  sleep 0.05
+done
+printf 'g' >&9
+sleep 1.2
+printf 'g' >&9
+sleep 0.2
+slow_gg_after="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
+slow_gg_expires=0
+[ -n "$slow_gg_before" ] && [ "$slow_gg_after" = "$slow_gg_before" ] && slow_gg_expires=1
 tmux -S "$sock" set-option -gu @agenmux-wheel-jump
 tmux -S "$sock" list-windows -t navigation -F '#{window_id}	#{window_name}' |
   awk -F '\t' '$2 ~ /^overflow-/ { print $1 }' |
@@ -693,6 +730,24 @@ for _ in $(seq 1 20); do
 done
 accepted_cursor="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
   sed -n '/❯/p' | head -n 1)"
+printf 'G' >&9
+search_edges_work=0
+for _ in $(seq 1 20); do
+  search_last="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+    sed -n '/❯/p' | head -n 1)"
+  [ -n "$search_last" ] && [ "$search_last" != "$accepted_cursor" ] && break
+  sleep 0.05
+done
+printf 'gg' >&9
+for _ in $(seq 1 20); do
+  search_first="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+    sed -n '/❯/p' | head -n 1)"
+  if [ -n "$accepted_cursor" ] && [ "$search_first" = "$accepted_cursor" ]; then
+    search_edges_work=1
+    break
+  fi
+  sleep 0.05
+done
 printf 'j' >&9
 search_jk_works=0
 for _ in $(seq 1 20); do
@@ -759,6 +814,26 @@ for _ in $(seq 1 20); do
   if [ "$idle_targets" -eq 2 ] &&
     printf '%s' "$idle_frame" | grep -Fq '[idle]'; then
     idle_filter_works=1
+    break
+  fi
+  sleep 0.05
+done
+state_first="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+  sed -n '/❯/p' | head -n 1)"
+printf 'G' >&9
+state_edges_work=0
+for _ in $(seq 1 20); do
+  state_last="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+    sed -n '/❯/p' | head -n 1)"
+  [ -n "$state_last" ] && [ "$state_last" != "$state_first" ] && break
+  sleep 0.05
+done
+printf 'gg' >&9
+for _ in $(seq 1 20); do
+  state_restored="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
+    sed -n '/❯/p' | head -n 1)"
+  if [ -n "$state_first" ] && [ "$state_restored" = "$state_first" ]; then
+    state_edges_work=1
     break
   fi
   sleep 0.05
@@ -926,11 +1001,15 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   [ "$wheel_up" = "$wheel_selected" ] &&
   [ "$wheel_delay_works" -eq 1 ] &&
   [ "$scrollbar_works" -eq 1 ] &&
+  [ "$edge_long_list_works" -eq 1 ] &&
+  [ "$slow_gg_expires" -eq 1 ] &&
   [ "$return_table" = agenmux ] && [ "$return_focus" = agenmux ] &&
   [ "$fourth" != "$third" ] && [ "$search_works" -eq 1 ] &&
   [ "$search_accept_works" -eq 1 ] && [ "$search_jk_works" -eq 1 ] &&
+  [ "$search_edges_work" -eq 1 ] &&
   [ "$search_blur_works" -eq 1 ] && [ "$blocked_filter_works" -eq 1 ] &&
   [ "$working_filter_works" -eq 1 ] && [ "$idle_filter_works" -eq 1 ] &&
+  [ "$state_edges_work" -eq 1 ] &&
   [ "$all_filter_works" -eq 1 ] &&
   [ "$exit_table" = root ] && [ "$q_left" -eq 1 ] &&
   [ "$escape_ready" -eq 1 ] && [ "$escape_reset" -eq 1 ] &&
@@ -940,6 +1019,7 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   [ "$notification_stale_noop" -eq 1 ]; then
   echo "ok   attached-client-jk-navigation"
 else
+  echo "edge-nav: long=$edge_long_list_works slow=$slow_gg_expires search=$search_edges_work state=$state_edges_work"
   echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$blocked_filter_works/$blocked_targets/$blocked_frame/$blocked_hint/$working_filter_works/$working_targets/$working_frame/$idle_filter_works/$idle_targets/$idle_frame/$all_filter_works/$all_targets/$all_frame] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
   exit 1
 fi
