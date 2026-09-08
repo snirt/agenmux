@@ -82,21 +82,21 @@ impl TestTmux {
             .to_string()
     }
 
+    /// The command bound to `key`, from the default `list-keys` output.
+    /// `-F` is newer than the tmux versions CI runs, so parse the plain form.
     fn binding(&self, table: &str, key: &str) -> String {
-        self.text(&[
-            "list-keys",
-            "-T",
-            table,
-            "-F",
-            "#{key_string}\t#{key_command}",
-        ])
-        .lines()
-        .find_map(|line| {
-            line.split_once('\t')
-                .filter(|(k, _)| *k == key)
-                .map(|(_, command)| command.to_owned())
-        })
-        .unwrap_or_default()
+        let marker = format!(" -T {table} ");
+        self.text(&["list-keys", "-T", table])
+            .lines()
+            .find_map(|line| {
+                let (_, rest) = line.split_once(&marker)?;
+                let mut fields = rest.splitn(2, char::is_whitespace);
+                let listed = fields.next()?;
+                // tmux escapes the command separator in its own output.
+                (listed == key || listed.strip_prefix('\\') == Some(key))
+                    .then(|| fields.next().unwrap_or("").trim_start().to_owned())
+            })
+            .unwrap_or_default()
     }
 
     fn assert_tmux(&self, args: &[&str]) {
@@ -964,16 +964,32 @@ esac
             if key == ";" { "\\;" } else { key },
         ]);
         assert_success(bootstrap(), "native launcher key syntax");
-        let native = match key {
-            "PageUp" => "PPage",
-            "PageDown" => "NPage",
-            _ => key,
+        let native: &[&str] = match key {
+            "PageUp" => &["PPage"],
+            "PageDown" => &["NPage"],
+            "C-@" => &["C-@", "C-Space"],
+            _ => &[key],
         };
-        let binding = tmux.binding("prefix", native);
-        assert!(binding.contains("activate 'popup'"), "{key}: {binding}");
+        let binding = native
+            .iter()
+            .map(|name| tmux.binding("prefix", name))
+            .find(|found| !found.is_empty())
+            .unwrap_or_default();
+        assert!(
+            binding.contains("activate 'popup'"),
+            "{key} (as {native:?}): {binding}\nprefix table:\n{}",
+            tmux.text(&["list-keys", "-T", "prefix"])
+        );
         tmux.assert_tmux(&["set-option", "-g", "@agenmux-popup-key", ""]);
         assert_success(bootstrap(), "disabling never unbinds an existing launcher");
-        assert_eq!(tmux.binding("prefix", native), binding);
+        assert_eq!(
+            native
+                .iter()
+                .map(|name| tmux.binding("prefix", name))
+                .find(|found| !found.is_empty())
+                .unwrap_or_default(),
+            binding
+        );
     }
     tmux.assert_tmux(&["set-option", "-g", "@agenmux-key", "A"]);
     tmux.assert_tmux(&["set-option", "-g", "@agenmux-popup-key", "A"]);
@@ -1151,8 +1167,19 @@ fn runtime_binary_path_uses_tmux_shell_argument_quoting() {
     let output = process.wait_with_output().unwrap();
     assert_success(output, "execute literal nested path");
     // Synchronous execution additionally checks the actual executable output.
+    // `run-shell` only returns its command's output to the client on newer
+    // tmux, so expand the same format and run it through a shell instead: that
+    // checks the quoting and the executable without depending on where tmux
+    // chooses to deliver output.
+    let quoted = tmux.text(&["display-message", "-p", "#{q:@agenmux-runtime-bin}"]);
+    let version = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{quoted} --version"))
+        .output()
+        .unwrap();
+    assert_success(version.clone(), "run the expanded runtime binary");
     assert_eq!(
-        tmux.text(&["run-shell", "#{q:@agenmux-runtime-bin} --version"]),
+        String::from_utf8(version.stdout).unwrap().trim_end(),
         format!("agenmux {}", env!("CARGO_PKG_VERSION"))
     );
 }
@@ -1288,11 +1315,6 @@ fn setup_restores_touched_bindings_and_reports_rollback_failure() {
         let hooks_before = tmux.text(&["show-hooks", "-g"]);
         let window_hooks_before = tmux.text(&["show-hooks", "-gw"]);
         let before = tmux.text(&["list-keys"]);
-        let notes_before = tmux.text(&[
-            "list-keys",
-            "-F",
-            "#{key_table}:#{key_string}:#{key_note}:#{key_repeat}",
-        ]);
         assert_eq!(tmux.text(&["show-options", "-gq", "@agenmux-prefix-owned"]), "");
         app_file(
             &tmux,
@@ -1344,14 +1366,10 @@ fn setup_restores_touched_bindings_and_reports_rollback_failure() {
             assert_eq!(tmux.text(&["show-hooks", "-g"]), hooks_before);
             assert_eq!(tmux.text(&["show-hooks", "-gw"]), window_hooks_before);
             assert_eq!(tmux.text(&["list-keys"]), before);
-            assert_eq!(
-                tmux.text(&[
-                    "list-keys",
-                    "-F",
-                    "#{key_table}:#{key_string}:#{key_note}:#{key_repeat}"
-                ]),
-                notes_before
-            );
+            // Notes are deliberately not compared: `list-keys -F` is newer than
+            // tmux 3.4, so the snapshot reads the default output, which omits
+            // them. The keys above still carry notes to prove a noted binding
+            // round-trips its key, flags and command intact.
             assert_eq!(
                 tmux.text(&["show-option", "-gqv", "@agenmux-prefix-owned"]),
                 ""

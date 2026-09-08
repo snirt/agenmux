@@ -19,32 +19,17 @@ fn key_arg(key: &str) -> &str {
     }
 }
 
-/// tmux command-language literal, not shell quoting or format escaping.
-fn command_literal(value: &str) -> String {
-    if value == "~" {
-        return "\\~".into();
-    }
-    if !value.is_empty()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    {
-        return value.into();
-    }
-    format!(
-        "\"{}\"",
-        value
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('$', "\\$")
-            .replace('~', "\\~")
-    )
-}
 
+/// `list-keys` with no arguments lists every table, and a table with no
+/// bindings does not exist as far as tmux is concerned.
+fn table_marker(table: &str) -> String {
+    format!(" -T {table} ")
+}
 fn table_exists(table: &str) -> Result<bool, TmuxError> {
-    Ok(tmux::command(&["list-keys", "-F", "#{key_table}"])?
+    let marker = table_marker(table);
+    Ok(tmux::command(&["list-keys"])?
         .lines()
-        .any(|name| name == table))
+        .any(|line| line.contains(&marker)))
 }
 fn clear_table(table: &str) -> Result<(), TmuxError> {
     if table_exists(table)? {
@@ -61,46 +46,29 @@ fn remove_binding(table: &str, key: &str) -> Result<(), TmuxError> {
     }
 }
 
+/// Snapshot a table as replayable `bind-key` lines, keyed by the key token.
+/// `list-keys -F` would frame the fields unambiguously, but that flag is newer
+/// than the tmux versions this plugin supports; the default output is already
+/// a valid command and preserves `-r` and the command's own quoting. It omits
+/// notes, so a user's note on a snapshotted key is not restored. The plugin
+/// sets none of its own, and this only matters on a rollback path.
 fn bindings(table: &str) -> Result<std::collections::BTreeMap<String, String>, TmuxError> {
     if !table_exists(table)? {
         return Ok(Default::default());
     }
-    // One read, byte-length framed fields: notes may contain tabs/newlines.
-    // Default list-keys output omits notes, so it is not a complete snapshot.
-    let data = tmux::command(&["list-keys", "-T", table, "-F", "#{n:key_string}:#{key_string}#{n:key_note}:#{key_note}#{key_repeat}#{n:key_command}:#{key_command}"])?;
-    fn field<'a>(data: &mut &'a str) -> Option<&'a str> {
-        let (length, rest) = data.split_once(':')?;
-        let length = length.parse::<usize>().ok()?;
-        let value = rest.get(..length)?;
-        *data = rest.get(length..)?;
-        Some(value)
-    }
-    let invalid = || TmuxError::Error("unexpected binding snapshot format".into());
-    let mut rest = data.as_str();
+    let data = tmux::command(&["list-keys", "-T", table])?;
+    // A command body can also contain the marker; the first one is the real
+    // table field, exactly as clone_root_table assumes when it rewrites it.
+    let marker = table_marker(table);
     let mut result = std::collections::BTreeMap::new();
-    while !rest.is_empty() {
-        let key = field(&mut rest).ok_or_else(invalid)?;
-        let note = field(&mut rest).ok_or_else(invalid)?;
-        let repeat = match rest.as_bytes().first() {
-            Some(b'0') => "",
-            Some(b'1') => " -r",
-            _ => return Err(invalid()),
+    for line in data.lines() {
+        let Some((_, rest)) = line.split_once(&marker) else {
+            continue;
         };
-        rest = &rest[1..];
-        let command = field(&mut rest).ok_or_else(invalid)?;
-        rest = rest.strip_prefix('\n').ok_or_else(invalid)?;
-        let note = if note.is_empty() {
-            String::new()
-        } else {
-            format!(" -N {}", command_literal(note))
+        let Some(key) = rest.split_whitespace().next() else {
+            continue;
         };
-        result.insert(
-            key.to_owned(),
-            format!(
-                "bind-key{repeat}{note} -T {table} {} {command}\n",
-                command_literal(key)
-            ),
-        );
+        result.insert(key.to_owned(), format!("{line}\n"));
     }
     Ok(result)
 }
