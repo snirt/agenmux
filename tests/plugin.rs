@@ -671,7 +671,7 @@ fn setup_resolves_legacy_options_without_copying_behavior() {
     );
     assert_eq!(tmux.text(&["show-option", "-gqv", "@agenmux-key"]), "");
     assert!(tmux.binding("prefix", "L").is_empty());
-    let effective = tmux.bin(&["config", "check", "--effective"]);
+    let effective = tmux.bin(&["config", "check", "--effective", "--all"]);
     assert!(effective.status.success());
     let effective = String::from_utf8(effective.stdout).unwrap();
     // The winning option is named, so the fix for a surprise is obvious.
@@ -687,6 +687,7 @@ fn setup_resolves_legacy_options_without_copying_behavior() {
             .join(" ")
     };
     assert_eq!(row("display.sidebar_width"), "50 tmux @agenmux-width");
+    assert_eq!(row("display.show_all_panes"), "false default");
     assert_eq!(
         row("behavior.notifications"),
         "false tmux @agents-mon-notifications"

@@ -75,6 +75,7 @@ pub struct FileConfig {
 #[serde(deny_unknown_fields)]
 pub struct DisplayConfig {
     pub mode: Option<DisplayMode>,
+    pub show_all_panes: Option<bool>,
     pub sidebar_width: Option<u16>,
     pub popup_width: Option<u16>,
     pub popup_height: Option<PopupHeight>,
@@ -754,6 +755,7 @@ fn validate(config: &FileConfig) -> Result<(), ConfigError> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppConfig {
     pub mode: DisplayMode,
+    pub show_all_panes: bool,
     pub sidebar_width: u16,
     pub popup_width: u16,
     pub popup_height: PopupHeight,
@@ -850,6 +852,7 @@ pub fn resolve_cli(
     validate(file)?;
     let mut result = AppConfig {
         mode: DisplayMode::Split,
+        show_all_panes: false,
         sidebar_width: 30,
         popup_width: 40,
         popup_height: PopupHeight::Auto(AutoHeight::Auto),
@@ -866,6 +869,7 @@ pub fn resolve_cli(
         )?,
         sources: BTreeMap::from([
             ("display.mode", "default".into()),
+            ("display.show_all_panes", "default".into()),
             ("display.sidebar_width", "default".into()),
             ("display.popup_width", "default".into()),
             ("display.popup_height", "default".into()),
@@ -884,6 +888,7 @@ pub fn resolve_cli(
         }
         if let Some(d) = &f.display {
             set!(mode, d.mode, "display.mode");
+            set!(show_all_panes, d.show_all_panes, "display.show_all_panes");
             set!(sidebar_width, d.sidebar_width, "display.sidebar_width");
             set!(popup_width, d.popup_width, "display.popup_width");
             set!(popup_height, d.popup_height, "display.popup_height");
@@ -1234,6 +1239,7 @@ tmux option still wins over the file.
 
 [display]
   mode            split | popup                       (split)
+  show_all_panes  true | false                        (false)
   sidebar_width   1..=10000 cells                     (30)
   popup_width     1..=10000 cells                     (40)
   popup_height    "auto" or 1..=10000 cells           (auto)
@@ -1299,6 +1305,10 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
                 DisplayMode::Split => "split".into(),
                 DisplayMode::Popup => "popup".to_string(),
             },
+        ),
+        (
+            "display.show_all_panes".into(),
+            config.show_all_panes.to_string(),
         ),
         ("display.sidebar_width".into(), config.sidebar_width.to_string()),
         ("display.popup_width".into(), config.popup_width.to_string()),
@@ -1609,6 +1619,12 @@ mod tests {
     fn defaults_and_empty_layer_semantics() {
         let empty = parse("").unwrap();
         let default = resolve(&empty, &BTreeMap::new()).unwrap();
+        assert!(!default.show_all_panes);
+        let enabled = parse("[display]\nshow_all_panes = true").unwrap();
+        let enabled = resolve(&enabled, &BTreeMap::new()).unwrap();
+        assert!(enabled.show_all_panes);
+        assert_eq!(enabled.sources["display.show_all_panes"], "file");
+        assert!(parse("[display]\nshow_all_panes = 'true'").is_err());
         assert_eq!((default.sidebar_width, default.popup_width), (30, 40));
         assert_eq!(default.hide_windows, None);
         let file = parse("[display]\nmode='popup'\nsidebar_width=22\npopup_width=24\npopup_height=18\n[behavior]\nnotifications=false\nhide_windows='hidden*'").unwrap();
@@ -1627,6 +1643,7 @@ mod tests {
         assert!(config
             .sources
             .iter()
+            .filter(|(field, _)| **field != "display.show_all_panes")
             .filter(|(field, _)| field.starts_with("display.")
                 || field.starts_with("behavior."))
             .all(|(_, source)| source.starts_with("tmux @agenmux-")));

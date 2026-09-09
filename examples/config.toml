@@ -7,6 +7,7 @@ version = 1
 
 [display]
 mode = "split"        # split | popup
+show_all_panes = false
 sidebar_width = 30    # cells, 1..=10000
 popup_width = 40
 popup_height = "auto" # "auto" or cells
