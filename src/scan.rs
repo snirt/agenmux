@@ -21,7 +21,70 @@ pub struct PaneRow {
     pub title: String,
 }
 
-const LIST_FMT: &str = "list-panes -a -F '#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_title}'";
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneMeta {
+    pub pane: String,
+    pub pane_index: u32,
+    pub pane_title: String,
+    pub command: String,
+    pub path: String,
+    pub window_id: String,
+    pub window_index: u32,
+    pub window_name: String,
+    pub session_id: String,
+    pub session_name: String,
+    pub agent_index: Option<usize>,
+}
+
+pub struct ScanSnapshot {
+    pub panes: Vec<PaneMeta>,
+    pub agents: Vec<PaneRow>,
+}
+
+struct ParsedPane {
+    meta: PaneMeta,
+    pid: u32,
+}
+
+const LIST_FMT: &str = "list-panes -a -F '#{session_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_title}\t#{@agenmux}'";
+
+fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
+    rows.lines()
+        .filter_map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let [session_id, session_name, window_id, window_index, window_name, pane, pane_index, pid, command, path, pane_title, marked] =
+                fields.as_slice()
+            else {
+                return None;
+            };
+            let window_index = window_index.parse().ok()?;
+            let pane_index = pane_index.parse().ok()?;
+            let pid = pid.parse().ok()?;
+            if self_pane == Some(*pane)
+                || *marked == "1"
+                || (pid == 0 && *pane_title == "agenmux")
+            {
+                return None;
+            }
+            Some(ParsedPane {
+                meta: PaneMeta {
+                    pane: (*pane).to_string(),
+                    pane_index,
+                    pane_title: (*pane_title).to_string(),
+                    command: (*command).to_string(),
+                    path: (*path).to_string(),
+                    window_id: (*window_id).to_string(),
+                    window_index,
+                    window_name: (*window_name).to_string(),
+                    session_id: (*session_id).to_string(),
+                    session_name: (*session_name).to_string(),
+                    agent_index: None,
+                },
+                pid,
+            })
+        })
+        .collect()
+}
 
 pub fn scan(
     tmux: &mut Tmux,
@@ -29,34 +92,39 @@ pub fn scan(
     cache: &mut IdentCache,
     subj: &mut SubjectCache,
     self_pane: Option<&str>,
-) -> Result<Vec<PaneRow>, TmuxError> {
+) -> Result<ScanSnapshot, TmuxError> {
     tmux.sync()?;
-    let panes = tmux.run(LIST_FMT)?;
+    let rows = tmux.run(LIST_FMT)?;
     let mut snap: Option<Snapshot> = None;
-    let mut rows = Vec::new();
+    let mut panes = Vec::new();
+    let mut agents = Vec::new();
     let mut seen = IdentCache::new();
     let buf = format!("agenmux-{}", std::process::id());
     let cap = std::env::temp_dir().join(&buf);
     let mut captured_any = false;
-    for line in panes.lines() {
-        let mut f = line.splitn(6, '\t');
-        let (Some(pane), Some(pid), Some(cmd), Some(path), Some(loc), Some(title)) =
-            (f.next(), f.next(), f.next(), f.next(), f.next(), f.next())
-        else {
-            continue;
-        };
-        if self_pane == Some(pane) {
-            continue; // sidebar skips itself
-        }
-        let pid: u32 = pid.parse().unwrap_or(0);
+    for parsed in parse_panes(&rows, self_pane) {
+        let ParsedPane { mut meta, pid } = parsed;
+        let pane = meta.pane.as_str();
+        let cmd = meta.command.as_str();
+        let path = meta.path.as_str();
+        let title = meta.pane_title.as_str();
         let key = (pane.to_string(), pid, cmd.to_string());
         let name = cache
             .get(&key)
             .cloned()
-            .or_else(|| procs::identify(confs, &mut snap, pid, cmd).map(|i| confs[i].name.clone()));
-        let Some(name) = name else { continue };
+            .or_else(|| {
+                (pid != 0)
+                    .then(|| procs::identify(confs, &mut snap, pid, cmd))
+                    .flatten()
+                    .map(|i| confs[i].name.clone())
+            });
+        let Some(name) = name else {
+            panes.push(meta);
+            continue;
+        };
         seen.insert(key, name.clone());
         let Some(idx) = confs.iter().position(|c| c.name == name) else {
+            panes.push(meta);
             continue; // conf removed since cached
         };
         // pane content must never travel over the control pipe: a pane
@@ -87,14 +155,19 @@ pub fn scan(
                 }
             }
         }
-        rows.push(PaneRow {
+        meta.agent_index = Some(agents.len());
+        agents.push(PaneRow {
             pane: pane.to_string(),
-            loc: loc.to_string(),
+            loc: format!(
+                "{}:{}.{}",
+                meta.session_name, meta.window_index, meta.pane_index
+            ),
             agent: name,
             state: state.to_string(),
             cwd: path.rsplit('/').next().unwrap_or(path).to_string(),
             title: subject,
         });
+        panes.push(meta);
     }
     if captured_any {
         let _ = tmux.run(&format!("delete-buffer -b '{buf}'"));
@@ -102,7 +175,12 @@ pub fn scan(
     }
     subj.retain(|pane, _| seen.keys().any(|k| &k.0 == pane)); // dead panes pruned
     *cache = seen;
-    Ok(rows)
+    crate::tmux::debug_note(&format!(
+        "snapshot panes={} agents={}",
+        panes.len(),
+        agents.len()
+    ));
+    Ok(ScanSnapshot { panes, agents })
 }
 
 pub fn to_tsv(rows: &[PaneRow]) -> String {
@@ -165,6 +243,51 @@ mod tests {
             cwd: "x".into(),
             title: String::new(),
         }
+    }
+
+    #[test]
+    fn pane_inventory_parser_skips_malformed_and_sidebar_rows() {
+        let rows = [
+            "$1\twork\t@1\t0\teditor\t%1\t0\t101\tcodex\t/repo\trepo\t",
+            "$1\twork\t@1\t0\teditor\t%2\t1\t0\t\t/repo\tordinary\t",
+            "missing\tfields",
+            "$1\twork\t@1\tx\teditor\t%3\t2\t102\tsleep\t/repo\tbad window\t",
+            "$1\twork\t@1\t0\teditor\t%4\tx\t103\tsleep\t/repo\tbad pane\t",
+            "$1\twork\t@1\t0\teditor\t%5\t3\tnot-a-pid\tsleep\t/repo\tbad pid\t",
+            "$1\twork\t@1\t0\teditor\t%6\t4\t104\tsleep\t/repo\ttab\tfragment\t",
+            "$1\twork\t@1\t0\teditor\t%7\t5\t105\tbroken",
+            "fragment\t/repo\tnewline\t",
+            "$1\twork\t@1\t0\teditor\t%8\t6\t106\tsleep\t/repo\tself\t",
+            "$1\twork\t@1\t0\teditor\t%9\t7\t0\t\t/repo\tmarked\t1",
+            "$1\twork\t@1\t0\teditor\t%10\t8\t0\t\t/repo\tagenmux\t",
+            "$1\twork\t@1\t0\teditor\t%11\t9\t107\tsleep\t/repo\tagenmux\t",
+            "$2\tother\t@2\t3\tserver\t%12\t4\t108\tsleep\t/tmp\tlater valid\t",
+        ]
+        .join("\n");
+
+        let parsed = parse_panes(&rows, Some("%8"));
+
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|pane| (pane.meta.pane.as_str(), pane.pid, pane.meta.command.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("%1", 101, "codex"),
+                ("%2", 0, ""),
+                ("%11", 107, "sleep"),
+                ("%12", 108, "sleep"),
+            ]
+        );
+        assert_eq!(parsed[0].meta.session_id, "$1");
+        assert_eq!(parsed[0].meta.session_name, "work");
+        assert_eq!(parsed[0].meta.window_id, "@1");
+        assert_eq!(parsed[0].meta.window_index, 0);
+        assert_eq!(parsed[0].meta.window_name, "editor");
+        assert_eq!(parsed[0].meta.pane_index, 0);
+        assert_eq!(parsed[0].meta.path, "/repo");
+        assert_eq!(parsed[0].meta.pane_title, "repo");
+        assert_eq!(parsed[0].meta.agent_index, None);
     }
 
     #[test]

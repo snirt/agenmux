@@ -1432,6 +1432,133 @@ fn file_width_pin_and_notification_eligibility_share_resolution() {
 }
 
 #[test]
+fn scan_keeps_inventory_separate_from_agent_output() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmux = TestTmux::new("scan-inventory");
+    let ordinary = tmux.text(&["display-message", "-p", "#{pane_id}"]);
+    let codex = tmux.tmp.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nwhile :; do sleep 60; done\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let agent = tmux.text(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-n",
+        "agent",
+        codex.to_str().unwrap(),
+    ]);
+    let sidebar = tmux.text(&[
+        "split-window",
+        "-I",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &agent,
+    ]);
+    tmux.assert_tmux(&["select-pane", "-t", &sidebar, "-T", "agenmux"]);
+    let marked_sidebar = tmux.text(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &ordinary,
+        "exec sleep 60",
+    ]);
+    tmux.assert_tmux(&[
+        "set-option",
+        "-p",
+        "-t",
+        &marked_sidebar,
+        "@agenmux",
+        "1",
+    ]);
+
+    let debug = tmux.tmp.join("scan-debug");
+    let scan = tmux
+        .bin_command(&["scan"])
+        .env("AGENMUX_DEBUG", &debug)
+        .output()
+        .unwrap();
+    assert_success(scan.clone(), "agent scan");
+    let list = tmux.bin(&["list"]);
+    assert_success(list.clone(), "agent list");
+    assert_eq!(scan.stdout, list.stdout);
+    let rows = String::from_utf8(scan.stdout).unwrap();
+    let fields = rows.trim_end().split('\t').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 6, "{rows:?}");
+    assert_eq!(fields[0], agent);
+    assert_eq!(fields[2], "codex");
+    assert!(!rows.contains(&ordinary));
+    assert!(!rows.contains(&sidebar));
+    assert!(!rows.contains(&marked_sidebar));
+
+    let debug = std::fs::read_to_string(debug).unwrap();
+    assert!(debug.contains("# snapshot panes=2 agents=1"), "{debug}");
+    assert_eq!(
+        String::from_utf8(tmux.bin(&["status"]).stdout).unwrap(),
+        "#[fg=green]⣿#[default]1"
+    );
+}
+
+#[test]
+fn sidebar_refresh_uses_one_content_enumeration() {
+    let tmux = TestTmux::new("scan-query-count");
+    let debug = tmux.tmp.join("sidebar-debug");
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agenmux-bin",
+        env!("CARGO_BIN_EXE_agenmux"),
+    ]);
+    let started = tmux
+        .bin_command(&["toggle", "split"])
+        .env("AGENMUX_DEBUG", &debug)
+        .output()
+        .unwrap();
+    assert_success(started, "start debug sidebar");
+    tmux.wait_for(Duration::from_secs(8), || {
+        std::fs::read_to_string(&debug)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains("] # scan "))
+            .count()
+            >= 2
+    });
+    assert_success(tmux.bin(&["key", "close"]), "close debug sidebar");
+    tmux.wait_for(Duration::from_secs(4), || {
+        tmux.text(&["show-option", "-gqv", "@agenmux-control-client"])
+            .is_empty()
+    });
+
+    let debug = std::fs::read_to_string(debug).unwrap();
+    let completed = debug
+        .lines()
+        .filter(|line| line.contains("] # scan "))
+        .count();
+    let content_queries = debug
+        .lines()
+        .filter(|line| {
+            line.contains("ms list-panes -a -F ")
+                && !line.contains("ms list-panes -a -f '")
+        })
+        .count();
+    let mirror_queries = debug
+        .lines()
+        .filter(|line| line.contains("ms list-panes -a -f '"))
+        .count();
+    assert!(completed >= 2, "{debug}");
+    assert!(mirror_queries > 0, "{debug}");
+    assert_eq!(completed, content_queries, "{debug}");
+}
+
+#[test]
 fn binary_helper_uses_private_server() {
     let tmux = TestTmux::new("binary-helper");
     assert_success(tmux.bin(&["status"]), "agenmux status");

@@ -417,13 +417,17 @@ impl Sidebar {
             self.adopt_reload(refreshed);
         }
         let t0 = Instant::now();
-        let scanned = scan::scan(
+        let scan::ScanSnapshot {
+            agents: scanned,
+            panes,
+        } = scan::scan(
             &mut self.tmux,
             &self.confs,
             &mut self.ident,
             &mut self.subj,
             Some(&self.self_pane),
         )?;
+        drop(panes); // Task 3 activates the inventory in the sidebar.
         crate::tmux::debug_note(&format!("scan {}ms", t0.elapsed().as_millis()));
         let _ = std::fs::write(&self.cache_file, scan::to_tsv(&scanned));
         let mut focus = self.client_focus().unwrap_or_default();
