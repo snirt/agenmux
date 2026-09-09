@@ -81,10 +81,23 @@ fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
             if let Some(next) = chars.next() {
                 out.push(next);
                 if next == '[' {
+                    let mut csi_column = 0usize;
+                    let mut column_only = true;
+                    let mut saw_digit = false;
                     for parameter in chars.by_ref() {
                         out.push(parameter);
-                        if ('@'..='~').contains(&parameter) {
+                        if parameter.is_ascii_digit() && column_only {
+                            saw_digit = true;
+                            csi_column = csi_column
+                                .saturating_mul(10)
+                                .saturating_add(parameter as usize - '0' as usize);
+                        } else if ('@'..='~').contains(&parameter) {
+                            if parameter == 'G' && column_only {
+                                col = if saw_digit { csi_column } else { 1 }.saturating_sub(1);
+                            }
                             break;
+                        } else {
+                            column_only = false;
                         }
                     }
                 }
@@ -2757,7 +2770,11 @@ mod tests {
                                 sb.daemon.as_mut().unwrap().size = size;
                                 sb.render(true);
                                 let text = plain(&sb.last_frame);
-                                assert!(text.lines().all(|l| l.chars().count() <= size.0));
+                                let final_column = format!("{E}[{}G", size.0);
+                                assert!(sb.last_frame.lines().zip(text.lines()).all(
+                                    |(frame, text)| text.chars().count()
+                                        <= size.0 + usize::from(frame.contains(&final_column))
+                                ));
                                 assert!(text.lines().count() <= size.1.saturating_sub(1));
                                 assert!(
                                     std::fs::read_to_string(&sb.rows_file)

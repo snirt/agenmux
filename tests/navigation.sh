@@ -592,8 +592,11 @@ for _ in $(seq 1 80); do
   sleep 0.1
 done
 scrollbar_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+scrollbar_rows="$(wc -l <"$tmp/agenmux-rows")"
+scrollbar_glyph_rows="$(printf '%s\n' "$scrollbar_frame" |
+  awk -v rows="$scrollbar_rows" 'NR > 1 && NR <= rows + 1 && /[│▐]$/ { n++ } END { print n + 0 }')"
 scrollbar_works=0
-if printf '%s\n' "$scrollbar_frame" | grep -Fq '▐'; then
+if [ "$scrollbar_rows" -gt 0 ] && [ "$scrollbar_glyph_rows" -eq "$scrollbar_rows" ]; then
   scrollbar_works=1
 fi
 edge_first="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
