@@ -15,5 +15,8 @@ sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 mac-usernotifications = "0.3.1"
 
 [profile.release]
+opt-level = "z"
 strip = true
 lto = true
+panic = "abort"
+codegen-units = 1

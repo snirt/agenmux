@@ -1,4 +1,4 @@
-.PHONY: test build dev-use dev-stop bump release install-app
+.PHONY: test build clean dev-use dev-stop bump release install-app
 
 test:
 	./tests/run.sh
@@ -6,6 +6,9 @@ test:
 # optional: Rust engine (~10x less CPU); plugin works without it
 build:
 	cargo build --release
+
+clean:
+	cargo clean
 
 dev-use:
 	mise exec rust@latest -- ./scripts/dev-bin.sh use
