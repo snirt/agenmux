@@ -73,17 +73,17 @@ notification permission again because the bundle identity changed.
 ## Usage
 
 Press `prefix + A` to open the left sidebar or enter navigation when it is
-already open. Agents are grouped by session in tmux window order and refresh
-every two seconds.
+already open. By default, agents are grouped by session in tmux window order
+and refresh every two seconds.
 
 | Input | Action |
 | --- | --- |
 | `prefix + A` | Open the sidebar or enter navigation |
-| Click an agent row | Select it; click the selected row again to open it (requires `set -g mouse on`) |
-| Mouse wheel | Scroll the agent list without changing selection |
+| Click a selectable row | Select it; click the selected row again to open it (requires `set -g mouse on`) |
+| Mouse wheel | Scroll the sidebar without changing selection |
 | `j` / `k`, `↑` / `↓` | Move selection |
-| `Enter` / `l` | Jump to selected agent |
-| `/` | Search agent and session names |
+| `Enter` / `l` | Jump to the selected agent or pane |
+| `/` | Search fields available in the current mode |
 | `f` | Cycle `all → blocked → working → idle → done` |
 | `Esc` | Exit search and clear filters |
 | `u` | Open version picker |
@@ -93,10 +93,10 @@ every two seconds.
 <details>
 <summary>Search, mouse, and navigation details</summary>
 
-Clicks outside agent rows enter navigation; clicks in regular panes retain
-tmux behavior. The first click on an agent selects it, and a second click opens
-the selected agent. Wheel scrolling moves the list viewport without changing
-selection or switching panes.
+Clicks outside selectable rows enter navigation; clicks in regular panes retain
+tmux behavior. The first click on a selectable row selects it, and a second click
+opens its exact agent or pane. Wheel scrolling moves the list viewport without
+changing selection or switching panes.
 
 During search, type normally, then press `Enter` to accept the query and restore
 `j`/`k` navigation; press `Enter` again to jump. `↑`/`↓` or
@@ -104,9 +104,29 @@ During search, type normally, then press `Enter` to accept the query and restore
 leaving search. State and text filters are mutually exclusive. Matching a
 session keeps all its agents visible as context.
 
-The header shows active filters, matching/total counts, and contextual controls
-only while filtering. The green `❯` cursor follows the focused agent pane and
-long lists scroll to keep the selection visible.
+Set `display.show_all_panes = true` in the application configuration to turn the
+sidebar into a complete tmux navigator. The default is `false`, which preserves
+the agent-only list. All-pane mode renders sessions, windows, and panes in tmux
+order. A window with multiple panes gets a window header and nested pane rows; a
+single-pane window collapses its window and pane into one row. Only pane rows
+are selectable—session and window rows provide context. `Enter` and repeated
+clicks can therefore jump to ordinary panes as well as agent panes.
+
+Search in all-pane mode matches session, window, and pane metadata. A session or
+window match keeps its pane subtree, while a pane match keeps its session and
+window ancestors on screen. Status filtering remains agent-state filtering:
+only matching agent panes are results, with their session and window ancestors
+shown for context. With no inventory, all-pane mode says `no panes`; default
+mode says `no agents` when no agents are detected; either mode says `no matches`
+when a search or status filter has no results.
+
+This setting changes only sidebar presentation and navigation. `scan`, `list`,
+`status`, agent detection, attention tracking, notifications, and the scan cache
+remain agent-only; ordinary panes never contribute agent state or alerts.
+
+The header shows active filters, matching/total selectable-pane counts, and
+contextual controls only while filtering. The green `❯` cursor follows the
+focused agent or pane, and long lists scroll to keep the selection visible.
 
 </details>
 
@@ -173,6 +193,7 @@ otherwise `$HOME/.config/agenmux/config.toml` (absolute HOME):
 version = 1
 [display]
 mode = "split"
+show_all_panes = false
 sidebar_width = 30
 popup_width = 40
 popup_height = "auto"
