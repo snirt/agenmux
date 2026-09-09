@@ -1,7 +1,7 @@
 # Implementation Plan
 
-**Ticket:** [#69 — Show all tmux panes in optional sidebar tree](https://github.com/snirt/agenmux/issues/69)  
-**State:** OPEN  
+**Ticket:** [#69 — Show all tmux panes in optional sidebar tree](https://github.com/snirt/agenmux/issues/69)
+**State:** OPEN
 **Plan path after acceptance:** `docs/plans/2026-09-09-show-all-panes-sidebar.md`
 
 **Goal:** Add optional `display.show_all_panes = true` sidebar hierarchy while preserving default agent-only behavior and every agent-only runtime contract.
@@ -472,7 +472,7 @@ git log --oneline --decorate -8
 ```bash
 git ls-files -co --exclude-standard -z |
   xargs -0 grep -nEI \
-  '(api[_-]?key|token|secret|password|authorization:|BEGIN [A-Z ]*PRIVATE KEY|/Users/|snir\.turgeman|@[^ ]+\.[^ ]+)' \
+  '(api[_-]?key|token|secret|password|authorization:|BEGIN [A-Z ]*PRIVATE KEY|/Users/[^/]+|@[^ ]+\.[^ ]+)' \
   || true
 ```
 
