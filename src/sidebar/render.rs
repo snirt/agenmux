@@ -934,14 +934,14 @@ mod tests {
                 .escape_default()
         ));
 
+        if std::env::var_os("AGENMUX_UPDATE_FIXTURES").is_some() {
+            std::fs::write("tests/fixtures/sidebar/dark.frames", &frames).unwrap();
+        }
         let fixture = std::fs::read_to_string("tests/fixtures/sidebar/dark.frames").unwrap();
         assert!(
             fixture.starts_with(&false_frames),
             "false-mode fixture prefix changed"
         );
-        if std::env::var_os("AGENMUX_UPDATE_FIXTURES").is_some() {
-            std::fs::write("tests/fixtures/sidebar/dark.frames", &frames).unwrap();
-        }
         assert_eq!(
             frames,
             std::fs::read_to_string("tests/fixtures/sidebar/dark.frames").unwrap()

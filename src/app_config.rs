@@ -306,16 +306,16 @@ impl Palette {
             error_fg: Inherited,
             blocked_fg: Basic(1),
             blocked_bg: rgb(42, 16, 16),
-            blocked_bg_unfocused: rgb(32, 12, 12),
+            blocked_bg_unfocused: rgb(27, 10, 10),
             working_fg: Basic(3),
             working_bg: rgb(38, 32, 16),
-            working_bg_unfocused: rgb(29, 24, 12),
+            working_bg_unfocused: rgb(25, 20, 10),
             idle_fg: Basic(2),
             idle_bg: rgb(15, 36, 16),
-            idle_bg_unfocused: rgb(11, 27, 12),
+            idle_bg_unfocused: rgb(9, 23, 10),
             done_fg: Basic(2),
             done_bg: rgb(15, 36, 16),
-            done_bg_unfocused: rgb(11, 27, 12),
+            done_bg_unfocused: rgb(9, 23, 10),
         };
         match theme.base.unwrap_or(ThemeBase::Dark) {
             ThemeBase::Dark => {}
@@ -1549,6 +1549,11 @@ mod tests {
         expected.working_bg = Ink::Typed(Color::Indexed(7));
         assert_eq!(actual, expected);
         assert_eq!(dark.working_fg.fg("1"), "\x1b[1;33m");
+        assert_eq!(dark.blocked_bg_unfocused, Ink::Typed(Color::Rgb(27, 10, 10)));
+        assert_eq!(dark.working_bg_unfocused, Ink::Typed(Color::Rgb(25, 20, 10)));
+        assert_eq!(dark.idle_bg_unfocused, Ink::Typed(Color::Rgb(9, 23, 10)));
+        assert_eq!(dark.done_bg_unfocused, dark.idle_bg_unfocused);
+        assert_eq!(dark.working_bg, Ink::Typed(Color::Rgb(38, 32, 16)));
         for (value, fg, bg) in [
             ("'default'", "39", "49"),
             ("0", "38;5;0", "48;5;0"),
