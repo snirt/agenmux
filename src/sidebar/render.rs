@@ -319,9 +319,12 @@ impl Sidebar {
                         format!(" {muted}● {}{E}[0m", pane.command)
                     };
                     let row = format!("{mark}{prefix}{detail}");
-                    let row_bg = agent.filter(|_| selected).map_or(String::new(), |_| {
-                        self.palette.state_bg(state, self.plugin_selected)
-                    });
+                    let row_bg = match agent {
+                        Some(_) if selected =>
+                            self.palette.state_bg(state, self.plugin_selected),
+                        Some(_) => String::new(),
+                        None => self.palette.pane_bg.bg(),
+                    };
                     let mut chars = row.chars();
                     let mut width = 0;
                     while let Some(c) = chars.next() {
@@ -844,6 +847,14 @@ mod tests {
             collapsed_pane.contains(&pane_marker) && expanded_pane.contains(&pane_marker),
             "ordinary pane rows use the customizable muted circle marker"
         );
+        for pane in [collapsed_pane, expanded_pane] {
+            assert!(
+                pane.starts_with("\x1b[48;5;236m")
+                    && ansi.replace_all(pane, "").chars().count()
+                        == sb.daemon.as_ref().unwrap().size.0,
+                "ordinary pane background spans the full row"
+            );
+        }
         assert_eq!(
             ansi.replace_all(selected_agent, "").chars().count(),
             sb.daemon.as_ref().unwrap().size.0,

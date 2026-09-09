@@ -171,6 +171,7 @@ impl<'de> Deserialize<'de> for Color {
 pub struct ThemeColors {
     pub header_fg: Option<Color>,
     pub header_bg: Option<Color>,
+    pub pane_bg: Option<Color>,
     pub text_fg: Option<Color>,
     pub muted_fg: Option<Color>,
     pub accent_fg: Option<Color>,
@@ -244,6 +245,7 @@ impl Ink {
 pub(crate) struct Palette {
     pub header_fg: Ink,
     pub header_bg: Ink,
+    pub pane_bg: Ink,
     pub text_fg: Ink,
     pub muted_fg: Ink,
     pub accent_fg: Ink,
@@ -265,10 +267,11 @@ impl Palette {
     /// Every overridable role paired with its resolved colour, in the order
     /// `--help` and `check --effective` list them. One list, so a new role
     /// cannot appear in the palette without appearing in both.
-    pub fn roles(&self) -> [(&'static str, Ink); 18] {
+    pub fn roles(&self) -> [(&'static str, Ink); 19] {
         [
             ("header_fg", self.header_fg),
             ("header_bg", self.header_bg),
+            ("pane_bg", self.pane_bg),
             ("text_fg", self.text_fg),
             ("muted_fg", self.muted_fg),
             ("accent_fg", self.accent_fg),
@@ -300,6 +303,7 @@ impl Palette {
         let mut p = Self {
             header_fg: Inherited,
             header_bg: Typed(Color::Indexed(236)),
+            pane_bg: Typed(Color::Indexed(236)),
             text_fg: Inherited,
             muted_fg: Inherited,
             accent_fg: Basic(4),
@@ -322,6 +326,7 @@ impl Palette {
             ThemeBase::Light => {
                 p.header_fg = rgb(32, 32, 32);
                 p.header_bg = rgb(238, 238, 238);
+                p.pane_bg = rgb(238, 238, 238);
                 p.text_fg = rgb(32, 32, 32);
                 p.muted_fg = rgb(80, 80, 80);
                 p.accent_fg = rgb(32, 72, 144);
@@ -345,6 +350,7 @@ impl Palette {
                 p.text_fg = Typed(Color::Default);
                 p.muted_fg = Typed(Color::Default);
                 p.header_bg = Typed(Color::Default);
+                p.pane_bg = Typed(Color::Default);
                 p.blocked_bg = Typed(Color::Default);
                 p.blocked_bg_unfocused = Typed(Color::Default);
                 p.working_bg = Typed(Color::Default);
@@ -360,6 +366,7 @@ impl Palette {
             apply!(
                 header_fg,
                 header_bg,
+                pane_bg,
                 text_fg,
                 muted_fg,
                 accent_fg,
@@ -918,6 +925,7 @@ pub fn resolve_cli(
     color_sources!(
         header_fg,
         header_bg,
+        pane_bg,
         text_fg,
         muted_fg,
         accent_fg,
@@ -1548,6 +1556,12 @@ mod tests {
         let mut expected = dark.clone();
         expected.working_bg = Ink::Typed(Color::Indexed(7));
         assert_eq!(actual, expected);
+        let pane_file = parse("[theme.colors]\npane_bg = 238").unwrap();
+        assert_eq!(
+            Palette::resolve(pane_file.theme.as_ref().unwrap()).pane_bg,
+            Ink::Typed(Color::Indexed(238))
+        );
+        assert_eq!(dark.pane_bg, Ink::Typed(Color::Indexed(236)));
         assert_eq!(dark.working_fg.fg("1"), "\x1b[1;33m");
         assert_eq!(dark.blocked_bg_unfocused, Ink::Typed(Color::Rgb(27, 10, 10)));
         assert_eq!(dark.working_bg_unfocused, Ink::Typed(Color::Rgb(25, 20, 10)));
@@ -1590,11 +1604,13 @@ mod tests {
             }
         }
         assert_eq!(terminal.header_bg.bg(), "\x1b[49m");
+        assert_eq!(terminal.pane_bg.bg(), "\x1b[49m");
         let light = Palette::resolve(&ThemeConfig {
             base: Some(ThemeBase::Light),
             colors: None,
         });
         assert_eq!(light.text_fg, Ink::Typed(Color::Rgb(32, 32, 32)));
+        assert_eq!(light.pane_bg, Ink::Typed(Color::Rgb(238, 238, 238)));
         assert_eq!(light.working_bg, Ink::Typed(Color::Rgb(255, 240, 204)));
     }
     use super::*;
