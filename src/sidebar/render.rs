@@ -854,6 +854,42 @@ mod tests {
                 .escape_default()
         ));
 
+        for (label, query, state_filter) in [
+            ("session query", "work", None),
+            ("window query", "server", None),
+            ("pane query", "%21", None),
+            ("agent query", "claude", None),
+            ("status filter", "ignored", Some(StateFilter::Working)),
+            ("absent query", "absent", None),
+        ] {
+            sb.query = query.into();
+            sb.state_filter = state_filter;
+            sb.rebuild_visible(false);
+            sb.render(true);
+            if label == "pane query" {
+                assert!(
+                    sb.last_frame.contains("server") && sb.last_frame.contains("└─ 1"),
+                    "a physical multi-pane window stays expanded after filtering"
+                );
+            }
+            if label == "absent query" {
+                assert!(sb.last_frame.contains("no matches"));
+                assert!(!sb.last_frame.contains("work") && !sb.last_frame.contains("personal"));
+            }
+            frames.push_str(&format!(
+                "all-panes {label}\n{}\nrows={}\n",
+                sb.last_frame
+                    .replace(&app_title(), "agenmux TEST")
+                    .escape_default(),
+                std::fs::read_to_string(&sb.rows_file)
+                    .unwrap()
+                    .escape_default()
+            ));
+        }
+        sb.query.clear();
+        sb.state_filter = None;
+        sb.rebuild_visible(false);
+
         sb.panes.push(pane(
             "$2",
             "personal",

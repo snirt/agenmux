@@ -1,5 +1,5 @@
 use crate::input::Key;
-use crate::scan::PaneRow;
+use crate::scan::{PaneMeta, PaneRow};
 use std::collections::HashSet;
 
 use super::{PaneOccurrence, Sidebar, VisiblePane};
@@ -44,6 +44,51 @@ fn row_filter_text(row: &PaneRow) -> String {
 /// Filter projection: status matching is exact and separate from text search.
 /// Matching a session keeps its whole agent subtree as context;
 /// matching an agent keeps that session's header through normal rendering.
+fn inventory_filtered_indices(
+    panes: &[PaneMeta],
+    rows: &[PaneRow],
+    query: &str,
+    state_filter: Option<StateFilter>,
+) -> Vec<usize> {
+    if let Some(filter) = state_filter {
+        return panes
+            .iter()
+            .enumerate()
+            .filter(|(_, pane)| {
+                pane.agent_index
+                    .and_then(|i| rows.get(i))
+                    .is_some_and(|row| row.state == filter.label())
+            })
+            .map(|(i, _)| i)
+            .collect();
+    }
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return (0..panes.len()).collect();
+    }
+    panes
+        .iter()
+        .enumerate()
+        .filter(|(_, pane)| {
+            pane.session_name.to_lowercase().contains(&query)
+                || pane.session_id.to_lowercase().contains(&query)
+                || pane.window_name.to_lowercase().contains(&query)
+                || pane.window_id.to_lowercase().contains(&query)
+                || pane.window_index.to_string().contains(&query)
+                || pane.pane_index.to_string().contains(&query)
+                || pane.pane.to_lowercase().contains(&query)
+                || pane.pane_title.to_lowercase().contains(&query)
+                || pane.command.to_lowercase().contains(&query)
+                || pane.path.to_lowercase().contains(&query)
+                || pane
+                    .agent_index
+                    .and_then(|i| rows.get(i))
+                    .is_some_and(|row| row_filter_text(row).contains(&query))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 fn filtered_indices(
     rows: &[PaneRow],
     query: &str,
@@ -191,20 +236,16 @@ impl Sidebar {
     }
 
     pub(super) fn rebuild_visible(&mut self, select_first: bool) {
-        let filtered = filtered_indices(&self.rows, &self.query, self.state_filter);
         self.visible = if self.settings.settings.show_all_panes {
-            if self.state_filter.is_none() && self.query.trim().is_empty() {
-                (0..self.panes.len()).map(VisiblePane::Inventory).collect()
-            } else {
-                self.panes
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, pane)| pane.agent_index.is_some_and(|i| filtered.contains(&i)))
-                    .map(|(i, _)| VisiblePane::Inventory(i))
-                    .collect()
-            }
+            inventory_filtered_indices(&self.panes, &self.rows, &self.query, self.state_filter)
+                .into_iter()
+                .map(VisiblePane::Inventory)
+                .collect()
         } else {
-            filtered.into_iter().map(VisiblePane::Agent).collect()
+            filtered_indices(&self.rows, &self.query, self.state_filter)
+                .into_iter()
+                .map(VisiblePane::Agent)
+                .collect()
         };
         if select_first {
             self.sel = 1;
@@ -284,6 +325,7 @@ impl Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::PaneMeta;
 
     fn filter_row(pane: &str, loc: &str, state: &str, title: &str) -> PaneRow {
         PaneRow {
@@ -313,6 +355,256 @@ mod tests {
             filter_row("%3", "web:1.0", "idle", "unrelated"),
         ];
         assert_eq!(filtered_indices(&rows, "api", None), vec![0, 1]);
+    }
+
+    fn inventory_pane(
+        session_id: &str,
+        session_name: &str,
+        window_id: &str,
+        window_index: u32,
+        window_name: &str,
+        pane: &str,
+        pane_index: u32,
+        pane_title: &str,
+        command: &str,
+        path: &str,
+        agent_index: Option<usize>,
+    ) -> PaneMeta {
+        PaneMeta {
+            pane: pane.into(),
+            pane_index,
+            pane_title: pane_title.into(),
+            command: command.into(),
+            path: path.into(),
+            window_id: window_id.into(),
+            window_index,
+            window_name: window_name.into(),
+            session_id: session_id.into(),
+            session_name: session_name.into(),
+            agent_index,
+        }
+    }
+
+    fn inventory() -> (Vec<PaneMeta>, Vec<PaneRow>) {
+        let rows = vec![
+            PaneRow {
+                pane: "%2".into(),
+                loc: "alpha:1.1".into(),
+                agent: "claude".into(),
+                state: "blocked".into(),
+                cwd: "/workspace/api".into(),
+                title: "Fix login".into(),
+            },
+            PaneRow {
+                pane: "%4".into(),
+                loc: "alpha:2.1".into(),
+                agent: "codex".into(),
+                state: "working".into(),
+                cwd: "/workspace/web".into(),
+                title: "Build sidebar".into(),
+            },
+            PaneRow {
+                pane: "%5".into(),
+                loc: "other:3.1".into(),
+                agent: "pi".into(),
+                state: "idle".into(),
+                cwd: "/workspace/docs".into(),
+                title: "Review notes".into(),
+            },
+        ];
+        let panes = vec![
+            inventory_pane(
+                "$1",
+                "team",
+                "@1",
+                1,
+                "same",
+                "%1",
+                1,
+                "ordinary editor",
+                "working",
+                "/workspace/api",
+                None,
+            ),
+            inventory_pane(
+                "$1",
+                "team",
+                "@1",
+                1,
+                "same",
+                "%2",
+                2,
+                "agent host",
+                "claude",
+                "/workspace/api",
+                Some(0),
+            ),
+            inventory_pane(
+                "$1",
+                "team",
+                "@2",
+                2,
+                "tools",
+                "%3",
+                1,
+                "working notes",
+                "zsh",
+                "/workspace/tools",
+                None,
+            ),
+            inventory_pane(
+                "$2",
+                "team",
+                "@3",
+                1,
+                "same",
+                "%4",
+                1,
+                "agent host",
+                "codex",
+                "/workspace/web",
+                Some(1),
+            ),
+            inventory_pane(
+                "$3",
+                "other",
+                "@4",
+                3,
+                "notes",
+                "%5",
+                1,
+                "agent host",
+                "pi",
+                "/workspace/docs",
+                Some(2),
+            ),
+            inventory_pane(
+                "$3",
+                "other",
+                "@1",
+                42,
+                "same",
+                "%2",
+                7,
+                "linked host",
+                "claude",
+                "/workspace/api",
+                Some(0),
+            ),
+        ];
+        (panes, rows)
+    }
+
+    #[test]
+    fn inventory_session_name_or_id_query_returns_only_matching_occurrence_descendants() {
+        let (panes, rows) = inventory();
+        assert_eq!(
+            inventory_filtered_indices(&panes, &rows, "team", None),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(
+            inventory_filtered_indices(&panes, &rows, "$1", None),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn inventory_window_name_query_returns_full_matching_window_subtrees() {
+        let (panes, rows) = inventory();
+        assert_eq!(
+            inventory_filtered_indices(&panes, &rows, "same", None),
+            vec![0, 1, 3, 5]
+        );
+        assert_eq!(
+            inventory_filtered_indices(&panes, &rows, "@3", None),
+            vec![3]
+        );
+    }
+
+    #[test]
+    fn inventory_window_index_query_respects_session_occurrences() {
+        let (panes, rows) = inventory();
+        assert_eq!(
+            inventory_filtered_indices(&panes, &rows, "42", None),
+            vec![5]
+        );
+    }
+
+    #[test]
+    fn inventory_pane_fields_return_only_matching_panes() {
+        let (panes, rows) = inventory();
+        for (query, expected) in [
+            ("7", vec![5]),
+            ("%3", vec![2]),
+            ("working notes", vec![2]),
+            ("zsh", vec![2]),
+            ("/workspace/tools", vec![2]),
+        ] {
+            assert_eq!(
+                inventory_filtered_indices(&panes, &rows, query, None),
+                expected,
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_agent_fields_return_only_host_pane_occurrences() {
+        let (panes, rows) = inventory();
+        for (query, expected) in [
+            ("claude", vec![1, 5]),
+            ("blocked", vec![1, 5]),
+            ("/workspace/web", vec![3]),
+            ("Fix login", vec![1, 5]),
+            ("alpha:2.1", vec![3]),
+        ] {
+            assert_eq!(
+                inventory_filtered_indices(&panes, &rows, query, None),
+                expected,
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_matching_is_case_insensitive() {
+        let (panes, rows) = inventory();
+        assert_eq!(
+            inventory_filtered_indices(&panes, &rows, "fIx LoGiN", None),
+            vec![1, 5]
+        );
+    }
+
+    #[test]
+    fn inventory_status_filter_is_exact_and_ignores_query_and_non_agent_metadata() {
+        let (panes, rows) = inventory();
+        for (filter, expected) in [
+            (StateFilter::Blocked, vec![1, 5]),
+            (StateFilter::Working, vec![3]),
+            (StateFilter::Idle, vec![4]),
+        ] {
+            assert_eq!(
+                inventory_filtered_indices(&panes, &rows, "alpha", Some(filter)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_working_metadata_never_matches_working_status() {
+        let (panes, rows) = inventory();
+        assert!(panes[0].command.contains("working"));
+        assert!(panes[2].pane_title.contains("working"));
+        assert_eq!(
+            inventory_filtered_indices(&panes, &rows, "", Some(StateFilter::Working)),
+            vec![3]
+        );
+    }
+
+    #[test]
+    fn inventory_absent_query_returns_no_panes_for_rendering() {
+        let (panes, rows) = inventory();
+        assert!(inventory_filtered_indices(&panes, &rows, "absent", None).is_empty());
     }
 
     #[test]
