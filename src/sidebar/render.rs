@@ -355,10 +355,20 @@ impl Sidebar {
                         selected,
                     ));
                     if let Some(row) = agent.filter(|row| !row.title.is_empty()) {
-                        let title: String =
-                            row.title.chars().take(cols.saturating_sub(10)).collect();
+                        let title_prefix = if expanded {
+                            format!("  {}  │   ", if last_window { "  " } else { "│ " })
+                        } else {
+                            "  │       ".into()
+                        };
+                        let title: String = row
+                            .title
+                            .chars()
+                            .take(cols.saturating_sub(title_prefix.chars().count()))
+                            .collect();
+                        let width = title_prefix.chars().count() + title.chars().count();
+                        let line = format!("{title_prefix}{muted}{title}{E}[0m");
                         lines.push((
-                            format!("          {muted}{title}{E}[0m{E}[K\n"),
+                            format!("{}{E}[K\n", bar(&line, &row_bg, cols, width)),
                             "-".into(),
                             0,
                             false,
@@ -838,11 +848,25 @@ mod tests {
             .lines()
             .find(|line| line.contains("claude"))
             .unwrap();
+        let selected_title = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("Implement sidebar tree"))
+            .unwrap();
         let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap();
         assert_eq!(
             ansi.replace_all(selected_agent, "").chars().count(),
             sb.daemon.as_ref().unwrap().size.0,
             "selected inventory agent background reaches the final column"
+        );
+        let selected_bg = sb.palette.state_bg("working", true);
+        assert!(
+            selected_title.starts_with(&selected_bg),
+            "selected inventory description keeps cursor background"
+        );
+        assert!(
+            ansi.replace_all(selected_title, "").starts_with("      │   Implement sidebar tree"),
+            "inventory description stays connected to its pane branch"
         );
         frames.push_str(&format!(
             "all-panes hierarchy\n{}\nrows={}\n",
@@ -934,14 +958,14 @@ mod tests {
                 .escape_default()
         ));
 
-        if std::env::var_os("AGENMUX_UPDATE_FIXTURES").is_some() {
-            std::fs::write("tests/fixtures/sidebar/dark.frames", &frames).unwrap();
-        }
         let fixture = std::fs::read_to_string("tests/fixtures/sidebar/dark.frames").unwrap();
         assert!(
             fixture.starts_with(&false_frames),
             "false-mode fixture prefix changed"
         );
+        if std::env::var_os("AGENMUX_UPDATE_FIXTURES").is_some() {
+            std::fs::write("tests/fixtures/sidebar/dark.frames", &frames).unwrap();
+        }
         assert_eq!(
             frames,
             std::fs::read_to_string("tests/fixtures/sidebar/dark.frames").unwrap()
