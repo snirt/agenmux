@@ -48,6 +48,12 @@ struct ParsedPane {
 
 const LIST_FMT: &str = "list-panes -a -F '#{session_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_title}\t#{@agenmux}'";
 
+fn valid_tmux_id(value: &str, prefix: char) -> bool {
+    value
+        .strip_prefix(prefix)
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
     rows.lines()
         .filter_map(|line| {
@@ -57,6 +63,12 @@ fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
             else {
                 return None;
             };
+            if !valid_tmux_id(session_id, '$')
+                || !valid_tmux_id(window_id, '@')
+                || !valid_tmux_id(pane, '%')
+            {
+                return None;
+            }
             let window_index = window_index.parse().ok()?;
             let pane_index = pane_index.parse().ok()?;
             let pid = pid.parse().ok()?;
@@ -254,6 +266,15 @@ mod tests {
             "$1\twork\t@1\tx\teditor\t%3\t2\t102\tsleep\t/repo\tbad window\t",
             "$1\twork\t@1\t0\teditor\t%4\tx\t103\tsleep\t/repo\tbad pane\t",
             "$1\twork\t@1\t0\teditor\t%5\t3\tnot-a-pid\tsleep\t/repo\tbad pid\t",
+            "1\twork\t@1\t0\teditor\t%13\t3\t109\tsleep\t/repo\tbad session prefix\t",
+            "$x\twork\t@1\t0\teditor\t%14\t3\t110\tsleep\t/repo\tbad session digits\t",
+            "$1\twork\t1\t0\teditor\t%15\t3\t111\tsleep\t/repo\tbad window prefix\t",
+            "$1\twork\t@x\t0\teditor\t%16\t3\t112\tsleep\t/repo\tbad window digits\t",
+            "$1\twork\t@1\t0\teditor\t17\t3\t113\tsleep\t/repo\tbad pane prefix\t",
+            "$1\twork\t@1\t0\teditor\t%x\t3\t114\tsleep\t/repo\tbad pane digits\t",
+            "$\twork\t@1\t0\teditor\t%18\t3\t115\tsleep\t/repo\tempty session id\t",
+            "$1\twork\t@\t0\teditor\t%19\t3\t116\tsleep\t/repo\tempty window id\t",
+            "$1\twork\t@1\t0\teditor\t%\t3\t117\tsleep\t/repo\tempty pane id\t",
             "$1\twork\t@1\t0\teditor\t%6\t4\t104\tsleep\t/repo\ttab\tfragment\t",
             "$1\twork\t@1\t0\teditor\t%7\t5\t105\tbroken",
             "fragment\t/repo\tnewline\t",
