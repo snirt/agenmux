@@ -13,6 +13,10 @@
 
 - Store implementation plans in `docs/plans/`. Never write plans under `docs/superpowers/`.
 
+## GitHub issues
+
+- When creating a GitHub issue, apply appropriate existing labels based on its title and description.
+
 ## Module boundaries
 
 - Before splitting an existing file into multiple modules, ask for approval unless the task explicitly requests the split.
