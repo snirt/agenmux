@@ -86,6 +86,7 @@ fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMod
 pub struct Sidebar {
     tmux: Tmux,
     settings: crate::app_config::LiveConfig,
+    adopted_show_all_panes: bool,
     palette: Palette,    // immutable startup snapshot shared by popup and split
     normal_keys: Keymap, // startup snapshot: keys never change while running
     search_keys: Keymap,
@@ -137,12 +138,14 @@ fn new_sidebar(
     // read once: the check behind it runs at most daily, and switching version
     // restarts the engine anyway
     let update = update_available(&plugin_dir);
+    let adopted_show_all_panes = settings.show_all_panes;
     let mut sb = Sidebar {
         tmux,
         palette: Palette::resolve(&settings.theme),
         normal_keys: settings.normal.clone(),
         search_keys: settings.search.clone(),
         settings: crate::app_config::LiveConfig::new(settings),
+        adopted_show_all_panes,
         confs,
         ident: IdentCache::new(),
         subj: scan::SubjectCache::new(),
@@ -427,7 +430,15 @@ impl Sidebar {
         self.palette = Palette::resolve(&self.settings.settings.theme);
         self.normal_keys = self.settings.settings.normal.clone();
         self.search_keys = self.settings.settings.search.clone();
-        self.last_frame.clear(); // colors changed: no diff against old bytes
+        let show_all_panes = self.settings.settings.show_all_panes;
+        if show_all_panes != self.adopted_show_all_panes {
+            self.adopted_show_all_panes = show_all_panes;
+            self.rebuild_visible(false);
+            if let Some(index) = self.active_visible_index() {
+                self.select_index(index + 1);
+            }
+        }
+        self.last_frame.clear(); // colors or projection changed: redraw every pane
     }
 
     fn scan_tick(&mut self) -> Result<(), TmuxError> {

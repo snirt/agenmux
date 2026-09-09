@@ -1508,6 +1508,285 @@ fn scan_keeps_inventory_separate_from_agent_output() {
 }
 
 #[test]
+fn all_panes_reload_preserves_daemon_and_selection() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmux = TestTmux::new("all-panes-reload");
+    tmux.assert_tmux(&["rename-window", "-t", "plugin:0", "ordinary-single"]);
+    let single = tmux.text(&["display-message", "-p", "-t", "plugin:0", "#{pane_id}"]);
+    let codex = tmux.tmp.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nwhile :; do sleep 60; done\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let agent = tmux.text(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "plugin:",
+        "-n",
+        "mixed",
+        codex.to_str().unwrap(),
+    ]);
+    let ordinary = tmux.text(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "plugin:mixed",
+        "exec sleep 60",
+    ]);
+    let ordinary_only = tmux.text(&[
+        "new-session",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-s",
+        "ordinary-only",
+        "-x",
+        "120",
+        "-y",
+        "40",
+        "exec sleep 60",
+    ]);
+    app_file(
+        &tmux,
+        "[display]\nshow_all_panes=false\n[behavior]\nnotifications=false",
+    );
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agenmux-bin",
+        env!("CARGO_BIN_EXE_agenmux"),
+    ]);
+    let debug = tmux.tmp.join("reload-debug");
+    let mut viewer = tmux.attach();
+    tmux.wait_for(Duration::from_secs(2), || {
+        !tmux
+            .text(&["list-clients", "-F", "#{client_name}"])
+            .is_empty()
+    });
+    let client = tmux.text(&["list-clients", "-F", "#{client_name}"]);
+    assert_success(
+        tmux.bin_command(&["toggle", "split", &client])
+            .env("AGENMUX_DEBUG", &debug)
+            .output()
+            .unwrap(),
+        "start all-pane reload daemon",
+    );
+    tmux.wait_for(Duration::from_secs(5), || {
+        tmux.text(&["list-panes", "-a", "-F", "#{pane_title}\t#{pane_pid}"])
+            .lines()
+            .filter(|line| *line == "agenmux\t0")
+            .count()
+            == 3
+            && std::fs::read_to_string(tmux.tmp.join("agenmux-scan-cache"))
+                .unwrap_or_default()
+                .contains(&agent)
+    });
+    let assert_agent_only_cache = || {
+        let cache = std::fs::read_to_string(tmux.tmp.join("agenmux-scan-cache")).unwrap();
+        let lines = cache.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1, "{cache}");
+        assert_eq!(lines[0].split('\t').count(), 6, "{cache}");
+        assert!(lines[0].starts_with(&format!("{agent}\t")), "{cache}");
+        for pane in [&single, &ordinary, &ordinary_only] {
+            assert!(!cache.contains(pane), "{cache}");
+        }
+    };
+    assert_agent_only_cache();
+
+    let sidebar = tmux.text(&[
+        "list-panes",
+        "-t",
+        "plugin:mixed",
+        "-f",
+        "#{==:#{pane_title},agenmux}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-t", &sidebar]);
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-T", "agenmux"]);
+    let capture = || tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
+    let selected = || {
+        std::fs::read_to_string(tmux.tmp.join("agenmux-rows"))
+            .unwrap_or_default()
+            .lines()
+            .find_map(|line| {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                (fields.get(2) == Some(&"1")).then(|| fields[0].to_owned())
+            })
+            .unwrap_or_default()
+    };
+    tmux.wait_for(Duration::from_secs(5), || selected() == agent);
+    let false_frame = capture();
+    assert!(!false_frame.contains("ordinary-only"), "{false_frame}");
+    assert!(!false_frame.contains(&ordinary), "{false_frame}");
+
+    let control = tmux.text(&["show-option", "-gqv", "@agenmux-control-client"]);
+    let daemon = tmux.text(&[
+        "list-clients",
+        "-f",
+        &format!("#{{==:#{{client_name}},{control}}}"),
+        "-F",
+        "#{client_pid}",
+    ]);
+    let sidebars = tmux.text(&[
+        "list-panes",
+        "-a",
+        "-f",
+        "#{==:#{pane_title},agenmux}",
+        "-F",
+        "#{pane_id}\t#{pane_pid}",
+    ]);
+    assert!(!control.is_empty() && !daemon.is_empty());
+    assert_eq!(sidebars.lines().count(), 3, "{sidebars}");
+    assert!(
+        sidebars.lines().all(|line| line.ends_with("\t0")),
+        "{sidebars}"
+    );
+
+    app_file(
+        &tmux,
+        "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false",
+    );
+    assert_success(tmux.bin(&["config", "reload"]), "enable all panes");
+    tmux.wait_for(Duration::from_secs(3), || {
+        let frame = capture();
+        frame.contains("ordinary-only") && frame.contains("ordinary-single")
+    });
+    let true_frame = capture();
+    assert!(true_frame.contains("mixed"), "{true_frame}");
+    assert!(
+        true_frame
+            .lines()
+            .any(|line| line.contains('❯') && line.contains("codex")),
+        "selected agent occurrence moved: {true_frame}"
+    );
+    let row_map = std::fs::read_to_string(tmux.tmp.join("agenmux-rows")).unwrap();
+    for pane in [&single, &ordinary, &ordinary_only] {
+        assert_eq!(
+            row_map
+                .lines()
+                .filter(|line| line.split('\t').next() == Some(pane.as_str()))
+                .count(),
+            1,
+            "ordinary pane {pane} missing or duplicated: {row_map}"
+        );
+    }
+    for sidebar in sidebars.lines().filter_map(|line| line.split('\t').next()) {
+        assert!(
+            !row_map.lines().any(|line| line.starts_with(sidebar)),
+            "{row_map}"
+        );
+    }
+    assert_eq!(selected(), agent);
+    assert_eq!(
+        tmux.text(&["show-option", "-gqv", "@agenmux-control-client"]),
+        control
+    );
+    assert_eq!(
+        tmux.text(&[
+            "list-clients",
+            "-f",
+            &format!("#{{==:#{{client_name}},{control}}}"),
+            "-F",
+            "#{client_pid}",
+        ]),
+        daemon
+    );
+    assert_eq!(
+        tmux.text(&[
+            "list-panes",
+            "-a",
+            "-f",
+            "#{==:#{pane_title},agenmux}",
+            "-F",
+            "#{pane_id}\t#{pane_pid}",
+        ]),
+        sidebars
+    );
+
+    assert_agent_only_cache();
+
+    app_file(&tmux, "invalid");
+    let invalid = tmux.bin(&["config", "reload"]);
+    assert_eq!(invalid.status.code(), Some(2));
+    thread::sleep(Duration::from_millis(2200));
+    let retained_frame = capture();
+    assert!(
+        retained_frame.contains("ordinary-only") && retained_frame.contains("ordinary-single"),
+        "{retained_frame}"
+    );
+    assert_eq!(selected(), agent);
+    assert_agent_only_cache();
+
+    app_file(
+        &tmux,
+        "[display]\nshow_all_panes=false\n[behavior]\nnotifications=false",
+    );
+    assert_success(tmux.bin(&["config", "reload"]), "disable all panes");
+    tmux.wait_for(Duration::from_secs(3), || {
+        let frame = capture();
+        !frame.contains("ordinary-only") && !frame.contains("ordinary-single")
+    });
+    let restored_frame = capture();
+    assert!(!restored_frame.contains(&ordinary), "{restored_frame}");
+    assert_eq!(selected(), agent);
+    assert_agent_only_cache();
+    assert_eq!(
+        tmux.text(&["show-option", "-gqv", "@agenmux-control-client"]),
+        control
+    );
+    assert_eq!(
+        tmux.text(&[
+            "list-clients",
+            "-f",
+            &format!("#{{==:#{{client_name}},{control}}}"),
+            "-F",
+            "#{client_pid}",
+        ]),
+        daemon
+    );
+    assert_eq!(
+        tmux.text(&[
+            "list-panes",
+            "-a",
+            "-f",
+            "#{==:#{pane_title},agenmux}",
+            "-F",
+            "#{pane_id}\t#{pane_pid}",
+        ]),
+        sidebars
+    );
+    let debug = std::fs::read_to_string(debug).unwrap();
+    assert!(debug.contains("# scan "), "{debug}");
+    for line in debug
+        .lines()
+        .filter(|line| line.contains("# notification "))
+    {
+        assert!(
+            line.contains(&agent),
+            "ordinary pane reached tracker events: {line}"
+        );
+    }
+
+    tmux.assert_tmux(&["kill-pane", "-t", &agent]);
+    tmux.wait_for(Duration::from_secs(5), || capture().contains("no agents"));
+    assert!(std::fs::read_to_string(tmux.tmp.join("agenmux-scan-cache"))
+        .unwrap_or_default()
+        .is_empty());
+
+    assert_success(tmux.bin(&["key", "close"]), "close all-pane reload daemon");
+    let _ = viewer.kill();
+    let _ = viewer.wait();
+}
+
+#[test]
 fn sidebar_refresh_uses_one_content_enumeration() {
     let tmux = TestTmux::new("scan-query-count");
     let debug = tmux.tmp.join("sidebar-debug");
