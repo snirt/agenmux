@@ -273,15 +273,13 @@ impl Sidebar {
             let session = &self.panes[*session_i];
             let name: String = session.session_name.chars().take(cols).collect();
             lines.push((format!("{accent}{name}{E}[0m{E}[K\n"), "-".into(), 0, false));
-            for (window_pos, (window_i, panes)) in windows.iter().enumerate() {
+            for (window_i, panes) in windows {
                 let window = &self.panes[*window_i];
-                let last_window = window_pos + 1 == windows.len();
-                let window_branch = if last_window { "└─" } else { "├─" };
                 let expanded = counts[&(window.session_id.as_str(), window.window_id.as_str())] > 1;
                 if expanded {
                     lines.push((
                         format!(
-                            "  {accent}{window_branch} {} {}{E}[0m{E}[K\n",
+                            "  {accent}{} {}{E}[0m{E}[K\n",
                             window.window_index, window.window_name
                         ),
                         "-".into(),
@@ -289,7 +287,7 @@ impl Sidebar {
                         false,
                     ));
                 }
-                for (pane_pos, (ordinal, pane_i)) in panes.iter().enumerate() {
+                for (ordinal, pane_i) in panes {
                     let pane = &self.panes[*pane_i];
                     let selected = Some(*ordinal) == cursor;
                     if selected {
@@ -304,16 +302,10 @@ impl Sidebar {
                     } else {
                         "  ".into()
                     };
-                    let last_pane = pane_pos + 1 == panes.len();
-                    let pane_branch = if last_pane { "└─" } else { "├─" };
                     let prefix = if expanded {
-                        format!(
-                            "{}  {pane_branch} {}",
-                            if last_window { "  " } else { "│ " },
-                            pane.pane_index
-                        )
+                        format!("  {}", pane.pane_index)
                     } else {
-                        format!("{window_branch} {} {}", pane.window_index, pane.window_name)
+                        format!("{} {}", pane.window_index, pane.window_name)
                     };
                     let detail = if let Some(row) = agent {
                         format!(
@@ -350,18 +342,7 @@ impl Sidebar {
                         selected,
                     ));
                     if let Some(row) = agent.filter(|row| !row.title.is_empty()) {
-                        let title_prefix = if expanded {
-                            format!(
-                                "  {}  {}└─ ",
-                                if last_window { "  " } else { "│ " },
-                                if last_pane { "    " } else { "│   " }
-                            )
-                        } else {
-                            format!(
-                                "  {}└─ ",
-                                if last_window { "    " } else { "│   " }
-                            )
-                        };
+                        let title_prefix = if expanded { "      " } else { "    " };
                         let title: String = row
                             .title
                             .chars()
@@ -873,11 +854,16 @@ mod tests {
             selected_title.starts_with(&selected_bg),
             "selected inventory description keeps cursor background"
         );
+        let plain_frame = ansi.replace_all(&sb.last_frame, "");
+        assert!(
+            ['├', '└', '│'].iter().all(|glyph| !plain_frame.contains(*glyph)),
+            "inventory hierarchy uses indentation without tree connectors"
+        );
         assert!(
             ansi
                 .replace_all(selected_title, "")
-                .starts_with("          └─ Implement sidebar tree"),
-            "inventory description stays connected to its pane branch"
+                .starts_with("      Implement sidebar tree"),
+            "inventory description is indented beneath its pane"
         );
         frames.push_str(&format!(
             "all-panes hierarchy\n{}\nrows={}\n",
@@ -902,8 +888,10 @@ mod tests {
             sb.rebuild_visible(false);
             sb.render(true);
             if label == "pane query" {
+                let plain = ansi.replace_all(&sb.last_frame, "");
                 assert!(
-                    sb.last_frame.contains("server") && sb.last_frame.contains("└─ 1"),
+                    plain.lines().any(|line| line.starts_with("  2 server"))
+                        && plain.lines().any(|line| line.contains("  1 █ npm")),
                     "a physical multi-pane window stays expanded after filtering"
                 );
             }
