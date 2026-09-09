@@ -1479,6 +1479,9 @@ fn scan_keeps_inventory_separate_from_agent_output() {
         "@agenmux",
         "1",
     ]);
+    tmux.wait_for(Duration::from_secs(2), || {
+        !tmux.bin(&["scan"]).stdout.is_empty()
+    });
 
     let debug = tmux.tmp.join("scan-debug");
     let scan = tmux
