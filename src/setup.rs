@@ -241,7 +241,7 @@ fn setup(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> Result<(),
     let windows = tmux::lines(&["list-windows", "-a", "-F", "#{window_id}"])?;
     for window in &windows {
         for name in ["@agenmux-sidebar", "@agents-mon-sidebar"] {
-            options.push(OptionBackup::capture(Some(&window), name, false)?);
+            options.push(OptionBackup::capture(Some(window), name, false)?);
         }
     }
 
@@ -306,8 +306,8 @@ fn clear_legacy_options_and_hooks(windows: &[String]) -> Result<(), TmuxError> {
         // Best effort: the list is a snapshot, and a window the user closed
         // mid-setup has nothing left to clear. Failing here would roll back an
         // otherwise healthy setup.
-        let _ = tmux::command_status(&["set-option", "-wu", "-t", &window, "@agenmux-sidebar"]);
-        let _ = tmux::command_status(&["set-option", "-wu", "-t", &window, "@agents-mon-sidebar"]);
+        let _ = tmux::command_status(&["set-option", "-wu", "-t", window, "@agenmux-sidebar"]);
+        let _ = tmux::command_status(&["set-option", "-wu", "-t", window, "@agents-mon-sidebar"]);
     }
     for hook in [
         "after-select-window[42]",

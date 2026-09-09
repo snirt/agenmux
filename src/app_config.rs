@@ -335,9 +335,9 @@ impl Palette {
                 p.idle_fg = rgb(32, 104, 40);
                 p.idle_bg = rgb(224, 244, 224);
                 p.idle_bg_unfocused = rgb(238, 247, 238);
-                p.done_fg = p.idle_fg.clone();
-                p.done_bg = p.idle_bg.clone();
-                p.done_bg_unfocused = p.idle_bg_unfocused.clone();
+                p.done_fg = p.idle_fg;
+                p.done_bg = p.idle_bg;
+                p.done_bg_unfocused = p.idle_bg_unfocused;
             }
             ThemeBase::Terminal => {
                 p.error_fg = Basic(1);
