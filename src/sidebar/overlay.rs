@@ -122,10 +122,21 @@ impl Sidebar {
             Some(Overlay::Help) => {
                 let accept = self.search_keys[&Action::Accept]
                     .first()
-                    .map_or(String::new(), |c| format!("; {} enables {}", c.label(false), self.nav_label(false, false)));
+                    .map_or(String::new(), |c| {
+                        format!(
+                            "; {} enables {}",
+                            c.label(false),
+                            self.nav_label(false, false)
+                        )
+                    });
                 let mut keys = vec![(self.nav_label(false, true), "move selection".to_string())];
+                let jump = if self.settings.settings.show_all_panes {
+                    "jump to pane"
+                } else {
+                    "jump to agent"
+                };
                 for (action, what) in [
-                    (Action::Jump, "jump to agent".to_string()),
+                    (Action::Jump, jump.to_string()),
                     (Action::Search, format!("live search{accept}")),
                     (Action::Filter, "select next state filter".into()),
                     (Action::Reset, "clear filters / show all".into()),

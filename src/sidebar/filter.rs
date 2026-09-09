@@ -2,7 +2,7 @@ use crate::input::Key;
 use crate::scan::PaneRow;
 use std::collections::HashSet;
 
-use super::Sidebar;
+use super::{PaneOccurrence, Sidebar, VisiblePane};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StateFilter {
@@ -78,20 +78,56 @@ fn filtered_indices(
         .collect()
 }
 
-pub(super) fn cursor_row(
-    rows: &[PaneRow],
-    visible: &[usize],
-    selected: usize,
-    plugin_selected: bool,
-    active: &str,
-) -> Option<usize> {
-    if plugin_selected {
-        return selected.checked_sub(1).filter(|&i| i < visible.len());
-    }
-    visible.iter().position(|&i| rows[i].pane == active)
-}
-
 impl Sidebar {
+    pub(super) fn visible_pane_id(&self, pane: VisiblePane) -> &str {
+        match pane {
+            VisiblePane::Agent(i) => &self.rows[i].pane,
+            VisiblePane::Inventory(i) => &self.panes[i].pane,
+        }
+    }
+
+    pub(super) fn visible_occurrence(&self, pane: VisiblePane) -> Option<PaneOccurrence> {
+        let VisiblePane::Inventory(i) = pane else {
+            return None;
+        };
+        let pane = &self.panes[i];
+        Some(PaneOccurrence {
+            session_id: pane.session_id.clone(),
+            window_id: pane.window_id.clone(),
+            pane: pane.pane.clone(),
+        })
+    }
+
+    pub(super) fn visible_agent_row(&self, pane: VisiblePane) -> Option<&PaneRow> {
+        let i = match pane {
+            VisiblePane::Agent(i) => Some(i),
+            VisiblePane::Inventory(i) => self.panes[i].agent_index,
+        }?;
+        self.rows.get(i)
+    }
+
+    pub(super) fn visible_state(&self, pane: VisiblePane) -> &str {
+        self.visible_agent_row(pane)
+            .map_or("idle", |row| row.state.as_str())
+    }
+
+    pub(super) fn active_visible_index(&self) -> Option<usize> {
+        let matches = |pane: VisiblePane| self.visible_pane_id(pane) == self.active;
+        self.visible
+            .iter()
+            .position(|&pane| {
+                matches(pane)
+                    && matches!(pane, VisiblePane::Inventory(i) if self.panes[i].session_id == self.active_session)
+            })
+            .or_else(|| self.visible.iter().position(|&pane| matches(pane)))
+    }
+
+    pub(super) fn cursor_row(&self) -> Option<usize> {
+        if self.plugin_selected {
+            return self.sel.checked_sub(1).filter(|&i| i < self.visible.len());
+        }
+        self.active_visible_index()
+    }
     pub(super) fn select_index(&mut self, index: usize) {
         self.sel = index.max(1);
         self.follow_selection = true;
@@ -118,12 +154,11 @@ impl Sidebar {
     }
 
     fn sync_sel_pane(&mut self) {
-        self.sel_pane = self
-            .visible
-            .get(self.sel.wrapping_sub(1))
-            .and_then(|&i| self.rows.get(i))
-            .map(|r| r.pane.clone())
+        let selected = self.visible.get(self.sel.wrapping_sub(1)).copied();
+        self.sel_pane = selected
+            .map(|pane| self.visible_pane_id(pane).to_string())
             .unwrap_or_default();
+        self.sel_occurrence = selected.and_then(|pane| self.visible_occurrence(pane));
     }
 
     fn restore_sel(&mut self) {
@@ -133,12 +168,21 @@ impl Sidebar {
             self.sync_sel_pane();
             return;
         }
-        match self
-            .visible
-            .iter()
-            .position(|&i| self.rows[i].pane == self.sel_pane)
-        {
-            Some(i) => self.sel = i + 1,
+        let exact = self.sel_occurrence.as_ref().and_then(|selected| {
+            self.visible
+                .iter()
+                .position(|&pane| self.visible_occurrence(pane).as_ref() == Some(selected))
+        });
+        let physical = || {
+            self.visible
+                .iter()
+                .position(|&pane| self.visible_pane_id(pane) == self.sel_pane)
+        };
+        match exact.or_else(physical) {
+            Some(i) => {
+                self.sel = i + 1;
+                self.sync_sel_pane();
+            }
             None => {
                 self.clamp_sel();
                 self.sync_sel_pane();
@@ -147,7 +191,21 @@ impl Sidebar {
     }
 
     pub(super) fn rebuild_visible(&mut self, select_first: bool) {
-        self.visible = filtered_indices(&self.rows, &self.query, self.state_filter);
+        let filtered = filtered_indices(&self.rows, &self.query, self.state_filter);
+        self.visible = if self.settings.settings.show_all_panes {
+            if self.state_filter.is_none() && self.query.trim().is_empty() {
+                (0..self.panes.len()).map(VisiblePane::Inventory).collect()
+            } else {
+                self.panes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, pane)| pane.agent_index.is_some_and(|i| filtered.contains(&i)))
+                    .map(|(i, _)| VisiblePane::Inventory(i))
+                    .collect()
+            }
+        } else {
+            filtered.into_iter().map(VisiblePane::Agent).collect()
+        };
         if select_first {
             self.sel = 1;
             self.follow_selection = true;
@@ -158,6 +216,7 @@ impl Sidebar {
         }
         if self.visible.is_empty() {
             self.sel_pane.clear();
+            self.sel_occurrence = None;
         }
     }
 
@@ -225,27 +284,6 @@ impl Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn row(pane: &str) -> PaneRow {
-        PaneRow {
-            pane: pane.into(),
-            loc: "s:1.1".into(),
-            agent: "pi".into(),
-            state: "idle".into(),
-            cwd: "repo".into(),
-            title: String::new(),
-        }
-    }
-
-    #[test]
-    fn cursor_follows_focus_outside_navigation() {
-        let rows = [row("%1"), row("%2")];
-        let visible = [0, 1];
-        assert_eq!(cursor_row(&rows, &visible, 1, false, "%2"), Some(1));
-        assert_eq!(cursor_row(&rows, &visible, 2, false, "%9"), None);
-        assert_eq!(cursor_row(&rows, &visible, 2, true, "%1"), Some(1));
-        assert_eq!(cursor_row(&rows, &[1], 1, false, "%2"), Some(0));
-    }
 
     fn filter_row(pane: &str, loc: &str, state: &str, title: &str) -> PaneRow {
         PaneRow {

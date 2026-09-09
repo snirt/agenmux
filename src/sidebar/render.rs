@@ -2,9 +2,8 @@ use crate::app_config::{Action, Keymap, Palette};
 use crate::input::term_size;
 use std::io::Write;
 
-use super::filter::cursor_row;
 use super::overlay::current_tag;
-use super::{Sidebar, E};
+use super::{Sidebar, VisiblePane, E};
 
 const SPIN: [char; 8] = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
 
@@ -26,7 +25,12 @@ pub(super) fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
     format!("{bg}{body}{}{E}[0m", " ".repeat(cols.saturating_sub(width)))
 }
 
-pub(super) fn cursor_mark(palette: &Palette, selected: bool, plugin_selected: bool, state: &str) -> String {
+pub(super) fn cursor_mark(
+    palette: &Palette,
+    selected: bool,
+    plugin_selected: bool,
+    state: &str,
+) -> String {
     if !selected {
         return "  ".into();
     }
@@ -122,10 +126,12 @@ impl Sidebar {
             .map_or(String::new(), |c| format!("{} {what}", c.label(true)))
     }
     pub(super) fn hints(&self, parts: &[(Action, &str)]) -> String {
-        join(&parts
-            .iter()
-            .map(|(action, what)| self.hint(&self.normal_keys, *action, what))
-            .collect::<Vec<_>>())
+        join(
+            &parts
+                .iter()
+                .map(|(action, what)| self.hint(&self.normal_keys, *action, what))
+                .collect::<Vec<_>>(),
+        )
     }
     /// Every chord of an action, "/"-joined: "Enter/l".
     pub(super) fn labels(&self, keys: &Keymap, action: Action, short: bool) -> String {
@@ -137,7 +143,10 @@ impl Sidebar {
     }
     /// Down/up pairs: "j/k" (first pair) or "j/k ↓/↑" (all pairs).
     pub(super) fn nav_label(&self, short: bool, all: bool) -> String {
-        let (down, up) = (&self.normal_keys[&Action::Down], &self.normal_keys[&Action::Up]);
+        let (down, up) = (
+            &self.normal_keys[&Action::Down],
+            &self.normal_keys[&Action::Up],
+        );
         let pairs = if all { down.len().max(up.len()) } else { 1 };
         (0..pairs)
             .filter_map(|i| match (down.get(i), up.get(i)) {
@@ -180,7 +189,11 @@ impl Sidebar {
             .as_ref()
             .map(|d| d.size)
             .unwrap_or_else(term_size);
-        let cap = if cols == 0 { 0 } else { height.saturating_sub(1) };
+        let cap = if cols == 0 {
+            0
+        } else {
+            height.saturating_sub(1)
+        };
         let frame = clip_frame(&frame, cols, cap);
         let rows: String = rows
             .lines()
@@ -217,6 +230,147 @@ impl Sidebar {
         if changed {
             self.last_frame = frame;
         }
+    }
+
+    fn inventory_lines(
+        &self,
+        cols: usize,
+        cursor: Option<usize>,
+        accent: &str,
+        muted: &str,
+    ) -> (Vec<(String, String, usize, bool)>, usize, usize) {
+        let mut groups: Vec<(usize, Vec<(usize, Vec<(usize, usize)>)>)> = Vec::new();
+        for (ordinal, visible) in self.visible.iter().copied().enumerate() {
+            let VisiblePane::Inventory(pane_i) = visible else {
+                continue;
+            };
+            let pane = &self.panes[pane_i];
+            let new_session = groups
+                .last()
+                .is_none_or(|(i, _)| self.panes[*i].session_id != pane.session_id);
+            if new_session {
+                groups.push((pane_i, Vec::new()));
+            }
+            let windows = &mut groups.last_mut().unwrap().1;
+            let new_window = windows
+                .last()
+                .is_none_or(|(i, _)| self.panes[*i].window_id != pane.window_id);
+            if new_window {
+                windows.push((pane_i, Vec::new()));
+            }
+            windows.last_mut().unwrap().1.push((ordinal, pane_i));
+        }
+
+        let mut counts = std::collections::HashMap::new();
+        for pane in &self.panes {
+            *counts
+                .entry((pane.session_id.as_str(), pane.window_id.as_str()))
+                .or_insert(0usize) += 1;
+        }
+        let mut lines = Vec::new();
+        let (mut sel_top, mut sel_bot) = (0usize, 0usize);
+        for (session_i, windows) in &groups {
+            let session = &self.panes[*session_i];
+            let name: String = session.session_name.chars().take(cols).collect();
+            lines.push((format!("{accent}{name}{E}[0m{E}[K\n"), "-".into(), 0, false));
+            for (window_pos, (window_i, panes)) in windows.iter().enumerate() {
+                let window = &self.panes[*window_i];
+                let last_window = window_pos + 1 == windows.len();
+                let window_branch = if last_window { "└─" } else { "├─" };
+                let expanded = counts[&(window.session_id.as_str(), window.window_id.as_str())] > 1;
+                if expanded {
+                    lines.push((
+                        format!(
+                            "  {accent}{window_branch} {} {}{E}[0m{E}[K\n",
+                            window.window_index, window.window_name
+                        ),
+                        "-".into(),
+                        0,
+                        false,
+                    ));
+                }
+                for (pane_pos, (ordinal, pane_i)) in panes.iter().enumerate() {
+                    let pane = &self.panes[*pane_i];
+                    let selected = Some(*ordinal) == cursor;
+                    if selected {
+                        sel_top = lines.len();
+                    }
+                    let agent = self.visible_agent_row(VisiblePane::Inventory(*pane_i));
+                    let state = agent.map_or("idle", |row| row.state.as_str());
+                    let mark = if agent.is_some() {
+                        cursor_mark(&self.palette, selected, self.plugin_selected, state)
+                    } else if selected {
+                        format!("{accent}❯{E}[0m ")
+                    } else {
+                        "  ".into()
+                    };
+                    let pane_branch = if pane_pos + 1 == panes.len() {
+                        "└─"
+                    } else {
+                        "├─"
+                    };
+                    let prefix = if expanded {
+                        format!(
+                            "{}  {pane_branch} {}",
+                            if last_window { "  " } else { "│ " },
+                            pane.pane_index
+                        )
+                    } else {
+                        format!("{window_branch} {} {}", pane.window_index, pane.window_name)
+                    };
+                    let detail = if let Some(row) = agent {
+                        format!(
+                            " {} {E}[1m{}{E}[0m {muted}{} · {}{E}[0m",
+                            self.dot(state),
+                            row.agent,
+                            state,
+                            row.cwd
+                        )
+                    } else if expanded {
+                        format!(" {muted}{}{E}[0m", pane.command)
+                    } else {
+                        format!(" {muted}· {}{E}[0m", pane.command)
+                    };
+                    let row = format!("{mark}{prefix}{detail}");
+                    let row_bg = agent.filter(|_| selected).map_or(String::new(), |_| {
+                        self.palette.state_bg(state, self.plugin_selected)
+                    });
+                    let mut chars = row.chars();
+                    let mut width = 0;
+                    while let Some(c) = chars.next() {
+                        if c == '\x1b' && chars.next() == Some('[') {
+                            for parameter in chars.by_ref() {
+                                if ('@'..='~').contains(&parameter) {
+                                    break;
+                                }
+                            }
+                        } else {
+                            width += 1;
+                        }
+                    }
+                    lines.push((
+                        format!("{}{E}[K\n", bar(&row, &row_bg, cols, width)),
+                        pane.pane.clone(),
+                        ordinal + 1,
+                        selected,
+                    ));
+                    if let Some(row) = agent.filter(|row| !row.title.is_empty()) {
+                        let title: String =
+                            row.title.chars().take(cols.saturating_sub(10)).collect();
+                        lines.push((
+                            format!("          {muted}{title}{E}[0m{E}[K\n"),
+                            "-".into(),
+                            0,
+                            false,
+                        ));
+                    }
+                    if selected {
+                        sel_bot = lines.len() - 1;
+                    }
+                }
+            }
+        }
+        (lines, sel_top, sel_bot)
     }
 
     pub(super) fn render(&mut self, force: bool) {
@@ -257,7 +411,12 @@ impl Sidebar {
             None => String::new(),
         };
         if filtering {
-            filter.push_str(&format!(" {}/{}", self.visible.len(), self.rows.len()));
+            let total = if self.settings.settings.show_all_panes {
+                self.panes.len()
+            } else {
+                self.rows.len()
+            };
+            filter.push_str(&format!(" {}/{}", self.visible.len(), total));
         }
         let filter: String = filter
             .chars()
@@ -318,14 +477,11 @@ impl Sidebar {
             frame.push_str(&format!("{muted}{hint}{E}[0m{E}[K\n"));
             vis.push_str("-\n");
         }
-        let cursor = cursor_row(
-            &self.rows,
-            &self.visible,
-            self.sel,
-            self.plugin_selected,
-            &self.active,
-        );
-        if self.rows.is_empty() {
+        let cursor = self.cursor_row();
+        let inventory_mode = self.settings.settings.show_all_panes;
+        if inventory_mode && self.panes.is_empty() {
+            frame.push_str(&format!("{muted}no panes{E}[0m{E}[K\n"));
+        } else if !inventory_mode && self.rows.is_empty() {
             frame.push_str(&format!("{muted}no agents{E}[0m{E}[K\n"));
         } else if self.visible.is_empty() {
             let reset = self.normal_keys[&Action::Reset]
@@ -334,64 +490,72 @@ impl Sidebar {
                 .unwrap_or_default();
             frame.push_str(&format!("{muted}no matches{reset}{E}[0m{E}[K\n"));
         } else {
-            // build filtered agents plus their session context, then window it
-            let mut lines: Vec<(String, &str, usize, bool)> = Vec::new();
-            let (mut sel_top, mut sel_bot) = (0usize, 0usize);
+            // build selectable panes plus context, then window it
+            let (mut lines, mut sel_top, mut sel_bot) = if inventory_mode {
+                self.inventory_lines(cols, cursor, &accent, &muted)
+            } else {
+                (Vec::new(), 0usize, 0usize)
+            };
             let mut session = "";
-            for (n, &row_i) in self.visible.iter().enumerate() {
-                let r = &self.rows[row_i];
-                let sess = r.loc.split(':').next().unwrap_or("");
-                if sess != session {
-                    session = sess;
-                    // clip to pane width — a wrapped header shifts every row
-                    // below it and breaks the click→rows-file mapping
-                    let sess_clipped: String = sess.chars().take(cols).collect();
+            if !inventory_mode {
+                for (n, visible) in self.visible.iter().copied().enumerate() {
+                    let VisiblePane::Agent(row_i) = visible else {
+                        continue;
+                    };
+                    let r = &self.rows[row_i];
+                    let sess = r.loc.split(':').next().unwrap_or("");
+                    if sess != session {
+                        session = sess;
+                        // clip to pane width — a wrapped header shifts every row
+                        // below it and breaks the click→rows-file mapping
+                        let sess_clipped: String = sess.chars().take(cols).collect();
+                        lines.push((
+                            format!("{accent}{sess_clipped}{E}[0m{E}[K\n"),
+                            "-".into(),
+                            0,
+                            false,
+                        ));
+                    }
+                    if Some(n) == cursor {
+                        sel_top = lines.len();
+                    }
+                    let selected = Some(n) == cursor;
+                    let mark = cursor_mark(&self.palette, selected, self.plugin_selected, &r.state);
+                    let dot = self.dot(&r.state);
+                    let win = r.loc.split_once(':').map(|x| x.1).unwrap_or("");
+                    let mut rest = format!("{win} {}", r.cwd);
+                    let agent_len = r.agent.chars().count();
+                    let avail = cols.saturating_sub(6 + agent_len);
+                    if avail > 0 {
+                        rest = rest.chars().take(avail).collect();
+                    }
+                    let row_bg = if selected {
+                        self.palette.state_bg(&r.state, self.plugin_selected)
+                    } else {
+                        String::new()
+                    };
+                    let row = format!(" {mark}{dot} {E}[1m{}{E}[0m {muted}{rest}{E}[0m", r.agent);
+                    let width = 6 + agent_len + rest.chars().count();
                     lines.push((
-                        format!("{accent}{sess_clipped}{E}[0m{E}[K\n"),
-                        "-",
-                        0,
-                        false,
-                    ));
-                }
-                if Some(n) == cursor {
-                    sel_top = lines.len();
-                }
-                let selected = Some(n) == cursor;
-                let mark = cursor_mark(&self.palette, selected, self.plugin_selected, &r.state);
-                let dot = self.dot(&r.state);
-                let win = r.loc.split_once(':').map(|x| x.1).unwrap_or("");
-                let mut rest = format!("{win} {}", r.cwd);
-                let agent_len = r.agent.chars().count();
-                let avail = cols.saturating_sub(6 + agent_len);
-                if avail > 0 {
-                    rest = rest.chars().take(avail).collect();
-                }
-                let row_bg = if selected {
-                    self.palette.state_bg(&r.state, self.plugin_selected)
-                } else {
-                    String::new()
-                };
-                let row = format!(" {mark}{dot} {E}[1m{}{E}[0m {muted}{rest}{E}[0m", r.agent);
-                let width = 6 + agent_len + rest.chars().count();
-                lines.push((
-                    format!("{}{E}[K\n", bar(&row, &row_bg, cols, width)),
-                    &r.pane,
-                    n + 1,
-                    selected,
-                ));
-                if !r.title.is_empty() {
-                    let t: String = r.title.chars().take(cols.saturating_sub(5)).collect();
-                    let line = format!("     {muted}{t}{E}[0m");
-                    let width = 5 + t.chars().count();
-                    lines.push((
-                        format!("{}{E}[K\n", bar(&line, &row_bg, cols, width)),
-                        &r.pane,
+                        format!("{}{E}[K\n", bar(&row, &row_bg, cols, width)),
+                        r.pane.clone(),
                         n + 1,
                         selected,
                     ));
-                }
-                if Some(n) == cursor {
-                    sel_bot = lines.len() - 1;
+                    if !r.title.is_empty() {
+                        let t: String = r.title.chars().take(cols.saturating_sub(5)).collect();
+                        let line = format!("     {muted}{t}{E}[0m");
+                        let width = 5 + t.chars().count();
+                        lines.push((
+                            format!("{}{E}[K\n", bar(&line, &row_bg, cols, width)),
+                            r.pane.clone(),
+                            n + 1,
+                            selected,
+                        ));
+                    }
+                    if Some(n) == cursor {
+                        sel_bot = lines.len() - 1;
+                    }
                 }
             }
             // cursor's session header gives context — drag it into view
@@ -442,7 +606,7 @@ impl Sidebar {
                 } else {
                     frame.push_str(text);
                 }
-                if *pane == "-" {
+                if pane == "-" {
                     vis.push_str("-\n");
                 } else {
                     vis.push_str(&format!("{pane}\t{index}\t{}\n", usize::from(*selected)));
@@ -458,7 +622,7 @@ impl Sidebar {
 mod tests {
     use super::*;
     use crate::pane_writers::PaneWriters;
-    use crate::scan::PaneRow;
+    use crate::scan::{PaneMeta, PaneRow};
     use crate::tmux::Tmux;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -475,6 +639,32 @@ mod tests {
             state: "idle".into(),
             cwd: "repo".into(),
             title: String::new(),
+        }
+    }
+
+    fn pane(
+        session_id: &str,
+        session_name: &str,
+        window_id: &str,
+        window_index: u32,
+        window_name: &str,
+        pane_id: &str,
+        pane_index: u32,
+        command: &str,
+        agent_index: Option<usize>,
+    ) -> PaneMeta {
+        PaneMeta {
+            pane: pane_id.into(),
+            pane_index,
+            pane_title: String::new(),
+            command: command.into(),
+            path: format!("/workspace/{window_name}"),
+            window_id: window_id.into(),
+            window_index,
+            window_name: window_name.into(),
+            session_id: session_id.into(),
+            session_name: session_name.into(),
+            agent_index,
         }
     }
 
@@ -559,7 +749,7 @@ mod tests {
                 r
             })
             .collect();
-        sb.visible = (0..4).collect();
+        sb.visible = (0..4).map(VisiblePane::Agent).collect();
         let mut frames = String::new();
         for focused in [false, true] {
             sb.plugin_selected = focused;
@@ -616,6 +806,103 @@ mod tests {
                     .escape_default()
             ));
         }
+        let false_frames = frames.clone();
+        sb.settings.settings.show_all_panes = true;
+        sb.rows = vec![PaneRow {
+            pane: "%22".into(),
+            loc: "work:2.2".into(),
+            agent: "claude".into(),
+            state: "working".into(),
+            cwd: "repo".into(),
+            title: "Implement sidebar tree".into(),
+        }];
+        sb.panes = vec![
+            pane("$1", "work", "@1", 1, "editor", "%11", 1, "nvim", None),
+            pane("$1", "work", "@2", 2, "server", "%21", 1, "npm", None),
+            pane("$1", "work", "@2", 2, "server", "%22", 2, "node", Some(0)),
+            pane("$2", "personal", "@3", 3, "shell", "%31", 1, "zsh", None),
+        ];
+        sb.query.clear();
+        sb.state_filter = None;
+        sb.search_focused = false;
+        sb.overlay = None;
+        sb.update = None;
+        sb.plugin_selected = true;
+        sb.sel = 3;
+        sb.active = "%22".into();
+        sb.active_session = "$1".into();
+        sb.rebuild_visible(false);
+        sb.render(true);
+        let selected_agent = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("claude"))
+            .unwrap();
+        let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap();
+        assert_eq!(
+            ansi.replace_all(selected_agent, "").chars().count(),
+            sb.daemon.as_ref().unwrap().size.0,
+            "selected inventory agent background reaches the final column"
+        );
+        frames.push_str(&format!(
+            "all-panes hierarchy\n{}\nrows={}\n",
+            sb.last_frame
+                .replace(&app_title(), "agenmux TEST")
+                .escape_default(),
+            std::fs::read_to_string(&sb.rows_file)
+                .unwrap()
+                .escape_default()
+        ));
+
+        sb.panes.push(pane(
+            "$2",
+            "personal",
+            "@4",
+            4,
+            "linked",
+            "%22",
+            1,
+            "node",
+            Some(0),
+        ));
+        sb.rebuild_visible(false);
+        sb.plugin_selected = false;
+        sb.active_session = "$2".into();
+        assert_eq!(
+            sb.cursor_row(),
+            Some(4),
+            "active linked pane prefers active session"
+        );
+        sb.select_index(5);
+        assert_eq!(sb.sel_occurrence.as_ref().unwrap().session_id, "$2");
+        sb.panes.retain(|pane| pane.window_id != "@4");
+        sb.rebuild_visible(false);
+        assert_eq!(sb.sel, 3, "selection falls back to the physical pane");
+        assert_eq!(sb.sel_occurrence.as_ref().unwrap().session_id, "$1");
+        sb.panes.retain(|pane| pane.pane != "%22");
+        sb.rebuild_visible(false);
+        assert_eq!(sb.sel, 3, "selection keeps the nearest valid ordinal");
+        assert_eq!(sb.sel_pane, "%31");
+
+        sb.plugin_selected = true;
+        sb.panes.clear();
+        sb.rebuild_visible(false);
+        sb.render(true);
+        frames.push_str(&format!(
+            "all-panes empty\n{}\nrows={}\n",
+            sb.last_frame
+                .replace(&app_title(), "agenmux TEST")
+                .escape_default(),
+            std::fs::read_to_string(&sb.rows_file)
+                .unwrap()
+                .escape_default()
+        ));
+
+        let fixture = std::fs::read_to_string("tests/fixtures/sidebar/dark.frames").unwrap();
+        assert!(
+            fixture.starts_with(&false_frames),
+            "false-mode fixture prefix changed"
+        );
         if std::env::var_os("AGENMUX_UPDATE_FIXTURES").is_some() {
             std::fs::write("tests/fixtures/sidebar/dark.frames", &frames).unwrap();
         }
@@ -623,6 +910,8 @@ mod tests {
             frames,
             std::fs::read_to_string("tests/fixtures/sidebar/dark.frames").unwrap()
         );
+        sb.settings.settings.show_all_panes = false;
+        sb.rebuild_visible(false);
         themed_frames(&mut sb);
         custom_key_hints(&mut sb);
         if let Some(output) = std::env::var_os("AGENMUX_THEME_VISUAL_DIR") {
@@ -649,7 +938,7 @@ mod tests {
                     r
                 })
                 .collect();
-            sb.visible = (0..4).collect();
+            sb.visible = (0..4).map(VisiblePane::Agent).collect();
             sb.sel = 2;
             sb.active = "%2".into();
             sb.plugin_selected = true;
@@ -729,7 +1018,7 @@ mod tests {
         sb.search_keys = settings.search.clone();
         sb.rows = vec![row("%1")];
         sb.rows[0].state = "working".into();
-        sb.visible = vec![0];
+        sb.visible = vec![VisiblePane::Agent(0)];
         sb.sel = 1;
         sb.query.clear();
         sb.search_focused = false;
@@ -742,6 +1031,11 @@ mod tests {
         assert!(!help.contains("j/k"), "{help}");
         // An unbound action leaves no row behind rather than a stale default.
         assert!(!help.contains("close sidebar"), "{help}");
+        assert!(help.contains("jump to agent"), "{help}");
+        sb.settings.settings.show_all_panes = true;
+        sb.render(true);
+        assert!(sb.last_frame.contains("jump to pane"), "{}", sb.last_frame);
+        sb.settings.settings.show_all_panes = false;
 
         sb.overlay = None;
         sb.state_filter = Some(StateFilter::Working);
@@ -782,7 +1076,7 @@ mod tests {
                         sb.rows = vec![row("%1")];
                         sb.rows[0].state = state.into();
                         sb.rows[0].title = "Synthetic task".into();
-                        sb.visible = vec![0];
+                        sb.visible = vec![VisiblePane::Agent(0)];
                         sb.sel = 1;
                         sb.active = "%1".into();
                         sb.plugin_selected = focused;
@@ -799,12 +1093,14 @@ mod tests {
                                     sb.search_focused = true;
                                 }
                                 2 => sb.query = "repo".into(),
-                                3 => sb.state_filter = Some(match state {
-                                    "blocked" => StateFilter::Blocked,
-                                    "working" => StateFilter::Working,
-                                    "done" => StateFilter::Done,
-                                    _ => StateFilter::Idle,
-                                }),
+                                3 => {
+                                    sb.state_filter = Some(match state {
+                                        "blocked" => StateFilter::Blocked,
+                                        "working" => StateFilter::Working,
+                                        "done" => StateFilter::Done,
+                                        _ => StateFilter::Idle,
+                                    })
+                                }
                                 4 => sb.update = Some("v9.9.9".into()),
                                 5 => sb.overlay = Some(Overlay::Help),
                                 6 => {
@@ -843,7 +1139,10 @@ mod tests {
                             assert_eq!(std::fs::read_to_string(&sb.rows_file).unwrap(), old_map);
                             if mode == 0 {
                                 if source == sources[2] && state != "working" {
-                                    assert_eq!(sb.last_frame, old_frame, "working overrides leave other rows byte-identical");
+                                    assert_eq!(
+                                        sb.last_frame, old_frame,
+                                        "working overrides leave other rows byte-identical"
+                                    );
                                 }
                                 assert!(sb.last_frame.contains(&p.state_bg(state, focused)));
                                 assert!(sb.last_frame.contains(
@@ -866,10 +1165,16 @@ mod tests {
                             if mode == 5 || mode == 6 {
                                 assert!(sb.last_frame.contains(&p.header_fg.fg("1")));
                                 if p.header_bg != Palette::default().header_bg {
-                                    assert!(sb.last_frame.starts_with(&format!("{}{E}[2J{E}[H{}", p.text_fg.fg(""), p.header_bg.bg())));
+                                    assert!(sb.last_frame.starts_with(&format!(
+                                        "{}{E}[2J{E}[H{}",
+                                        p.text_fg.fg(""),
+                                        p.header_bg.bg()
+                                    )));
                                 }
                             }
-                            if mode == 6 { assert!(sb.last_frame.contains("(current)")); }
+                            if mode == 6 {
+                                assert!(sb.last_frame.contains("(current)"));
+                            }
                             if mode == 9 {
                                 assert!(sb.last_frame.contains(&p.error_fg.fg("2")));
                                 std::fs::write(
@@ -878,9 +1183,7 @@ mod tests {
                                 )
                                 .unwrap();
                             }
-                            if mode == 4
-                                && (source == sources[2] || source == sources[3])
-                            {
+                            if mode == 4 && (source == sources[2] || source == sources[3]) {
                                 assert_eq!(
                                     sb.last_frame.lines().next(),
                                     old_frame.lines().next(),
@@ -920,10 +1223,12 @@ mod tests {
                                 sb.render(true);
                                 let text = plain(&sb.last_frame);
                                 let final_column = format!("{E}[{}G", size.0);
-                                assert!(sb.last_frame.lines().zip(text.lines()).all(
-                                    |(frame, text)| text.chars().count()
-                                        <= size.0 + usize::from(frame.contains(&final_column))
-                                ));
+                                assert!(sb
+                                    .last_frame
+                                    .lines()
+                                    .zip(text.lines())
+                                    .all(|(frame, text)| text.chars().count()
+                                        <= size.0 + usize::from(frame.contains(&final_column))));
                                 assert!(text.lines().count() <= size.1.saturating_sub(1));
                                 assert!(
                                     std::fs::read_to_string(&sb.rows_file)
