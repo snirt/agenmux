@@ -3,7 +3,8 @@ use crate::input::term_size;
 use std::io::Write;
 
 use super::filter::cursor_row;
-use super::{current_tag, Sidebar, E};
+use super::overlay::current_tag;
+use super::{Sidebar, E};
 
 const SPIN: [char; 8] = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
 
