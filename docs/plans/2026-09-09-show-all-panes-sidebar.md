@@ -1,6 +1,6 @@
 # Implementation Plan
 
-**Ticket:** [#69 — Show all tmux panes in optional sidebar tree](https://github.com/snirt/agenmux/issues/69)
+**Ticket:** #69 — Show all tmux panes in optional sidebar tree
 **State:** OPEN
 **Plan path after acceptance:** `docs/plans/2026-09-09-show-all-panes-sidebar.md`
 
@@ -409,7 +409,7 @@ git commit -m "docs: explain all-pane sidebar mode"
 
 Use fresh private tmux server first; never assume checkout binary is deployed.
 
-- [ ] Inspect configured binary and derive loaded plugin root:
+- [x] Inspect configured binary and derive loaded plugin root:
 
 ```bash
 bin="$(tmux show-option -gqv @agenmux-bin)"
@@ -424,7 +424,7 @@ tmux show-option -gqv @agenmux-plugin-dir
 find "$root/agents" -maxdepth 1 -type f -name '*.conf' -print | sort
 ```
 
-- [ ] Deploy worktree binary and restart active daemon safely:
+- [x] Deploy worktree binary and restart active daemon safely:
 
 ```bash
 /bin/bash -c 'mise exec rust@latest -- ./scripts/dev-bin.sh use'
@@ -432,28 +432,39 @@ tmux show-option -gqv @agenmux-bin
 tmux show-option -gqv @agenmux-plugin-dir
 ```
 
-- [ ] In fresh tmux pane, launch real configured agent, capture pane title/screen only to temporary untracked location, and drive active work then completion:
+- [x] In fresh tmux pane, launch real configured agent, capture pane title/screen only to temporary untracked location, and drive active work then completion:
 
 ```bash
 agent_pane="$(tmux new-window -d -P -F '#{pane_id}' -n ax69-live "$SHELL")"
 tmux send-keys -t "$agent_pane" 'pi' Enter
 tmux send-keys -t "$agent_pane" \
-  "Run /bin/bash -c 'for n in 1 2 3 4 5; do echo \$n; sleep 1; done', then report done." Enter
+  '<sanitized agent activity request>' Enter
 ```
 
-- [ ] Through deployed public scanner, verify pane reports `working` during activity and `idle` after completion:
+- [x] Through deployed public scanner, verify pane reports `working` during activity and `idle` after completion:
 
 ```bash
 "$bin" scan | awk -F '\t' -v pane="$agent_pane" '$1 == pane { print $4 }'
 ```
 
-- [ ] Verify false → true → false live reload visually without daemon/control-client identity changing. Then restart daemon once after config changes and repeat working → idle detector transition, per project rule.
-- [ ] Confirm Enter and mouse jump to exact ordinary and agent panes.
-- [ ] Restore release binary after live verification:
+- [x] Verify false → true → false live reload visually without daemon/control-client identity changing. Then restart daemon once after config changes and repeat working → idle detector transition, per project rule.
+- [x] Confirm Enter and mouse jump to exact ordinary and agent panes.
+- [x] Restore release binary after live verification:
 
 ```bash
 /bin/bash -c './scripts/dev-bin.sh stop'
 ```
+
+### Sanitized completion evidence
+
+- Confirmed the configured binary, derived plugin root, and loaded `agents/*.conf` before live testing.
+- Verified public false → true → false reload with stable daemon/control/sidebar identity.
+- Observed a real configured agent report `working` and then `idle` through the public scanner, repeated after daemon restart.
+- Verified attached-client keyboard and mouse navigation for ordinary and agent panes.
+- Removed all temporary title/screen captures; none are tracked.
+- Restored the release daemon with no global binary override. The local user configuration intentionally leaves `display.show_all_panes = true`.
+- User-approved `7ce03da` supersedes strict false-mode renderer-byte compatibility only for darker unfocused state-row backgrounds; agent-only structure, search, row maps, cache, and runtime behavior remain unchanged.
+- The redundant-reference cleanup is isolated in `af22229` and its legacy allowlist update in `bf0fdee`; it is intentionally retained outside feature commits.
 
 ## Final diff/privacy checks
 
