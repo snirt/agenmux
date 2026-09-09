@@ -47,10 +47,10 @@ src/setup.rs:            .replace("#{agents_mon}", &segment);
 src/setup.rs:        for name in ["@agenmux-sidebar", "@agents-mon-sidebar"] {
 src/setup.rs:        let _ = tmux::command_status(&["set-option", "-wu", "-t", &window, "@agents-mon-sidebar"]);
 src/setup.rs:        let legacy = format!("@agents-mon-{suffix}");
-src/sidebar.rs:        .or_else(|_| std::fs::read_to_string(release_dir.join(".agents-mon-latest")))
-src/sidebar.rs:        .or_else(|_| std::fs::read_to_string(release_dir.join(".agents-mon-tags")))
 src/sidebar.rs:        popup_client: crate::compat_env("AGENMUX_POPUP_CLIENT", "AGENTS_MON_POPUP_CLIENT")
 src/sidebar.rs:    let pin = crate::compat_env("AGENMUX_PIN", "AGENTS_MON_PIN").filter(|p| !p.is_empty());
+src/sidebar/overlay.rs:        .or_else(|_| std::fs::read_to_string(release_dir.join(".agents-mon-latest")))
+src/sidebar/overlay.rs:        .or_else(|_| std::fs::read_to_string(release_dir.join(".agents-mon-tags")))
 src/tmux.rs:    let Some(path) = crate::compat_env("AGENMUX_DEBUG", "AGENTS_MON_DEBUG") else {
 src/tmux.rs:    let Some(path) = crate::compat_env("AGENMUX_DEBUG", "AGENTS_MON_DEBUG") else {
 src/toggle.rs:        .map(|suffix| format!("@agents-mon-{suffix}"))
