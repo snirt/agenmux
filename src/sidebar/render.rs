@@ -1332,7 +1332,7 @@ mod tests {
         );
         assert_eq!(
             Palette::default().state_bg("blocked", false),
-            "\x1b[48;2;32;12;12m"
+            "\x1b[48;2;27;10;10m"
         );
     }
 }
