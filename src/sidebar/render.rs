@@ -304,11 +304,8 @@ impl Sidebar {
                     } else {
                         "  ".into()
                     };
-                    let pane_branch = if pane_pos + 1 == panes.len() {
-                        "└─"
-                    } else {
-                        "├─"
-                    };
+                    let last_pane = pane_pos + 1 == panes.len();
+                    let pane_branch = if last_pane { "└─" } else { "├─" };
                     let prefix = if expanded {
                         format!(
                             "{}  {pane_branch} {}",
@@ -356,9 +353,16 @@ impl Sidebar {
                     ));
                     if let Some(row) = agent.filter(|row| !row.title.is_empty()) {
                         let title_prefix = if expanded {
-                            format!("  {}  │   ", if last_window { "  " } else { "│ " })
+                            format!(
+                                "  {}  {}└─ ",
+                                if last_window { "  " } else { "│ " },
+                                if last_pane { "    " } else { "│   " }
+                            )
                         } else {
-                            "  │       ".into()
+                            format!(
+                                "  {}└─ ",
+                                if last_window { "    " } else { "│   " }
+                            )
                         };
                         let title: String = row
                             .title
@@ -865,7 +869,9 @@ mod tests {
             "selected inventory description keeps cursor background"
         );
         assert!(
-            ansi.replace_all(selected_title, "").starts_with("      │   Implement sidebar tree"),
+            ansi
+                .replace_all(selected_title, "")
+                .starts_with("          └─ Implement sidebar tree"),
             "inventory description stays connected to its pane branch"
         );
         frames.push_str(&format!(
