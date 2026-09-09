@@ -316,7 +316,7 @@ impl Sidebar {
                             row.cwd
                         )
                     } else {
-                        format!(" {muted}█ {}{E}[0m", pane.command)
+                        format!(" {muted}● {}{E}[0m", pane.command)
                     };
                     let row = format!("{mark}{prefix}{detail}");
                     let row_bg = agent.filter(|_| selected).map_or(String::new(), |_| {
@@ -839,10 +839,10 @@ mod tests {
         let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap();
         let collapsed_pane = sb.last_frame.lines().find(|line| line.contains("nvim")).unwrap();
         let expanded_pane = sb.last_frame.lines().find(|line| line.contains("npm")).unwrap();
-        let pane_marker = format!("{}█", sb.palette.muted_fg.fg("2"));
+        let pane_marker = format!("{}●", sb.palette.muted_fg.fg("2"));
         assert!(
             collapsed_pane.contains(&pane_marker) && expanded_pane.contains(&pane_marker),
-            "ordinary pane rows use the customizable muted full-block marker"
+            "ordinary pane rows use the customizable muted circle marker"
         );
         assert_eq!(
             ansi.replace_all(selected_agent, "").chars().count(),
@@ -891,7 +891,7 @@ mod tests {
                 let plain = ansi.replace_all(&sb.last_frame, "");
                 assert!(
                     plain.lines().any(|line| line.starts_with("  2 server"))
-                        && plain.lines().any(|line| line.contains("  1 █ npm")),
+                        && plain.lines().any(|line| line.contains("  1 ● npm")),
                     "a physical multi-pane window stays expanded after filtering"
                 );
             }
