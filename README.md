@@ -112,8 +112,8 @@ single-pane window collapses its window and pane into one row. Only pane rows
 are selectable—session and window rows provide context. `Enter` and repeated
 clicks can therefore jump to ordinary panes as well as agent panes.
 All-pane hierarchy uses indentation without connector glyphs. Ordinary pane rows
-use a muted `●` marker and full-width `theme.colors.pane_bg`; agent rows keep their
-state styling.
+use a muted `●` marker; when selected, their full row uses `theme.colors.pane_bg`.
+Agent rows keep their state styling.
 
 Search in all-pane mode matches session, window, and pane metadata. A session or
 window match keeps its pane subtree, while a pane match keeps its session and
@@ -224,7 +224,7 @@ reports their sources. Themes and keys apply to both split and popup renderers.
 base = "light" # dark (default), light, or terminal
 [theme.colors]
 working_bg = "#fff0cc" # override only this semantic role
-pane_bg = 236          # ordinary pane-row background
+pane_bg = 236          # selected ordinary pane-row background
 # working_fg = 136    # indexed terminal color, 0..255
 # header_bg = "default"
 ```
@@ -235,8 +235,9 @@ appearance; `light` uses explicit dark foregrounds and pale selected-row fills
 Colors accept only `"default"`, integers 0..255, or exact `"#RRGGBB"` values—not
 ANSI strings. Roles are `header_fg/bg`, `pane_bg`, `text_fg`, `muted_fg`,
 `accent_fg`, `error_fg`, and `blocked`, `working`, `idle`, `done` each with
-`_fg`, `_bg`, `_bg_unfocused`. `pane_bg` fills ordinary pane rows; `muted_fg`
-colors their `●` marker. Foregrounds color status/cursor marks independently of their
+`_fg`, `_bg`, `_bg_unfocused`. `pane_bg` fills the selected ordinary pane row;
+`muted_fg` colors its `●` markers. Foregrounds color status/cursor marks independently
+of their
 unchanged glyphs, spinner, and blink. Overrides affect hints, help, and version
 views too. No global tmux colors are changed. Close/reopen running views after
 activation to consume the new palette.

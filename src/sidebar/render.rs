@@ -319,11 +319,11 @@ impl Sidebar {
                         format!(" {muted}● {}{E}[0m", pane.command)
                     };
                     let row = format!("{mark}{prefix}{detail}");
-                    let row_bg = match agent {
-                        Some(_) if selected =>
+                    let row_bg = match (agent, selected) {
+                        (Some(_), true) =>
                             self.palette.state_bg(state, self.plugin_selected),
-                        Some(_) => String::new(),
-                        None => self.palette.pane_bg.bg(),
+                        (None, true) => self.palette.pane_bg.bg(),
+                        _ => String::new(),
                     };
                     let mut chars = row.chars();
                     let mut width = 0;
@@ -847,14 +847,13 @@ mod tests {
             collapsed_pane.contains(&pane_marker) && expanded_pane.contains(&pane_marker),
             "ordinary pane rows use the customizable muted circle marker"
         );
-        for pane in [collapsed_pane, expanded_pane] {
-            assert!(
-                pane.starts_with("\x1b[48;5;236m")
-                    && ansi.replace_all(pane, "").chars().count()
-                        == sb.daemon.as_ref().unwrap().size.0,
-                "ordinary pane background spans the full row"
-            );
-        }
+        let pane_bg = sb.palette.pane_bg.bg();
+        assert!(
+            [collapsed_pane, expanded_pane]
+                .iter()
+                .all(|pane| !pane.starts_with(&pane_bg)),
+            "unselected ordinary pane rows stay transparent"
+        );
         assert_eq!(
             ansi.replace_all(selected_agent, "").chars().count(),
             sb.daemon.as_ref().unwrap().size.0,
@@ -876,6 +875,17 @@ mod tests {
                 .starts_with("      Implement sidebar tree"),
             "inventory description is indented beneath its pane"
         );
+        sb.select_index(1);
+        sb.render(true);
+        let selected_pane = sb.last_frame.lines().find(|line| line.contains("nvim")).unwrap();
+        assert!(
+            selected_pane.starts_with(&pane_bg)
+                && ansi.replace_all(selected_pane, "").chars().count()
+                    == sb.daemon.as_ref().unwrap().size.0,
+            "selected ordinary pane background spans the full row"
+        );
+        sb.select_index(3);
+        sb.render(true);
         frames.push_str(&format!(
             "all-panes hierarchy\n{}\nrows={}\n",
             sb.last_frame

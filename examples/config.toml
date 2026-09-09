@@ -20,7 +20,7 @@ notifications = true
 base = "dark"         # dark | light | terminal
 [theme.colors]        # semantic overrides: "default", 0..255, or "#RRGGBB"
 # working_bg = "#fff0cc"
-# pane_bg = 236
+# pane_bg = 236       # selected ordinary pane row
 # header_bg = "default"
 
 [keys.normal]         # each list replaces the default list; [] unbinds
