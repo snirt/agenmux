@@ -26,12 +26,12 @@
   - Status filter matches exact agent states only, then adds ancestors.
 - Filter counts mean selectable matching panes / total selectable panes for current mode. Headers and subjects never count.
 - Window collapse uses complete sidebar-excluded inventory, not filtered count or raw `window_panes`.
-- True-mode row labels omit numeric indexes. Ordinary single-pane windows use muted ` name` rows; split-window headers use the same glyph in the accent color; nested ordinary panes use `▦ command`. Agent rows place the animated status glyph first, and descriptions remain indented on the next line:
+- True-mode row labels omit numeric indexes. Ordinary single-pane windows use muted ` name` rows; split-window headers use the same glyph in the accent color; nested ordinary panes use `⣿ command`. Agent rows place the animated status glyph first, and descriptions remain indented on the next line:
   ```text
   work
       editor
       server
-       ▦ npm
+       ⣿ npm
        ⠹ claude node
          Implement sidebar tree
   ```

@@ -113,7 +113,7 @@ window retains its compact agent row. Pane rows and agent description rows are s
 session and split-window headers provide context. `Enter` and repeated clicks can jump to
 ordinary panes as well as agent panes.
 All-pane hierarchy uses indentation without connector glyphs. Nested ordinary panes use a
-muted `▦ command` row; when selected, their full row uses `theme.colors.pane_bg`. Agent
+muted `⣿ command` row; when selected, their full row uses `theme.colors.pane_bg`. Agent
 rows keep their state styling and show the animated status glyph, agent name in its original
 style, then pane command. Agent descriptions stay on the next indented line.
 
