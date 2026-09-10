@@ -38,6 +38,7 @@ Reliability means recovering the current visible state, not promising a lossless
 - Modify `src/sidebar/daemon.rs` only if its existing constructor or scheduling contracts require it.
 - Modify `README.md`: briefly document actual monitoring behavior and background fallback.
 - Add `tests/polling.sh`: isolated real-tmux regression harness with synthetic producers, no external API dependency.
+- Modify `tests/run.sh`: invoke the polling harness from the integration entry point used by CI and Makefile.
 - Add tests inside existing Rust modules for protocol/scheduling/cache edge cases. Do not extract modules merely to test them.
 
 **Interfaces:**
@@ -67,4 +68,12 @@ Reliability means recovering the current visible state, not promising a lossless
 
 ## Validation results
 
-Implementation and live validation are pending.
+Live verification used tmux 3.7c, a separate server, an attached terminal client, and real Claude Code sessions in fresh panes. The test server's `@agenmux-bin` resolved to the candidate release binary, its ancestor containing `agents/` matched the implementation worktree, and an empty configuration override directory ensured the checked built-in rules were effective. The test daemon was restarted for the final runtime build.
+
+- Quiet-agent capture count: the existing daemon captured one unchanged agent five times over ten seconds; the final implementation captured an unchanged agent once over ten seconds. This is an 80% reduction in captures for this case, not a claim about total CPU usage.
+- Attached-session activity: real working output was reflected in the runtime cache promptly. On the final build, the public detector became idle at sample 37 and the daemon cache at sample 39 (roughly half a second later), remaining idle through sample 99.
+- Background-session activity: after the control client followed the viewer to another session, real agent start and completion were each reflected about 1.25 seconds after the detector changed, within the retained two-second fallback. The automated harness also covers background updates and control-session switching.
+- Real fixtures: two working UI variants and a completed idle negative case retain activity glyphs, timers, interrupt controls and prompt layout. Local paths, the task prompt and other irrelevant session content were removed; the completion time was replaced with a neutral value. Agent detection rules were unchanged.
+- Toolchain: the shell's default Rust 1.89 is too old for an existing macOS dependency. The already-installed rustup stable toolchain builds the project; no dependency change or toolchain installation was needed.
+
+Automated suite results and independent review will be recorded after their completion. The user's original checkout and active tmux deployment remain untouched.

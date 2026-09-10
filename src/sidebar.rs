@@ -13,11 +13,67 @@ use crate::attention::Tracker;
 use crate::conf::AgentConf;
 use crate::procs::IdentCache;
 use crate::scan::{self, PaneRow};
-use crate::tmux::{command_status, Tmux, TmuxError};
+use crate::tmux::{command_status, PendingChanges, Tmux, TmuxError};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+const PERIODIC_SCAN: Duration = Duration::from_secs(2);
+const OUTPUT_SCAN_MIN: Duration = Duration::from_millis(500);
+
+struct ScanSchedule {
+    next_periodic: Instant,
+    next_output_eligible: Instant,
+    output_due: Option<Instant>,
+    immediate: bool,
+}
+
+impl ScanSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            next_periodic: now,
+            next_output_eligible: now,
+            output_due: None,
+            immediate: false,
+        }
+    }
+
+    fn observe_output(&mut self, now: Instant) {
+        self.output_due
+            .get_or_insert(now.max(self.next_output_eligible));
+    }
+
+    fn request_immediate(&mut self) {
+        self.immediate = true;
+    }
+
+    fn due(&self, now: Instant) -> Option<bool> {
+        (self.immediate || now >= self.next_periodic || self.output_due.is_some_and(|d| now >= d))
+            .then_some(now >= self.next_periodic)
+    }
+
+    fn complete(&mut self, now: Instant, periodic: bool) {
+        self.immediate = false;
+        if periodic {
+            while self.next_periodic <= now {
+                self.next_periodic += PERIODIC_SCAN;
+            }
+        }
+        if self.output_due.is_some_and(|due| due <= now) {
+            self.output_due = None;
+        }
+        self.next_output_eligible = now + OUTPUT_SCAN_MIN;
+    }
+
+    fn next_deadline(&self) -> Instant {
+        if self.immediate {
+            return Instant::now();
+        }
+        self.output_due
+            .map_or(self.next_periodic, |output| output.min(self.next_periodic))
+    }
+}
 
 #[allow(unused_imports)]
 pub use crate::input::{select, send_key};
@@ -79,6 +135,7 @@ pub struct Sidebar {
     confs: Vec<AgentConf>,
     ident: IdentCache,
     subj: scan::SubjectCache,
+    screens: scan::ScreenCache,
     tracker: Tracker,
     rows: Vec<PaneRow>, // complete debounced view-model; never filter cache/status
     visible: Vec<usize>, // filtered indexes used by render/navigation/clicks
@@ -131,6 +188,7 @@ fn new_sidebar(
         confs,
         ident: IdentCache::new(),
         subj: scan::SubjectCache::new(),
+        screens: scan::ScreenCache::default(),
         tracker: Tracker::default(),
         rows: Vec::new(),
         visible: Vec::new(),
@@ -198,7 +256,7 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     print!("{E}[?25l{E}[2J");
     let _ = std::io::stdout().flush();
 
-    let tmux = match Tmux::connect() {
+    let tmux = match Tmux::connect_monitoring() {
         Ok(t) => t,
         Err(_) => {
             cleanup(&rows_file, &pin);
@@ -218,15 +276,18 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
 /// Returns true when the loop ended because another daemon took ownership.
 fn event_loop(sb: &mut Sidebar) -> bool {
     let key_fd = sb.daemon.as_ref().map_or(0, |d| d.keys_fd);
-    let mut next_scan = Instant::now(); // scan immediately
+    let mut scans = ScanSchedule::new(Instant::now());
     let mut next_tick = Instant::now();
     loop {
         if QUIT.load(Ordering::Relaxed) {
             break;
         }
         let mut now = Instant::now();
-        if now >= next_scan {
-            match sb.scan_tick() {
+        if let Some(periodic) = scans.due(now) {
+            // Consume first: output observed by command-response reads during
+            // this scan belongs to the next pass.
+            let changes = sb.tmux.take_pending_changes();
+            match sb.scan_tick(periodic, &changes) {
                 Ok(()) => {}
                 // a pipe I/O error can leave a response block half-read —
                 // the pipe is desynced, restarting is the only safe move
@@ -246,7 +307,13 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             // a scan takes tens of ms — with the pre-scan `now`, a tick due
             // mid-scan is missed and the poll sleeps its full stale remainder
             now = Instant::now();
-            next_scan = now + Duration::from_secs(2);
+            scans.complete(now, periodic);
+            if sb.has_immediate_change() {
+                scans.request_immediate();
+            }
+            if sb.has_relevant_output() {
+                scans.observe_output(now);
+            }
         }
         let animating = sb
             .visible
@@ -260,19 +327,24 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             sb.render(false);
         }
         // animated states need ticks; all-idle sleeps until the next scan
-        let wake = if animating {
-            next_tick.saturating_duration_since(now)
-        } else {
-            next_scan.saturating_duration_since(now)
-        };
+        let mut wake = scans.next_deadline().saturating_duration_since(now);
+        if animating {
+            wake = wake.min(next_tick.saturating_duration_since(now));
+        }
         let (key_ready, pipe_ready) = poll_inputs(key_fd, sb.tmux.fd(), sb.tmux.buffered(), wake);
         if pipe_ready {
             // focus notification (%window-pane-changed etc.) — rescan now so
             // the cursor snaps to the newly focused pane without the 2s wait
             match sb.tmux.drain_notifications() {
-                Ok(true) => next_scan = Instant::now(),
+                Ok(true) => scans.request_immediate(),
                 Ok(false) => {}
                 Err(_) => break,
+            }
+            if sb.has_relevant_output() {
+                scans.observe_output(Instant::now());
+            }
+            if sb.has_immediate_change() {
+                scans.request_immediate();
             }
         }
         if key_ready {
@@ -411,20 +483,34 @@ impl Sidebar {
         self.last_frame.clear(); // colors changed: no diff against old bytes
     }
 
-    fn scan_tick(&mut self) -> Result<(), TmuxError> {
+    fn scan_tick(&mut self, periodic: bool, changes: &PendingChanges) -> Result<(), TmuxError> {
         if self.daemon.is_none() {
             let refreshed = self.settings.refresh(&mut self.tmux);
             self.adopt_reload(refreshed);
         }
         let t0 = Instant::now();
-        let scanned = scan::scan(
+        let covered_session = self.tmux.attached_session().map(str::to_string);
+        let (scanned, stats) = scan::scan_cached(
             &mut self.tmux,
             &self.confs,
             &mut self.ident,
             &mut self.subj,
             Some(&self.self_pane),
+            &mut self.screens,
+            scan::ScanPolicy {
+                dirty: &changes.panes,
+                full: changes.full,
+                periodic,
+                covered_session: covered_session.as_deref(),
+                now: Instant::now(),
+            },
         )?;
-        crate::tmux::debug_note(&format!("scan {}ms", t0.elapsed().as_millis()));
+        crate::tmux::debug_note(&format!(
+            "scan {}ms captured={} reused={}",
+            t0.elapsed().as_millis(),
+            stats.captured,
+            stats.reused
+        ));
         let _ = std::fs::write(&self.cache_file, scan::to_tsv(&scanned));
         let mut focus = self.client_focus().unwrap_or_default();
         // A popup owns the terminal's input even though tmux still reports the
@@ -446,8 +532,6 @@ impl Sidebar {
         {
             let sid = self.active_session.clone();
             if self.tmux.run(&format!("switch-client -t '{sid}'")).is_ok() {
-                // insurance: keep pane output off the control pipe
-                let _ = self.tmux.run("refresh-client -f no-output");
                 self.daemon.as_mut().unwrap().attached = sid;
             }
         }
@@ -473,6 +557,19 @@ impl Sidebar {
             self.last_active = self.active.clone();
         }
         Ok(())
+    }
+
+    fn has_relevant_output(&self) -> bool {
+        self.tmux
+            .pending_changes()
+            .panes
+            .iter()
+            .any(|pane| self.rows.iter().any(|row| &row.pane == pane))
+    }
+
+    fn has_immediate_change(&self) -> bool {
+        let pending = self.tmux.pending_changes();
+        pending.full || pending.focus
     }
 
     fn client_focus(&mut self) -> Option<crate::focus::ClientFocus> {
@@ -591,4 +688,51 @@ mod tests {
         assert_eq!(dispatch_mode(None, false), DispatchMode::Normal);
     }
 
+    #[test]
+    fn continuous_output_keeps_the_first_bounded_deadline() {
+        let start = Instant::now();
+        let mut schedule = ScanSchedule::new(start);
+        schedule.complete(start, true);
+        schedule.observe_output(start + Duration::from_millis(10));
+        let due = schedule.output_due.unwrap();
+        assert_eq!(due, start + OUTPUT_SCAN_MIN);
+        for offset in [100, 200, 499] {
+            schedule.observe_output(start + Duration::from_millis(offset));
+            assert_eq!(schedule.output_due, Some(due));
+        }
+        assert!(schedule.due(start + Duration::from_millis(499)).is_none());
+        assert_eq!(schedule.due(due), Some(false));
+    }
+
+    #[test]
+    fn periodic_deadline_wins_even_when_output_and_animation_are_busy() {
+        let start = Instant::now();
+        let mut schedule = ScanSchedule::new(start);
+        schedule.complete(start, true);
+        schedule.next_output_eligible = start + Duration::from_secs(3);
+        schedule.observe_output(start + Duration::from_millis(100));
+        assert_eq!(schedule.next_deadline(), start + PERIODIC_SCAN);
+        assert_eq!(schedule.due(start + PERIODIC_SCAN), Some(true));
+
+        let animation = start + Duration::from_millis(250);
+        let wake = schedule
+            .next_deadline()
+            .min(animation)
+            .saturating_duration_since(start);
+        assert_eq!(wake, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn final_output_observed_during_a_scan_gets_another_capture_deadline() {
+        let start = Instant::now();
+        let mut schedule = ScanSchedule::new(start);
+        schedule.complete(start, true);
+        schedule.observe_output(start + Duration::from_millis(10));
+        let first = start + OUTPUT_SCAN_MIN;
+        assert_eq!(schedule.due(first), Some(false));
+        let finished = first + Duration::from_millis(20);
+        schedule.complete(finished, false);
+        schedule.observe_output(finished);
+        assert_eq!(schedule.output_due, Some(finished + OUTPUT_SCAN_MIN));
+    }
 }

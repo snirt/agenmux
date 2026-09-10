@@ -843,6 +843,9 @@ if [ "$fail" -eq 0 ] && [ "$(uname -s)" = Darwin ] &&
   rm -rf "$tmp"
 fi
 if [ "$fail" -eq 0 ]; then
+  AGENMUX_BIN="$BIN" bash "$DIR/tests/polling.sh" || fail=1
+fi
+if [ "$fail" -eq 0 ]; then
   AGENMUX_BIN="$BIN" bash "$DIR/tests/navigation.sh" || fail=1
 fi
 if [ "$fail" -eq 0 ]; then
