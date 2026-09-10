@@ -297,7 +297,10 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             if sb.daemon.is_some() && sb.superseded() {
                 return true; // a newer daemon owns the panes now
             }
-            if sb.daemon.is_some() && !sb.mirror_tick() {
+            // Preserved-pane inventory, sizing and drag detection are periodic
+            // reconciliation. Running them for output/focus scans can sample
+            // transient tmux layouts twice and mistake them for a user drag.
+            if sb.daemon.is_some() && periodic && !sb.mirror_tick() {
                 break; // all preserved panes gone — nothing left to display
             }
             if sb.daemon.as_ref().is_some_and(|d| !d.keys_path.exists()) {
@@ -505,8 +508,19 @@ impl Sidebar {
                 now: Instant::now(),
             },
         )?;
+        let reason = if periodic {
+            "periodic"
+        } else if !changes.panes.is_empty() {
+            "output"
+        } else if changes.full {
+            "full"
+        } else if changes.focus {
+            "focus"
+        } else {
+            "scheduled"
+        };
         crate::tmux::debug_note(&format!(
-            "scan {}ms captured={} reused={}",
+            "scan {}ms reason={reason} captured={} reused={}",
             t0.elapsed().as_millis(),
             stats.captured,
             stats.reused

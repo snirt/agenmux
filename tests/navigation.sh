@@ -482,6 +482,13 @@ done
   echo "FAIL navigation-key-table: cursor never reached the clicked row"
   exit 1
 }
+# Focus/output-triggered scans must not run periodic mirror maintenance and
+# misclassify transient layout widths as a user border drag.
+picker_width="$(tmux -S "$sock" show-option -gqv @agenmux-width)"
+[ "$picker_width" = 30 ] || {
+  echo "FAIL navigation-key-table: event scan adopted transient width $picker_width"
+  exit 1
+}
 picker_start="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
   sed -n '/❯/p' | head -n 1)"
 printf 'K' >&9

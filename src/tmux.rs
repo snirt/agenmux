@@ -323,19 +323,24 @@ impl Tmux {
         }
     }
 
-    /// read_line that survives EINTR: SIGWINCH lands mid-read and BufReader
-    /// does not retry Interrupted — aborting here would desync the pipe
-    /// (every later command pairs with the wrong response block).
+    /// Read one protocol line as bytes. `%output` chunks may split a pane's
+    /// multibyte UTF-8 sequence between lines, but only their ASCII prefix and
+    /// pane ID are meaningful to us, so discard the payload before decoding.
+    /// Keeping partial bytes undecoded also lets a bounded drain hand a
+    /// mid-codepoint line back to the blocking response reader safely. Other
+    /// lines remain strict UTF-8 so malformed command bodies still fail.
     fn read_line_retry(&mut self, line: &mut String) -> std::io::Result<usize> {
-        if !self.partial_line.is_empty() {
-            line.push_str(&String::from_utf8_lossy(&std::mem::take(
-                &mut self.partial_line,
-            )));
-        }
+        let mut bytes = std::mem::take(&mut self.partial_line);
         loop {
-            match self.rdr.read_line(line) {
+            match self.rdr.read_until(b'\n', &mut bytes) {
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                r => return r,
+                Err(e) => return Err(e),
+                Ok(0) if bytes.is_empty() => return Ok(0),
+                Ok(_) => {
+                    let len = bytes.len();
+                    line.push_str(&decode_protocol_line(bytes)?);
+                    return Ok(len);
+                }
             }
         }
     }
@@ -383,6 +388,23 @@ impl Tmux {
             }
         }
     }
+}
+
+/// Pane output is opaque transport data. Retain the notification header only;
+/// every other control line is a command/metadata response and stays strict.
+fn decode_protocol_line(mut bytes: Vec<u8>) -> std::io::Result<String> {
+    for prefix in [b"%output ".as_slice(), b"%extended-output ".as_slice()] {
+        if let Some(rest) = bytes.strip_prefix(prefix) {
+            let pane_len = rest
+                .iter()
+                .position(|byte| byte.is_ascii_whitespace())
+                .unwrap_or(rest.len());
+            bytes.truncate(prefix.len() + pane_len);
+            break;
+        }
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 /// Retain enough of a partial notification to identify it, but never retain
@@ -540,6 +562,31 @@ mod tests {
     }
 
     #[test]
+    fn invalid_utf8_output_payloads_do_not_break_response_framing() {
+        let mut tmux = scripted_tmux(
+            "read _; printf '%%output %%7 \\377\\n%%begin 1 2 0\\n'; \
+             printf '%%output %%8 \\376\\n%%0\\trow\\n%%end 1 2 0\\n'",
+        );
+        let body = match tmux.run("list-panes") {
+            Ok(body) => body,
+            Err(error) => panic!("{error}"),
+        };
+        assert_eq!(body, "%0\trow\n");
+        assert_eq!(
+            tmux.pending_changes().panes,
+            HashSet::from(["%7".to_string(), "%8".to_string()])
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_command_body_remains_an_error() {
+        let mut tmux =
+            scripted_tmux("read _; printf '%%begin 1 2 0\\ninvalid \\377\\n%%end 1 2 0\\n'");
+        assert!(matches!(tmux.run("synthetic"), Err(TmuxError::Io(error))
+            if error.kind() == std::io::ErrorKind::InvalidData));
+    }
+
+    #[test]
     fn pane_rows_and_nonmatching_end_markers_remain_response_text() {
         let mut tmux = scripted_tmux(
             "read _; printf '%s\\n' '%begin 1 2 0' '%9\\tmetadata' \
@@ -589,6 +636,29 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_millis(100));
         assert!(tmux.pending_changes().panes.is_empty());
         let _ = tmux.child.kill();
+    }
+
+    #[test]
+    fn response_read_joins_partial_notification_bytes_before_utf8_decoding() {
+        let mut tmux = scripted_tmux(
+            "printf '%%output %%8 \\342'; sleep .1; \
+             read _; printf '\\202\\254\\n%%begin 1 2 0\\nok\\n%%end 1 2 0\\n'",
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while !fd_readable(tmux.fd()) && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(matches!(tmux.drain_notifications(), Ok(false)));
+
+        let body = match tmux.run("synthetic") {
+            Ok(body) => body,
+            Err(error) => panic!("{error}"),
+        };
+        assert_eq!(body, "ok\n");
+        assert_eq!(
+            tmux.pending_changes().panes,
+            HashSet::from(["%8".to_string()])
+        );
     }
 
     #[test]
