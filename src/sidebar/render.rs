@@ -295,7 +295,7 @@ impl Sidebar {
                     let mark = if agent.is_some() {
                         cursor_mark(&self.palette, selected, self.plugin_selected, state)
                     } else if selected {
-                        format!("{accent}❯{E}[0m ")
+                        format!("{muted}❯{E}[0m ")
                     } else {
                         "  ".into()
                     };
@@ -905,6 +905,11 @@ mod tests {
                 && ansi.replace_all(selected_pane, "").chars().count()
                     == sb.daemon.as_ref().unwrap().size.0,
             "selected ordinary pane background spans the full row"
+        );
+        let pane_cursor = format!("{}❯", sb.palette.muted_fg.fg("2"));
+        assert!(
+            selected_pane.contains(&pane_cursor),
+            "selected ordinary pane cursor uses muted pane color"
         );
         sb.select_index(3);
         sb.render(true);
