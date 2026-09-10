@@ -295,6 +295,12 @@ fn public_pane_lock_recovers_bounds_contention_and_rolls_back() {
 
     // Startup creates @0 then times out on @1. It must roll back only its
     // own split, restore layout, and clear activation/daemon options.
+    server.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agenmux-bin",
+        env!("CARGO_BIN_EXE_agenmux"),
+    ]);
     let (owner, _) = pause_pane_add(&server, &other, "rollback-owner");
     let layout = server.text(&["display-message", "-p", "-t", "@0", "#{window_layout}"]);
     let error = pane_lock_run(&server, &["toggle", "split"], 1);
