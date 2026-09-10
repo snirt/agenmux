@@ -278,7 +278,7 @@ impl Sidebar {
                 let expanded = counts[&(window.session_id.as_str(), window.window_id.as_str())] > 1;
                 if expanded {
                     lines.push((
-                        format!("  {accent} {}{E}[0m{E}[K\n", window.window_name),
+                        format!("   {accent} {}{E}[0m{E}[K\n", window.window_name),
                         "-".into(),
                         0,
                         false,
@@ -307,8 +307,10 @@ impl Sidebar {
                             row.agent,
                             pane.command
                         )
+                    } else if expanded {
+                        format!("{muted}▦ {}{E}[0m", pane.command)
                     } else {
-                        format!("{muted}● {}{E}[0m", pane.command)
+                        format!("{muted} {}{E}[0m", window.window_name)
                     };
                     let row = format!(" {mark}{prefix}{detail}");
                     let row_bg = match (agent, selected) {
@@ -831,22 +833,24 @@ mod tests {
             .find(|line| line.contains("Implement sidebar tree"))
             .unwrap();
         let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap();
-        let collapsed_pane = sb.last_frame.lines().find(|line| line.contains("nvim")).unwrap();
+        let collapsed_pane = sb.last_frame.lines().find(|line| line.contains("editor")).unwrap();
         let expanded_pane = sb.last_frame.lines().find(|line| line.contains("npm")).unwrap();
-        let pane_marker = format!("{}●", sb.palette.muted_fg.fg("2"));
+        let single_window_marker = format!("{}", sb.palette.muted_fg.fg("2"));
+        let pane_marker = format!("{}▦", sb.palette.muted_fg.fg("2"));
         assert!(
-            collapsed_pane.contains(&pane_marker) && expanded_pane.contains(&pane_marker),
-            "ordinary pane rows use the customizable muted circle marker"
+            collapsed_pane.contains(&single_window_marker)
+                && expanded_pane.contains(&pane_marker),
+            "ordinary rows distinguish single windows from nested panes"
         );
         assert_eq!(
             ansi.replace_all(collapsed_pane, ""),
-            "   ● nvim",
-            "collapsed ordinary rows contain only status marker and command"
+            "    editor",
+            "collapsed ordinary windows use muted window name rows"
         );
         assert_eq!(
             ansi.replace_all(expanded_pane, ""),
-            "     ● npm",
-            "expanded ordinary rows drop pane indexes"
+            "     ▦ npm",
+            "expanded ordinary panes use nested pane markers"
         );
         let selected_agent_plain = ansi.replace_all(selected_agent, "");
         let record = selected_agent_plain
@@ -899,7 +903,7 @@ mod tests {
         );
         sb.select_index(1);
         sb.render(true);
-        let selected_pane = sb.last_frame.lines().find(|line| line.contains("nvim")).unwrap();
+        let selected_pane = sb.last_frame.lines().find(|line| line.contains("editor")).unwrap();
         assert!(
             selected_pane.starts_with(&pane_bg)
                 && ansi.replace_all(selected_pane, "").chars().count()
@@ -947,8 +951,8 @@ mod tests {
             if label == "pane query" {
                 let plain = ansi.replace_all(&sb.last_frame, "");
                 assert!(
-                    plain.lines().any(|line| line.starts_with("   server"))
-                        && plain.lines().any(|line| line.trim_end().ends_with("● npm")),
+                    plain.lines().any(|line| line.starts_with("    server"))
+                        && plain.lines().any(|line| line.trim_end().ends_with("▦ npm")),
                     "a physical multi-pane window stays expanded after filtering"
                 );
             }

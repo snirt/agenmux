@@ -107,16 +107,15 @@ session keeps all its agents visible as context.
 Set `display.show_all_panes = true` in the application configuration to turn the
 sidebar into a complete tmux navigator. The default is `false`, which preserves
 the agent-only list. All-pane mode renders sessions, windows, and panes in tmux
-order. A window with multiple panes gets a window header and nested pane rows; a
-single-pane window collapses its window and pane into one row. Pane rows and agent
-description rows are selectable; session and window rows provide context. `Enter` and
-repeated clicks can therefore jump to ordinary panes as well as agent panes.
-All-pane hierarchy uses indentation without connector glyphs. Ordinary pane rows
-use a muted `●` marker; when selected, their full row uses `theme.colors.pane_bg`.
-Agent rows keep their state styling.
-Pane rows omit numeric indexes. Expanded window headers show ` name`. Ordinary rows show
-`● command`; agent rows show the animated status glyph, agent name in its original style,
-then pane command. Agent descriptions stay on the next indented line.
+order. A split window gets an accent-colored ` name` header and nested pane rows. A
+single ordinary-pane window collapses into a selectable muted ` name` row; a single-agent
+window retains its compact agent row. Pane rows and agent description rows are selectable;
+session and split-window headers provide context. `Enter` and repeated clicks can jump to
+ordinary panes as well as agent panes.
+All-pane hierarchy uses indentation without connector glyphs. Nested ordinary panes use a
+muted `▦ command` row; when selected, their full row uses `theme.colors.pane_bg`. Agent
+rows keep their state styling and show the animated status glyph, agent name in its original
+style, then pane command. Agent descriptions stay on the next indented line.
 
 Search in all-pane mode matches session, window, and pane metadata. A session or
 window match keeps its pane subtree, while a pane match keeps its session and
