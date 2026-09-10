@@ -26,14 +26,14 @@
   - Status filter matches exact agent states only, then adds ancestors.
 - Filter counts mean selectable matching panes / total selectable panes for current mode. Headers and subjects never count.
 - Window collapse uses complete sidebar-excluded inventory, not filtered count or raw `window_panes`.
-- True-mode row labels:
+- True-mode row labels omit pane indexes and place state first. Agent descriptions remain indented on the next line:
   ```text
   work
-  ├─ 1 editor · nvim
-  └─ 2 server
-     ├─ 1 npm
-     └─ 2 ● claude working · repo
-          Implement sidebar tree
+    ● nvim
+    2 server
+      ● npm
+      ⠹ working claude node
+        Implement sidebar tree
   ```
 - In true mode, session/window headers and subject continuation lines map to `-`; only pane rows map to pane IDs. False mode keeps current subject-line mapping.
 - Current sidebar ownership test remains narrow: exact `self_pane`, `@agenmux=1`, or processless `pane_title=agenmux`. Ordinary user panes merely titled `agenmux` remain visible.
