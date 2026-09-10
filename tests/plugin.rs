@@ -1625,6 +1625,14 @@ fn all_panes_reload_preserves_daemon_and_selection() {
             })
             .unwrap_or_default()
     };
+    let inventory_present = || {
+        let rows = std::fs::read_to_string(tmux.tmp.join("agenmux-rows"))
+            .unwrap_or_default();
+        [&single, &ordinary, &ordinary_only].iter().all(|pane| {
+            rows.lines()
+                .any(|line| line.split('\t').next() == Some(pane.as_str()))
+        })
+    };
     tmux.wait_for(Duration::from_secs(5), || selected() == agent);
     let false_frame = capture();
     assert!(!false_frame.contains("ordinary-only"), "{false_frame}");
@@ -1658,10 +1666,7 @@ fn all_panes_reload_preserves_daemon_and_selection() {
         "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false",
     );
     assert_success(tmux.bin(&["config", "reload"]), "enable all panes");
-    tmux.wait_for(Duration::from_secs(3), || {
-        let frame = capture();
-        frame.contains("ordinary-only") && frame.contains("ordinary-single")
-    });
+    tmux.wait_for(Duration::from_secs(3), &inventory_present);
     let true_frame = capture();
     assert!(true_frame.contains("mixed"), "{true_frame}");
     assert!(
@@ -1720,11 +1725,7 @@ fn all_panes_reload_preserves_daemon_and_selection() {
     let invalid = tmux.bin(&["config", "reload"]);
     assert_eq!(invalid.status.code(), Some(2));
     thread::sleep(Duration::from_millis(2200));
-    let retained_frame = capture();
-    assert!(
-        retained_frame.contains("ordinary-only") && retained_frame.contains("ordinary-single"),
-        "{retained_frame}"
-    );
+    assert!(inventory_present(), "all-pane projection changed after invalid reload");
     assert_eq!(selected(), agent);
     assert_agent_only_cache();
 
@@ -1733,10 +1734,7 @@ fn all_panes_reload_preserves_daemon_and_selection() {
         "[display]\nshow_all_panes=false\n[behavior]\nnotifications=false",
     );
     assert_success(tmux.bin(&["config", "reload"]), "disable all panes");
-    tmux.wait_for(Duration::from_secs(3), || {
-        let frame = capture();
-        !frame.contains("ordinary-only") && !frame.contains("ordinary-single")
-    });
+    tmux.wait_for(Duration::from_secs(3), || !inventory_present());
     let restored_frame = capture();
     assert!(!restored_frame.contains(&ordinary), "{restored_frame}");
     assert_eq!(selected(), agent);
