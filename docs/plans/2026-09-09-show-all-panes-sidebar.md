@@ -35,7 +35,7 @@
        ⠹ claude node
          Implement sidebar tree
   ```
-- In true mode, session/window headers and subject continuation lines map to `-`; only pane rows map to pane IDs. False mode keeps current subject-line mapping.
+- In true mode, session/window headers map to `-`; pane rows and agent descriptions map to pane IDs. False mode keeps current subject-line mapping.
 - Current sidebar ownership test remains narrow: exact `self_pane`, `@agenmux=1`, or processless `pane_title=agenmux`. Ordinary user panes merely titled `agenmux` remain visible.
 - Tabs/newlines or malformed IDs/numbers make that tmux row malformed; skip it and continue. PID `0` remains valid for processless panes.
 - Popup auto-height remains agent-cache-based; normal scrolling handles larger tree. No topology cache added.

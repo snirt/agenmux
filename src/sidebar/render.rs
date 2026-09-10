@@ -346,9 +346,9 @@ impl Sidebar {
                         let line = format!("{title_prefix}{muted}{title}{E}[0m");
                         lines.push((
                             format!("{}{E}[K\n", bar(&line, &row_bg, cols, width)),
-                            "-".into(),
-                            0,
-                            false,
+                            pane.pane.clone(),
+                            ordinal + 1,
+                            selected,
                         ));
                     }
                     if selected {
@@ -910,6 +910,15 @@ mod tests {
         assert!(
             selected_pane.contains(&pane_cursor),
             "selected ordinary pane cursor uses muted pane color"
+        );
+        let selected_agent_rows = std::fs::read_to_string(&sb.rows_file)
+            .unwrap()
+            .lines()
+            .filter(|line| *line == "%22\t3\t0")
+            .count();
+        assert_eq!(
+            selected_agent_rows, 2,
+            "agent row and description share click target"
         );
         sb.select_index(3);
         sb.render(true);

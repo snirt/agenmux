@@ -108,9 +108,9 @@ Set `display.show_all_panes = true` in the application configuration to turn the
 sidebar into a complete tmux navigator. The default is `false`, which preserves
 the agent-only list. All-pane mode renders sessions, windows, and panes in tmux
 order. A window with multiple panes gets a window header and nested pane rows; a
-single-pane window collapses its window and pane into one row. Only pane rows
-are selectable—session and window rows provide context. `Enter` and repeated
-clicks can therefore jump to ordinary panes as well as agent panes.
+single-pane window collapses its window and pane into one row. Pane rows and agent
+description rows are selectable; session and window rows provide context. `Enter` and
+repeated clicks can therefore jump to ordinary panes as well as agent panes.
 All-pane hierarchy uses indentation without connector glyphs. Ordinary pane rows
 use a muted `●` marker; when selected, their full row uses `theme.colors.pane_bg`.
 Agent rows keep their state styling.
@@ -131,8 +131,8 @@ This setting changes only sidebar presentation and navigation. `scan`, `list`,
 remain agent-only; ordinary panes never contribute agent state or alerts.
 
 The header shows active filters, matching/total selectable-pane counts, and
-contextual controls only while filtering. The green `❯` cursor follows the
-focused agent or pane, and long lists scroll to keep the selection visible.
+contextual controls only while filtering. Agent cursors follow state color; ordinary-pane
+cursors use `theme.colors.muted_fg`. Long lists scroll to keep selection visible.
 
 </details>
 
