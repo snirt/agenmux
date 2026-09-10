@@ -48,9 +48,12 @@ impl ScanSchedule {
         self.immediate = true;
     }
 
-    fn due(&self, now: Instant) -> Option<bool> {
-        (self.immediate || now >= self.next_periodic || self.output_due.is_some_and(|d| now >= d))
-            .then_some(now >= self.next_periodic)
+    fn due(&self, now: Instant, cache_expiry: Option<Instant>) -> Option<bool> {
+        (self.immediate
+            || now >= self.next_periodic
+            || self.output_due.is_some_and(|d| now >= d)
+            || cache_expiry.is_some_and(|d| now >= d))
+        .then_some(now >= self.next_periodic)
     }
 
     fn complete(&mut self, now: Instant, periodic: bool) {
@@ -66,12 +69,15 @@ impl ScanSchedule {
         self.next_output_eligible = now + OUTPUT_SCAN_MIN;
     }
 
-    fn next_deadline(&self) -> Instant {
+    fn next_deadline(&self, cache_expiry: Option<Instant>) -> Instant {
         if self.immediate {
             return Instant::now();
         }
-        self.output_due
-            .map_or(self.next_periodic, |output| output.min(self.next_periodic))
+        [Some(self.next_periodic), self.output_due, cache_expiry]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap()
     }
 }
 
@@ -283,7 +289,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             break;
         }
         let mut now = Instant::now();
-        if let Some(periodic) = scans.due(now) {
+        if let Some(periodic) = scans.due(now, sb.screens.next_expiry()) {
             // Consume first: output observed by command-response reads during
             // this scan belongs to the next pass.
             let changes = sb.tmux.take_pending_changes();
@@ -330,7 +336,9 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             sb.render(false);
         }
         // animated states need ticks; all-idle sleeps until the next scan
-        let mut wake = scans.next_deadline().saturating_duration_since(now);
+        let mut wake = scans
+            .next_deadline(sb.screens.next_expiry())
+            .saturating_duration_since(now);
         if animating {
             wake = wake.min(next_tick.saturating_duration_since(now));
         }
@@ -714,8 +722,10 @@ mod tests {
             schedule.observe_output(start + Duration::from_millis(offset));
             assert_eq!(schedule.output_due, Some(due));
         }
-        assert!(schedule.due(start + Duration::from_millis(499)).is_none());
-        assert_eq!(schedule.due(due), Some(false));
+        assert!(schedule
+            .due(start + Duration::from_millis(499), None)
+            .is_none());
+        assert_eq!(schedule.due(due, None), Some(false));
     }
 
     #[test]
@@ -725,12 +735,12 @@ mod tests {
         schedule.complete(start, true);
         schedule.next_output_eligible = start + Duration::from_secs(3);
         schedule.observe_output(start + Duration::from_millis(100));
-        assert_eq!(schedule.next_deadline(), start + PERIODIC_SCAN);
-        assert_eq!(schedule.due(start + PERIODIC_SCAN), Some(true));
+        assert_eq!(schedule.next_deadline(None), start + PERIODIC_SCAN);
+        assert_eq!(schedule.due(start + PERIODIC_SCAN, None), Some(true));
 
         let animation = start + Duration::from_millis(250);
         let wake = schedule
-            .next_deadline()
+            .next_deadline(None)
             .min(animation)
             .saturating_duration_since(start);
         assert_eq!(wake, Duration::from_millis(250));
@@ -743,10 +753,33 @@ mod tests {
         schedule.complete(start, true);
         schedule.observe_output(start + Duration::from_millis(10));
         let first = start + OUTPUT_SCAN_MIN;
-        assert_eq!(schedule.due(first), Some(false));
+        assert_eq!(schedule.due(first, None), Some(false));
         let finished = first + Duration::from_millis(20);
         schedule.complete(finished, false);
         schedule.observe_output(finished);
         assert_eq!(schedule.output_due, Some(finished + OUTPUT_SCAN_MIN));
+    }
+
+    #[test]
+    fn off_phase_cache_expiry_becomes_the_earliest_scan_deadline() {
+        let start = Instant::now();
+        let mut schedule = ScanSchedule::new(start);
+        schedule.complete(start, true);
+
+        // A covered pane is freshly captured by an output scan halfway
+        // between periodic ticks. Periodic metadata scans reuse that screen.
+        let captured = start + Duration::from_millis(500);
+        let expiry = captured + Duration::from_secs(10);
+        for seconds in [2, 4, 6, 8, 10] {
+            let periodic = start + Duration::from_secs(seconds);
+            assert_eq!(schedule.due(periodic, Some(expiry)), Some(true));
+            schedule.complete(periodic, true);
+        }
+
+        assert_eq!(schedule.next_deadline(Some(expiry)), expiry);
+        assert!(schedule
+            .due(expiry - Duration::from_millis(1), Some(expiry))
+            .is_none());
+        assert_eq!(schedule.due(expiry, Some(expiry)), Some(false));
     }
 }

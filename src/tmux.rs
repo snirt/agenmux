@@ -314,7 +314,7 @@ impl Tmux {
                 *bytes_left -= len;
                 continue;
             }
-            if !fd_readable(self.fd()) {
+            if !fd_ready(self.fd()) {
                 return Ok(None);
             }
             if self.rdr.fill_buf()?.is_empty() {
@@ -416,14 +416,23 @@ fn append_line_prefix(dst: &mut Vec<u8>, src: &[u8]) {
     }
 }
 
-/// fd readable right now (0ms poll)?
-fn fd_readable(fd: libc::c_int) -> bool {
+fn poll_ready(revents: libc::c_short) -> bool {
+    let terminal = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+    revents & (libc::POLLIN | terminal) != 0
+}
+
+/// fd readable or terminal right now (0ms poll)? A drained pipe may report
+/// only HUP on Linux; ERR/NVAL must likewise reach read() and surface as I/O.
+fn fd_ready(fd: libc::c_int) -> bool {
+    if fd < 0 {
+        return false;
+    }
     let mut p = libc::pollfd {
         fd,
         events: libc::POLLIN,
         revents: 0,
     };
-    unsafe { libc::poll(&mut p, 1, 0) > 0 && p.revents & libc::POLLIN != 0 }
+    unsafe { libc::poll(&mut p, 1, 0) > 0 && poll_ready(p.revents) }
 }
 
 /// "%begin <time> <num> <flags>" -> num
@@ -628,7 +637,7 @@ mod tests {
     fn draining_a_partial_notification_line_does_not_block() {
         let mut tmux = scripted_tmux("printf '%%output %%8 partial'; sleep 1");
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while !fd_readable(tmux.fd()) && std::time::Instant::now() < deadline {
+        while !fd_ready(tmux.fd()) && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
         let started = std::time::Instant::now();
@@ -645,7 +654,7 @@ mod tests {
              read _; printf '\\202\\254\\n%%begin 1 2 0\\nok\\n%%end 1 2 0\\n'",
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while !fd_readable(tmux.fd()) && std::time::Instant::now() < deadline {
+        while !fd_ready(tmux.fd()) && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
         assert!(matches!(tmux.drain_notifications(), Ok(false)));
@@ -665,17 +674,26 @@ mod tests {
     fn draining_reports_eof_instead_of_spinning() {
         let mut tmux = scripted_tmux(":");
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while !fd_readable(tmux.fd()) && std::time::Instant::now() < deadline {
+        while !fd_ready(tmux.fd()) && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
         assert!(matches!(tmux.drain_notifications(), Err(TmuxError::Exited)));
     }
 
     #[test]
+    fn terminal_poll_flags_are_ready_for_eof_or_io_error() {
+        assert!(poll_ready(libc::POLLIN));
+        assert!(poll_ready(libc::POLLHUP));
+        assert!(poll_ready(libc::POLLERR));
+        assert!(poll_ready(libc::POLLNVAL));
+        assert!(!poll_ready(0));
+    }
+
+    #[test]
     fn draining_a_newline_free_stream_has_a_byte_budget() {
         let mut tmux = scripted_tmux("printf '%070000d' 0; sleep 1");
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while !fd_readable(tmux.fd()) && std::time::Instant::now() < deadline {
+        while !fd_ready(tmux.fd()) && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
         let started = std::time::Instant::now();

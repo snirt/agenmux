@@ -39,6 +39,13 @@ pub struct ScreenCache {
 }
 
 impl ScreenCache {
+    pub(crate) fn next_expiry(&self) -> Option<Instant> {
+        self.panes
+            .values()
+            .map(|cached| cached.captured_at + SCREEN_MAX_AGE)
+            .min()
+    }
+
     fn get_or_capture(
         &mut self,
         key: ScreenKey,
@@ -378,6 +385,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(first, "screen-1");
         assert!(!reused);
+        assert_eq!(cache.next_expiry(), Some(now + SCREEN_MAX_AGE));
         let (same, reused) = cache
             .get_or_capture(
                 screen_key(),
@@ -398,6 +406,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(dirty, "screen-2");
         assert!(!reused);
+        assert_eq!(cache.next_expiry(), Some(now + Duration::from_secs(19)));
         let (_, reused) = cache
             .get_or_capture(
                 screen_key(),
