@@ -1833,6 +1833,147 @@ fn sidebar_refresh_uses_one_content_enumeration() {
 }
 
 #[test]
+fn startup_populates_the_focused_sidebar_before_fanning_out() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmux = TestTmux::new("focused-startup");
+    tmux.assert_tmux(&["rename-window", "-t", "plugin:0", "ordinary"]);
+    let codex = tmux.tmp.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nwhile :; do sleep 60; done\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let agent = tmux.text(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "plugin:",
+        "-n",
+        "focused",
+        codex.to_str().unwrap(),
+    ]);
+    tmux.assert_tmux(&["select-pane", "-t", &agent, "-T", "codex"]);
+    let cwd = tmux.text(&["display-message", "-p", "-t", &agent, "#{pane_current_path}"]);
+    let cwd_name = PathBuf::from(&cwd)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let plugin_dir = tmux.tmp.join("plugin");
+    std::fs::create_dir_all(plugin_dir.join("agents")).unwrap();
+    std::fs::write(
+        plugin_dir.join("agents/codex.conf"),
+        "AGENT_BINS='codex'\nSUBJECT_CMD='sleep 3; printf slow'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmux.tmp.join("agenmux-scan-cache"),
+        format!("{agent}\tprobe:1.0\tcodex\tidle\t{cwd_name}\tcached subject\n"),
+    )
+    .unwrap();
+    tmux.assert_tmux(&[
+        "new-window",
+        "-d",
+        "-t",
+        "plugin:",
+        "-n",
+        "tail",
+        "exec sleep 60",
+    ]);
+    app_file(
+        &tmux,
+        "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false",
+    );
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agenmux-bin",
+        env!("CARGO_BIN_EXE_agenmux"),
+    ]);
+
+    let mut viewer = tmux.attach();
+    tmux.wait_for(Duration::from_secs(2), || {
+        !tmux
+            .text(&["list-clients", "-F", "#{client_name}"])
+            .is_empty()
+    });
+    let client = tmux.text(&["list-clients", "-F", "#{client_name}"]);
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-t", &agent]);
+    let focused_window = tmux.text(&["display-message", "-p", "-t", &agent, "#{window_id}"]);
+
+    let stubs = tmux.tmp.join("stubs");
+    std::fs::create_dir_all(&stubs).unwrap();
+    let real_tmux = String::from_utf8(Command::new("which").arg("tmux").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let split_count = tmux.tmp.join("split-count");
+    let blocked = tmux.tmp.join("second-split-blocked");
+    let release = tmux.tmp.join("release-second-split");
+    std::fs::write(
+        stubs.join("tmux"),
+        format!(
+            "#!/bin/sh\nif printf '%s\\n' \"$*\" | grep -q 'split-window -I'; then\n  count=$(cat '{}' 2>/dev/null || echo 0)\n  count=$((count + 1))\n  printf '%s\\n' \"$count\" > '{}'\n  if [ \"$count\" = 2 ]; then\n    : > '{}'\n    while [ ! -e '{}' ]; do sleep 0.01; done\n  fi\nfi\nexec '{}' \"$@\"\n",
+            split_count.display(),
+            split_count.display(),
+            blocked.display(),
+            release.display(),
+            real_tmux.replace('\'', "'\\''"),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(stubs.join("tmux"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let child = tmux
+        .bin_command(&["toggle", "split", &client])
+        .env(
+            "PATH",
+            format!("{}:{}", stubs.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("AGENMUX_DIR", &plugin_dir)
+        .spawn()
+        .unwrap();
+    tmux.wait_for(Duration::from_secs(3), || blocked.exists());
+    let sidebar_windows = tmux.text(&[
+        "list-panes",
+        "-a",
+        "-f",
+        "#{==:#{pane_title},agenmux}",
+        "-F",
+        "#{window_id}",
+    ]);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut loaded_before_fanout = false;
+    while Instant::now() < deadline {
+        if std::fs::read_to_string(tmux.tmp.join("agenmux-rows"))
+            .unwrap_or_default()
+            .contains(&agent)
+        {
+            loaded_before_fanout = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    std::fs::write(&release, "").unwrap();
+    let output = child.wait_with_output().unwrap();
+    let first_sidebar_was_focused = sidebar_windows == focused_window;
+
+    assert_success(output, "start focused sidebar");
+    assert!(
+        first_sidebar_was_focused,
+        "first sidebar was {sidebar_windows}, focused window was {focused_window}"
+    );
+    assert!(
+        loaded_before_fanout,
+        "focused sidebar had no agent data while remaining panes were blocked"
+    );
+    assert_success(tmux.bin(&["key", "close"]), "close focused sidebar");
+    let _ = viewer.kill();
+    let _ = viewer.wait();
+}
+
+#[test]
 fn binary_helper_uses_private_server() {
     let tmux = TestTmux::new("binary-helper");
     assert_success(tmux.bin(&["status"]), "agenmux status");

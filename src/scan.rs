@@ -5,7 +5,7 @@ use crate::procs::{self, IdentCache, Snapshot};
 use crate::tmux::{Tmux, TmuxError};
 use std::collections::HashMap;
 
-/// pane -> (cwd, SUBJECT_CMD output). The sidebar loop must stay fork-free:
+/// pane -> (cwd, SUBJECT_CMD output). Startup seeds may hold cwd basename;
 /// entries live while the pane sits idle and drop on any state change (a new
 /// prompt flips the pane to working), so the fork re-runs only when the
 /// subject could actually have changed.
@@ -152,8 +152,17 @@ pub fn scan(
         if state != "idle" {
             subj.remove(pane); // pane got a new prompt — cached subject is stale
         } else if subject.is_empty() && confs[idx].subject_cmd.is_some() {
-            match subj.get(pane).filter(|(cwd, _)| cwd == path) {
-                Some((_, s)) => subject = s.clone(),
+            let cached = subj
+                .get(pane)
+                .filter(|(cwd, _)| {
+                    cwd == path || cwd == path.rsplit('/').next().unwrap_or(path)
+                })
+                .map(|(_, subject)| subject.clone());
+            match cached {
+                Some(cached) => {
+                    subject = cached;
+                    subj.insert(pane.to_string(), (path.to_string(), subject.clone()));
+                }
                 None => {
                     let t0 = std::time::Instant::now();
                     let started = procs::agent_start(&confs[idx], &mut snap, pid);

@@ -139,6 +139,22 @@ fn new_sidebar(
     // restarts the engine anyway
     let update = update_available(&plugin_dir);
     let adopted_show_all_panes = settings.show_all_panes;
+    let cached_rows = std::fs::read_to_string(&cache_file)
+        .map(|tsv| scan::from_tsv(&tsv))
+        .unwrap_or_default();
+    // Cached TSV stores cwd basename, enough to avoid blocking startup on
+    // unchanged panes. Live scans upgrade matching entries to full paths.
+    // ponytail: basename can collide; persist full cwd if cache format changes.
+    let seeded_subjects = cached_rows
+        .iter()
+        .filter(|row| row.pane != self_pane && !row.title.is_empty())
+        .map(|row| {
+            (
+                row.pane.clone(),
+                (row.cwd.clone(), row.title.clone()),
+            )
+        })
+        .collect();
     let mut sb = Sidebar {
         tmux,
         palette: Palette::resolve(&settings.theme),
@@ -148,7 +164,7 @@ fn new_sidebar(
         adopted_show_all_panes,
         confs,
         ident: IdentCache::new(),
-        subj: scan::SubjectCache::new(),
+        subj: seeded_subjects,
         tracker: Tracker::default(),
         rows: Vec::new(),
         panes: Vec::new(),
@@ -179,12 +195,10 @@ fn new_sidebar(
         daemon: None,
         overlay: None,
     };
-    // seed from the previous instance's scan for an instant first frame
+    // Agent-only mode can show the whole cached projection immediately.
     if !sb.settings.settings.show_all_panes {
-        if let Ok(tsv) = std::fs::read_to_string(&sb.cache_file) {
-            sb.rows = scan::from_tsv(&tsv);
-            sb.rows.retain(|r| r.pane != sb.self_pane);
-        }
+        sb.rows = cached_rows;
+        sb.rows.retain(|r| r.pane != sb.self_pane);
     }
     sb.rebuild_visible(false);
     sb

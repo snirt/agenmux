@@ -145,12 +145,12 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
             .map(|name| runtime.join(name))
             .into_iter().filter(|path| !path.exists()).collect::<Vec<_>>();
         let result = (|| {
-            // Record only panes made by this activation, not arbitrary panes
-            // that appear while the daemon is starting.
-            for window in tmux::lines(&["list-windows", "-a", "-F", "#{window_id}"])
-                .map_err(|_| "cannot enumerate startup windows")? {
-                if panes::pane_add_record(Some(&window), config, &mut created) != 0 {
-                    return Err("cannot create startup pane");
+            let mut windows = tmux::lines(&["list-windows", "-a", "-F", "#{window_id}"])
+                .map_err(|_| "cannot enumerate startup windows")?;
+            if let Some(focused) = window.as_deref() {
+                if let Some(index) = windows.iter().position(|candidate| candidate == focused) {
+                    let focused = windows.remove(index);
+                    windows.insert(0, focused);
                 }
             }
             child = Some(Command::new(&bin)
@@ -161,6 +161,14 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn().map_err(|_| "cannot launch daemon; check executable")?);
+            // Record only panes made by this activation, not arbitrary panes
+            // that appear while the daemon is starting. The focused window goes
+            // first so its sidebar can render while the remaining panes fan out.
+            for window in windows {
+                if panes::pane_add_record(Some(&window), config, &mut created) != 0 {
+                    return Err("cannot create startup pane");
+                }
+            }
             await_daemon(child.as_mut().unwrap())?;
             if setup::run_config(plugin_dir, config) != 0 { return Err("daemon setup failed"); }
             if child.as_mut().unwrap().try_wait().map_err(|_| "cannot observe daemon")?.is_some() {
