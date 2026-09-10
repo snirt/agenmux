@@ -121,6 +121,7 @@ fn run_scan() -> Result<Vec<scan::PaneRow>, tmux::TmuxError> {
         &mut subj,
         self_pane().as_deref(),
     )
+    .map(|snapshot| snapshot.agents)
 }
 
 fn cmd_scan() -> i32 {

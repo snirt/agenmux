@@ -7,6 +7,7 @@ version = 1
 
 [display]
 mode = "split"        # split | popup
+show_all_panes = false
 sidebar_width = 30    # cells, 1..=10000
 popup_width = 40
 popup_height = "auto" # "auto" or cells
@@ -19,6 +20,7 @@ notifications = true
 base = "dark"         # dark | light | terminal
 [theme.colors]        # semantic overrides: "default", 0..255, or "#RRGGBB"
 # working_bg = "#fff0cc"
+# pane_bg = 236       # selected ordinary pane row
 # header_bg = "default"
 
 [keys.normal]         # each list replaces the default list; [] unbinds
