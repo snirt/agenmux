@@ -278,10 +278,7 @@ impl Sidebar {
                 let expanded = counts[&(window.session_id.as_str(), window.window_id.as_str())] > 1;
                 if expanded {
                     lines.push((
-                        format!(
-                            "  {accent}{} {}{E}[0m{E}[K\n",
-                            window.window_index, window.window_name
-                        ),
+                        format!("  {accent} {}{E}[0m{E}[K\n", window.window_name),
                         "-".into(),
                         0,
                         false,
@@ -313,10 +310,9 @@ impl Sidebar {
                     } else {
                         format!("{muted}● {}{E}[0m", pane.command)
                     };
-                    let row = format!("{mark}{prefix}{detail}");
+                    let row = format!(" {mark}{prefix}{detail}");
                     let row_bg = match (agent, selected) {
-                        (Some(_), true) =>
-                            self.palette.state_bg(state, self.plugin_selected),
+                        (Some(_), true) => self.palette.state_bg(state, self.plugin_selected),
                         (None, true) => self.palette.pane_bg.bg(),
                         _ => String::new(),
                     };
@@ -340,7 +336,7 @@ impl Sidebar {
                         selected,
                     ));
                     if let Some(row) = agent.filter(|row| !row.title.is_empty()) {
-                        let title_prefix = if expanded { "      " } else { "    " };
+                        let title_prefix = if expanded { "       " } else { "     " };
                         let title: String = row
                             .title
                             .chars()
@@ -844,17 +840,17 @@ mod tests {
         );
         assert_eq!(
             ansi.replace_all(collapsed_pane, ""),
-            "  ● nvim",
+            "   ● nvim",
             "collapsed ordinary rows contain only status marker and command"
         );
         assert_eq!(
             ansi.replace_all(expanded_pane, ""),
-            "    ● npm",
+            "     ● npm",
             "expanded ordinary rows drop pane indexes"
         );
         let selected_agent_plain = ansi.replace_all(selected_agent, "");
         let record = selected_agent_plain
-            .strip_prefix("❯   ")
+            .strip_prefix(" ❯   ")
             .expect("selected expanded agent keeps hierarchy indentation");
         let after_status = record.chars().skip(1).collect::<String>();
         assert_eq!(
@@ -898,7 +894,7 @@ mod tests {
         assert!(
             ansi
                 .replace_all(selected_title, "")
-                .starts_with("      Implement sidebar tree"),
+                .starts_with("       Implement sidebar tree"),
             "inventory description is indented beneath its pane"
         );
         sb.select_index(1);
@@ -937,7 +933,7 @@ mod tests {
             if label == "pane query" {
                 let plain = ansi.replace_all(&sb.last_frame, "");
                 assert!(
-                    plain.lines().any(|line| line.starts_with("  2 server"))
+                    plain.lines().any(|line| line.starts_with("   server"))
                         && plain.lines().any(|line| line.trim_end().ends_with("● npm")),
                     "a physical multi-pane window stays expanded after filtering"
                 );
