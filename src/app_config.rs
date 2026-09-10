@@ -75,6 +75,7 @@ pub struct FileConfig {
 #[serde(deny_unknown_fields)]
 pub struct DisplayConfig {
     pub mode: Option<DisplayMode>,
+    pub show_all_panes: Option<bool>,
     pub sidebar_width: Option<u16>,
     pub popup_width: Option<u16>,
     pub popup_height: Option<PopupHeight>,
@@ -170,6 +171,7 @@ impl<'de> Deserialize<'de> for Color {
 pub struct ThemeColors {
     pub header_fg: Option<Color>,
     pub header_bg: Option<Color>,
+    pub pane_bg: Option<Color>,
     pub text_fg: Option<Color>,
     pub muted_fg: Option<Color>,
     pub accent_fg: Option<Color>,
@@ -243,6 +245,7 @@ impl Ink {
 pub(crate) struct Palette {
     pub header_fg: Ink,
     pub header_bg: Ink,
+    pub pane_bg: Ink,
     pub text_fg: Ink,
     pub muted_fg: Ink,
     pub accent_fg: Ink,
@@ -264,10 +267,11 @@ impl Palette {
     /// Every overridable role paired with its resolved colour, in the order
     /// `--help` and `check --effective` list them. One list, so a new role
     /// cannot appear in the palette without appearing in both.
-    pub fn roles(&self) -> [(&'static str, Ink); 18] {
+    pub fn roles(&self) -> [(&'static str, Ink); 19] {
         [
             ("header_fg", self.header_fg),
             ("header_bg", self.header_bg),
+            ("pane_bg", self.pane_bg),
             ("text_fg", self.text_fg),
             ("muted_fg", self.muted_fg),
             ("accent_fg", self.accent_fg),
@@ -299,28 +303,30 @@ impl Palette {
         let mut p = Self {
             header_fg: Inherited,
             header_bg: Typed(Color::Indexed(236)),
+            pane_bg: Typed(Color::Indexed(236)),
             text_fg: Inherited,
             muted_fg: Inherited,
             accent_fg: Basic(4),
             error_fg: Inherited,
             blocked_fg: Basic(1),
             blocked_bg: rgb(42, 16, 16),
-            blocked_bg_unfocused: rgb(32, 12, 12),
+            blocked_bg_unfocused: rgb(27, 10, 10),
             working_fg: Basic(3),
             working_bg: rgb(38, 32, 16),
-            working_bg_unfocused: rgb(29, 24, 12),
+            working_bg_unfocused: rgb(25, 20, 10),
             idle_fg: Basic(2),
             idle_bg: rgb(15, 36, 16),
-            idle_bg_unfocused: rgb(11, 27, 12),
+            idle_bg_unfocused: rgb(9, 23, 10),
             done_fg: Basic(2),
             done_bg: rgb(15, 36, 16),
-            done_bg_unfocused: rgb(11, 27, 12),
+            done_bg_unfocused: rgb(9, 23, 10),
         };
         match theme.base.unwrap_or(ThemeBase::Dark) {
             ThemeBase::Dark => {}
             ThemeBase::Light => {
                 p.header_fg = rgb(32, 32, 32);
                 p.header_bg = rgb(238, 238, 238);
+                p.pane_bg = rgb(238, 238, 238);
                 p.text_fg = rgb(32, 32, 32);
                 p.muted_fg = rgb(80, 80, 80);
                 p.accent_fg = rgb(32, 72, 144);
@@ -334,9 +340,9 @@ impl Palette {
                 p.idle_fg = rgb(32, 104, 40);
                 p.idle_bg = rgb(224, 244, 224);
                 p.idle_bg_unfocused = rgb(238, 247, 238);
-                p.done_fg = p.idle_fg.clone();
-                p.done_bg = p.idle_bg.clone();
-                p.done_bg_unfocused = p.idle_bg_unfocused.clone();
+                p.done_fg = p.idle_fg;
+                p.done_bg = p.idle_bg;
+                p.done_bg_unfocused = p.idle_bg_unfocused;
             }
             ThemeBase::Terminal => {
                 p.error_fg = Basic(1);
@@ -344,6 +350,7 @@ impl Palette {
                 p.text_fg = Typed(Color::Default);
                 p.muted_fg = Typed(Color::Default);
                 p.header_bg = Typed(Color::Default);
+                p.pane_bg = Typed(Color::Default);
                 p.blocked_bg = Typed(Color::Default);
                 p.blocked_bg_unfocused = Typed(Color::Default);
                 p.working_bg = Typed(Color::Default);
@@ -359,6 +366,7 @@ impl Palette {
             apply!(
                 header_fg,
                 header_bg,
+                pane_bg,
                 text_fg,
                 muted_fg,
                 accent_fg,
@@ -754,6 +762,7 @@ fn validate(config: &FileConfig) -> Result<(), ConfigError> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppConfig {
     pub mode: DisplayMode,
+    pub show_all_panes: bool,
     pub sidebar_width: u16,
     pub popup_width: u16,
     pub popup_height: PopupHeight,
@@ -850,6 +859,7 @@ pub fn resolve_cli(
     validate(file)?;
     let mut result = AppConfig {
         mode: DisplayMode::Split,
+        show_all_panes: false,
         sidebar_width: 30,
         popup_width: 40,
         popup_height: PopupHeight::Auto(AutoHeight::Auto),
@@ -866,6 +876,7 @@ pub fn resolve_cli(
         )?,
         sources: BTreeMap::from([
             ("display.mode", "default".into()),
+            ("display.show_all_panes", "default".into()),
             ("display.sidebar_width", "default".into()),
             ("display.popup_width", "default".into()),
             ("display.popup_height", "default".into()),
@@ -884,6 +895,7 @@ pub fn resolve_cli(
         }
         if let Some(d) = &f.display {
             set!(mode, d.mode, "display.mode");
+            set!(show_all_panes, d.show_all_panes, "display.show_all_panes");
             set!(sidebar_width, d.sidebar_width, "display.sidebar_width");
             set!(popup_width, d.popup_width, "display.popup_width");
             set!(popup_height, d.popup_height, "display.popup_height");
@@ -913,6 +925,7 @@ pub fn resolve_cli(
     color_sources!(
         header_fg,
         header_bg,
+        pane_bg,
         text_fg,
         muted_fg,
         accent_fg,
@@ -1234,6 +1247,7 @@ tmux option still wins over the file.
 
 [display]
   mode            split | popup                       (split)
+  show_all_panes  true | false                        (false)
   sidebar_width   1..=10000 cells                     (30)
   popup_width     1..=10000 cells                     (40)
   popup_height    "auto" or 1..=10000 cells           (auto)
@@ -1299,6 +1313,10 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
                 DisplayMode::Split => "split".into(),
                 DisplayMode::Popup => "popup".to_string(),
             },
+        ),
+        (
+            "display.show_all_panes".into(),
+            config.show_all_panes.to_string(),
         ),
         ("display.sidebar_width".into(), config.sidebar_width.to_string()),
         ("display.popup_width".into(), config.popup_width.to_string()),
@@ -1538,7 +1556,18 @@ mod tests {
         let mut expected = dark.clone();
         expected.working_bg = Ink::Typed(Color::Indexed(7));
         assert_eq!(actual, expected);
+        let pane_file = parse("[theme.colors]\npane_bg = 238").unwrap();
+        assert_eq!(
+            Palette::resolve(pane_file.theme.as_ref().unwrap()).pane_bg,
+            Ink::Typed(Color::Indexed(238))
+        );
+        assert_eq!(dark.pane_bg, Ink::Typed(Color::Indexed(236)));
         assert_eq!(dark.working_fg.fg("1"), "\x1b[1;33m");
+        assert_eq!(dark.blocked_bg_unfocused, Ink::Typed(Color::Rgb(27, 10, 10)));
+        assert_eq!(dark.working_bg_unfocused, Ink::Typed(Color::Rgb(25, 20, 10)));
+        assert_eq!(dark.idle_bg_unfocused, Ink::Typed(Color::Rgb(9, 23, 10)));
+        assert_eq!(dark.done_bg_unfocused, dark.idle_bg_unfocused);
+        assert_eq!(dark.working_bg, Ink::Typed(Color::Rgb(38, 32, 16)));
         for (value, fg, bg) in [
             ("'default'", "39", "49"),
             ("0", "38;5;0", "48;5;0"),
@@ -1575,11 +1604,13 @@ mod tests {
             }
         }
         assert_eq!(terminal.header_bg.bg(), "\x1b[49m");
+        assert_eq!(terminal.pane_bg.bg(), "\x1b[49m");
         let light = Palette::resolve(&ThemeConfig {
             base: Some(ThemeBase::Light),
             colors: None,
         });
         assert_eq!(light.text_fg, Ink::Typed(Color::Rgb(32, 32, 32)));
+        assert_eq!(light.pane_bg, Ink::Typed(Color::Rgb(238, 238, 238)));
         assert_eq!(light.working_bg, Ink::Typed(Color::Rgb(255, 240, 204)));
     }
     use super::*;
@@ -1609,6 +1640,12 @@ mod tests {
     fn defaults_and_empty_layer_semantics() {
         let empty = parse("").unwrap();
         let default = resolve(&empty, &BTreeMap::new()).unwrap();
+        assert!(!default.show_all_panes);
+        let enabled = parse("[display]\nshow_all_panes = true").unwrap();
+        let enabled = resolve(&enabled, &BTreeMap::new()).unwrap();
+        assert!(enabled.show_all_panes);
+        assert_eq!(enabled.sources["display.show_all_panes"], "file");
+        assert!(parse("[display]\nshow_all_panes = 'true'").is_err());
         assert_eq!((default.sidebar_width, default.popup_width), (30, 40));
         assert_eq!(default.hide_windows, None);
         let file = parse("[display]\nmode='popup'\nsidebar_width=22\npopup_width=24\npopup_height=18\n[behavior]\nnotifications=false\nhide_windows='hidden*'").unwrap();
@@ -1627,6 +1664,7 @@ mod tests {
         assert!(config
             .sources
             .iter()
+            .filter(|(field, _)| **field != "display.show_all_panes")
             .filter(|(field, _)| field.starts_with("display.")
                 || field.starts_with("behavior."))
             .all(|(_, source)| source.starts_with("tmux @agenmux-")));

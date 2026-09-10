@@ -45,7 +45,7 @@ src/release.rs:    release_dir(plugin_dir).join(".agents-mon-latest")
 src/setup.rs:            "run-shell -b 'tmux if-shell -t \"#{pane_id}\" -F \"#{&&:#{||:#{==:#{pane_title},agenmux},#{==:#{pane_title},agents-mon}},#{window_zoomed_flag}}\" \"resize-pane -Z -t \\\"#{pane_id}\\\"\"'".to_string(),
 src/setup.rs:            .replace("#{agents_mon}", &segment);
 src/setup.rs:        for name in ["@agenmux-sidebar", "@agents-mon-sidebar"] {
-src/setup.rs:        let _ = tmux::command_status(&["set-option", "-wu", "-t", &window, "@agents-mon-sidebar"]);
+src/setup.rs:        let _ = tmux::command_status(&["set-option", "-wu", "-t", window, "@agents-mon-sidebar"]);
 src/setup.rs:        let legacy = format!("@agents-mon-{suffix}");
 src/sidebar.rs:        popup_client: crate::compat_env("AGENMUX_POPUP_CLIENT", "AGENTS_MON_POPUP_CLIENT")
 src/sidebar.rs:    let pin = crate::compat_env("AGENMUX_PIN", "AGENTS_MON_PIN").filter(|p| !p.is_empty());

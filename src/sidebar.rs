@@ -12,7 +12,7 @@ use crate::app_config::{KeyMode, Keymap, Palette};
 use crate::attention::Tracker;
 use crate::conf::AgentConf;
 use crate::procs::IdentCache;
-use crate::scan::{self, PaneRow};
+use crate::scan::{self, PaneMeta, PaneRow};
 use crate::tmux::{command_status, PendingChanges, Tmux, TmuxError};
 use std::io::Write;
 use std::path::PathBuf;
@@ -81,20 +81,20 @@ impl ScanSchedule {
     }
 }
 
-#[allow(unused_imports)]
-pub use crate::input::{select, send_key};
 use crate::input::{
     poll_inputs, protocol_keys, read_key, read_search_key, Key, KeySequence, RawMode,
     SequenceResult,
 };
+#[allow(unused_imports)]
+pub use crate::input::{select, send_key};
 
 mod daemon;
 pub use daemon::run_daemon;
 use daemon::Daemon;
 mod filter;
 use filter::StateFilter;
-mod render;
 mod overlay;
+mod render;
 use overlay::{update_available, Overlay};
 
 static WINCH: AtomicBool = AtomicBool::new(false);
@@ -122,6 +122,19 @@ enum DispatchResult {
     QuietExit,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PaneOccurrence {
+    session_id: String,
+    window_id: String,
+    pane: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisiblePane {
+    Agent(usize),
+    Inventory(usize),
+}
+
 fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMode {
     if overlay.is_some() {
         DispatchMode::Overlay
@@ -135,7 +148,8 @@ fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMod
 pub struct Sidebar {
     tmux: Tmux,
     settings: crate::app_config::LiveConfig,
-    palette: Palette, // immutable startup snapshot shared by popup and split
+    adopted_show_all_panes: bool,
+    palette: Palette,    // immutable startup snapshot shared by popup and split
     normal_keys: Keymap, // startup snapshot: keys never change while running
     search_keys: Keymap,
     confs: Vec<AgentConf>,
@@ -144,7 +158,8 @@ pub struct Sidebar {
     screens: scan::ScreenCache,
     tracker: Tracker,
     rows: Vec<PaneRow>, // complete debounced view-model; never filter cache/status
-    visible: Vec<usize>, // filtered indexes used by render/navigation/clicks
+    panes: Vec<PaneMeta>, // latest complete sidebar-excluded inventory
+    visible: Vec<VisiblePane>, // selectable panes; headers never enter this projection
     query: String,
     state_filter: Option<StateFilter>,
     search_focused: bool,
@@ -153,6 +168,7 @@ pub struct Sidebar {
     scroll: usize, // first visible list line
     follow_selection: bool,
     sel_pane: String,
+    sel_occurrence: Option<PaneOccurrence>,
     last_active: String,
     active: String,
     active_session: String,
@@ -185,18 +201,32 @@ fn new_sidebar(
     // read once: the check behind it runs at most daily, and switching version
     // restarts the engine anyway
     let update = update_available(&plugin_dir);
+    let adopted_show_all_panes = settings.show_all_panes;
+    let cached_rows = std::fs::read_to_string(&cache_file)
+        .map(|tsv| scan::from_tsv(&tsv))
+        .unwrap_or_default();
+    // Cached TSV stores cwd basename, enough to avoid blocking startup on
+    // unchanged panes. Live scans upgrade matching entries to full paths.
+    // ponytail: basename can collide; persist full cwd if cache format changes.
+    let seeded_subjects = cached_rows
+        .iter()
+        .filter(|row| row.pane != self_pane && !row.title.is_empty())
+        .map(|row| (row.pane.clone(), (row.cwd.clone(), row.title.clone())))
+        .collect();
     let mut sb = Sidebar {
         tmux,
         palette: Palette::resolve(&settings.theme),
         normal_keys: settings.normal.clone(),
         search_keys: settings.search.clone(),
         settings: crate::app_config::LiveConfig::new(settings),
+        adopted_show_all_panes,
         confs,
         ident: IdentCache::new(),
-        subj: scan::SubjectCache::new(),
+        subj: seeded_subjects,
         screens: scan::ScreenCache::default(),
         tracker: Tracker::default(),
         rows: Vec::new(),
+        panes: Vec::new(),
         visible: Vec::new(),
         query: String::new(),
         state_filter: None,
@@ -205,6 +235,7 @@ fn new_sidebar(
         sel: 1,
         scroll: 0,
         sel_pane: String::new(),
+        sel_occurrence: None,
         follow_selection: true,
         last_active: String::new(),
         active: String::new(),
@@ -223,9 +254,9 @@ fn new_sidebar(
         daemon: None,
         overlay: None,
     };
-    // seed from the previous instance's scan for an instant first frame
-    if let Ok(tsv) = std::fs::read_to_string(&sb.cache_file) {
-        sb.rows = scan::from_tsv(&tsv);
+    // Agent-only mode can show the whole cached projection immediately.
+    if !sb.settings.settings.show_all_panes {
+        sb.rows = cached_rows;
         sb.rows.retain(|r| r.pane != sb.self_pane);
     }
     sb.rebuild_visible(false);
@@ -327,7 +358,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         let animating = sb
             .visible
             .iter()
-            .any(|&i| matches!(sb.rows[i].state.as_str(), "working" | "blocked" | "done"));
+            .any(|&pane| matches!(sb.visible_state(pane), "working" | "blocked" | "done"));
         // deadline-based tick: held keys keep poll_inputs returning early, so
         // advancing on poll timeout would freeze the spinner during key repeat
         if animating && now >= next_tick {
@@ -491,7 +522,15 @@ impl Sidebar {
         self.palette = Palette::resolve(&self.settings.settings.theme);
         self.normal_keys = self.settings.settings.normal.clone();
         self.search_keys = self.settings.settings.search.clone();
-        self.last_frame.clear(); // colors changed: no diff against old bytes
+        let show_all_panes = self.settings.settings.show_all_panes;
+        if show_all_panes != self.adopted_show_all_panes {
+            self.adopted_show_all_panes = show_all_panes;
+            self.rebuild_visible(false);
+            if let Some(index) = self.active_visible_index() {
+                self.select_index(index + 1);
+            }
+        }
+        self.last_frame.clear(); // colors or projection changed: redraw every pane
     }
 
     fn scan_tick(&mut self, periodic: bool, changes: &PendingChanges) -> Result<(), TmuxError> {
@@ -501,7 +540,7 @@ impl Sidebar {
         }
         let t0 = Instant::now();
         let covered_session = self.tmux.attached_session().map(str::to_string);
-        let (scanned, stats) = scan::scan_cached(
+        let (snapshot, stats) = scan::scan_cached(
             &mut self.tmux,
             &self.confs,
             &mut self.ident,
@@ -516,6 +555,10 @@ impl Sidebar {
                 now: Instant::now(),
             },
         )?;
+        let scan::ScanSnapshot {
+            agents: scanned,
+            panes,
+        } = snapshot;
         let reason = if periodic {
             "periodic"
         } else if !changes.panes.is_empty() {
@@ -560,6 +603,7 @@ impl Sidebar {
 
         let update = self.tracker.update(scanned, &focus.focused_panes);
         self.rows = update.rows;
+        self.panes = panes;
         for event in &update.events {
             let _ = crate::notifications::deliver(self.settings.settings.notifications, event);
         }
@@ -567,14 +611,8 @@ impl Sidebar {
         // single cursor: focus landing on a visible agent pane snaps selection
         // to it; active filters never select a row they intentionally hid
         if !self.active.is_empty() && self.active != self.last_active {
-            if let Some(i) = self
-                .visible
-                .iter()
-                .position(|&i| self.rows[i].pane == self.active)
-            {
-                self.sel = i + 1;
-                self.follow_selection = true;
-                self.sel_pane = self.active.clone();
+            if let Some(i) = self.active_visible_index() {
+                self.select_index(i + 1);
             }
             self.last_active = self.active.clone();
         }
@@ -616,8 +654,7 @@ impl Sidebar {
         let Some(target) = self
             .visible
             .get(self.sel.wrapping_sub(1))
-            .and_then(|&i| self.rows.get(i))
-            .map(|r| r.pane.clone())
+            .map(|&pane| self.visible_pane_id(pane).to_string())
         else {
             return false;
         };
@@ -683,7 +720,6 @@ impl Sidebar {
         let _ = command_status(&args);
         false
     }
-
 }
 
 #[cfg(test)]
@@ -709,7 +745,6 @@ mod tests {
         );
         assert_eq!(dispatch_mode(None, false), DispatchMode::Normal);
     }
-
     #[test]
     fn continuous_output_keeps_the_first_bounded_deadline() {
         let start = Instant::now();

@@ -6,7 +6,7 @@ use crate::tmux::{Tmux, TmuxError};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// pane -> (cwd, SUBJECT_CMD output). The sidebar loop must stay fork-free:
+/// pane -> (cwd, SUBJECT_CMD output). Startup seeds may hold cwd basename;
 /// entries live while the pane sits idle and drop on any state change (a new
 /// prompt flips the pane to working), so the fork re-runs only when the
 /// subject could actually have changed.
@@ -105,33 +105,88 @@ pub struct PaneRow {
     pub title: String,
 }
 
-const LIST_FMT: &str = "list-panes -a -F '#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{session_name}:#{window_index}.#{pane_index}\t#{session_id}\t#{pane_width}\t#{pane_height}\t#{pane_title}'";
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneMeta {
+    pub pane: String,
+    pub pane_index: u32,
+    pub pane_title: String,
+    pub command: String,
+    pub path: String,
+    pub window_id: String,
+    pub window_index: u32,
+    pub window_name: String,
+    pub session_id: String,
+    pub session_name: String,
+    pub agent_index: Option<usize>,
+}
 
-type PaneFields<'a> = (
-    &'a str,
-    &'a str,
-    &'a str,
-    &'a str,
-    &'a str,
-    &'a str,
-    &'a str,
-    &'a str,
-    &'a str,
-);
+pub struct ScanSnapshot {
+    pub panes: Vec<PaneMeta>,
+    pub agents: Vec<PaneRow>,
+}
 
-fn pane_fields(line: &str) -> Option<PaneFields<'_>> {
-    let mut fields = line.splitn(9, '\t');
-    Some((
-        fields.next()?,
-        fields.next()?,
-        fields.next()?,
-        fields.next()?,
-        fields.next()?,
-        fields.next()?,
-        fields.next()?,
-        fields.next()?,
-        fields.next()?,
-    ))
+struct ParsedPane {
+    meta: PaneMeta,
+    pid: u32,
+    width: usize,
+    height: usize,
+}
+
+const LIST_FMT: &str = "list-panes -a -F '#{session_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_width}\t#{pane_height}\t#{pane_title}\t#{@agenmux}'";
+
+fn valid_tmux_id(value: &str, prefix: char) -> bool {
+    value
+        .strip_prefix(prefix)
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
+    rows.lines()
+        .filter_map(|line| {
+            let fields = line.splitn(13, '\t').collect::<Vec<_>>();
+            let [session_id, session_name, window_id, window_index, window_name, pane, pane_index, pid, command, path, width, height, title_and_marked] =
+                fields.as_slice()
+            else {
+                return None;
+            };
+            let (pane_title, marked) = title_and_marked.rsplit_once('\t')?;
+            if !valid_tmux_id(session_id, '$')
+                || !valid_tmux_id(window_id, '@')
+                || !valid_tmux_id(pane, '%')
+            {
+                return None;
+            }
+            let window_index = window_index.parse().ok()?;
+            let pane_index = pane_index.parse().ok()?;
+            let pid = pid.parse().ok()?;
+            let width = width.parse().ok()?;
+            let height = height.parse().ok()?;
+            if self_pane == Some(*pane)
+                || marked == "1"
+                || (pid == 0 && pane_title == "agenmux")
+            {
+                return None;
+            }
+            Some(ParsedPane {
+                meta: PaneMeta {
+                    pane: (*pane).to_string(),
+                    pane_index,
+                    pane_title: pane_title.to_string(),
+                    command: (*command).to_string(),
+                    path: (*path).to_string(),
+                    window_id: (*window_id).to_string(),
+                    window_index,
+                    window_name: (*window_name).to_string(),
+                    session_id: (*session_id).to_string(),
+                    session_name: (*session_name).to_string(),
+                    agent_index: None,
+                },
+                pid,
+                width,
+                height,
+            })
+        })
+        .collect()
 }
 
 pub fn scan(
@@ -140,7 +195,7 @@ pub fn scan(
     cache: &mut IdentCache,
     subj: &mut SubjectCache,
     self_pane: Option<&str>,
-) -> Result<Vec<PaneRow>, TmuxError> {
+) -> Result<ScanSnapshot, TmuxError> {
     let mut screens = ScreenCache::default();
     let dirty = std::collections::HashSet::new();
     scan_cached(
@@ -158,7 +213,7 @@ pub fn scan(
             now: Instant::now(),
         },
     )
-    .map(|(rows, _)| rows)
+    .map(|(snapshot, _)| snapshot)
 }
 
 pub fn scan_cached(
@@ -169,34 +224,43 @@ pub fn scan_cached(
     self_pane: Option<&str>,
     screens: &mut ScreenCache,
     policy: ScanPolicy<'_>,
-) -> Result<(Vec<PaneRow>, ScanStats), TmuxError> {
+) -> Result<(ScanSnapshot, ScanStats), TmuxError> {
     tmux.sync()?;
-    let panes = tmux.run(LIST_FMT)?;
+    let rows = tmux.run(LIST_FMT)?;
     let mut snap: Option<Snapshot> = None;
-    let mut rows = Vec::new();
+    let mut panes = Vec::new();
+    let mut agents = Vec::new();
     let mut seen = IdentCache::new();
     let buf = format!("agenmux-{}", std::process::id());
     let cap = std::env::temp_dir().join(&buf);
     let mut used_buffer = false;
     let mut stats = ScanStats::default();
-    let result: Result<Vec<PaneRow>, TmuxError> = (|| {
-        for line in panes.lines() {
-            let Some((pane, pid, cmd, path, loc, session, width, height, title)) =
-                pane_fields(line)
-            else {
-                continue;
-            };
-            if self_pane == Some(pane) {
-                continue; // sidebar skips itself
-            }
-            let pid: u32 = pid.parse().unwrap_or(0);
+    let result: Result<ScanSnapshot, TmuxError> = (|| {
+        for parsed in parse_panes(&rows, self_pane) {
+            let ParsedPane {
+                mut meta,
+                pid,
+                width,
+                height,
+            } = parsed;
+            let pane = meta.pane.as_str();
+            let cmd = meta.command.as_str();
+            let path = meta.path.as_str();
+            let title = meta.pane_title.as_str();
             let key = (pane.to_string(), pid, cmd.to_string());
             let name = cache.get(&key).cloned().or_else(|| {
-                procs::identify(confs, &mut snap, pid, cmd).map(|i| confs[i].name.clone())
+                (pid != 0)
+                    .then(|| procs::identify(confs, &mut snap, pid, cmd))
+                    .flatten()
+                    .map(|i| confs[i].name.clone())
             });
-            let Some(name) = name else { continue };
+            let Some(name) = name else {
+                panes.push(meta);
+                continue;
+            };
             seen.insert(key, name.clone());
             let Some(idx) = confs.iter().position(|c| c.name == name) else {
+                panes.push(meta);
                 continue; // conf removed since cached
             };
             let key = ScreenKey {
@@ -204,12 +268,12 @@ pub fn scan_cached(
                 pid,
                 command: cmd.to_string(),
                 agent: name.clone(),
-                width: width.parse().unwrap_or(0),
-                height: height.parse().unwrap_or(0),
+                width,
+                height,
                 title: title.to_string(),
                 path: path.to_string(),
             };
-            let force = force_capture(&policy, pane, session);
+            let force = force_capture(&policy, pane, &meta.session_id);
             // pane content must never travel over the control pipe: a pane
             // displaying literal "%end <t> <num>" text (logs, this plugin's own
             // docs...) would terminate the response block early and desync every
@@ -230,8 +294,17 @@ pub fn scan_cached(
             if state != "idle" {
                 subj.remove(pane); // pane got a new prompt — cached subject is stale
             } else if subject.is_empty() && confs[idx].subject_cmd.is_some() {
-                match subj.get(pane).filter(|(cwd, _)| cwd == path) {
-                    Some((_, s)) => subject = s.clone(),
+                let cached = subj
+                    .get(pane)
+                    .filter(|(cwd, _)| {
+                        cwd == path || cwd == path.rsplit('/').next().unwrap_or(path)
+                    })
+                    .map(|(_, subject)| subject.clone());
+                match cached {
+                    Some(cached) => {
+                        subject = cached;
+                        subj.insert(pane.to_string(), (path.to_string(), subject.clone()));
+                    }
                     None => {
                         let t0 = std::time::Instant::now();
                         let started = procs::agent_start(&confs[idx], &mut snap, pid);
@@ -245,28 +318,38 @@ pub fn scan_cached(
                     }
                 }
             }
-            rows.push(PaneRow {
+            meta.agent_index = Some(agents.len());
+            agents.push(PaneRow {
                 pane: pane.to_string(),
-                loc: loc.to_string(),
+                loc: format!(
+                    "{}:{}.{}",
+                    meta.session_name, meta.window_index, meta.pane_index
+                ),
                 agent: name,
                 state: state.to_string(),
                 cwd: path.rsplit('/').next().unwrap_or(path).to_string(),
                 title: subject,
             });
+            panes.push(meta);
         }
-        Ok(rows)
+        crate::tmux::debug_note(&format!(
+            "snapshot panes={} agents={}",
+            panes.len(),
+            agents.len()
+        ));
+        Ok(ScanSnapshot { panes, agents })
     })();
     if used_buffer {
         let _ = tmux.run(&format!("delete-buffer -b '{buf}'"));
         let _ = std::fs::remove_file(&cap);
     }
-    let rows = result?;
+    let snapshot = result?;
     subj.retain(|pane, _| seen.keys().any(|k| &k.0 == pane)); // dead panes pruned
     screens
         .panes
         .retain(|pane, _| seen.keys().any(|key| &key.0 == pane));
     *cache = seen;
-    Ok((rows, stats))
+    Ok((snapshot, stats))
 }
 
 pub fn to_tsv(rows: &[PaneRow]) -> String {
@@ -346,6 +429,67 @@ mod tests {
     }
 
     #[test]
+    fn pane_inventory_parser_skips_malformed_and_sidebar_rows() {
+        let rows = [
+            "$1\twork\t@1\t0\teditor\t%1\t0\t101\tcodex\t/repo\t80\t24\trepo\t",
+            "$1\twork\t@1\t0\teditor\t%2\t1\t0\t\t/repo\t80\t24\tordinary\t",
+            "missing\tfields",
+            "$1\twork\t@1\tx\teditor\t%3\t2\t102\tsleep\t/repo\t80\t24\tbad window\t",
+            "$1\twork\t@1\t0\teditor\t%4\tx\t103\tsleep\t/repo\t80\t24\tbad pane\t",
+            "$1\twork\t@1\t0\teditor\t%5\t3\tnot-a-pid\tsleep\t/repo\t80\t24\tbad pid\t",
+            "1\twork\t@1\t0\teditor\t%13\t3\t109\tsleep\t/repo\t80\t24\tbad session prefix\t",
+            "$x\twork\t@1\t0\teditor\t%14\t3\t110\tsleep\t/repo\t80\t24\tbad session digits\t",
+            "$1\twork\t1\t0\teditor\t%15\t3\t111\tsleep\t/repo\t80\t24\tbad window prefix\t",
+            "$1\twork\t@x\t0\teditor\t%16\t3\t112\tsleep\t/repo\t80\t24\tbad window digits\t",
+            "$1\twork\t@1\t0\teditor\t17\t3\t113\tsleep\t/repo\t80\t24\tbad pane prefix\t",
+            "$1\twork\t@1\t0\teditor\t%x\t3\t114\tsleep\t/repo\t80\t24\tbad pane digits\t",
+            "$\twork\t@1\t0\teditor\t%18\t3\t115\tsleep\t/repo\t80\t24\tempty session id\t",
+            "$1\twork\t@\t0\teditor\t%19\t3\t116\tsleep\t/repo\t80\t24\tempty window id\t",
+            "$1\twork\t@1\t0\teditor\t%\t3\t117\tsleep\t/repo\t80\t24\tempty pane id\t",
+            "$1\twork\t@1\t0\teditor\t%6\t4\t104\tsleep\t/repo\t80\t24\ttab\tfragment\t",
+            "$1\twork\t@1\t0\teditor\t%7\t5\t105\tbroken",
+            "fragment\t/repo\tnewline\t",
+            "$1\twork\t@1\t0\teditor\t%8\t6\t106\tsleep\t/repo\t80\t24\tself\t",
+            "$1\twork\t@1\t0\teditor\t%9\t7\t0\t\t/repo\t80\t24\tmarked\t1",
+            "$1\twork\t@1\t0\teditor\t%10\t8\t0\t\t/repo\t80\t24\tagenmux\t",
+            "$1\twork\t@1\t0\teditor\t%11\t9\t107\tsleep\t/repo\t80\t24\tagenmux\t",
+            "$2\tother\t@2\t3\tserver\t%12\t4\t108\tsleep\t/tmp\t90\t25\tlater valid\t",
+        ]
+        .join("\n");
+
+        let parsed = parse_panes(&rows, Some("%8"));
+
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|pane| {
+                    (
+                        pane.meta.pane.as_str(),
+                        pane.pid,
+                        pane.meta.command.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("%1", 101, "codex"),
+                ("%2", 0, ""),
+                ("%6", 104, "sleep"),
+                ("%11", 107, "sleep"),
+                ("%12", 108, "sleep"),
+            ]
+        );
+        assert_eq!(parsed[0].meta.session_id, "$1");
+        assert_eq!(parsed[0].meta.session_name, "work");
+        assert_eq!(parsed[0].meta.window_id, "@1");
+        assert_eq!(parsed[0].meta.window_index, 0);
+        assert_eq!(parsed[0].meta.window_name, "editor");
+        assert_eq!(parsed[0].meta.pane_index, 0);
+        assert_eq!(parsed[0].meta.path, "/repo");
+        assert_eq!(parsed[0].meta.pane_title, "repo");
+        assert_eq!(parsed[0].meta.agent_index, None);
+    }
+
+    #[test]
     fn segment_counts_and_omits_zeros() {
         assert_eq!(status_segment(&[]), "");
         assert_eq!(
@@ -365,9 +509,11 @@ mod tests {
 
     #[test]
     fn pane_title_keeps_embedded_tabs_as_the_final_field() {
-        let fields =
-            pane_fields("%1\t42\tagent\t/work\ts:0.0\t$1\t80\t24\ttitle\twith\ttabs").unwrap();
-        assert_eq!(fields.8, "title\twith\ttabs");
+        let parsed = parse_panes(
+            "$1\twork\t@2\t3\twindow\t%1\t0\t42\tagent\t/work\t80\t24\ttitle\twith\ttabs\t",
+            None,
+        );
+        assert_eq!(parsed[0].meta.pane_title, "title\twith\ttabs");
     }
 
     #[test]

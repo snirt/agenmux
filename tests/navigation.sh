@@ -58,6 +58,7 @@ tmux -S "$sock" new-window -d -t navigation: "$tmp/codex"
 tmux -S "$sock" set-option -g @agenmux-bin "$BIN"
 tmux -S "$sock" set-option -g @agenmux-width 30
 tmux -S "$sock" set-option -g prefix M-a
+tmux -S "$sock" set-option -g mouse on
 # The sidebar must behave like a regular pane for the user's root-table
 # bindings. This deliberately differs from tmux's defaults so the test proves
 # the configured command is inherited rather than hard-coded by the plugin.
@@ -879,7 +880,7 @@ done
 # rename itself without the sidebar being reopened.
 printf 'f' >&9
 reload_hint_follows=0
-printf '[keys.normal]\nup = ["Z"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
+printf '[display]\nshow_all_panes = true\n[keys.normal]\nup = ["Z"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" config reload >/dev/null 2>&1 || true
 for _ in $(seq 1 40); do
@@ -901,8 +902,8 @@ for _ in $(seq 1 40); do
   sleep 0.05
 done
 printf '\033' >&9
-# Let the filter clear and the client settle back before the closing key, the
-# way every other step here waits for its own effect.
+# Let the filter clear and the client settle before proving that ordinary
+# inventory rows use the same real keyboard and mouse navigation paths.
 for _ in $(seq 1 40); do
   reload_cleared="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
   reload_table="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -914,11 +915,115 @@ for _ in $(seq 1 40); do
   sleep 0.05
 done
 
+ordinary_target="$(tmux -S "$sock" split-window -d -P -F '#{pane_id}' \
+  -t navigation:1 'exec sleep 60')"
+ordinary_keyboard_jump=0
+ordinary_first_click=0
+ordinary_mouse_jump=0
+ordinary_restored_false=0
+for _ in $(seq 1 60); do
+  last_target="$(awk '$1 ~ /^%/ { pane=$1 } END { print pane }' \
+    "$tmp/agenmux-rows")"
+  [ "$last_target" = "$ordinary_target" ] && break
+  sleep 0.05
+done
+printf 'G' >&9
+for _ in $(seq 1 40); do
+  selected_target="$(awk '$1 == target && $3 == 1 { print $1; exit }' \
+    target="$ordinary_target" "$tmp/agenmux-rows")"
+  [ "$selected_target" = "$ordinary_target" ] && break
+  sleep 0.05
+done
+printf '\r' >&9
+for _ in $(seq 1 40); do
+  ordinary_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
+  ordinary_table="$(tmux -S "$sock" display-message -p -c "$client" \
+    '#{client_key_table}')"
+  if [ "$ordinary_focus" = "$ordinary_target" ] && [ "$ordinary_table" = root ]; then
+    ordinary_keyboard_jump=1
+    break
+  fi
+  sleep 0.05
+done
+
+# Move the cursor away before clicking so the first click can only select and
+# the second click can only jump to the exact ordinary pane.
+tmux -S "$sock" switch-client -c "$client" -t "$sidebar"
+tmux -S "$sock" switch-client -c "$client" -T agenmux
+printf 'gg' >&9
+for _ in $(seq 1 40); do
+  selected_target="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
+  [ -n "$selected_target" ] && [ "$selected_target" != "$ordinary_target" ] && break
+  sleep 0.05
+done
+ordinary_row="$(awk -v target="$ordinary_target" '$1 == target { print NR; exit }' \
+  "$tmp/agenmux-rows")"
+sidebar_left="$(tmux -S "$sock" display-message -p -t "$sidebar" '#{pane_left}')"
+sidebar_top="$(tmux -S "$sock" display-message -p -t "$sidebar" '#{pane_top}')"
+mouse_x=$((sidebar_left + 1))
+mouse_y=$((sidebar_top + ordinary_row + 1))
+tmux -S "$sock" switch-client -c "$client" -t "$work"
+tmux -S "$sock" switch-client -c "$client" -T root
+printf '\033[<0;%d;%dM' "$mouse_x" "$mouse_y" >&9
+for _ in $(seq 1 40); do
+  ordinary_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
+  ordinary_table="$(tmux -S "$sock" display-message -p -c "$client" \
+    '#{client_key_table}')"
+  selected_target="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
+  if [ "$ordinary_focus" = "$sidebar" ] && [ "$ordinary_table" = agenmux ] &&
+    [ "$selected_target" = "$ordinary_target" ]; then
+    ordinary_first_click=1
+    break
+  fi
+  sleep 0.05
+done
+printf '\033[<0;%d;%dm' "$mouse_x" "$mouse_y" >&9
+# Keep these as two clicks rather than tmux's DoubleClick1Pane event.
+sleep 0.6
+ordinary_row="$(awk -v target="$ordinary_target" '$1 == target { print NR; exit }' \
+  "$tmp/agenmux-rows")"
+mouse_y=$((sidebar_top + ordinary_row + 1))
+printf '\033[<0;%d;%dM' "$mouse_x" "$mouse_y" >&9
+for _ in $(seq 1 40); do
+  ordinary_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
+  ordinary_table="$(tmux -S "$sock" display-message -p -c "$client" \
+    '#{client_key_table}')"
+  if [ "$ordinary_focus" = "$ordinary_target" ] && [ "$ordinary_table" = root ]; then
+    ordinary_mouse_jump=1
+    break
+  fi
+  sleep 0.05
+done
+printf '\033[<0;%d;%dm' "$mouse_x" "$mouse_y" >&9
+
+tmux -S "$sock" kill-pane -t "$ordinary_target"
+tmux -S "$sock" switch-client -c "$client" -t "$sidebar"
+tmux -S "$sock" switch-client -c "$client" -T agenmux
+printf '[display]\nshow_all_panes = false\n[keys.normal]\nup = ["Z"]\n' \
+  >"$XDG_CONFIG_HOME/agenmux/config.toml"
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
+  "$BIN" config reload >/dev/null
+for _ in $(seq 1 60); do
+  restored_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { print length(seen) }' \
+    "$tmp/agenmux-rows")"
+  restored_table="$(tmux -S "$sock" display-message -p -c "$client" \
+    '#{client_key_table}')"
+  restored_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
+  if [ "$restored_targets" -eq 2 ] &&
+    ! grep -Fq "$ordinary_target" "$tmp/agenmux-rows" &&
+    [ "$restored_table" = agenmux ] && [ "$restored_focus" = "$sidebar" ]; then
+    ordinary_restored_false=1
+    break
+  fi
+  sleep 0.05
+done
+sleep 0.1
+
 printf 'q' >&9
 exit_table=agenmux
 q_left=0
-# teardown (kill pane + restore layout) is the slowest step: allow 3s
-for _ in $(seq 1 60); do
+# teardown (kill pane + restore layout) is the slowest step: allow 5s
+for _ in $(seq 1 100); do
   exit_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   exit_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -1073,6 +1178,8 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   [ "$working_filter_works" -eq 1 ] && [ "$idle_filter_works" -eq 1 ] &&
   [ "$state_edges_work" -eq 1 ] &&
   [ "$all_filter_works" -eq 1 ] && [ "$reload_hint_follows" -eq 1 ] &&
+  [ "$ordinary_keyboard_jump" -eq 1 ] && [ "$ordinary_first_click" -eq 1 ] &&
+  [ "$ordinary_mouse_jump" -eq 1 ] && [ "$ordinary_restored_false" -eq 1 ] &&
   [ "$exit_table" = root ] && [ "$q_left" -eq 1 ] &&
   [ "$escape_ready" -eq 1 ] && [ "$escape_reset" -eq 1 ] &&
   [ "$escape_left" -eq 1 ] && [ "$close_ready" -eq 1 ] &&
@@ -1082,6 +1189,6 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   echo "ok   attached-client-jk-navigation"
 else
   echo "edge-nav: long=$edge_long_list_works slow=$slow_gg_expires search=$search_edges_work state=$state_edges_work"
-  echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$blocked_filter_works/$blocked_targets/$blocked_frame/$blocked_hint/$working_filter_works/$working_targets/$working_frame/$idle_filter_works/$idle_targets/$idle_frame/$all_filter_works/$all_targets/$all_frame] reload=[$reload_hint_follows/$reload_hint] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
+  echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$blocked_filter_works/$blocked_targets/$blocked_frame/$blocked_hint/$working_filter_works/$working_targets/$working_frame/$idle_filter_works/$idle_targets/$idle_frame/$all_filter_works/$all_targets/$all_frame] reload=[$reload_hint_follows/$reload_hint] ordinary=[$ordinary_keyboard_jump/$ordinary_first_click/$ordinary_mouse_jump/$ordinary_restored_false target=$ordinary_target focus=$ordinary_focus table=$ordinary_table] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
   exit 1
 fi
