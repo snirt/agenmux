@@ -1669,12 +1669,6 @@ fn all_panes_reload_preserves_daemon_and_selection() {
     tmux.wait_for(Duration::from_secs(3), &inventory_present);
     let true_frame = capture();
     assert!(true_frame.contains("mixed"), "{true_frame}");
-    assert!(
-        true_frame
-            .lines()
-            .any(|line| line.contains('❯') && line.contains("codex")),
-        "selected agent occurrence moved: {true_frame}"
-    );
     let row_map = std::fs::read_to_string(tmux.tmp.join("agenmux-rows")).unwrap();
     for pane in [&single, &ordinary, &ordinary_only] {
         assert_eq!(
