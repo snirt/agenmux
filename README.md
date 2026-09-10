@@ -115,8 +115,8 @@ All-pane hierarchy uses indentation without connector glyphs. Ordinary pane rows
 use a muted `●` marker; when selected, their full row uses `theme.colors.pane_bg`.
 Agent rows keep their state styling.
 Pane rows omit numeric pane indexes. Ordinary rows show `● command`; agent rows show
-the animated status glyph, state, agent name, then pane command. Agent descriptions stay
-on the next indented line.
+the animated status glyph, agent name in its original style, then pane command. Agent
+descriptions stay on the next indented line.
 
 Search in all-pane mode matches session, window, and pane metadata. A session or
 window match keeps its pane subtree, while a pane match keeps its session and

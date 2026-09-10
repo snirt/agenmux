@@ -26,13 +26,13 @@
   - Status filter matches exact agent states only, then adds ancestors.
 - Filter counts mean selectable matching panes / total selectable panes for current mode. Headers and subjects never count.
 - Window collapse uses complete sidebar-excluded inventory, not filtered count or raw `window_panes`.
-- True-mode row labels omit pane indexes and place state first. Agent descriptions remain indented on the next line:
+- True-mode row labels omit pane indexes and place the animated status glyph first. Agent descriptions remain indented on the next line:
   ```text
   work
     ● nvim
     2 server
       ● npm
-      ⠹ working claude node
+      ⠹ claude node
         Implement sidebar tree
   ```
 - In true mode, session/window headers and subject continuation lines map to `-`; only pane rows map to pane IDs. False mode keeps current subject-line mapping.

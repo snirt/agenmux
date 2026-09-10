@@ -305,9 +305,8 @@ impl Sidebar {
                     let prefix = if expanded { "  " } else { "" };
                     let detail = if let Some(row) = agent {
                         format!(
-                            "{} {muted}{} {E}[1m{}{E}[0m {muted}{}{E}[0m",
+                            "{} {E}[1m{}{E}[0m {muted}{}{E}[0m",
                             self.dot(state),
-                            state,
                             row.agent,
                             pane.command
                         )
@@ -860,8 +859,15 @@ mod tests {
         let after_status = record.chars().skip(1).collect::<String>();
         assert_eq!(
             after_status.trim_end(),
-            " working claude node",
+            " claude node",
             "agent rows order status, agent name, then pane command"
+        );
+        assert!(
+            selected_agent.contains(&format!(
+                "{E}[0m{} {E}[1mclaude{E}[0m",
+                sb.palette.state_bg("working", true)
+            )),
+            "agent name keeps its original non-muted color"
         );
         assert!(
             !ansi.replace_all(selected_agent, "").contains(" · repo"),
