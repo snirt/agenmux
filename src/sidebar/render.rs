@@ -302,21 +302,17 @@ impl Sidebar {
                     } else {
                         "  ".into()
                     };
-                    let prefix = if expanded {
-                        format!("  {}", pane.pane_index)
-                    } else {
-                        format!("{} {}", pane.window_index, pane.window_name)
-                    };
+                    let prefix = if expanded { "  " } else { "" };
                     let detail = if let Some(row) = agent {
                         format!(
-                            " {} {E}[1m{}{E}[0m {muted}{} · {}{E}[0m",
+                            "{} {muted}{} {E}[1m{}{E}[0m {muted}{}{E}[0m",
                             self.dot(state),
-                            row.agent,
                             state,
-                            row.cwd
+                            row.agent,
+                            pane.command
                         )
                     } else {
-                        format!(" {muted}● {}{E}[0m", pane.command)
+                        format!("{muted}● {}{E}[0m", pane.command)
                     };
                     let row = format!("{mark}{prefix}{detail}");
                     let row_bg = match (agent, selected) {
@@ -847,6 +843,30 @@ mod tests {
             collapsed_pane.contains(&pane_marker) && expanded_pane.contains(&pane_marker),
             "ordinary pane rows use the customizable muted circle marker"
         );
+        assert_eq!(
+            ansi.replace_all(collapsed_pane, ""),
+            "  ● nvim",
+            "collapsed ordinary rows contain only status marker and command"
+        );
+        assert_eq!(
+            ansi.replace_all(expanded_pane, ""),
+            "    ● npm",
+            "expanded ordinary rows drop pane indexes"
+        );
+        let selected_agent_plain = ansi.replace_all(selected_agent, "");
+        let record = selected_agent_plain
+            .strip_prefix("❯   ")
+            .expect("selected expanded agent keeps hierarchy indentation");
+        let after_status = record.chars().skip(1).collect::<String>();
+        assert_eq!(
+            after_status.trim_end(),
+            " working claude node",
+            "agent rows order status, agent name, then pane command"
+        );
+        assert!(
+            !ansi.replace_all(selected_agent, "").contains(" · repo"),
+            "agent rows no longer use cwd as pane name"
+        );
         let pane_bg = sb.palette.pane_bg.bg();
         assert!(
             [collapsed_pane, expanded_pane]
@@ -912,7 +932,7 @@ mod tests {
                 let plain = ansi.replace_all(&sb.last_frame, "");
                 assert!(
                     plain.lines().any(|line| line.starts_with("  2 server"))
-                        && plain.lines().any(|line| line.contains("  1 ● npm")),
+                        && plain.lines().any(|line| line.trim_end().ends_with("● npm")),
                     "a physical multi-pane window stays expanded after filtering"
                 );
             }
