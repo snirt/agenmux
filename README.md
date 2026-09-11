@@ -518,8 +518,13 @@ tmux capture-pane -p -t <pane> > tests/fixtures/claude-blocked.txt
 ## Runtime architecture
 
 The Rust engine is the sole runtime implementation. It runs the scan/sidebar
-hot path with one persistent tmux control-mode connection. The plugin downloads
-and verifies a prebuilt binary automatically; if one is unavailable and
+hot path with one persistent tmux control-mode connection. Pane output from the
+attached session invalidates cached screens and triggers a scan no more often
+than every 500 ms. Inventory and background sessions are still reconciled every
+two seconds, and attached-session screens are recaptured at least every ten
+seconds; silence is never treated as an agent state. Direct `scan`/`list`
+commands always take a fresh snapshot. The plugin downloads and verifies a
+prebuilt binary automatically; if one is unavailable and
 [cargo](https://rustup.rs) is installed, it builds the engine in the background. `make build` does the same
 by hand, and `@agenmux-bin` overrides the binary path. Agent detection stays
 in `agents/*.conf`, so adding or tuning agents never needs a rebuild. Building

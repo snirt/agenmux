@@ -100,7 +100,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     if keys_fd < 0 {
         return 1;
     }
-    let tmux = match Tmux::connect() {
+    let tmux = match Tmux::connect_monitoring() {
         Ok(t) => t,
         Err(_) => return 1,
     };

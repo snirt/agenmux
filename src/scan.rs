@@ -4,6 +4,7 @@ use crate::conf::AgentConf;
 use crate::procs::{self, IdentCache, Snapshot};
 use crate::tmux::{Tmux, TmuxError};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// pane -> (cwd, SUBJECT_CMD output). Startup seeds may hold cwd basename;
 /// entries live while the pane sits idle and drop on any state change (a new
@@ -11,6 +12,89 @@ use std::collections::HashMap;
 /// subject could actually have changed.
 /// ponytail: assumes new sessions always bounce through a non-idle state
 pub type SubjectCache = HashMap<String, (String, String)>;
+
+const SCREEN_MAX_AGE: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ScreenKey {
+    pane: String,
+    pid: u32,
+    command: String,
+    agent: String,
+    width: usize,
+    height: usize,
+    title: String,
+    path: String,
+}
+
+struct CachedScreen {
+    key: ScreenKey,
+    screen: String,
+    captured_at: Instant,
+}
+
+#[derive(Default)]
+pub struct ScreenCache {
+    panes: HashMap<String, CachedScreen>,
+}
+
+impl ScreenCache {
+    pub(crate) fn next_expiry(&self) -> Option<Instant> {
+        self.panes
+            .values()
+            .map(|cached| cached.captured_at + SCREEN_MAX_AGE)
+            .min()
+    }
+
+    fn get_or_capture(
+        &mut self,
+        key: ScreenKey,
+        force: bool,
+        now: Instant,
+        capture: impl FnOnce() -> Result<String, TmuxError>,
+    ) -> Result<(String, bool), TmuxError> {
+        let reusable = !force
+            && self.panes.get(&key.pane).is_some_and(|cached| {
+                cached.key == key
+                    && now.saturating_duration_since(cached.captured_at) < SCREEN_MAX_AGE
+            });
+        if reusable {
+            return Ok((self.panes[&key.pane].screen.clone(), true));
+        }
+        let screen = capture()?;
+        self.panes.insert(
+            key.pane.clone(),
+            CachedScreen {
+                key,
+                screen: screen.clone(),
+                captured_at: now,
+            },
+        );
+        Ok((screen, false))
+    }
+}
+
+pub struct ScanPolicy<'a> {
+    pub dirty: &'a std::collections::HashSet<String>,
+    pub full: bool,
+    pub periodic: bool,
+    pub covered_session: Option<&'a str>,
+    pub now: Instant,
+}
+
+#[derive(Default)]
+pub struct ScanStats {
+    pub captured: usize,
+    pub reused: usize,
+}
+
+fn force_capture(policy: &ScanPolicy<'_>, pane: &str, session: &str) -> bool {
+    let covered = policy.covered_session == Some(session);
+    policy.full
+        || policy.dirty.contains(pane)
+        || policy.covered_session.is_none()
+        || (policy.periodic && !covered)
+}
 
 pub struct PaneRow {
     pub pane: String,
@@ -44,9 +128,11 @@ pub struct ScanSnapshot {
 struct ParsedPane {
     meta: PaneMeta,
     pid: u32,
+    width: usize,
+    height: usize,
 }
 
-const LIST_FMT: &str = "list-panes -a -F '#{session_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_title}\t#{@agenmux}'";
+const LIST_FMT: &str = "list-panes -a -F '#{session_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_width}\t#{pane_height}\t#{pane_title}\t#{@agenmux}'";
 
 fn valid_tmux_id(value: &str, prefix: char) -> bool {
     value
@@ -57,12 +143,13 @@ fn valid_tmux_id(value: &str, prefix: char) -> bool {
 fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
     rows.lines()
         .filter_map(|line| {
-            let fields = line.split('\t').collect::<Vec<_>>();
-            let [session_id, session_name, window_id, window_index, window_name, pane, pane_index, pid, command, path, pane_title, marked] =
+            let fields = line.splitn(13, '\t').collect::<Vec<_>>();
+            let [session_id, session_name, window_id, window_index, window_name, pane, pane_index, pid, command, path, width, height, title_and_marked] =
                 fields.as_slice()
             else {
                 return None;
             };
+            let (pane_title, marked) = title_and_marked.rsplit_once('\t')?;
             if !valid_tmux_id(session_id, '$')
                 || !valid_tmux_id(window_id, '@')
                 || !valid_tmux_id(pane, '%')
@@ -72,9 +159,11 @@ fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
             let window_index = window_index.parse().ok()?;
             let pane_index = pane_index.parse().ok()?;
             let pid = pid.parse().ok()?;
+            let width = width.parse().ok()?;
+            let height = height.parse().ok()?;
             if self_pane == Some(*pane)
-                || *marked == "1"
-                || (pid == 0 && *pane_title == "agenmux")
+                || marked == "1"
+                || (pid == 0 && pane_title == "agenmux")
             {
                 return None;
             }
@@ -82,7 +171,7 @@ fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
                 meta: PaneMeta {
                     pane: (*pane).to_string(),
                     pane_index,
-                    pane_title: (*pane_title).to_string(),
+                    pane_title: pane_title.to_string(),
                     command: (*command).to_string(),
                     path: (*path).to_string(),
                     window_id: (*window_id).to_string(),
@@ -93,6 +182,8 @@ fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
                     agent_index: None,
                 },
                 pid,
+                width,
+                height,
             })
         })
         .collect()
@@ -105,6 +196,35 @@ pub fn scan(
     subj: &mut SubjectCache,
     self_pane: Option<&str>,
 ) -> Result<ScanSnapshot, TmuxError> {
+    let mut screens = ScreenCache::default();
+    let dirty = std::collections::HashSet::new();
+    scan_cached(
+        tmux,
+        confs,
+        cache,
+        subj,
+        self_pane,
+        &mut screens,
+        ScanPolicy {
+            dirty: &dirty,
+            full: true,
+            periodic: true,
+            covered_session: None,
+            now: Instant::now(),
+        },
+    )
+    .map(|(snapshot, _)| snapshot)
+}
+
+pub fn scan_cached(
+    tmux: &mut Tmux,
+    confs: &[AgentConf],
+    cache: &mut IdentCache,
+    subj: &mut SubjectCache,
+    self_pane: Option<&str>,
+    screens: &mut ScreenCache,
+    policy: ScanPolicy<'_>,
+) -> Result<(ScanSnapshot, ScanStats), TmuxError> {
     tmux.sync()?;
     let rows = tmux.run(LIST_FMT)?;
     let mut snap: Option<Snapshot> = None;
@@ -113,95 +233,123 @@ pub fn scan(
     let mut seen = IdentCache::new();
     let buf = format!("agenmux-{}", std::process::id());
     let cap = std::env::temp_dir().join(&buf);
-    let mut captured_any = false;
-    for parsed in parse_panes(&rows, self_pane) {
-        let ParsedPane { mut meta, pid } = parsed;
-        let pane = meta.pane.as_str();
-        let cmd = meta.command.as_str();
-        let path = meta.path.as_str();
-        let title = meta.pane_title.as_str();
-        let key = (pane.to_string(), pid, cmd.to_string());
-        let name = cache
-            .get(&key)
-            .cloned()
-            .or_else(|| {
+    let mut used_buffer = false;
+    let mut stats = ScanStats::default();
+    let result: Result<ScanSnapshot, TmuxError> = (|| {
+        for parsed in parse_panes(&rows, self_pane) {
+            let ParsedPane {
+                mut meta,
+                pid,
+                width,
+                height,
+            } = parsed;
+            let pane = meta.pane.as_str();
+            let cmd = meta.command.as_str();
+            let path = meta.path.as_str();
+            let title = meta.pane_title.as_str();
+            let key = (pane.to_string(), pid, cmd.to_string());
+            let name = cache.get(&key).cloned().or_else(|| {
                 (pid != 0)
                     .then(|| procs::identify(confs, &mut snap, pid, cmd))
                     .flatten()
                     .map(|i| confs[i].name.clone())
             });
-        let Some(name) = name else {
-            panes.push(meta);
-            continue;
-        };
-        seen.insert(key, name.clone());
-        let Some(idx) = confs.iter().position(|c| c.name == name) else {
-            panes.push(meta);
-            continue; // conf removed since cached
-        };
-        // pane content must never travel over the control pipe: a pane
-        // displaying literal "%end <t> <num>" text (logs, this plugin's own
-        // docs...) would terminate the response block early and desync every
-        // later command. Route it through a buffer + file instead.
-        tmux.run(&format!("capture-pane -b '{buf}' -t '{pane}'"))?;
-        tmux.run(&format!("save-buffer -b '{buf}' '{}'", cap.display()))?;
-        captured_any = true;
-        let screen = std::fs::read_to_string(&cap).unwrap_or_default();
-        let state = crate::detect::detect_state(&confs[idx], title, &screen);
-        let mut subject = crate::detect::subject(&confs[idx], title, &screen, path);
-        if state != "idle" {
-            subj.remove(pane); // pane got a new prompt — cached subject is stale
-        } else if subject.is_empty() && confs[idx].subject_cmd.is_some() {
-            let cached = subj
-                .get(pane)
-                .filter(|(cwd, _)| {
-                    cwd == path || cwd == path.rsplit('/').next().unwrap_or(path)
-                })
-                .map(|(_, subject)| subject.clone());
-            match cached {
-                Some(cached) => {
-                    subject = cached;
-                    subj.insert(pane.to_string(), (path.to_string(), subject.clone()));
-                }
-                None => {
-                    let t0 = std::time::Instant::now();
-                    let started = procs::agent_start(&confs[idx], &mut snap, pid);
-                    subject = crate::detect::subject_cmd(&confs[idx], pane, path, started)
-                        .unwrap_or_default();
-                    crate::tmux::debug_note(&format!(
-                        "subject_cmd {pane} {}ms",
-                        t0.elapsed().as_millis()
-                    ));
-                    subj.insert(pane.to_string(), (path.to_string(), subject.clone()));
+            let Some(name) = name else {
+                panes.push(meta);
+                continue;
+            };
+            seen.insert(key, name.clone());
+            let Some(idx) = confs.iter().position(|c| c.name == name) else {
+                panes.push(meta);
+                continue; // conf removed since cached
+            };
+            let key = ScreenKey {
+                pane: pane.to_string(),
+                pid,
+                command: cmd.to_string(),
+                agent: name.clone(),
+                width,
+                height,
+                title: title.to_string(),
+                path: path.to_string(),
+            };
+            let force = force_capture(&policy, pane, &meta.session_id);
+            // pane content must never travel over the control pipe: a pane
+            // displaying literal "%end <t> <num>" text (logs, this plugin's own
+            // docs...) would terminate the response block early and desync every
+            // later command. Route it through a buffer + file instead.
+            let (screen, reused) = screens.get_or_capture(key, force, policy.now, || {
+                tmux.run(&format!("capture-pane -b '{buf}' -t '{pane}'"))?;
+                used_buffer = true;
+                tmux.run(&format!("save-buffer -b '{buf}' '{}'", cap.display()))?;
+                std::fs::read_to_string(&cap).map_err(TmuxError::Io)
+            })?;
+            if reused {
+                stats.reused += 1;
+            } else {
+                stats.captured += 1;
+            }
+            let state = crate::detect::detect_state(&confs[idx], title, &screen);
+            let mut subject = crate::detect::subject(&confs[idx], title, &screen, path);
+            if state != "idle" {
+                subj.remove(pane); // pane got a new prompt — cached subject is stale
+            } else if subject.is_empty() && confs[idx].subject_cmd.is_some() {
+                let cached = subj
+                    .get(pane)
+                    .filter(|(cwd, _)| {
+                        cwd == path || cwd == path.rsplit('/').next().unwrap_or(path)
+                    })
+                    .map(|(_, subject)| subject.clone());
+                match cached {
+                    Some(cached) => {
+                        subject = cached;
+                        subj.insert(pane.to_string(), (path.to_string(), subject.clone()));
+                    }
+                    None => {
+                        let t0 = std::time::Instant::now();
+                        let started = procs::agent_start(&confs[idx], &mut snap, pid);
+                        subject = crate::detect::subject_cmd(&confs[idx], pane, path, started)
+                            .unwrap_or_default();
+                        crate::tmux::debug_note(&format!(
+                            "subject_cmd {pane} {}ms",
+                            t0.elapsed().as_millis()
+                        ));
+                        subj.insert(pane.to_string(), (path.to_string(), subject.clone()));
+                    }
                 }
             }
+            meta.agent_index = Some(agents.len());
+            agents.push(PaneRow {
+                pane: pane.to_string(),
+                loc: format!(
+                    "{}:{}.{}",
+                    meta.session_name, meta.window_index, meta.pane_index
+                ),
+                agent: name,
+                state: state.to_string(),
+                cwd: path.rsplit('/').next().unwrap_or(path).to_string(),
+                title: subject,
+            });
+            panes.push(meta);
         }
-        meta.agent_index = Some(agents.len());
-        agents.push(PaneRow {
-            pane: pane.to_string(),
-            loc: format!(
-                "{}:{}.{}",
-                meta.session_name, meta.window_index, meta.pane_index
-            ),
-            agent: name,
-            state: state.to_string(),
-            cwd: path.rsplit('/').next().unwrap_or(path).to_string(),
-            title: subject,
-        });
-        panes.push(meta);
-    }
-    if captured_any {
+        crate::tmux::debug_note(&format!(
+            "snapshot panes={} agents={}",
+            panes.len(),
+            agents.len()
+        ));
+        Ok(ScanSnapshot { panes, agents })
+    })();
+    if used_buffer {
         let _ = tmux.run(&format!("delete-buffer -b '{buf}'"));
         let _ = std::fs::remove_file(&cap);
     }
+    let snapshot = result?;
     subj.retain(|pane, _| seen.keys().any(|k| &k.0 == pane)); // dead panes pruned
+    screens
+        .panes
+        .retain(|pane, _| seen.keys().any(|key| &key.0 == pane));
     *cache = seen;
-    crate::tmux::debug_note(&format!(
-        "snapshot panes={} agents={}",
-        panes.len(),
-        agents.len()
-    ));
-    Ok(ScanSnapshot { panes, agents })
+    Ok((snapshot, stats))
 }
 
 pub fn to_tsv(rows: &[PaneRow]) -> String {
@@ -254,6 +402,20 @@ pub fn from_tsv(tsv: &str) -> Vec<PaneRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    fn screen_key() -> ScreenKey {
+        ScreenKey {
+            pane: "%1".into(),
+            pid: 42,
+            command: "synthetic-agent".into(),
+            agent: "synthetic".into(),
+            width: 80,
+            height: 24,
+            title: "task".into(),
+            path: "/workspace".into(),
+        }
+    }
 
     fn row(state: &str) -> PaneRow {
         PaneRow {
@@ -269,29 +431,29 @@ mod tests {
     #[test]
     fn pane_inventory_parser_skips_malformed_and_sidebar_rows() {
         let rows = [
-            "$1\twork\t@1\t0\teditor\t%1\t0\t101\tcodex\t/repo\trepo\t",
-            "$1\twork\t@1\t0\teditor\t%2\t1\t0\t\t/repo\tordinary\t",
+            "$1\twork\t@1\t0\teditor\t%1\t0\t101\tcodex\t/repo\t80\t24\trepo\t",
+            "$1\twork\t@1\t0\teditor\t%2\t1\t0\t\t/repo\t80\t24\tordinary\t",
             "missing\tfields",
-            "$1\twork\t@1\tx\teditor\t%3\t2\t102\tsleep\t/repo\tbad window\t",
-            "$1\twork\t@1\t0\teditor\t%4\tx\t103\tsleep\t/repo\tbad pane\t",
-            "$1\twork\t@1\t0\teditor\t%5\t3\tnot-a-pid\tsleep\t/repo\tbad pid\t",
-            "1\twork\t@1\t0\teditor\t%13\t3\t109\tsleep\t/repo\tbad session prefix\t",
-            "$x\twork\t@1\t0\teditor\t%14\t3\t110\tsleep\t/repo\tbad session digits\t",
-            "$1\twork\t1\t0\teditor\t%15\t3\t111\tsleep\t/repo\tbad window prefix\t",
-            "$1\twork\t@x\t0\teditor\t%16\t3\t112\tsleep\t/repo\tbad window digits\t",
-            "$1\twork\t@1\t0\teditor\t17\t3\t113\tsleep\t/repo\tbad pane prefix\t",
-            "$1\twork\t@1\t0\teditor\t%x\t3\t114\tsleep\t/repo\tbad pane digits\t",
-            "$\twork\t@1\t0\teditor\t%18\t3\t115\tsleep\t/repo\tempty session id\t",
-            "$1\twork\t@\t0\teditor\t%19\t3\t116\tsleep\t/repo\tempty window id\t",
-            "$1\twork\t@1\t0\teditor\t%\t3\t117\tsleep\t/repo\tempty pane id\t",
-            "$1\twork\t@1\t0\teditor\t%6\t4\t104\tsleep\t/repo\ttab\tfragment\t",
+            "$1\twork\t@1\tx\teditor\t%3\t2\t102\tsleep\t/repo\t80\t24\tbad window\t",
+            "$1\twork\t@1\t0\teditor\t%4\tx\t103\tsleep\t/repo\t80\t24\tbad pane\t",
+            "$1\twork\t@1\t0\teditor\t%5\t3\tnot-a-pid\tsleep\t/repo\t80\t24\tbad pid\t",
+            "1\twork\t@1\t0\teditor\t%13\t3\t109\tsleep\t/repo\t80\t24\tbad session prefix\t",
+            "$x\twork\t@1\t0\teditor\t%14\t3\t110\tsleep\t/repo\t80\t24\tbad session digits\t",
+            "$1\twork\t1\t0\teditor\t%15\t3\t111\tsleep\t/repo\t80\t24\tbad window prefix\t",
+            "$1\twork\t@x\t0\teditor\t%16\t3\t112\tsleep\t/repo\t80\t24\tbad window digits\t",
+            "$1\twork\t@1\t0\teditor\t17\t3\t113\tsleep\t/repo\t80\t24\tbad pane prefix\t",
+            "$1\twork\t@1\t0\teditor\t%x\t3\t114\tsleep\t/repo\t80\t24\tbad pane digits\t",
+            "$\twork\t@1\t0\teditor\t%18\t3\t115\tsleep\t/repo\t80\t24\tempty session id\t",
+            "$1\twork\t@\t0\teditor\t%19\t3\t116\tsleep\t/repo\t80\t24\tempty window id\t",
+            "$1\twork\t@1\t0\teditor\t%\t3\t117\tsleep\t/repo\t80\t24\tempty pane id\t",
+            "$1\twork\t@1\t0\teditor\t%6\t4\t104\tsleep\t/repo\t80\t24\ttab\tfragment\t",
             "$1\twork\t@1\t0\teditor\t%7\t5\t105\tbroken",
             "fragment\t/repo\tnewline\t",
-            "$1\twork\t@1\t0\teditor\t%8\t6\t106\tsleep\t/repo\tself\t",
-            "$1\twork\t@1\t0\teditor\t%9\t7\t0\t\t/repo\tmarked\t1",
-            "$1\twork\t@1\t0\teditor\t%10\t8\t0\t\t/repo\tagenmux\t",
-            "$1\twork\t@1\t0\teditor\t%11\t9\t107\tsleep\t/repo\tagenmux\t",
-            "$2\tother\t@2\t3\tserver\t%12\t4\t108\tsleep\t/tmp\tlater valid\t",
+            "$1\twork\t@1\t0\teditor\t%8\t6\t106\tsleep\t/repo\t80\t24\tself\t",
+            "$1\twork\t@1\t0\teditor\t%9\t7\t0\t\t/repo\t80\t24\tmarked\t1",
+            "$1\twork\t@1\t0\teditor\t%10\t8\t0\t\t/repo\t80\t24\tagenmux\t",
+            "$1\twork\t@1\t0\teditor\t%11\t9\t107\tsleep\t/repo\t80\t24\tagenmux\t",
+            "$2\tother\t@2\t3\tserver\t%12\t4\t108\tsleep\t/tmp\t90\t25\tlater valid\t",
         ]
         .join("\n");
 
@@ -300,11 +462,18 @@ mod tests {
         assert_eq!(
             parsed
                 .iter()
-                .map(|pane| (pane.meta.pane.as_str(), pane.pid, pane.meta.command.as_str()))
+                .map(|pane| {
+                    (
+                        pane.meta.pane.as_str(),
+                        pane.pid,
+                        pane.meta.command.as_str(),
+                    )
+                })
                 .collect::<Vec<_>>(),
             vec![
                 ("%1", 101, "codex"),
                 ("%2", 0, ""),
+                ("%6", 104, "sleep"),
                 ("%11", 107, "sleep"),
                 ("%12", 108, "sleep"),
             ]
@@ -336,5 +505,123 @@ mod tests {
         let parsed = from_tsv(&to_tsv(&rows));
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].state, "idle");
+    }
+
+    #[test]
+    fn pane_title_keeps_embedded_tabs_as_the_final_field() {
+        let parsed = parse_panes(
+            "$1\twork\t@2\t3\twindow\t%1\t0\t42\tagent\t/work\t80\t24\ttitle\twith\ttabs\t",
+            None,
+        );
+        assert_eq!(parsed[0].meta.pane_title, "title\twith\ttabs");
+    }
+
+    #[test]
+    fn successful_unchanged_screen_is_reused_until_dirty_or_expired() {
+        let now = Instant::now();
+        let captures = Cell::new(0);
+        let mut cache = ScreenCache::default();
+        let mut capture = || {
+            captures.set(captures.get() + 1);
+            Ok(format!("screen-{}", captures.get()))
+        };
+
+        let (first, reused) = cache
+            .get_or_capture(screen_key(), false, now, &mut capture)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(first, "screen-1");
+        assert!(!reused);
+        assert_eq!(cache.next_expiry(), Some(now + SCREEN_MAX_AGE));
+        let (same, reused) = cache
+            .get_or_capture(
+                screen_key(),
+                false,
+                now + Duration::from_secs(9),
+                &mut capture,
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(same, "screen-1");
+        assert!(reused);
+        let (dirty, reused) = cache
+            .get_or_capture(
+                screen_key(),
+                true,
+                now + Duration::from_secs(9),
+                &mut capture,
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(dirty, "screen-2");
+        assert!(!reused);
+        assert_eq!(cache.next_expiry(), Some(now + Duration::from_secs(19)));
+        let (_, reused) = cache
+            .get_or_capture(
+                screen_key(),
+                false,
+                now + Duration::from_secs(19),
+                &mut capture,
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(!reused);
+        assert_eq!(captures.get(), 3);
+    }
+
+    #[test]
+    fn identity_metadata_and_size_changes_refresh_the_screen() {
+        let now = Instant::now();
+        for mutate in [
+            |key: &mut ScreenKey| key.pid += 1,
+            |key: &mut ScreenKey| key.command.push_str("-new"),
+            |key: &mut ScreenKey| key.agent.push_str("-new"),
+            |key: &mut ScreenKey| key.width += 1,
+            |key: &mut ScreenKey| key.height += 1,
+            |key: &mut ScreenKey| key.title.push_str(" changed"),
+            |key: &mut ScreenKey| key.path.push_str("/changed"),
+        ] {
+            let mut cache = ScreenCache::default();
+            cache
+                .get_or_capture(screen_key(), false, now, || Ok("old".into()))
+                .unwrap_or_else(|error| panic!("{error}"));
+            let mut changed = screen_key();
+            mutate(&mut changed);
+            let (_, reused) = cache
+                .get_or_capture(changed, false, now, || Ok("new".into()))
+                .unwrap_or_else(|error| panic!("{error}"));
+            assert!(!reused);
+        }
+    }
+
+    #[test]
+    fn coverage_policy_refreshes_dirty_background_full_and_unknown_panes() {
+        let dirty = std::collections::HashSet::from(["%2".to_string()]);
+        let policy = |full, periodic, covered_session| ScanPolicy {
+            dirty: &dirty,
+            full,
+            periodic,
+            covered_session,
+            now: Instant::now(),
+        };
+        assert!(!force_capture(&policy(false, true, Some("$1")), "%1", "$1"));
+        assert!(force_capture(&policy(false, false, Some("$1")), "%2", "$1"));
+        assert!(force_capture(&policy(false, true, Some("$1")), "%3", "$2"));
+        assert!(!force_capture(
+            &policy(false, false, Some("$1")),
+            "%3",
+            "$2"
+        ));
+        assert!(force_capture(&policy(true, false, Some("$1")), "%1", "$1"));
+        assert!(force_capture(&policy(false, false, None), "%1", "$1"));
+    }
+
+    #[test]
+    fn failed_capture_is_returned_and_never_cached() {
+        let mut cache = ScreenCache::default();
+        let result = cache.get_or_capture(screen_key(), false, Instant::now(), || {
+            Err(TmuxError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "synthetic missing capture",
+            )))
+        });
+        assert!(matches!(result, Err(TmuxError::Io(_))));
+        assert!(cache.panes.is_empty());
     }
 }
