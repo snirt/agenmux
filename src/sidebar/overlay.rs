@@ -54,7 +54,7 @@ fn newer_than(a: &str, b: &str) -> bool {
 }
 
 /// Releases install-bin.sh saw on the remote, newest first.
-fn known_tags(plugin_dir: &PathBuf) -> Vec<String> {
+pub(super) fn known_tags(plugin_dir: &PathBuf) -> Vec<String> {
     let release_dir = plugin_dir.join("target/release");
     let raw = std::fs::read_to_string(release_dir.join(".agenmux-tags"))
         .or_else(|_| std::fs::read_to_string(release_dir.join(".agents-mon-tags")))
@@ -69,7 +69,7 @@ fn known_tags(plugin_dir: &PathBuf) -> Vec<String> {
     tags
 }
 
-fn picker_sel(tags: &[String], cur: &str, chosen: Option<&str>, sel: usize) -> usize {
+pub(super) fn picker_sel(tags: &[String], cur: &str, chosen: Option<&str>, sel: usize) -> usize {
     let selected = chosen
         .and_then(|tag| tags.iter().position(|t| t == tag))
         .or_else(|| {
@@ -109,6 +109,7 @@ impl Sidebar {
         self.last_frame.clear();
     }
 
+    #[cfg_attr(feature = "ratatui", allow(dead_code))]
     pub(super) fn render_overlay(&mut self, force: bool) {
         let title = app_title();
         let header = self.palette.header_fg.fg("1");

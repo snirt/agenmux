@@ -9,6 +9,12 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 libc = "0.2"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+# experimental Buffer-based frame construction; see src/sidebar/ratatui_render.rs
+ratatui = { version = "0.30.2", default-features = false, features = ["std"], optional = true }
+unicode-width = { version = "0.2", optional = true }
+
+[features]
+ratatui = ["dep:ratatui", "dep:unicode-width"]
 
 # native notifications for the Agenmux.app helper (src/bin/agenmux-notifier.rs)
 [target.'cfg(target_os = "macos")'.dependencies]

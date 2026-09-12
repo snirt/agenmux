@@ -5,6 +5,7 @@ use std::io::Write;
 use super::overlay::current_tag;
 use super::{Sidebar, VisiblePane, E};
 
+#[cfg_attr(feature = "ratatui", allow(dead_code))]
 const SPIN: [char; 8] = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
 
 /// " · "-separated hint segments, skipping unbound (empty) ones.
@@ -17,6 +18,7 @@ pub(super) fn join(parts: &[String]) -> String {
         .join(" · ")
 }
 
+#[cfg_attr(feature = "ratatui", allow(dead_code))]
 pub(super) fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
     if bg.is_empty() {
         return line.into();
@@ -362,7 +364,17 @@ impl Sidebar {
         (lines, sel_top, sel_bot)
     }
 
+    /// Tests keep the ANSI path so the byte fixtures stay the reference; the
+    /// ratatui parity test calls `render_ratatui` explicitly.
     pub(super) fn render(&mut self, force: bool) {
+        #[cfg(all(feature = "ratatui", not(test)))]
+        return self.render_ratatui(force);
+        #[cfg(not(all(feature = "ratatui", not(test))))]
+        self.render_ansi(force);
+    }
+
+    #[cfg_attr(feature = "ratatui", allow(dead_code))]
+    fn render_ansi(&mut self, force: bool) {
         if self.overlay.is_some() {
             self.render_overlay(force);
             return;

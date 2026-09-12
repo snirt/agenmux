@@ -229,6 +229,7 @@ impl Ink {
             format!("\x1b[{params}m")
         }
     }
+    #[cfg_attr(feature = "ratatui", allow(dead_code))]
     pub fn bg(&self) -> String {
         match self {
             Self::Inherited => String::new(),
@@ -395,7 +396,11 @@ impl Palette {
             _ => &self.idle_fg,
         }
     }
+    #[cfg_attr(feature = "ratatui", allow(dead_code))]
     pub fn state_bg(&self, state: &str, focused: bool) -> String {
+        self.state_bg_ink(state, focused).bg()
+    }
+    pub fn state_bg_ink(&self, state: &str, focused: bool) -> &Ink {
         match (state, focused) {
             ("blocked", true) => &self.blocked_bg,
             ("blocked", false) => &self.blocked_bg_unfocused,
@@ -406,7 +411,6 @@ impl Palette {
             (_, true) => &self.idle_bg,
             (_, false) => &self.idle_bg_unfocused,
         }
-        .bg()
     }
 }
 

@@ -11,7 +11,8 @@ ACTION="${1:-}"
 
 case "$ACTION" in
 use)
-  cargo build --manifest-path "$DIR/Cargo.toml" || exit 1
+  # shellcheck disable=SC2086  # e.g. AGENMUX_CARGO_FLAGS="--features ratatui"
+  cargo build ${AGENMUX_CARGO_FLAGS:-} --manifest-path "$DIR/Cargo.toml" || exit 1
   next="$DEBUG"
   ;;
 stop) next="$RELEASE" ;;

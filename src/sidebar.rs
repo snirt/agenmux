@@ -94,6 +94,8 @@ use daemon::Daemon;
 mod filter;
 use filter::StateFilter;
 mod overlay;
+#[cfg(feature = "ratatui")]
+mod ratatui_render;
 mod render;
 use overlay::{update_available, Overlay};
 
@@ -184,6 +186,9 @@ pub struct Sidebar {
     update: Option<String>, // newer release to advertise in the header
     daemon: Option<Daemon>,
     overlay: Option<Overlay>,
+    /// Frame buffer reused across renders; resized only when the pane is.
+    #[cfg(feature = "ratatui")]
+    frame_buf: ratatui::buffer::Buffer,
 }
 
 /// `self_pane` is the pane the sidebar itself occupies, skipped by every scan.
@@ -253,6 +258,8 @@ fn new_sidebar(
         update,
         daemon: None,
         overlay: None,
+        #[cfg(feature = "ratatui")]
+        frame_buf: ratatui::buffer::Buffer::empty(ratatui::layout::Rect::ZERO),
     };
     // Agent-only mode can show the whole cached projection immediately.
     if !sb.settings.settings.show_all_panes {
