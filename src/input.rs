@@ -113,6 +113,7 @@ pub(crate) enum Key {
     Close,
     Help,
     Versions,
+    Settings,
     Search,
     Backspace,
     ClearSearch,
@@ -227,6 +228,7 @@ fn action_key(keys: &Keymap, chord: KeyChord) -> Option<Key> {
         Action::Reset | Action::Cancel => Key::AllStates,
         Action::Help => Key::Help,
         Action::Versions => Key::Versions,
+        Action::Settings => Key::Settings,
         Action::Close => Key::Close,
         Action::Backspace => Key::Backspace,
         Action::Clear => Key::ClearSearch,
@@ -249,6 +251,20 @@ pub(crate) fn protocol_keys(mode: KeyMode) -> &'static Keymap {
         KeyMode::Normal => normal,
         KeyMode::Search => search,
     }
+}
+
+pub(crate) fn settings_keys() -> &'static Keymap {
+    static KEYS: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        let mut keys = protocol_keys(KeyMode::Search).clone();
+        if let Some(up) = keys.get_mut(&Action::Up) {
+            up.push(KeyChord::Left);
+        }
+        if let Some(down) = keys.get_mut(&Action::Down) {
+            down.push(KeyChord::Right);
+        }
+        keys
+    })
 }
 
 pub(crate) fn read_key(fd: libc::c_int, keys: &Keymap) -> Key {
@@ -393,6 +409,7 @@ pub fn send_key(name: &str) -> i32 {
             "close" => b"Q".to_vec(),
             "help" => b"?".to_vec(),
             "versions" => b"u".to_vec(),
+            "settings" => b"s".to_vec(),
             _ => return 2,
         }
     };
@@ -664,6 +681,14 @@ mod tests {
             Some(Key::ClearSearch)
         ));
         assert!(action_key(&normal, KeyChord::Control(21)).is_none());
+        assert!(matches!(
+            action_key(settings_keys(), KeyChord::Left),
+            Some(Key::Up)
+        ));
+        assert!(matches!(
+            action_key(settings_keys(), KeyChord::Right),
+            Some(Key::Down)
+        ));
     }
 
     #[test]

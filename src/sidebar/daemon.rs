@@ -75,7 +75,7 @@ pub(super) struct Daemon {
 /// reads keys from a FIFO, and sizes itself from the preserved panes. Exits
 /// (with full teardown) when the last pane disappears.
 pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
-    let settings = match crate::app_config::current(None) {
+    let settings = match crate::app_config::current_process() {
         Ok(config) => config,
         Err(e) => {
             eprintln!("agenmux: {e}");
@@ -133,7 +133,11 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
             });
         if let Some(client) = client {
             let quoted = client.replace('\'', "\\'");
-            if sb.tmux.run(&format!("set-option -g @agenmux-control-client '{quoted}'")).is_err() {
+            if sb
+                .tmux
+                .run(&format!("set-option -g @agenmux-control-client '{quoted}'"))
+                .is_err()
+            {
                 return 1;
             }
             control_client = client;
@@ -142,9 +146,14 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         std::thread::sleep(Duration::from_millis(10));
     }
     let quoted_tmp = tmp.to_string_lossy().replace('\'', "\\'");
-    if control_client.is_empty() || sb.tmux.run(&format!(
-        "set-option -g @agenmux-runtime-dir '{quoted_tmp}'"
-    )).is_err() {
+    if control_client.is_empty()
+        || sb
+            .tmux
+            .run(&format!(
+                "set-option -g @agenmux-runtime-dir '{quoted_tmp}'"
+            ))
+            .is_err()
+    {
         return 1;
     }
     sb.daemon = Some(Daemon {
@@ -174,7 +183,10 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     sb.render(true);
     if std::env::var_os("AGENMUX_STARTUP_ACK").is_some() {
         use std::io::Write;
-        if sb.daemon.as_ref().is_none_or(|d| d.client.is_empty() || !d.seen_mirror)
+        if sb
+            .daemon
+            .as_ref()
+            .is_none_or(|d| d.client.is_empty() || !d.seen_mirror)
             || std::io::stdout().write_all(b"R").is_err()
             || std::io::stdout().flush().is_err()
         {

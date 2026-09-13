@@ -674,7 +674,7 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
     assert!(!text_action.contains("run-shell -b"), "{text_action}");
     let nav_version = tmux.text(&["show-option", "-gqv", "@agenmux-nav-version"]);
     assert!(
-        nav_version.starts_with("14.") && nav_version.len() == 19,
+        nav_version.starts_with("15.") && nav_version.len() == 19,
         "{nav_version}"
     );
     let status = tmux.tmux(&["show-option", "-gqv", "status-right"]);
@@ -2140,7 +2140,7 @@ fn toggle_reinstalls_key_tables_after_a_keymap_change() {
             .is_empty()
     });
     let first = tmux.text(&["show-option", "-gqv", "@agenmux-nav-version"]);
-    assert!(first.starts_with("14."), "{first}");
+    assert!(first.starts_with("15."), "{first}");
     assert!(tmux.binding("agenmux", "n").contains("key 'down'"));
     assert!(tmux.binding("agenmux", "j").is_empty());
 

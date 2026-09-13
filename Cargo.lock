@@ -12,6 +12,7 @@ dependencies = [
  "serde",
  "sysinfo",
  "toml",
+ "toml_edit",
 ]
 
 [[package]]

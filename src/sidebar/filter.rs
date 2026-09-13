@@ -317,6 +317,7 @@ impl Sidebar {
             | Key::CycleState
             | Key::Help
             | Key::Versions
+            | Key::Settings
             | Key::Other => {}
         }
     }

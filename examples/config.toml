@@ -32,6 +32,7 @@ filter = ["f"]
 reset = ["Escape"]
 help = ["?"]
 versions = ["u"]
+settings = ["s"]
 close = ["q", "Q"]
 
 [keys.search]         # printable keys are query text and cannot be bound

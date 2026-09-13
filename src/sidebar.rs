@@ -82,8 +82,8 @@ impl ScanSchedule {
 }
 
 use crate::input::{
-    key_pending, poll_inputs, protocol_keys, read_key, read_search_key, Key, KeySequence,
-    RawMode, SequenceResult,
+    key_pending, poll_inputs, protocol_keys, read_key, read_search_key, settings_keys, Key,
+    KeySequence, RawMode, SequenceResult,
 };
 #[allow(unused_imports)]
 pub use crate::input::send_key;
@@ -95,6 +95,7 @@ mod filter;
 use filter::StateFilter;
 mod overlay;
 mod render;
+mod ui;
 use overlay::{update_available, Overlay};
 
 static WINCH: AtomicBool = AtomicBool::new(false);
@@ -271,7 +272,7 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
     }
-    let settings = match crate::app_config::current(None) {
+    let settings = match crate::app_config::current_process() {
         Ok(config) => config,
         Err(e) => {
             eprintln!("agenmux: {e}");
@@ -422,19 +423,22 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             // every sidebar pane of the session, too costly per repeat step.
             let mut drained = 0;
             loop {
-                let mode = if sb.search_focused {
+                let editing_settings = sb.settings_editing();
+                let mode = if sb.search_focused || editing_settings {
                     KeyMode::Search
                 } else {
                     KeyMode::Normal
                 };
-                let keys = if sb.daemon.is_some() {
+                let keys = if editing_settings {
+                    settings_keys()
+                } else if sb.daemon.is_some() {
                     protocol_keys(mode)
                 } else if sb.search_focused {
                     &sb.search_keys
                 } else {
                     &sb.normal_keys
                 };
-                let key = if sb.search_focused && sb.daemon.is_none() {
+                let key = if (sb.search_focused || editing_settings) && sb.daemon.is_none() {
                     read_search_key(key_fd, keys)
                 } else {
                     read_key(key_fd, keys)
@@ -515,6 +519,7 @@ impl Sidebar {
             }
             Key::Help => self.help(),
             Key::Versions => self.versions(),
+            Key::Settings => self.settings(),
             Key::Search => self.focus_search(),
             Key::CycleState => self.cycle_state_filter(),
             Key::AllStates => self.clear_filter(),

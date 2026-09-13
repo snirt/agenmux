@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -421,6 +421,7 @@ pub enum Action {
     Reset,
     Help,
     Versions,
+    Settings,
     Close,
     Accept,
     Cancel,
@@ -606,6 +607,7 @@ pub fn resolved_keys(
             (Reset, &["Escape"]),
             (Help, &["?"]),
             (Versions, &["u"]),
+            (Settings, &["s"]),
             (Close, &["q", "Q"]),
         ],
         KeyMode::Search => &[
@@ -952,6 +954,7 @@ pub fn resolve_cli(
         (KeyMode::Normal, Action::Reset, "keys.normal.reset"),
         (KeyMode::Normal, Action::Help, "keys.normal.help"),
         (KeyMode::Normal, Action::Versions, "keys.normal.versions"),
+        (KeyMode::Normal, Action::Settings, "keys.normal.settings"),
         (KeyMode::Normal, Action::Close, "keys.normal.close"),
         (KeyMode::Search, Action::Up, "keys.search.up"),
         (KeyMode::Search, Action::Down, "keys.search.down"),
@@ -1055,6 +1058,11 @@ pub fn current(cli: Option<&str>) -> Result<AppConfig, ConfigError> {
     resolve_cli(file, &options, cli)
 }
 
+pub fn current_process() -> Result<AppConfig, ConfigError> {
+    let mode = std::env::var("AGENMUX_DISPLAY_OVERRIDE").ok();
+    current(mode.as_deref())
+}
+
 /// What a refresh changed. Width drives relayout; a reload additionally
 /// replaces the palette and the keys the view names in its hints.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1069,15 +1077,22 @@ pub struct LiveConfig {
     /// it, and a rejected reload must leave the previous one standing.
     file: FileConfig,
     reload_token: Option<String>,
+    cli_mode: Option<String>,
     last_read: std::time::Instant,
     reported: HashSet<String>,
 }
 impl LiveConfig {
     pub fn new(settings: AppConfig) -> Self {
+        let cli_mode = (settings.sources.get("display.mode").map(String::as_str) == Some("CLI"))
+            .then(|| match settings.mode {
+                DisplayMode::Split => "split".into(),
+                DisplayMode::Popup => "popup".into(),
+            });
         Self {
             settings,
             file: snapshot().cloned().unwrap_or_default(),
             reload_token: None,
+            cli_mode,
             last_read: std::time::Instant::now() - std::time::Duration::from_secs(1),
             reported: HashSet::new(),
         }
@@ -1109,7 +1124,7 @@ impl LiveConfig {
             }
         }
         let next = read_options(|cmd| tmux.run(cmd))
-            .and_then(|options| resolve(&self.file, &options));
+            .and_then(|options| resolve_cli(&self.file, &options, self.cli_mode.as_deref()));
         let reported = self.reported.len();
         let width_changed = self.accept(next);
         if self.reported.len() != reported {
@@ -1133,6 +1148,18 @@ impl LiveConfig {
             }
         }
     }
+    pub(crate) fn resolve(
+        &self,
+        file: &FileConfig,
+        options: &BTreeMap<String, String>,
+    ) -> Result<AppConfig, ConfigError> {
+        resolve_cli(file, options, self.cli_mode.as_deref())
+    }
+
+    pub(crate) fn replace(&mut self, file: FileConfig, settings: AppConfig) {
+        self.file = file;
+        self.settings = settings;
+    }
     fn report(&mut self, error: &ConfigError) {
         let diagnostic = error.to_string();
         if self.reported.len() < 16 && self.reported.insert(diagnostic.clone()) {
@@ -1153,15 +1180,15 @@ pub fn reload(plugin_dir: &Path) -> i32 {
             return e.exit_code();
         }
     };
-    let options = match read_options(|cmd| {
-        crate::tmux::command(&cmd.split_whitespace().collect::<Vec<_>>())
-    }) {
-        Ok(options) => options,
-        Err(e) => {
-            eprintln!("agenmux: {e}");
-            return e.exit_code();
-        }
-    };
+    let options =
+        match read_options(|cmd| crate::tmux::command(&cmd.split_whitespace().collect::<Vec<_>>()))
+        {
+            Ok(options) => options,
+            Err(e) => {
+                eprintln!("agenmux: {e}");
+                return e.exit_code();
+            }
+        };
     let config = match resolve(&file, &options) {
         Ok(config) => config,
         Err(e) => {
@@ -1169,8 +1196,8 @@ pub fn reload(plugin_dir: &Path) -> i32 {
             return e.exit_code();
         }
     };
-    let installed = crate::tmux::command(&["show-option", "-gqv", "@agenmux-nav-version"])
-        .unwrap_or_default();
+    let installed =
+        crate::tmux::command(&["show-option", "-gqv", "@agenmux-nav-version"]).unwrap_or_default();
     let reinstalled = installed.trim_end() != crate::setup::nav_version(&config);
     if reinstalled {
         if crate::setup::run_config(plugin_dir, &config) != 0 {
@@ -1213,10 +1240,7 @@ fn columns(names: &[&str], per_row: usize, indent: &str) -> String {
     names
         .chunks(per_row)
         .map(|row| {
-            let cells: Vec<String> = row
-                .iter()
-                .map(|name| format!("{name:width$}"))
-                .collect();
+            let cells: Vec<String> = row.iter().map(|name| format!("{name:width$}")).collect();
             format!("{indent}{}", cells.join("  ").trim_end())
         })
         .collect::<Vec<_>>()
@@ -1272,13 +1296,7 @@ tmux option still wins over the file.
   C-c and C-d always exit, C-@/C-a/C-b/C-l carry the sidebar's own key
   packets, and C-h/C-j cannot be told apart from BSpace and Enter.
   Printable chords cannot be bound in search mode, where typing owns them."##,
-        columns(
-            &Palette::default()
-                .roles()
-                .map(|(name, _)| name),
-            3,
-            "  ",
-        ),
+        columns(&Palette::default().roles().map(|(name, _)| name), 3, "  ",),
         normal(KeyMode::Normal),
         normal(KeyMode::Search),
     );
@@ -1318,7 +1336,10 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
             "display.show_all_panes".into(),
             config.show_all_panes.to_string(),
         ),
-        ("display.sidebar_width".into(), config.sidebar_width.to_string()),
+        (
+            "display.sidebar_width".into(),
+            config.sidebar_width.to_string(),
+        ),
         ("display.popup_width".into(), config.popup_width.to_string()),
         (
             "display.popup_height".into(),
@@ -1327,7 +1348,10 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
                 PopupHeight::Cells(n) => n.to_string(),
             },
         ),
-        ("behavior.notifications".into(), config.notifications.to_string()),
+        (
+            "behavior.notifications".into(),
+            config.notifications.to_string(),
+        ),
         (
             "behavior.hide_windows".into(),
             // Validated, but still user text: escape before it reaches a terminal.
@@ -1367,7 +1391,11 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
                 .get(name.as_str())
                 .cloned()
                 .unwrap_or_else(|| "default".into());
-            Row { name, value, source }
+            Row {
+                name,
+                value,
+                source,
+            }
         })
         .collect()
 }
@@ -1452,62 +1480,242 @@ pub fn load() -> Result<FileConfig, ConfigError> {
         None => Ok(FileConfig::default()),
     }
 }
+
+pub fn document() -> Result<(PathBuf, bool, String), ConfigError> {
+    let path = config_path().ok_or_else(|| {
+        ConfigError::invalid(
+            "file",
+            "no absolute XDG_CONFIG_HOME or HOME configuration root",
+        )
+    })?;
+    match read_source_path(&path)? {
+        Some(source) => {
+            parse(&source)?;
+            Ok((path, true, source))
+        }
+        None => Ok((path, false, "version = 1\n".into())),
+    }
+}
+
+fn document_error(reason: impl Into<String>) -> ConfigError {
+    ConfigError::invalid("document", reason)
+}
+
+fn parse_item(value: &str) -> Result<toml_edit::Item, ConfigError> {
+    let document = format!("value = {value}\n")
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| document_error("invalid TOML value"))?;
+    Ok(document["value"].clone())
+}
+
+fn set_document_path(
+    table: &mut dyn toml_edit::TableLike,
+    path: &[&str],
+    value: toml_edit::Item,
+) -> Result<(), ConfigError> {
+    if path.len() == 1 {
+        if let Some(current) = table.get_mut(path[0]) {
+            let decor = current.as_value().map(|value| value.decor().clone());
+            *current = value;
+            if let (Some(decor), Some(value)) = (decor, current.as_value_mut()) {
+                *value.decor_mut() = decor;
+            }
+        } else {
+            table.insert(path[0], value);
+        }
+        return Ok(());
+    }
+    if !table.contains_key(path[0]) {
+        table.insert(path[0], toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    let child = table
+        .get_mut(path[0])
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or_else(|| document_error("setting parent must be a table"))?;
+    set_document_path(child, &path[1..], value)
+}
+
+fn remove_document_path(table: &mut dyn toml_edit::TableLike, path: &[&str]) {
+    if path.len() == 1 {
+        table.remove(path[0]);
+        return;
+    }
+    let empty = table
+        .get_mut(path[0])
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .map(|child| {
+            remove_document_path(child, &path[1..]);
+            child.is_empty()
+        })
+        .unwrap_or(false);
+    if empty {
+        table.remove(path[0]);
+    }
+}
+
+/// Update one known application setting while retaining the user's TOML layout.
+pub fn edit_document(source: &str, name: &str, value: Option<&str>) -> Result<String, ConfigError> {
+    parse(source)?;
+    let known = rows(&resolve(&FileConfig::default(), &BTreeMap::new())?)
+        .into_iter()
+        .any(|row| row.name == name);
+    if !known {
+        return Err(ConfigError::invalid(name, "unknown application setting"));
+    }
+    let mut document = source
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| document_error("invalid TOML document"))?;
+    let path: Vec<_> = name.split('.').collect();
+    match value {
+        Some(value) => set_document_path(document.as_table_mut(), &path, parse_item(value)?)?,
+        None => remove_document_path(document.as_table_mut(), &path),
+    }
+    let output = document.to_string();
+    parse(&output)?;
+    Ok(output)
+}
+
+/// Remove file-layer customizations without deleting comments or schema version.
+pub fn revert_document(source: &str) -> Result<String, ConfigError> {
+    parse(source)?;
+    let mut document = source
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| document_error("invalid TOML document"))?;
+    for section in ["display", "behavior", "theme", "keys"] {
+        document.as_table_mut().remove(section);
+    }
+    let output = document.to_string();
+    parse(&output)?;
+    Ok(output)
+}
+
+/// Validate and atomically replace the configuration, following regular-file symlinks.
+pub fn save_document(path: &Path, source: &str) -> Result<(), ConfigError> {
+    if source.len() > MAX_BYTES {
+        return Err(ConfigError::invalid("file", "configuration exceeds 64 KiB"));
+    }
+    parse(source)?;
+    let link = fs::symlink_metadata(path);
+    let target = match link {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            fs::canonicalize(path).map_err(|e| ConfigError::io(path, e))?
+        }
+        Ok(metadata) if metadata.is_file() => path.to_path_buf(),
+        Ok(_) => {
+            return Err(ConfigError::invalid(
+                "file",
+                "configuration target is not a regular file",
+            ))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(error) => return Err(ConfigError::io(path, error)),
+    };
+    let parent = target
+        .parent()
+        .ok_or_else(|| ConfigError::invalid("file", "configuration path has no parent"))?;
+    fs::create_dir_all(parent).map_err(|e| ConfigError::io(parent, e))?;
+    let permissions = fs::metadata(&target)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    let mut temporary = None;
+    for attempt in 0..100 {
+        let candidate = parent.join(format!(
+            ".agenmux-config-{}-{attempt}.tmp",
+            std::process::id()
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                temporary = Some((candidate, file));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(ConfigError::io(&candidate, error)),
+        }
+    }
+    let (temporary_path, mut file) = temporary.ok_or_else(|| {
+        ConfigError::invalid("file", "cannot allocate temporary configuration file")
+    })?;
+    let result = (|| {
+        file.write_all(source.as_bytes())?;
+        file.sync_all()?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        drop(file);
+        fs::rename(&temporary_path, &target)
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(ConfigError::io(&target, error));
+    }
+    Ok(())
+}
 /// Read-only, nonblocking open; inspect the opened descriptor, not a pre-open stat.
 /// Symlinks to regular files are intentionally supported.
-pub fn load_path(path: &Path) -> Result<FileConfig, ConfigError> {
+fn read_source_path(path: &Path) -> Result<Option<String>, ConfigError> {
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
         .open(path)
     {
         Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return match fs::symlink_metadata(path) {
                 Err(missing) if missing.kind() == io::ErrorKind::NotFound => {
-                    // A missing leaf under a dangling directory symlink is not an absent config.
                     for parent in path.ancestors().skip(1) {
                         match fs::symlink_metadata(parent) {
-                            Ok(meta) => {
-                                if meta.file_type().is_symlink() {
-                                    fs::metadata(parent).map_err(|e| ConfigError::io(path, e))?;
+                            Ok(metadata) => {
+                                if metadata.file_type().is_symlink() {
+                                    fs::metadata(parent)
+                                        .map_err(|error| ConfigError::io(path, error))?;
                                 }
                                 break;
                             }
-                            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                            Err(e) => return Err(ConfigError::io(path, e)),
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                            Err(error) => return Err(ConfigError::io(path, error)),
                         }
                     }
-                    Ok(FileConfig::default())
+                    Ok(None)
                 }
                 Err(other) => Err(ConfigError::io(path, other)),
-                Ok(_) => Err(ConfigError::io(path, e)), // includes a dangling final symlink
+                Ok(_) => Err(ConfigError::io(path, error)),
             };
         }
-        Err(e) => return Err(ConfigError::io(path, e)),
+        Err(error) => return Err(ConfigError::io(path, error)),
     };
-    let result = (|| {
-        if !file
-            .metadata()
-            .map_err(|e| ConfigError::io(path, e))?
-            .is_file()
-        {
-            return Err(ConfigError::invalid("file", "must be a regular file"));
-        }
-        let mut bytes = Vec::new();
-        file.take((MAX_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|e| ConfigError::io(path, e))?;
-        if bytes.len() > MAX_BYTES {
-            return Err(ConfigError::invalid("file", "exceeds 65536 bytes"));
-        }
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|_| ConfigError::invalid("file", "must be strict UTF-8"))?;
-        parse(text)
-    })();
-    result.map_err(|mut e| {
-        e.location = path.to_string_lossy().into_owned();
-        e
-    })
+    if !file
+        .metadata()
+        .map_err(|error| ConfigError::io(path, error))?
+        .is_file()
+    {
+        return Err(ConfigError::invalid("file", "must be a regular file"));
+    }
+    let mut bytes = Vec::new();
+    file.take((MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| ConfigError::io(path, error))?;
+    if bytes.len() > MAX_BYTES {
+        return Err(ConfigError::invalid("file", "exceeds 65536 bytes"));
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| ConfigError::invalid("file", "must be strict UTF-8"))
+}
+
+pub fn load_path(path: &Path) -> Result<FileConfig, ConfigError> {
+    read_source_path(path)
+        .and_then(|source| {
+            source.map_or_else(|| Ok(FileConfig::default()), |source| parse(&source))
+        })
+        .map_err(|mut error| {
+            error.location = path.to_string_lossy().into_owned();
+            error
+        })
 }
 
 /// Standalone validation: no tmux, detector, hook, or update dependencies.
@@ -1550,7 +1758,10 @@ mod tests {
     fn palette_resolves_only_typed_colors_and_partial_roles() {
         use super::*;
         let dark = Palette::default();
-        assert_eq!(dark, Palette::resolve(&parse("").unwrap().theme.unwrap_or_default()));
+        assert_eq!(
+            dark,
+            Palette::resolve(&parse("").unwrap().theme.unwrap_or_default())
+        );
         let file = parse("[theme.colors]\nworking_bg = 7").unwrap();
         let actual = Palette::resolve(file.theme.as_ref().unwrap());
         let mut expected = dark.clone();
@@ -1563,8 +1774,14 @@ mod tests {
         );
         assert_eq!(dark.pane_bg, Ink::Typed(Color::Indexed(236)));
         assert_eq!(dark.working_fg.fg("1"), "\x1b[1;33m");
-        assert_eq!(dark.blocked_bg_unfocused, Ink::Typed(Color::Rgb(27, 10, 10)));
-        assert_eq!(dark.working_bg_unfocused, Ink::Typed(Color::Rgb(25, 20, 10)));
+        assert_eq!(
+            dark.blocked_bg_unfocused,
+            Ink::Typed(Color::Rgb(27, 10, 10))
+        );
+        assert_eq!(
+            dark.working_bg_unfocused,
+            Ink::Typed(Color::Rgb(25, 20, 10))
+        );
         assert_eq!(dark.idle_bg_unfocused, Ink::Typed(Color::Rgb(9, 23, 10)));
         assert_eq!(dark.done_bg_unfocused, dark.idle_bg_unfocused);
         assert_eq!(dark.working_bg, Ink::Typed(Color::Rgb(38, 32, 16)));
@@ -1665,14 +1882,15 @@ mod tests {
             .sources
             .iter()
             .filter(|(field, _)| **field != "display.show_all_panes")
-            .filter(|(field, _)| field.starts_with("display.")
-                || field.starts_with("behavior."))
+            .filter(|(field, _)| field.starts_with("display.") || field.starts_with("behavior."))
             .all(|(_, source)| source.starts_with("tmux @agenmux-")));
     }
 
     #[test]
     fn precedence_cli_canonical_legacy_file_defaults_and_unset() {
-        let file = parse("[display]\nmode='popup'\nsidebar_width=22\n[behavior]\nnotifications=false").unwrap();
+        let file =
+            parse("[display]\nmode='popup'\nsidebar_width=22\n[behavior]\nnotifications=false")
+                .unwrap();
         let mut options = BTreeMap::new();
         assert_eq!(resolve(&file, &options).unwrap().sidebar_width, 22);
         options.insert("@agents-mon-width".into(), "44".into());
@@ -1682,7 +1900,10 @@ mod tests {
         assert_eq!(config.sidebar_width, 55);
         assert_eq!(config.mode, DisplayMode::Split);
         assert_eq!(config.sources["display.mode"], "CLI");
-        assert_eq!(config.sources["display.sidebar_width"], "tmux @agenmux-width");
+        assert_eq!(
+            config.sources["display.sidebar_width"],
+            "tmux @agenmux-width"
+        );
         assert_eq!(
             resolve_cli(&file, &options, Some("")).unwrap().mode,
             DisplayMode::Popup
@@ -1866,8 +2087,7 @@ clear = ["C-u"]
                 assert!(parse(&format!("[display]\n{field} = {value}")).is_ok());
             }
         }
-        for value in ["'off'", "0", "60000"] {
-        }
+        for value in ["'off'", "0", "60000"] {}
         for value in [
             "'auto'",
             "'0'",
@@ -1878,8 +2098,7 @@ clear = ["C-u"]
             "inf",
             "true",
             "4294967296",
-        ] {
-        }
+        ] {}
         assert!(parse("[display]\nmode = 'popup'\npopup_height = 'off'").is_err());
     }
 
@@ -1967,10 +2186,7 @@ clear = ["C-u"]
                 format!("C-{}", key[2..].to_ascii_uppercase()),
             ] {
                 assert!(KeyChord::parse(&key).is_err(), "{key}");
-                for (mode, action) in [
-                    ("normal", "help"),
-                    ("search", "clear"),
-                ] {
+                for (mode, action) in [("normal", "help"), ("search", "clear")] {
                     assert!(parse(&format!("[keys.{mode}]\n{action} = ['{key}']")).is_err());
                 }
             }
@@ -2078,6 +2294,66 @@ clear = ["C-u"]
             assert!(diagnostic.contains("invalid TOML syntax") || diagnostic.contains("invalid configuration schema"));
         }
     }
+
+    #[test]
+    fn live_candidate_resolution_keeps_the_launch_override() {
+        let initial = resolve_cli(&Default::default(), &Default::default(), Some("popup")).unwrap();
+        let live = LiveConfig::new(initial);
+        let file = parse("[display]\nmode = 'split'\n").unwrap();
+        let candidate = live.resolve(&file, &Default::default()).unwrap();
+        assert_eq!(candidate.mode, DisplayMode::Popup);
+        assert_eq!(candidate.sources["display.mode"], "CLI");
+    }
+
+    #[test]
+    fn editable_document_preserves_comments_and_validates_changes() {
+        let source = "# keep me\nversion = 1\n\n[display]\nmode = \"split\" # layout\n";
+        let edited = edit_document(source, "display.mode", Some("\"popup\"")).unwrap();
+        assert!(edited.contains("# keep me"));
+        assert!(edited.contains("mode = \"popup\" # layout"));
+        assert_eq!(
+            resolve(&parse(&edited).unwrap(), &Default::default())
+                .unwrap()
+                .mode,
+            DisplayMode::Popup
+        );
+        assert!(edit_document(&edited, "display.sidebar_width", Some("0")).is_err());
+    }
+
+    #[test]
+    fn revert_removes_only_persisted_customizations() {
+        let source =
+            "# keep me\nversion = 1\n[display]\nmode = \"popup\"\n[theme]\nbase = \"light\"\n";
+        let reverted = revert_document(source).unwrap();
+        assert!(reverted.contains("# keep me"));
+        assert!(reverted.contains("version = 1"));
+        assert!(!reverted.contains("mode =") && !reverted.contains("base ="));
+        assert_eq!(
+            parse(&reverted).unwrap(),
+            FileConfig {
+                version: Some(1),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn atomic_save_preserves_a_symlink_and_rejects_invalid_output() {
+        let dir = Temp::new();
+        let target = dir.0.join("real.toml");
+        let link = dir.0.join("config.toml");
+        fs::write(&target, "version = 1\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        save_document(&link, "version = 1\n[behavior]\nnotifications = false\n").unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let before = fs::read_to_string(&target).unwrap();
+        assert!(save_document(&link, "[display]\nsidebar_width = 0\n").is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), before);
+    }
 }
 
 #[cfg(test)]
@@ -2114,7 +2390,10 @@ mod chord_tests {
             );
         }
         let keys = resolved_keys(KeyMode::Normal, None).unwrap();
-        assert_eq!(action_for(&keys, KeyChord::Printable(b'j')), Some(Action::Down));
+        assert_eq!(
+            action_for(&keys, KeyChord::Printable(b'j')),
+            Some(Action::Down)
+        );
         assert_eq!(action_for(&keys, KeyChord::Down), Some(Action::Down));
         assert_eq!(action_for(&keys, KeyChord::Printable(b'n')), None);
     }
@@ -2125,7 +2404,10 @@ mod chord_tests {
         let example = parse(include_str!("../examples/config.toml")).unwrap();
         let mut resolved = resolve(&example, &Default::default()).unwrap();
         let defaults = resolve(&Default::default(), &Default::default()).unwrap();
-        assert_eq!(Palette::resolve(&resolved.theme), Palette::resolve(&defaults.theme));
+        assert_eq!(
+            Palette::resolve(&resolved.theme),
+            Palette::resolve(&defaults.theme)
+        );
         resolved.theme = defaults.theme.clone();
         resolved.sources = defaults.sources.clone();
         assert_eq!(resolved, defaults);

@@ -42,7 +42,7 @@ pub(super) fn cursor_mark(
 
 /// Clip generated SGR/CSI frames without splitting an escape or wrapping a
 /// logical click row. Layout elsewhere uses the same character-cell metric.
-fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
+pub(super) fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
     if cols == 0 || cap == 0 {
         return format!("{E}[H{E}[0m{E}[J");
     }
@@ -833,13 +833,20 @@ mod tests {
             .find(|line| line.contains("Implement sidebar tree"))
             .unwrap();
         let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap();
-        let collapsed_pane = sb.last_frame.lines().find(|line| line.contains("editor")).unwrap();
-        let expanded_pane = sb.last_frame.lines().find(|line| line.contains("npm")).unwrap();
+        let collapsed_pane = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("editor"))
+            .unwrap();
+        let expanded_pane = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("npm"))
+            .unwrap();
         let single_window_marker = format!("{}", sb.palette.muted_fg.fg("2"));
         let pane_marker = format!("{}▦", sb.palette.muted_fg.fg("2"));
         assert!(
-            collapsed_pane.contains(&single_window_marker)
-                && expanded_pane.contains(&pane_marker),
+            collapsed_pane.contains(&single_window_marker) && expanded_pane.contains(&pane_marker),
             "ordinary rows distinguish single windows from nested panes"
         );
         assert_eq!(
@@ -892,18 +899,23 @@ mod tests {
         );
         let plain_frame = ansi.replace_all(&sb.last_frame, "");
         assert!(
-            ['├', '└', '│'].iter().all(|glyph| !plain_frame.contains(*glyph)),
+            ['├', '└', '│']
+                .iter()
+                .all(|glyph| !plain_frame.contains(*glyph)),
             "inventory hierarchy uses indentation without tree connectors"
         );
         assert!(
-            ansi
-                .replace_all(selected_title, "")
+            ansi.replace_all(selected_title, "")
                 .starts_with("       Implement sidebar tree"),
             "inventory description is indented beneath its pane"
         );
         sb.select_index(1);
         sb.render(true);
-        let selected_pane = sb.last_frame.lines().find(|line| line.contains("editor")).unwrap();
+        let selected_pane = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("editor"))
+            .unwrap();
         assert!(
             selected_pane.starts_with(&pane_bg)
                 && ansi.replace_all(selected_pane, "").chars().count()
@@ -1018,14 +1030,14 @@ mod tests {
                 .escape_default()
         ));
 
+        if std::env::var_os("AGENMUX_UPDATE_FIXTURES").is_some() {
+            std::fs::write("tests/fixtures/sidebar/dark.frames", &frames).unwrap();
+        }
         let fixture = std::fs::read_to_string("tests/fixtures/sidebar/dark.frames").unwrap();
         assert!(
             fixture.starts_with(&false_frames),
             "false-mode fixture prefix changed"
         );
-        if std::env::var_os("AGENMUX_UPDATE_FIXTURES").is_some() {
-            std::fs::write("tests/fixtures/sidebar/dark.frames", &frames).unwrap();
-        }
         assert_eq!(
             frames,
             std::fs::read_to_string("tests/fixtures/sidebar/dark.frames").unwrap()
