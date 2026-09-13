@@ -168,6 +168,16 @@ fn post_mutation_dispatch(action: SequenceAction, daemon: bool) -> DispatchResul
     }
 }
 
+fn mutation_owner(overlay: &Overlay) -> Option<&str> {
+    match overlay {
+        Overlay::Create { target, .. }
+        | Overlay::RenameScope(target)
+        | Overlay::Rename { target, .. }
+        | Overlay::Confirm(target) => Some(target.client.as_str()),
+        Overlay::Help | Overlay::Versions { .. } | Overlay::Settings(_) => None,
+    }
+}
+
 pub struct Sidebar {
     tmux: Tmux,
     settings: crate::app_config::LiveConfig,
@@ -622,9 +632,26 @@ impl Sidebar {
     /// Route every logical key through active UI mode. Overlay row maps may
     /// use mouse selection; normal list selection runs only after mode dispatch.
     fn dispatch_key(&mut self, key: Key) -> DispatchResult {
-        if self.overlay.is_some() {
+        let key = match key {
+            Key::Owned(key, client) => {
+                let owner = self.overlay.as_ref().and_then(mutation_owner);
+                if owner.is_some_and(|owner| owner != client) {
+                    self.restore_mutation_input(&client);
+                    return DispatchResult::Continue;
+                }
+                *key
+            }
+            key => key,
+        };
+        if let Some(overlay) = self.overlay.as_ref() {
             if let Key::Sequence(_, Some(client)) = &key {
-                self.restore_mutation_input(client);
+                if mutation_owner(overlay).is_some_and(|owner| owner != client) {
+                    self.restore_mutation_input(client);
+                    return DispatchResult::Continue;
+                }
+                if mutation_owner(overlay).is_none() {
+                    self.restore_mutation_input(client);
+                }
             }
             return self.overlay_key(key);
         }
@@ -704,7 +731,8 @@ impl Sidebar {
                 }
                 return DispatchResult::Break;
             }
-            Key::Sequence(_, _)
+            Key::Owned(_, _)
+            | Key::Sequence(_, _)
             | Key::Backspace
             | Key::ClearSearch
             | Key::Text(_)
@@ -922,13 +950,14 @@ impl Sidebar {
                 crate::tmux::command(&["rename-session", "-t", &target.session_id, name])
             }
             SequenceAction::DeletePane => (|| -> Result<String, TmuxError> {
+                let not_sidebar = format!("#{{?{},0,1}}", crate::panes::IS_SIDEBAR);
                 let panes = crate::tmux::command(&[
                     "list-panes",
                     "-s",
                     "-t",
                     &target.session_id,
                     "-f",
-                    "#{!=:#{pane_title},agenmux}",
+                    &not_sidebar,
                     "-F",
                     "#{pane_id}",
                 ])?;
@@ -1321,6 +1350,10 @@ mod tests {
     fn popup_deletes_continue_while_creates_handoff() {
         assert_eq!(
             post_mutation_dispatch(SequenceAction::DeletePane, false),
+            DispatchResult::Continue
+        );
+        assert_eq!(
+            post_mutation_dispatch(SequenceAction::RenamePane, false),
             DispatchResult::Continue
         );
         assert_eq!(

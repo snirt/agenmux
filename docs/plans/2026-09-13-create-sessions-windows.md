@@ -17,6 +17,7 @@
 - Escape, invalid continuation, or timeout clears pending state/hint; timeout expires without another key.
 - Create prompts for optional name. Enter accepts; blank lets tmux choose; Escape cancels.
 - Create inherits selected pane cwd, revalidates stable IDs, uses `new-window`/`new-session`, switches invoking client to created first pane, and refreshes surviving sidebars.
+- Mutation overlays accept framed daemon input only from the invoking client; legacy unowned packets remain compatible for popup/direct input.
 - Delete revalidates stable pane/window/session IDs and uses `kill-pane`/`kill-window`/`kill-session`; `dp`/`dw` refuse to implicitly destroy a session, while `ds` moves attached clients first; stale targets error and refresh without fallback.
 - With confirmation enabled, overlay displays exact resource type and identity; only explicit `y` confirms. Enter, `n`, Escape, or any other key cancels.
 - Rename preloads the current pane/window/session name for inline typing and Backspace edits, revalidates the stable ID, and uses `select-pane -T`/`rename-window`/`rename-session`; control-only or empty names cancel and native tmux errors remain nonfatal.

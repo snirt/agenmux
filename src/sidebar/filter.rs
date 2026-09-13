@@ -313,6 +313,7 @@ impl Sidebar {
             | Key::Last
             | Key::Select(_)
             | Key::Sequence(_, _)
+            | Key::Owned(_, _)
             | Key::Search
             | Key::CycleState
             | Key::Help

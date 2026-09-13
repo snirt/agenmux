@@ -101,6 +101,7 @@ pub(crate) enum Key {
     First,
     Last,
     Sequence(char, Option<String>),
+    Owned(Box<Key>, String),
     Up,
     Select(usize),
     Down,
@@ -382,6 +383,31 @@ pub(crate) fn settings_keys() -> &'static Keymap {
     })
 }
 
+fn decode_protocol_payload(first: u8, mut next: impl FnMut() -> Option<u8>, keys: &Keymap) -> Key {
+    match first {
+        0x01 => Key::WheelUp,
+        0x02 => Key::WheelDown,
+        0x0c => Key::AllStates,
+        0x00 => next()
+            .filter(|byte| (0x20..=0x7e).contains(byte))
+            .map(|byte| Key::Text(char::from(byte).to_string()))
+            .unwrap_or(Key::Other),
+        _ => chord(first, next)
+            .and_then(|chord| action_key(keys, chord))
+            .unwrap_or(match first {
+                b'G' => Key::Last,
+                byte if BUILTIN_SEQUENCES
+                    .iter()
+                    .any(|binding| binding.sequence.as_bytes()[0] == byte) =>
+                {
+                    Key::Sequence(char::from(byte), None)
+                }
+                0x03 | 0x04 => Key::Quit,
+                _ => Key::Other,
+            }),
+    }
+}
+
 pub(crate) fn read_key(fd: libc::c_int, keys: &Keymap) -> Key {
     let Some(b) = read_byte(fd) else {
         return Key::Quit;
@@ -396,17 +422,6 @@ pub(crate) fn read_key(fd: libc::c_int, keys: &Keymap) -> Key {
             .flatten()
     };
     match b {
-        0x01 => return Key::WheelUp,
-        0x02 => return Key::WheelDown,
-        0x0c => return Key::AllStates, // private clear packet used by tmux/click helpers
-        // Search-table printable keys use a NUL-prefixed packet so normal-mode
-        // actions such as `j`, `q`, and `f` remain query text while typing.
-        0x00 => {
-            return next()
-                .filter(|b| (0x20..=0x7e).contains(b))
-                .map(|b| Key::Text(char::from(b).to_string()))
-                .unwrap_or(Key::Other)
-        }
         // Click target: a four-byte row index the mouse helper sends.
         0x05 => {
             let mut index = [0u8; 4];
@@ -448,22 +463,42 @@ pub(crate) fn read_key(fd: libc::c_int, keys: &Keymap) -> Key {
                 .map(|client| Key::Sequence(char::from(key), Some(client)))
                 .unwrap_or(Key::Other);
         }
+        // Framed logical key: payload length, u16 client length, payload, client.
+        0x08 => {
+            let Some(payload_len) = next().map(usize::from).filter(|len| (1..=16).contains(len))
+            else {
+                return Key::Other;
+            };
+            let (Some(high), Some(low)) = (next(), next()) else {
+                return Key::Other;
+            };
+            let client_len = u16::from_be_bytes([high, low]) as usize;
+            if client_len == 0 || client_len > 255 {
+                return Key::Other;
+            }
+            let mut payload = Vec::with_capacity(payload_len);
+            for _ in 0..payload_len {
+                let Some(byte) = next() else {
+                    return Key::Other;
+                };
+                payload.push(byte);
+            }
+            let mut client = Vec::with_capacity(client_len);
+            for _ in 0..client_len {
+                let Some(byte) = next() else {
+                    return Key::Other;
+                };
+                client.push(byte);
+            }
+            let mut payload = payload.into_iter();
+            let key = decode_protocol_payload(payload.next().unwrap(), || payload.next(), keys);
+            return String::from_utf8(client)
+                .map(|client| Key::Owned(Box::new(key), client))
+                .unwrap_or(Key::Other);
+        }
         _ => {}
     }
-    // Configured chords win; the fixed edge keys are the default underneath.
-    chord(b, next)
-        .and_then(|chord| action_key(keys, chord))
-        .unwrap_or(match b {
-            b'G' => Key::Last,
-            byte if BUILTIN_SEQUENCES
-                .iter()
-                .any(|binding| binding.sequence.as_bytes()[0] == byte) =>
-            {
-                Key::Sequence(char::from(byte), None)
-            }
-            0x03 | 0x04 => Key::Quit, // Ctrl-C, Ctrl-D: emergency exit
-            _ => Key::Other,
-        })
+    decode_protocol_payload(b, next, keys)
 }
 
 /// Popup/tty search owns printable input. Daemon search receives printable
@@ -565,6 +600,19 @@ pub fn send_key(name: &str, client: Option<&str>) -> i32 {
             _ => return 2,
         }
     };
+    if let Some(client) = client.filter(|client| !client.is_empty()) {
+        if !name.starts_with("sequence-") {
+            if client.len() > 255 || bytes.is_empty() || bytes.len() > 16 {
+                return 2;
+            }
+            let mut packet = vec![0x08, bytes.len() as u8, 0, client.len() as u8];
+            packet.extend(&bytes);
+            packet.extend(client.as_bytes());
+            return send_bytes(&packet);
+        }
+    } else if client.is_some() {
+        return 2;
+    }
     send_bytes(&bytes)
 }
 

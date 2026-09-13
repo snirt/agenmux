@@ -1561,6 +1561,17 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             "second client create sequence",
         );
     }
+    assert_eq!(
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]),
+        "agenmux-search",
+        "stray client sequence must preserve the owner's create prompt"
+    );
     assert_success(tmux.bin(&["key", "escape"]), "cancel owned create");
     tmux.wait_for(Duration::from_secs(2), || {
         tmux.text(&[
@@ -1710,19 +1721,53 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         tmux.bin(&["key", "text-79"]),
         "confirm guarded last-window delete",
     );
-    thread::sleep(Duration::from_millis(200));
+    tmux.wait_for(Duration::from_secs(2), || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]) == "agenmux"
+    });
     assert!(
         tmux.text(&["list-sessions", "-F", "#{session_id}"])
             .lines()
             .any(|session| session == guarded_session),
         "window deletion must not implicitly destroy its session"
     );
+    let marked_sidebar = tmux.text(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &session_pane,
+        "exec sleep 60",
+    ]);
+    tmux.assert_tmux(&["set-option", "-p", "-t", &marked_sidebar, "@agenmux", "1"]);
+    tmux.assert_tmux(&[
+        "select-pane",
+        "-t",
+        &marked_sidebar,
+        "-T",
+        "sidebar-fixture",
+    ]);
     send_sequence("dp");
     assert_success(
         tmux.bin(&["key", "text-79"]),
         "confirm guarded last-pane delete",
     );
-    thread::sleep(Duration::from_millis(200));
+    tmux.wait_for(Duration::from_secs(2), || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]) == "agenmux"
+    });
     assert!(
         tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
             .lines()
@@ -1761,6 +1806,44 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     tmux.assert_tmux(&["select-pane", "-t", &extra]);
     tmux.wait_for(Duration::from_secs(4), || selected() == extra);
     send_sequence("dp");
+    assert_success(
+        tmux.bin(&["key", "text-79", "missing-client"]),
+        "ignore non-owner confirmation",
+    );
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
+            .lines()
+            .any(|pane| pane == extra),
+        "non-owner y must not confirm deletion"
+    );
+    assert_eq!(
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]),
+        "agenmux-search",
+        "non-owner input must leave the owner's confirmation active"
+    );
+    assert_success(
+        tmux.bin(&["key", "sequence-67", "missing-client"]),
+        "ignore non-owner sequence during confirmation",
+    );
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]),
+        "agenmux-search",
+        "non-owner sequence must leave confirmation active"
+    );
     assert_success(tmux.bin(&["key", "text-59"]), "reject uppercase delete");
     thread::sleep(Duration::from_millis(150));
     assert!(

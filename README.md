@@ -290,8 +290,9 @@ and `r` (rename). `gg` remains available regardless of this setting. Rename asks
 for pane/window/session scope, then opens the current name for inline editing; empty
 Enter or Escape cancels. Create prompts accept an optional name (leave it blank for
 tmux's default), inherit the selected pane's working directory, and move only the
-invoking client to the new target. Delete prompts name the exact stable tmux ID and
-cancel on Enter, `n`, Escape, or any input other than lowercase `y`. `dp` and `dw`
+invoking client to the new target. Mutation prompts accept input only from that
+invoking client. Delete prompts name the exact stable tmux ID and cancel on Enter,
+`n`, Escape, or any input other than lowercase `y`. `dp` and `dw`
 refuse to implicitly destroy a session; use `ds` so attached clients can be moved
 safely first. Set `confirm_delete = false` only if immediate deletion is intentional.
 
