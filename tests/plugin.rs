@@ -108,7 +108,6 @@ impl TestTmux {
         );
     }
 
-    /// `track_caller`: a timeout names the waiting line, not this helper.
     #[track_caller]
     fn wait_for(&self, timeout: Duration, mut condition: impl FnMut() -> bool) {
         let deadline = Instant::now() + timeout;
@@ -122,9 +121,7 @@ impl TestTmux {
         }
     }
 
-    /// Server state for a failed wait: every pane and client, plus the tail
-    /// of any daemon trace the test routed into its temp dir via
-    /// `AGENMUX_DEBUG`. Best effort: never panics while reporting a panic.
+    /// Panes, clients, runtime files and the daemon trace tail, for a failed wait.
     fn diagnostics(&self) -> String {
         let listing = |args: &[&str]| {
             let output = self.tmux(args);
@@ -1734,8 +1731,7 @@ fn all_panes_reload_preserves_daemon_and_selection() {
     );
     assert_success(tmux.bin(&["config", "reload"]), "enable all panes");
     tmux.wait_for(Duration::from_secs(3), &inventory_present);
-    let true_frame = capture();
-    assert!(true_frame.contains("mixed"), "{true_frame}");
+    tmux.wait_for(Duration::from_secs(3), || capture().contains("mixed"));
     let row_map = std::fs::read_to_string(tmux.tmp.join("agenmux-rows")).unwrap();
     for pane in [&single, &ordinary, &ordinary_only] {
         assert_eq!(
@@ -1796,8 +1792,7 @@ fn all_panes_reload_preserves_daemon_and_selection() {
     );
     assert_success(tmux.bin(&["config", "reload"]), "disable all panes");
     tmux.wait_for(Duration::from_secs(3), || !inventory_present());
-    let restored_frame = capture();
-    assert!(!restored_frame.contains(&ordinary), "{restored_frame}");
+    tmux.wait_for(Duration::from_secs(3), || !capture().contains(&ordinary));
     assert_eq!(selected(), agent);
     assert_agent_only_cache();
     assert_eq!(
