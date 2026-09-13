@@ -70,7 +70,7 @@
         <a href="https://github.com/snirt/agenmux">agenmux on github</a>
         <span class="sep">·</span>
         <a href="https://github.com/snirt/agenmux/releases/latest"
-          ><span id="version">v0.2.1</span></a
+          ><span id="version">v0.4.0</span></a
         >
         <span class="sep">·</span>
         <span id="stars" hidden
@@ -296,8 +296,8 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
 
       <h2 id="release">latest release</h2>
       <p id="release-head">
-        <span id="release-tag">v0.2.1</span>
-        <span id="release-date"></span>
+        <span id="release-tag">v0.4.0</span>
+        <span id="release-date">2026-09-08</span>
         <a href="https://github.com/snirt/agenmux/releases">all releases →</a>
       </p>
       <pre id="release-notes" hidden><code id="release-body"></code></pre>
@@ -831,20 +831,27 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
       // Live GitHub data. The page works without it; a fetch only upgrades it.
       const API = "https://api.github.com/repos/snirt/agenmux";
       function cachedJson(url) {
-        // 10-minute cache: fresh enough to see new stars, kind to the rate limit
+        // 10-minute cache, kept as the fallback when the API is unreachable
+        let hit = null;
         try {
-          const hit = JSON.parse(sessionStorage.getItem(url));
-          if (hit && Date.now() - hit.t < 600000) return Promise.resolve(hit.j);
+          hit = JSON.parse(localStorage.getItem(url));
         } catch (_) {}
-        return fetch(url).then((r) => {
-          if (!r.ok) throw new Error(r.status);
-          return r.json().then((j) => {
+        if (hit && Date.now() - hit.t < 600000) return Promise.resolve(hit.j);
+        return fetch(url)
+          .then((r) => {
+            if (!r.ok) throw new Error(r.status);
+            return r.json();
+          })
+          .then((j) => {
             try {
-              sessionStorage.setItem(url, JSON.stringify({ t: Date.now(), j }));
+              localStorage.setItem(url, JSON.stringify({ t: Date.now(), j }));
             } catch (_) {}
             return j;
+          })
+          .catch((err) => {
+            if (hit) return hit.j;
+            throw err;
           });
-        });
       }
       cachedJson(API)
         .then((repo) => {
@@ -869,7 +876,13 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
             document.getElementById("release-notes").hidden = false;
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          const note = document.createElement("span");
+          note.className = "muted";
+          note.textContent =
+            " (github unreachable; showing the release as of the last site deploy)";
+          document.getElementById("release-head").appendChild(note);
+        });
     </script>
   </body>
 </html>
