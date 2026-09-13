@@ -1,7 +1,7 @@
 use crate::app_config::{action_for, Action, KeyChord};
 use crate::input::{available_sequences, term_size, Key, SequenceAction};
 use crate::release;
-use crate::tmux::command_spawn;
+use crate::tmux::{command, command_spawn};
 use std::path::{Path, PathBuf};
 
 use super::render::{app_title, clip_frame, cursor_mark, join};
@@ -16,6 +16,11 @@ pub(super) enum Overlay {
     },
     Settings(Settings),
     Create {
+        target: MutationTarget,
+        name: String,
+    },
+    RenameScope(MutationTarget),
+    Rename {
         target: MutationTarget,
         name: String,
     },
@@ -681,6 +686,30 @@ impl Sidebar {
                      name (optional): {name}\n\n{muted}{hint}{E}[0m"
                 )
             }
+            Some(Overlay::RenameScope(_)) => format!(
+                "{E}[2J{E}[H{header}{title} — rename{E}[0m\n\n\
+                 rename:\n\n\
+                 p  pane\n\
+                 w  window\n\
+                 s  session\n\n{muted}p/w/s choose · Esc cancel{E}[0m"
+            ),
+            Some(Overlay::Rename { target, name, .. }) => {
+                let kind = match target.action {
+                    SequenceAction::RenamePane => "pane",
+                    SequenceAction::RenameWindow => "window",
+                    SequenceAction::RenameSession => "session",
+                    _ => return,
+                };
+                let name: String = name.chars().filter(|c| !c.is_control()).collect();
+                let hint = join(&[
+                    self.hint(&self.search_keys, Action::Accept, "rename"),
+                    self.hint(&self.search_keys, Action::Cancel, "cancel"),
+                ]);
+                format!(
+                    "{E}[2J{E}[H{header}{title} — rename {kind}{E}[0m\n\n\
+                     name: {name}▏\n\n{muted}{hint}{E}[0m"
+                )
+            }
             Some(Overlay::Confirm(target)) => {
                 let (kind, identity) = match target.action {
                     SequenceAction::DeletePane => ("pane", &target.pane_id),
@@ -721,6 +750,30 @@ impl Sidebar {
             )
         };
         self.emit(text, &click_rows, force);
+    }
+
+    fn open_rename_input(&mut self, mut target: MutationTarget, action: SequenceAction) {
+        target.action = action;
+        let (id, format) = match action {
+            SequenceAction::RenamePane => (target.pane_id.as_str(), "#{pane_title}"),
+            SequenceAction::RenameWindow => (target.window_id.as_str(), "#{window_name}"),
+            SequenceAction::RenameSession => (target.session_id.as_str(), "#{session_name}"),
+            _ => return,
+        };
+        match command(&["display-message", "-p", "-t", id, format]) {
+            Ok(name) => {
+                let name = name
+                    .trim_end_matches(['\r', '\n'])
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .collect();
+                self.overlay = Some(Overlay::Rename { target, name });
+            }
+            Err(error) => {
+                self.restore_mutation_input(&target.client);
+                self.mutation_error(&target.client, &error.to_string());
+            }
+        }
     }
 
     pub(super) fn overlay_key(&mut self, key: Key) -> super::DispatchResult {
@@ -775,6 +828,44 @@ impl Sidebar {
                     self.restore_mutation_input(&target.client);
                 }
                 _ => self.overlay = Some(Overlay::Create { target, name }),
+            },
+            Overlay::RenameScope(target) => match key {
+                Key::Text(scope) if scope.eq_ignore_ascii_case("p") => {
+                    self.open_rename_input(target, SequenceAction::RenamePane);
+                }
+                Key::Text(scope) if scope.eq_ignore_ascii_case("w") => {
+                    self.open_rename_input(target, SequenceAction::RenameWindow);
+                }
+                Key::Text(scope) if scope.eq_ignore_ascii_case("s") => {
+                    self.open_rename_input(target, SequenceAction::RenameSession);
+                }
+                Key::AllStates | Key::ClearSearch | Key::Quit | Key::Close => {
+                    self.restore_mutation_input(&target.client);
+                }
+                _ => self.overlay = Some(Overlay::RenameScope(target)),
+            },
+            Overlay::Rename { target, mut name } => match key {
+                Key::Text(text) => {
+                    for character in text.chars().filter(|c| !c.is_control()) {
+                        if name.chars().count() >= 128 {
+                            break;
+                        }
+                        name.push(character);
+                    }
+                    self.overlay = Some(Overlay::Rename { target, name });
+                }
+                Key::Backspace => {
+                    name.pop();
+                    self.overlay = Some(Overlay::Rename { target, name });
+                }
+                Key::Jump if name.trim().is_empty() => {
+                    self.restore_mutation_input(&target.client);
+                }
+                Key::Jump => return self.execute_mutation(&target, &name),
+                Key::AllStates | Key::ClearSearch | Key::Quit | Key::Close => {
+                    self.restore_mutation_input(&target.client);
+                }
+                _ => self.overlay = Some(Overlay::Rename { target, name }),
             },
             Overlay::Confirm(target) => {
                 let confirmed =

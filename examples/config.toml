@@ -17,6 +17,7 @@ notifications = true
 # hide_windows = "agents*" # filter the prefix+w picker; omitted leaves it alone
 
 [tmux_management]
+# cc/cs create, dp/dw/ds delete, r renames pane/window/session
 enabled = false
 confirm_delete = true
 

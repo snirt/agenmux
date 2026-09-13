@@ -7,7 +7,8 @@ use std::process::{Command, Stdio};
 pub(crate) const NORMAL_TABLE: &str = "agenmux";
 pub(crate) const SEARCH_TABLE: &str = "agenmux-search";
 const SETTINGS_TABLE: &str = "agenmux-settings-edit";
-const NAV_LAYOUT: &str = "15";
+pub(crate) const SEQUENCE_TABLE: &str = "agenmux-sequence";
+const NAV_LAYOUT: &str = "16";
 // These are trusted runtime identities, not application-file settings. q
 // quotes them for the shell only when tmux executes the installed command.
 const ENGINE: &str = "AGENMUX_DIR=#{q:@agenmux-plugin-dir} #{q:@agenmux-runtime-bin}";
@@ -98,7 +99,7 @@ impl BindingBackup {
         // Check server connectivity before accepting an absent plugin table.
         tmux::command(&["list-keys", "-T", "root"])?;
         let mut tables = Vec::new();
-        for table in [NORMAL_TABLE, SEARCH_TABLE, SETTINGS_TABLE] {
+        for table in [NORMAL_TABLE, SEARCH_TABLE, SETTINGS_TABLE, SEQUENCE_TABLE] {
             tables.push((table, bindings(table)?.into_values().collect()));
         }
         let mut keys = Vec::new();
@@ -314,6 +315,7 @@ fn setup(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> Result<(),
         // strand an open TextEdit or Select control.
         clone_root_table(SETTINGS_TABLE)?;
         install_settings_keys()?;
+        clear_table(SEQUENCE_TABLE)?;
         install_keys(config)?;
         install_wheel_keys(&bin)?;
         install_picker_filter(config.hide_windows.as_deref())?;
@@ -487,20 +489,53 @@ fn key_bindings(config: &crate::app_config::AppConfig) -> Vec<(&'static str, Str
         key_command("last", NORMAL_TABLE, true),
     ));
     let mut prefixes = Vec::new();
+    let mut continuations = Vec::new();
     for binding in crate::input::available_sequences(config.tmux_management_enabled) {
-        let key = binding.sequence.as_bytes()[0];
-        if prefixes.contains(&key)
-            || crate::app_config::action_for(&config.normal, KeyChord::Printable(key)).is_some()
-        {
+        let bytes = binding.sequence.as_bytes();
+        let prefix = bytes[0];
+        if crate::app_config::action_for(&config.normal, KeyChord::Printable(prefix)).is_some() {
             continue;
         }
-        prefixes.push(key);
+        if bytes.len() == 1 {
+            if !prefixes.contains(&prefix) {
+                prefixes.push(prefix);
+                out.push((
+                    NORMAL_TABLE,
+                    char::from(prefix).to_string(),
+                    key_command(&format!("sequence-{prefix:02X}"), NORMAL_TABLE, false),
+                ));
+            }
+            continue;
+        }
+        let continuation = bytes[1];
+        if !continuations.contains(&continuation) {
+            continuations.push(continuation);
+            out.push((
+                SEQUENCE_TABLE,
+                char::from(continuation).to_string(),
+                key_command(&format!("sequence-{continuation:02X}"), NORMAL_TABLE, false),
+            ));
+        }
+        if prefixes.contains(&prefix) {
+            continue;
+        }
+        prefixes.push(prefix);
         out.push((
             NORMAL_TABLE,
-            char::from(key).to_string(),
-            key_command(&format!("sequence-{key:02X}"), NORMAL_TABLE, true),
+            char::from(prefix).to_string(),
+            key_command(&format!("sequence-{prefix:02X}"), SEQUENCE_TABLE, false),
         ));
     }
+    out.push((
+        SEQUENCE_TABLE,
+        "Escape".into(),
+        key_command("all", NORMAL_TABLE, false),
+    ));
+    out.push((
+        SEQUENCE_TABLE,
+        "Any".into(),
+        key_command("escape", NORMAL_TABLE, false),
+    ));
     for (action, chords) in &config.normal {
         let (name, next, background) = match action {
             Down => ("down", NORMAL_TABLE, true),
@@ -752,13 +787,50 @@ mod tests {
         assert!(find(NORMAL_TABLE, "g").is_some());
         assert_eq!(find(NORMAL_TABLE, "c"), None);
         assert_eq!(find(NORMAL_TABLE, "d"), None);
+        assert_eq!(find(NORMAL_TABLE, "r"), None);
         let enabled = config("[tmux_management]\nenabled = true");
         let enabled_keys = key_bindings(&enabled);
-        for key in ["c", "d", "g"] {
+        for key in ["c", "d", "g", "r"] {
             assert!(enabled_keys
                 .iter()
                 .any(|(table, bound, _)| *table == NORMAL_TABLE && bound == key));
         }
+        assert_eq!(
+            enabled_keys
+                .iter()
+                .find(|(table, key, _)| *table == NORMAL_TABLE && key == "d")
+                .map(|(_, _, command)| command.as_str()),
+            Some(key_command("sequence-64", SEQUENCE_TABLE, false).as_str())
+        );
+        assert_eq!(
+            enabled_keys
+                .iter()
+                .find(|(table, key, _)| *table == NORMAL_TABLE && key == "r")
+                .map(|(_, _, command)| command.as_str()),
+            Some(key_command("sequence-72", NORMAL_TABLE, false).as_str())
+        );
+        for (key, code) in [
+            ("c", 0x63),
+            ("s", 0x73),
+            ("p", 0x70),
+            ("w", 0x77),
+            ("g", 0x67),
+        ] {
+            assert_eq!(
+                enabled_keys
+                    .iter()
+                    .find(|(table, bound, _)| *table == SEQUENCE_TABLE && bound == key)
+                    .map(|(_, _, command)| command.as_str()),
+                Some(key_command(&format!("sequence-{code:02X}"), NORMAL_TABLE, false).as_str())
+            );
+        }
+        assert_eq!(
+            enabled_keys
+                .iter()
+                .find(|(table, key, _)| *table == SEQUENCE_TABLE && key == "Any")
+                .map(|(_, _, command)| command.as_str()),
+            Some(key_command("escape", NORMAL_TABLE, false).as_str())
+        );
         let overridden = config("[tmux_management]\nenabled=true\n[keys.normal]\ndown=['c']");
         let overridden_keys = key_bindings(&overridden);
         let c_commands: Vec<_> = overridden_keys

@@ -283,15 +283,16 @@ each chord to a fixed internal action, never to a command from the file.
 `agenmux config reload` reinstalls the tables and updates the hints of running
 views; the next toggle does the same for the tables on its own.
 
-Tmux mutations are opt-in. With management enabled, the built-in sequences are
-`cc` (create a window in the selected pane's session), `cs` (create a session),
-`dp` (delete the selected pane), `dw` (delete its window), and `ds` (delete its
-session). `gg` remains available regardless of this setting. Create prompts accept
-an optional name (leave it blank for tmux's default), inherit the selected pane's
-working directory, and move only the invoking client to the new target. Delete
-prompts name the exact stable tmux ID and cancel on Enter, `n`, Escape, or any
-input other than `y`. Set `confirm_delete = false` only if immediate deletion is
-intentional.
+Tmux mutations are opt-in. With management enabled, the built-ins are `cc`
+(create a window in the selected pane's session), `cs` (create a session), `dp`
+(delete the selected pane), `dw` (delete its window), `ds` (delete its session),
+and `r` (rename). `gg` remains available regardless of this setting. Rename asks
+for pane/window/session scope, then opens the current name for inline editing; empty
+Enter or Escape cancels. Create prompts accept an optional name (leave it blank for
+tmux's default), inherit the selected pane's working directory, and move only the
+invoking client to the new target. Delete prompts name the exact stable tmux ID and
+cancel on Enter, `n`, Escape, or any input other than `y`. Set
+`confirm_delete = false` only if immediate deletion is intentional.
 
 ```toml
 [tmux_management]

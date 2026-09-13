@@ -544,7 +544,12 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                     || editing_settings
                     || matches!(
                         sb.overlay,
-                        Some(Overlay::Create { .. } | Overlay::Confirm(_))
+                        Some(
+                            Overlay::Create { .. }
+                                | Overlay::RenameScope(_)
+                                | Overlay::Rename { .. }
+                                | Overlay::Confirm(_)
+                        )
                     );
                 let mode = if text_input {
                     KeyMode::Search
@@ -727,6 +732,11 @@ impl Sidebar {
                 });
                 DispatchResult::Continue
             }
+            SequenceAction::Rename => {
+                self.enter_mutation_input(&target.client);
+                self.overlay = Some(Overlay::RenameScope(target));
+                DispatchResult::Continue
+            }
             SequenceAction::DeletePane
             | SequenceAction::DeleteWindow
             | SequenceAction::DeleteSession => {
@@ -738,7 +748,10 @@ impl Sidebar {
                     self.execute_mutation(&target, "")
                 }
             }
-            SequenceAction::First => DispatchResult::Continue,
+            SequenceAction::First
+            | SequenceAction::RenamePane
+            | SequenceAction::RenameWindow
+            | SequenceAction::RenameSession => DispatchResult::Continue,
         }
     }
 
@@ -780,7 +793,9 @@ impl Sidebar {
 
     fn target_is_live(target: &MutationTarget) -> bool {
         let (tmux_target, format, expected) = match target.action {
-            SequenceAction::CreateWindow | SequenceAction::CreateSession => (
+            SequenceAction::CreateWindow
+            | SequenceAction::CreateSession
+            | SequenceAction::Rename => (
                 target.pane_id.as_str(),
                 "#{pane_id}\t#{window_id}\t#{session_id}",
                 format!(
@@ -788,17 +803,17 @@ impl Sidebar {
                     target.pane_id, target.window_id, target.session_id
                 ),
             ),
-            SequenceAction::DeletePane => (
+            SequenceAction::DeletePane | SequenceAction::RenamePane => (
                 target.pane_id.as_str(),
                 "#{pane_id}",
                 target.pane_id.clone(),
             ),
-            SequenceAction::DeleteWindow => (
+            SequenceAction::DeleteWindow | SequenceAction::RenameWindow => (
                 target.window_id.as_str(),
                 "#{window_id}",
                 target.window_id.clone(),
             ),
-            SequenceAction::DeleteSession => (
+            SequenceAction::DeleteSession | SequenceAction::RenameSession => (
                 target.session_id.as_str(),
                 "#{session_id}",
                 target.session_id.clone(),
@@ -869,6 +884,24 @@ impl Sidebar {
                 args.extend(["-c", target.cwd.as_str()]);
                 crate::tmux::command(&args)
             }
+            SequenceAction::RenamePane => {
+                if name.is_empty() {
+                    return DispatchResult::Continue;
+                }
+                crate::tmux::command(&["select-pane", "-t", &target.pane_id, "-T", name])
+            }
+            SequenceAction::RenameWindow => {
+                if name.is_empty() {
+                    return DispatchResult::Continue;
+                }
+                crate::tmux::command(&["rename-window", "-t", &target.window_id, name])
+            }
+            SequenceAction::RenameSession => {
+                if name.is_empty() {
+                    return DispatchResult::Continue;
+                }
+                crate::tmux::command(&["rename-session", "-t", &target.session_id, name])
+            }
             SequenceAction::DeletePane => {
                 crate::tmux::command(&["kill-pane", "-t", &target.pane_id])
             }
@@ -903,7 +936,9 @@ impl Sidebar {
                 }
                 crate::tmux::command(&["kill-session", "-t", &target.session_id])
             })(),
-            SequenceAction::First => return DispatchResult::Continue,
+            SequenceAction::First | SequenceAction::Rename => {
+                return DispatchResult::Continue;
+            }
         };
         let created_pane = match result {
             Ok(output) => output.trim().to_string(),
@@ -948,9 +983,12 @@ impl Sidebar {
         let management_enabled = self.settings.settings.tmux_management_enabled;
         if !management_enabled {
             let mutation_client = match self.overlay.as_ref() {
-                Some(Overlay::Create { target, .. } | Overlay::Confirm(target)) => {
-                    Some(target.client.clone())
-                }
+                Some(
+                    Overlay::Create { target, .. }
+                    | Overlay::RenameScope(target)
+                    | Overlay::Rename { target, .. }
+                    | Overlay::Confirm(target),
+                ) => Some(target.client.clone()),
                 _ => None,
             };
             if let Some(client) = mutation_client {
@@ -964,7 +1002,7 @@ impl Sidebar {
                 crate::app_config::KeyChord::Printable(prefix as u8),
             )
             .is_some();
-            let disabled_mutation = !management_enabled && matches!(prefix, 'c' | 'd');
+            let disabled_mutation = !management_enabled && matches!(prefix, 'c' | 'd' | 'r');
             if shadowed || disabled_mutation {
                 self.key_sequence.clear();
             }

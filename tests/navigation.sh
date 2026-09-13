@@ -123,13 +123,15 @@ env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
 normal_keys="$(tmux -S "$sock" list-keys -T agenmux)"
 search_keys="$(tmux -S "$sock" list-keys -T agenmux-search)"
 settings_keys="$(tmux -S "$sock" list-keys -T agenmux-settings-edit)"
-has_re "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" '^15\.[0-9a-f]{16}$' &&
+sequence_keys="$(tmux -S "$sock" list-keys -T agenmux-sequence)"
+has_re "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" '^16\.[0-9a-f]{16}$' &&
   has "$normal_keys" 'C-l' &&
   has "$normal_keys" " key 'sequence-67'" &&
   has "$normal_keys" " key 'last'" &&
   has "$normal_keys" " key 'search'" &&
   has "$normal_keys" " key 'settings'" &&
   has "$settings_keys" " key 'text-6A'" &&
+  has "$sequence_keys" " key 'sequence-67'" &&
   has "$search_keys" 'text-6A' || {
   echo "FAIL navigation-key-table: native setup contract missing"
   exit 1
@@ -152,6 +154,79 @@ done
   echo "FAIL navigation-key-table: sidebar did not render a selection"
   exit 1
 }
+
+printf '[tmux_management]\nenabled = true\n[keys.normal]\nup = ["K"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
+  "$BIN" config reload >/dev/null
+sleep 2.2
+normal_keys="$(tmux -S "$sock" list-keys -T agenmux)"
+sequence_keys="$(tmux -S "$sock" list-keys -T agenmux-sequence)"
+has "$normal_keys" " key 'sequence-64'" &&
+  has "$normal_keys" " key 'sequence-72'" &&
+  has "$normal_keys" 'switch-client -T agenmux-sequence' &&
+  has "$sequence_keys" " key 'sequence-77'" || {
+  echo "FAIL navigation-key-table: management sequence tables missing after reload"
+  exit 1
+}
+printf 'r' >&9
+rename_scope=''
+for _ in $(seq 1 40); do
+  rename_scope="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+  has "$rename_scope" 'rename:' && break
+  sleep 0.05
+done
+has "$rename_scope" 'rename:' || {
+  echo "FAIL navigation-key-table: r did not open rename scope chooser"
+  exit 1
+}
+rename_window="$(tmux -S "$sock" display-message -p -t "$sidebar" '#{window_name}')"
+printf 'wx\177' >&9
+rename_input=''
+for _ in $(seq 1 40); do
+  rename_input="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+  has "$rename_input" "name: ${rename_window}▏" && break
+  sleep 0.05
+done
+has "$rename_input" "name: ${rename_window}▏" || {
+  echo "FAIL navigation-key-table: inline rename Backspace did not restore current name"
+  exit 1
+}
+printf '\033' >&9
+sleep 0.1
+printf 'gG' >&9
+sleep 0.1
+invalid_sequence_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+invalid_sequence_table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
+[ "$invalid_sequence_table" = agenmux ] &&
+  ! has "$invalid_sequence_frame" 'returned 2' || {
+  echo "FAIL navigation-key-table: invalid continuation leaked an error"
+  exit 1
+}
+# Exercise the real attached client's key tables: `dw` must reach the daemon
+# and open confirmation without deleting anything.
+windows_before="$(tmux -S "$sock" list-windows -a -F '#{window_id}' | wc -l | tr -d ' ')"
+printf 'dw' >&9
+delete_prompt=''
+for _ in $(seq 1 40); do
+  delete_prompt="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+  has "$delete_prompt" 'delete window' && break
+  sleep 0.05
+done
+has "$delete_prompt" 'delete window' || {
+  echo "FAIL navigation-key-table: dw did not open window deletion confirmation"
+  exit 1
+}
+printf '\033' >&9
+sleep 0.1
+windows_after="$(tmux -S "$sock" list-windows -a -F '#{window_id}' | wc -l | tr -d ' ')"
+[ "$windows_after" = "$windows_before" ] || {
+  echo "FAIL navigation-key-table: cancelling dw deleted a window"
+  exit 1
+}
+printf '[keys.normal]\nup = ["K"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
+  "$BIN" config reload >/dev/null
+sleep 0.1
 
 table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
 initial_focus="$(tmux -S "$sock" display-message -p -c "$client" \

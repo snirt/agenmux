@@ -646,6 +646,7 @@ fn stale_click_origin_is_a_noop() {
 fn setup_preserves_root_bindings_and_installs_plugin_tables() {
     let tmux = TestTmux::new("setup");
     let bin = env!("CARGO_BIN_EXE_agenmux");
+    app_file(&tmux, "[tmux_management]\nenabled=true");
     tmux.assert_tmux(&[
         "bind-key",
         "-T",
@@ -707,6 +708,28 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
         "{normal}"
     );
     assert!(normal.contains(" key \'sequence-67\'"), "{normal}");
+    assert!(normal.contains(" key \'sequence-72\'"), "{normal}");
+    let delete_prefix = normal
+        .lines()
+        .find(|line| line.contains(" key \'sequence-64\'"))
+        .unwrap();
+    assert!(
+        delete_prefix.contains("switch-client -T agenmux-sequence"),
+        "{delete_prefix}"
+    );
+    assert!(!delete_prefix.contains("run-shell -b"), "{delete_prefix}");
+    let sequence = tmux.text(&["list-keys", "-T", "agenmux-sequence"]);
+    for code in ["63", "67", "70", "73", "77"] {
+        assert!(
+            sequence.contains(&format!("key \'sequence-{code}\'")),
+            "missing {code}: {sequence}"
+        );
+    }
+    assert!(
+        tmux.binding("agenmux-sequence", "Any")
+            .contains("key 'escape'"),
+        "{sequence}"
+    );
     assert!(normal.contains(" key \'last\'"), "{normal}");
     let search_action = normal
         .lines()
@@ -1524,6 +1547,69 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             })
             .unwrap_or_default()
     };
+
+    let original_window_name =
+        tmux.text(&["display-message", "-p", "-t", &initial, "#{window_name}"]);
+    let original_pane_title =
+        tmux.text(&["display-message", "-p", "-t", &initial, "#{pane_title}"]);
+    let original_session_name =
+        tmux.text(&["display-message", "-p", "-t", &initial, "#{session_name}"]);
+
+    send_sequence("r");
+    thread::sleep(Duration::from_millis(200));
+    let rename_scope = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
+    assert!(
+        rename_scope.contains("rename") && rename_scope.contains("p  pane"),
+        "{rename_scope:?}"
+    );
+    send_text("w");
+    thread::sleep(Duration::from_millis(150));
+    let rename_prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
+    assert!(
+        rename_prompt.contains(&format!("name: {original_window_name}")),
+        "{rename_prompt:?}"
+    );
+    send_text("x");
+    assert_success(
+        tmux.bin(&["key", "backspace"]),
+        "delete appended name character",
+    );
+    thread::sleep(Duration::from_millis(150));
+    let rename_prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
+    assert!(
+        rename_prompt.contains(&format!("name: {original_window_name}")),
+        "{rename_prompt:?}"
+    );
+    send_text("-renamed");
+    assert_success(tmux.bin(&["key", "enter"]), "rename window");
+    let renamed_window = format!("{original_window_name}-renamed");
+    tmux.wait_for(Duration::from_secs(4), || {
+        tmux.text(&["display-message", "-p", "-t", &initial, "#{window_name}"]) == renamed_window
+    });
+
+    send_sequence("r");
+    send_text("p");
+    send_text("-renamed");
+    assert_success(tmux.bin(&["key", "enter"]), "rename pane");
+    let renamed_pane = format!("{original_pane_title}-renamed");
+    tmux.wait_for(Duration::from_secs(4), || {
+        tmux.text(&["display-message", "-p", "-t", &initial, "#{pane_title}"]) == renamed_pane
+    });
+
+    send_sequence("r");
+    send_text("s");
+    thread::sleep(Duration::from_millis(150));
+    let rename_prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
+    assert!(
+        rename_prompt.contains(&format!("name: {original_session_name}")),
+        "{rename_prompt:?}"
+    );
+    send_text("-renamed");
+    assert_success(tmux.bin(&["key", "enter"]), "rename session");
+    let renamed_session = format!("{original_session_name}-renamed");
+    tmux.wait_for(Duration::from_secs(4), || {
+        tmux.text(&["display-message", "-p", "-t", &initial, "#{session_name}"]) == renamed_session
+    });
 
     let windows = tmux
         .text(&["list-windows", "-a", "-F", "#{window_id}"])

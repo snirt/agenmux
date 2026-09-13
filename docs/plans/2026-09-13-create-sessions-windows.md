@@ -1,8 +1,8 @@
 # Tmux Management Implementation Plan
 
-**Goal:** Add gated sidebar create/delete commands with shared two-key mappings, exact-client transport, safe stable-ID mutation, and live-configurable sequence behavior.
+**Goal:** Add gated sidebar create/delete/rename commands with shared mappings, exact-client transport, safe stable-ID mutation, and live-configurable sequence behavior.
 
-**Architecture:** One built-in sequence table drives dispatch, prefix hints, setup bindings, and help. `[tmux_management]` gates every mutation and controls delete confirmation. Sequence packets carry invoking client identity through framed FIFO transport. Create/delete operations use tmux-native commands with stable IDs and existing control-mode refresh paths.
+**Architecture:** One built-in mapping drives dispatch, prefix hints, setup bindings, and help. `[tmux_management]` gates every mutation and controls delete confirmation. Sequence packets carry invoking client identity through framed FIFO transport. Create/delete/rename operations use tmux-native commands with stable IDs and existing control-mode refresh paths.
 
 **Tech Stack:** Rust, tmux, TOML/Serde, existing unit/plugin/navigation tests.
 
@@ -11,14 +11,15 @@
 - `[tmux_management] enabled = false` by default; `confirm_delete = true` by default.
 - `[keys] sequence_timeout_ms = 1000` by default and must be positive.
 - All fields are typed, validated, shown in effective config/example/docs, and live-reloaded.
-- Disabled mutations are absent from prefix hints/help, cannot execute, and disabling clears pending `c`/`d`.
-- Shared built-ins: `gg` first, `cc` create window, `cs` create session, `dp` delete pane, `dw` delete window, `ds` delete session.
-- First `c`/`d`/`g` shows valid continuations from same mapping used by dispatch and help.
+- Disabled mutations are absent from prefix hints/help, cannot execute, and disabling clears pending `c`/`d`/`r`.
+- Shared built-ins: `gg` first, `cc` create window, `cs` create session, `dp` delete pane, `dw` delete window, `ds` delete session, and `r` rename.
+- First `c`/`d`/`g` shows valid continuations from the same mapping used by dispatch and help; `r` opens a pane/window/session scope chooser.
 - Escape, invalid continuation, or timeout clears pending state/hint; timeout expires without another key.
 - Create prompts for optional name. Enter accepts; blank lets tmux choose; Escape cancels.
 - Create inherits selected pane cwd, revalidates stable IDs, uses `new-window`/`new-session`, switches invoking client to created first pane, and refreshes surviving sidebars.
 - Delete revalidates stable pane/window/session IDs and uses `kill-pane`/`kill-window`/`kill-session`; stale targets error and refresh without fallback.
 - With confirmation enabled, overlay displays exact resource type and identity; only explicit `y` confirms. Enter, `n`, Escape, or any other key cancels.
+- Rename preloads the current pane/window/session name for inline typing and Backspace edits, revalidates the stable ID, and uses `select-pane -T`/`rename-window`/`rename-session`; control-only or empty names cancel and native tmux errors remain nonfatal.
 - With confirmation disabled, completed delete sequence executes immediately.
 - Sidebar self-removal is safe; surviving views refresh and preserve nearest valid selection.
 - Pane creation/splitting remains excluded.

@@ -129,6 +129,10 @@ pub(crate) enum SequenceAction {
     DeletePane,
     DeleteWindow,
     DeleteSession,
+    Rename,
+    RenamePane,
+    RenameWindow,
+    RenameSession,
 }
 
 #[derive(Clone, Copy)]
@@ -174,6 +178,12 @@ pub(crate) const BUILTIN_SEQUENCES: &[BuiltinSequence] = &[
         sequence: "ds",
         action: SequenceAction::DeleteSession,
         label: "delete session",
+        mutation: true,
+    },
+    BuiltinSequence {
+        sequence: "r",
+        action: SequenceAction::Rename,
+        label: "rename pane/window/session",
         mutation: true,
     },
 ];
@@ -799,6 +809,15 @@ mod tests {
                 true
             ),
             SequenceResult::Match(SequenceAction::CreateWindow, Some(client)) if client == "client-a"
+        ));
+
+        assert!(matches!(
+            sequence.push('r', Some("client-a".into()), start, timeout, true),
+            SequenceResult::Match(SequenceAction::Rename, Some(client)) if client == "client-a"
+        ));
+        assert!(matches!(
+            sequence.push('r', None, start, timeout, false),
+            SequenceResult::Miss
         ));
 
         assert!(matches!(
