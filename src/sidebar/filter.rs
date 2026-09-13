@@ -312,7 +312,7 @@ impl Sidebar {
             Key::First
             | Key::Last
             | Key::Select(_)
-            | Key::Sequence(_)
+            | Key::Sequence(_, _)
             | Key::Search
             | Key::CycleState
             | Key::Help
@@ -358,6 +358,7 @@ mod tests {
         assert_eq!(filtered_indices(&rows, "api", None), vec![0, 1]);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn inventory_pane(
         session_id: &str,
         session_name: &str,

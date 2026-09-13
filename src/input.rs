@@ -2,8 +2,6 @@ use crate::app_config::{action_for, Action, KeyChord, KeyMode, Keymap};
 use crate::tmux;
 use std::time::{Duration, Instant};
 
-const KEY_SEQUENCE_TIMEOUT: Duration = Duration::from_secs(1);
-
 pub(crate) struct RawMode(Option<libc::termios>);
 
 impl RawMode {
@@ -102,7 +100,7 @@ fn read_byte(fd: libc::c_int) -> Option<u8> {
 pub(crate) enum Key {
     First,
     Last,
-    Sequence(char),
+    Sequence(char, Option<String>),
     Up,
     Select(usize),
     Down,
@@ -123,15 +121,81 @@ pub(crate) enum Key {
     Other,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SequenceAction {
+    First,
+    CreateWindow,
+    CreateSession,
+    DeletePane,
+    DeleteWindow,
+    DeleteSession,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct BuiltinSequence {
+    pub sequence: &'static str,
+    pub action: SequenceAction,
+    pub label: &'static str,
+    mutation: bool,
+}
+
+pub(crate) const BUILTIN_SEQUENCES: &[BuiltinSequence] = &[
+    BuiltinSequence {
+        sequence: "gg",
+        action: SequenceAction::First,
+        label: "first visible pane",
+        mutation: false,
+    },
+    BuiltinSequence {
+        sequence: "cc",
+        action: SequenceAction::CreateWindow,
+        label: "create window",
+        mutation: true,
+    },
+    BuiltinSequence {
+        sequence: "cs",
+        action: SequenceAction::CreateSession,
+        label: "create session",
+        mutation: true,
+    },
+    BuiltinSequence {
+        sequence: "dp",
+        action: SequenceAction::DeletePane,
+        label: "delete pane",
+        mutation: true,
+    },
+    BuiltinSequence {
+        sequence: "dw",
+        action: SequenceAction::DeleteWindow,
+        label: "delete window",
+        mutation: true,
+    },
+    BuiltinSequence {
+        sequence: "ds",
+        action: SequenceAction::DeleteSession,
+        label: "delete session",
+        mutation: true,
+    },
+];
+
+pub(crate) fn available_sequences(
+    management_enabled: bool,
+) -> impl Iterator<Item = &'static BuiltinSequence> {
+    BUILTIN_SEQUENCES
+        .iter()
+        .filter(move |binding| management_enabled || !binding.mutation)
+}
+
 #[derive(Default)]
 pub(crate) struct KeySequence {
     pending: String,
     last: Option<Instant>,
+    client: Option<String>,
 }
 
 pub(crate) enum SequenceResult {
     Pending,
-    Match(Key),
+    Match(SequenceAction, Option<String>),
     Miss,
 }
 
@@ -139,27 +203,33 @@ impl KeySequence {
     pub(crate) fn push(
         &mut self,
         key: char,
+        client: Option<String>,
         now: Instant,
-        bindings: &[(&str, Key)],
+        timeout: Duration,
+        management_enabled: bool,
     ) -> SequenceResult {
-        if self
-            .last
-            .is_some_and(|last| now.duration_since(last) > KEY_SEQUENCE_TIMEOUT)
+        if !self.pending.is_empty()
+            && self.client.is_some()
+            && client.is_some()
+            && self.client != client
         {
             self.clear();
         }
+        self.expire(now, timeout);
         self.pending.push(key);
         self.last = Some(now);
-        if let Some((_, action)) = bindings
-            .iter()
-            .find(|(sequence, _)| *sequence == self.pending)
+        if client.is_some() {
+            self.client = client;
+        }
+        if let Some(binding) =
+            available_sequences(management_enabled).find(|binding| binding.sequence == self.pending)
         {
-            let action = action.clone();
+            let action = binding.action;
+            let client = self.client.take();
             self.clear();
-            SequenceResult::Match(action)
-        } else if bindings
-            .iter()
-            .any(|(sequence, _)| sequence.starts_with(&self.pending))
+            SequenceResult::Match(action, client)
+        } else if available_sequences(management_enabled)
+            .any(|binding| binding.sequence.starts_with(&self.pending))
         {
             SequenceResult::Pending
         } else {
@@ -168,9 +238,44 @@ impl KeySequence {
         }
     }
 
+    pub(crate) fn continuations(&self, management_enabled: bool) -> Vec<(char, &'static str)> {
+        if self.pending.is_empty() {
+            return Vec::new();
+        }
+        available_sequences(management_enabled)
+            .filter_map(|binding| {
+                binding
+                    .sequence
+                    .strip_prefix(&self.pending)?
+                    .chars()
+                    .next()
+                    .map(|key| (key, binding.label))
+            })
+            .collect()
+    }
+
+    pub(crate) fn deadline(&self, timeout: Duration) -> Option<Instant> {
+        self.last.map(|last| last + timeout)
+    }
+
+    pub(crate) fn expire(&mut self, now: Instant, timeout: Duration) -> bool {
+        let expired = self
+            .last
+            .is_some_and(|last| now.duration_since(last) >= timeout);
+        if expired {
+            self.clear();
+        }
+        expired
+    }
+
+    pub(crate) fn pending_prefix(&self) -> Option<char> {
+        self.pending.chars().next()
+    }
+
     pub(crate) fn clear(&mut self) {
         self.pending.clear();
         self.last = None;
+        self.client = None;
     }
 }
 
@@ -303,12 +408,35 @@ pub(crate) fn read_key(fd: libc::c_int, keys: &Keymap) -> Key {
             }
             return Key::Select(u32::from_be_bytes(index) as usize);
         }
-        // Multi-key sequence such as `gg`, delivered as one packet.
+        // Multi-key sequence, legacy packet without client identity.
         0x06 => {
             return next()
                 .filter(|b| (0x20..=0x7e).contains(b))
-                .map(|b| Key::Sequence(char::from(b)))
+                .map(|b| Key::Sequence(char::from(b), None))
                 .unwrap_or(Key::Other)
+        }
+        // Framed sequence packet: key, u16 length, invoking client UTF-8.
+        0x07 => {
+            let Some(key) = next().filter(|b| (0x20..=0x7e).contains(b)) else {
+                return Key::Other;
+            };
+            let (Some(high), Some(low)) = (next(), next()) else {
+                return Key::Other;
+            };
+            let len = u16::from_be_bytes([high, low]) as usize;
+            if len == 0 || len > 255 {
+                return Key::Other;
+            }
+            let mut client = Vec::with_capacity(len);
+            for _ in 0..len {
+                let Some(byte) = next() else {
+                    return Key::Other;
+                };
+                client.push(byte);
+            }
+            return String::from_utf8(client)
+                .map(|client| Key::Sequence(char::from(key), Some(client)))
+                .unwrap_or(Key::Other);
         }
         _ => {}
     }
@@ -317,7 +445,12 @@ pub(crate) fn read_key(fd: libc::c_int, keys: &Keymap) -> Key {
         .and_then(|chord| action_key(keys, chord))
         .unwrap_or(match b {
             b'G' => Key::Last,
-            b'g' => Key::Sequence('g'),
+            byte if BUILTIN_SEQUENCES
+                .iter()
+                .any(|binding| binding.sequence.as_bytes()[0] == byte) =>
+            {
+                Key::Sequence(char::from(byte), None)
+            }
             0x03 | 0x04 => Key::Quit, // Ctrl-C, Ctrl-D: emergency exit
             _ => Key::Other,
         })
@@ -368,7 +501,7 @@ pub(crate) fn read_search_key(fd: libc::c_int, keys: &Keymap) -> Key {
 /// Deliver one key-table action to the daemon without waiting for a FIFO
 /// reader. Each invocation is intentionally short-lived; the daemon remains
 /// the only persistent agenmux process.
-pub fn send_key(name: &str) -> i32 {
+pub fn send_key(name: &str, client: Option<&str>) -> i32 {
     let bytes: Vec<u8> = if let Some(hex) = name.strip_prefix("text-") {
         let Ok(byte) = u8::from_str_radix(hex, 16) else {
             return 2;
@@ -384,7 +517,16 @@ pub fn send_key(name: &str) -> i32 {
         if !(0x20..=0x7e).contains(&byte) {
             return 2;
         }
-        vec![0x06, byte]
+        if let Some(client) = client {
+            if client.is_empty() || client.len() > 255 {
+                return 2;
+            }
+            let mut packet = vec![0x07, byte, 0, client.len() as u8];
+            packet.extend(client.as_bytes());
+            packet
+        } else {
+            vec![0x06, byte]
+        }
     } else {
         match name {
             "last" => b"G".to_vec(),
@@ -542,10 +684,13 @@ pub fn wheel(pane: &str, direction: Direction) -> i32 {
     if !panes.iter().any(|id| id == pane) {
         return 0;
     }
-    send_key(match direction {
-        Direction::Up => "wheel-up",
-        Direction::Down => "wheel-down",
-    })
+    send_key(
+        match direction {
+            Direction::Up => "wheel-up",
+            Direction::Down => "wheel-down",
+        },
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -575,9 +720,15 @@ mod tests {
         feed(b"j");
         assert!(matches!(read_key(fds[0], &keys), Key::Down));
         feed(b"g");
-        assert!(matches!(read_key(fds[0], &keys), Key::Sequence('g')));
+        assert!(matches!(read_key(fds[0], &keys), Key::Sequence('g', None)));
         feed(&[0x06, b'g']);
-        assert!(matches!(read_key(fds[0], &keys), Key::Sequence('g')));
+        assert!(matches!(read_key(fds[0], &keys), Key::Sequence('g', None)));
+        feed(&[0x07, b'c', 0, 7]);
+        feed(b"client1");
+        assert!(matches!(
+            read_key(fds[0], &keys),
+            Key::Sequence('c', Some(client)) if client == "client1"
+        ));
         feed(b"G");
         assert!(matches!(read_key(fds[0], &keys), Key::Last));
         feed(&[0x01]);
@@ -626,46 +777,72 @@ mod tests {
     }
 
     #[test]
-    fn timed_key_sequences_support_arbitrary_bindings_and_expiry() {
-        let bindings = [("gg", Key::First), ("gd", Key::Last)];
+    fn built_in_sequences_share_dispatch_continuations_and_expiry() {
         let start = Instant::now();
+        let timeout = Duration::from_millis(1000);
         let mut sequence = KeySequence::default();
 
         assert!(matches!(
-            sequence.push('g', start, &bindings),
+            sequence.push('c', Some("client-a".into()), start, timeout, true),
             SequenceResult::Pending
         ));
+        assert_eq!(
+            sequence.continuations(true),
+            vec![('c', "create window"), ('s', "create session")]
+        );
         assert!(matches!(
-            sequence.push('d', start + Duration::from_millis(10), &bindings),
-            SequenceResult::Match(Key::Last)
+            sequence.push(
+                'c',
+                Some("client-a".into()),
+                start + Duration::from_millis(10),
+                timeout,
+                true
+            ),
+            SequenceResult::Match(SequenceAction::CreateWindow, Some(client)) if client == "client-a"
         ));
+
         assert!(matches!(
-            sequence.push('g', start + Duration::from_millis(20), &bindings),
-            SequenceResult::Pending
-        ));
-        assert!(matches!(
-            sequence.push('x', start + Duration::from_millis(30), &bindings),
+            sequence.push('d', None, start, timeout, false),
             SequenceResult::Miss
         ));
         assert!(matches!(
-            sequence.push('g', start + Duration::from_millis(40), &bindings),
+            sequence.push('g', None, start, timeout, false),
+            SequenceResult::Pending
+        ));
+        assert_eq!(
+            sequence.continuations(false),
+            vec![('g', "first visible pane")]
+        );
+        assert!(sequence.expire(start + timeout + Duration::from_millis(1), timeout));
+        assert!(sequence.continuations(true).is_empty());
+        assert!(matches!(
+            sequence.push('g', None, start + timeout, timeout, false),
+            SequenceResult::Pending
+        ));
+    }
+
+    #[test]
+    fn sequence_continuations_do_not_cross_clients() {
+        let start = Instant::now();
+        let timeout = Duration::from_secs(1);
+        let mut sequence = KeySequence::default();
+
+        assert!(matches!(
+            sequence.push('c', Some("client-a".into()), start, timeout, true),
             SequenceResult::Pending
         ));
         assert!(matches!(
-            sequence.push(
-                'g',
-                start + KEY_SEQUENCE_TIMEOUT + Duration::from_millis(41),
-                &bindings
-            ),
+            sequence.push('s', Some("client-b".into()), start, timeout, true),
+            SequenceResult::Miss
+        ));
+        assert!(matches!(
+            sequence.push('c', Some("client-b".into()), start, timeout, true),
             SequenceResult::Pending
         ));
         assert!(matches!(
-            sequence.push(
-                'g',
-                start + KEY_SEQUENCE_TIMEOUT + Duration::from_millis(50),
-                &bindings
-            ),
-            SequenceResult::Match(Key::First)
+            sequence.push('c', Some("client-b".into()), start, timeout, true),
+            SequenceResult::Match(SequenceAction::CreateWindow, Some(client))
+                if client == "client-b"
         ));
     }
 

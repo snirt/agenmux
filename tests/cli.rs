@@ -75,10 +75,24 @@ fn config_help_lists_every_configurable_key_without_a_server() {
         {
             assert!(text.contains(key), "help omits {key}");
         }
-        for section in ["[display]", "[behavior]", "[theme]", "[keys.normal]", "[keys.search]"] {
+        for section in [
+            "[display]",
+            "[behavior]",
+            "[tmux_management]",
+            "[theme]",
+            "[keys]",
+            "[keys.normal]",
+            "[keys.search]",
+        ] {
             assert!(text.contains(section), "help omits {section}");
         }
-        assert!(text.contains("config reload"), "help omits the reload command");
+        assert!(
+            text.contains("config reload"),
+            "help omits the reload command"
+        );
+        assert!(text.contains("sequence_timeout_ms"));
+        assert!(text.contains("positive integer"));
+        assert!(text.contains("(1000)"));
     }
 }
 
@@ -97,7 +111,10 @@ fn config_reload_needs_a_server_and_refuses_an_invalid_file() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid configuration schema"), "{stderr}");
-    assert!(!stderr.contains("C-a"), "diagnostic echoed the value: {stderr}");
+    assert!(
+        !stderr.contains("C-a"),
+        "diagnostic echoed the value: {stderr}"
+    );
 }
 
 #[test]

@@ -182,8 +182,7 @@ exec "$PANE_LOCK_TEST_TMUX" "$@"
             child.0.as_mut().unwrap().try_wait().unwrap().is_none(),
             "holder exited before entering critical section"
         );
-        std::fs::read_to_string(&marker)
-            .is_ok_and(|value| value.trim().parse::<u32>().is_ok())
+        std::fs::read_to_string(&marker).is_ok_and(|value| value.trim().parse::<u32>().is_ok())
     });
     (child, marker)
 }

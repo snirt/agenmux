@@ -283,6 +283,31 @@ each chord to a fixed internal action, never to a command from the file.
 `agenmux config reload` reinstalls the tables and updates the hints of running
 views; the next toggle does the same for the tables on its own.
 
+Tmux mutations are opt-in. With management enabled, the built-in sequences are
+`cc` (create a window in the selected pane's session), `cs` (create a session),
+`dp` (delete the selected pane), `dw` (delete its window), and `ds` (delete its
+session). `gg` remains available regardless of this setting. Create prompts accept
+an optional name (leave it blank for tmux's default), inherit the selected pane's
+working directory, and move only the invoking client to the new target. Delete
+prompts name the exact stable tmux ID and cancel on Enter, `n`, Escape, or any
+input other than `y`. Set `confirm_delete = false` only if immediate deletion is
+intentional.
+
+```toml
+[tmux_management]
+enabled = false       # required for every create/delete sequence
+confirm_delete = true
+
+[keys]
+sequence_timeout_ms = 1000 # positive; applies live to gg/cc/cs/dp/dw/ds
+```
+
+Disabled mutation sequences are not installed, shown in continuation hints, or
+listed in `?` help, and direct legacy key packets cannot bypass the gate. Reloading
+a disabled setting also clears a pending `c` or `d`. Every operation captures and
+revalidates tmux pane/window/session IDs before mutation; a stale target reports an
+error and refreshes instead of falling back to another resource. Pane splitting is
+not part of tmux management.
 Precedence per field: explicit CLI mode > present canonical `@agenmux-*`
 option > present legacy `@agents-mon-*` option > file > defaults. Every supplied
 layer is validated, even when shadowed. Legacy behavioral options are **not**

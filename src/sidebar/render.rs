@@ -225,6 +225,7 @@ impl Sidebar {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn inventory_lines(
         &self,
         cols: usize,
@@ -413,7 +414,17 @@ impl Sidebar {
             .collect();
         let title_len = title.chars().count();
         let nav = self.nav_label(true, false);
-        let hint = if self.search_focused {
+        let sequence_hint = join(
+            &self
+                .key_sequence
+                .continuations(self.settings.settings.tmux_management_enabled)
+                .into_iter()
+                .map(|(key, label)| format!("{key} {label}"))
+                .collect::<Vec<_>>(),
+        );
+        let hint = if !sequence_hint.is_empty() {
+            sequence_hint
+        } else if self.search_focused {
             join(&[
                 self.hint(&self.search_keys, Action::Accept, "nav"),
                 self.hint(&self.search_keys, Action::Clear, "clear"),
@@ -606,6 +617,7 @@ impl Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_config::KeyChord;
     use crate::pane_writers::PaneWriters;
     use crate::scan::{PaneMeta, PaneRow};
     use crate::tmux::Tmux;
@@ -614,7 +626,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::super::filter::StateFilter;
-    use super::super::{new_sidebar, Daemon, Overlay};
+    use super::super::{new_sidebar, Daemon, MutationTarget, Overlay};
+    use crate::input::SequenceAction;
 
     fn row(pane: &str) -> PaneRow {
         PaneRow {
@@ -627,6 +640,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn pane(
         session_id: &str,
         session_name: &str,
@@ -1035,10 +1049,12 @@ mod tests {
         ));
 
         let fixture = std::fs::read_to_string("tests/fixtures/sidebar/dark.frames").unwrap();
-        assert!(
-            fixture.starts_with(&false_frames),
-            "false-mode fixture prefix changed"
-        );
+        if std::env::var_os("AGENMUX_UPDATE_FIXTURES").is_none() {
+            assert!(
+                fixture.starts_with(&false_frames),
+                "false-mode fixture prefix changed"
+            );
+        }
         if std::env::var_os("AGENMUX_UPDATE_FIXTURES").is_some() {
             std::fs::write("tests/fixtures/sidebar/dark.frames", &frames).unwrap();
         }
@@ -1168,6 +1184,59 @@ mod tests {
         // An unbound action leaves no row behind rather than a stale default.
         assert!(!help.contains("close sidebar"), "{help}");
         assert!(help.contains("jump to agent"), "{help}");
+        assert!(!help.contains("cc"), "{help}");
+        sb.settings.settings.tmux_management_enabled = true;
+        sb.last_frame.clear();
+        sb.render(true);
+        let help = sb.last_frame.clone();
+        for entry in ["gg", "cc", "cs", "dp", "dw", "ds"] {
+            assert!(help.contains(entry), "missing {entry}: {help}");
+        }
+        sb.normal_keys
+            .get_mut(&Action::Down)
+            .unwrap()
+            .push(KeyChord::Printable(b'c'));
+        sb.last_frame.clear();
+        sb.render(true);
+        let overridden_help = sb.last_frame.clone();
+        assert!(!overridden_help.contains("cc"), "{overridden_help}");
+        assert!(!overridden_help.contains("cs"), "{overridden_help}");
+        sb.normal_keys.get_mut(&Action::Down).unwrap().pop();
+        sb.overlay = None;
+        sb.key_sequence
+            .push('c', None, Instant::now(), Duration::from_secs(1), true);
+        sb.render(true);
+        assert!(
+            sb.last_frame.contains("c create window"),
+            "{}",
+            sb.last_frame
+        );
+        assert!(
+            sb.last_frame.contains("s create session"),
+            "{}",
+            sb.last_frame
+        );
+        sb.overlay = Some(Overlay::Create {
+            target: MutationTarget {
+                action: SequenceAction::CreateWindow,
+                pane_id: "%7".into(),
+                window_id: "@4".into(),
+                session_id: "$2".into(),
+                cwd: "/tmp/work".into(),
+                client: "client-a".into(),
+            },
+            name: "dev".into(),
+        });
+        sb.render(true);
+        assert!(sb.last_frame.contains("create window"), "{}", sb.last_frame);
+        assert!(
+            sb.last_frame.contains("name (optional): dev"),
+            "{}",
+            sb.last_frame
+        );
+        sb.overlay = None;
+        sb.key_sequence.clear();
+        sb.overlay = Some(Overlay::Help);
         sb.settings.settings.show_all_panes = true;
         sb.render(true);
         assert!(sb.last_frame.contains("jump to pane"), "{}", sb.last_frame);
@@ -1403,6 +1472,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::option_env_unwrap)]
     fn app_title_identifies_dev_and_release_builds() {
         let expected = if cfg!(debug_assertions) {
             let timestamp = option_env!("AGENMUX_BUILD_TIMESTAMP").expect("debug timestamp");

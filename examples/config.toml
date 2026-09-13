@@ -16,12 +16,19 @@ popup_height = "auto" # "auto" or cells
 notifications = true
 # hide_windows = "agents*" # filter the prefix+w picker; omitted leaves it alone
 
+[tmux_management]
+enabled = false
+confirm_delete = true
+
 [theme]
 base = "dark"         # dark | light | terminal
 [theme.colors]        # semantic overrides: "default", 0..255, or "#RRGGBB"
 # working_bg = "#fff0cc"
 # pane_bg = 236       # selected ordinary pane row
 # header_bg = "default"
+
+[keys]
+sequence_timeout_ms = 1000 # positive integer milliseconds
 
 [keys.normal]         # each list replaces the default list; [] unbinds
 down = ["j", "Down"]

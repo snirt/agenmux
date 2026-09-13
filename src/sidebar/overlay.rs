@@ -1,17 +1,25 @@
 use crate::app_config::{action_for, Action, KeyChord};
-use crate::input::{term_size, Key};
+use crate::input::{available_sequences, term_size, Key, SequenceAction};
 use crate::release;
 use crate::tmux::command_spawn;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::render::{app_title, clip_frame, cursor_mark, join};
 use super::ui::{bar, Action as UiAction, Editor, Label, Select, SelectedRow, TextEdit, TopBar};
-use super::{Sidebar, E};
+use super::{MutationTarget, Sidebar, E};
 
 pub(super) enum Overlay {
     Help,
-    Versions { sel: usize, chosen: Option<String> },
+    Versions {
+        sel: usize,
+        chosen: Option<String>,
+    },
     Settings(Settings),
+    Create {
+        target: MutationTarget,
+        name: String,
+    },
+    Confirm(MutationTarget),
 }
 
 pub(super) struct Settings {
@@ -88,7 +96,7 @@ pub(super) fn current_tag() -> String {
 /// None unless it is strictly newer than what is running: a checkout ahead of
 /// every release (master, or a just-bumped manifest) must not be told to
 /// "update" to the older tag behind it.
-pub(super) fn update_available(plugin_dir: &PathBuf) -> Option<String> {
+pub(super) fn update_available(plugin_dir: &Path) -> Option<String> {
     let release_dir = plugin_dir.join("target/release");
     let latest = std::fs::read_to_string(release_dir.join(".agenmux-latest"))
         .or_else(|_| std::fs::read_to_string(release_dir.join(".agents-mon-latest")))
@@ -120,7 +128,7 @@ fn newer_than(a: &str, b: &str) -> bool {
 }
 
 /// Releases install-bin.sh saw on the remote, newest first.
-fn known_tags(plugin_dir: &PathBuf) -> Vec<String> {
+fn known_tags(plugin_dir: &Path) -> Vec<String> {
     let release_dir = plugin_dir.join("target/release");
     let raw = std::fs::read_to_string(release_dir.join(".agenmux-tags"))
         .or_else(|_| std::fs::read_to_string(release_dir.join(".agents-mon-tags")))
@@ -219,6 +227,8 @@ fn setting_group(name: &str) -> &'static str {
         "Display"
     } else if name.starts_with("behavior.") {
         "Behavior"
+    } else if name.starts_with("tmux_management.") {
+        "Tmux management"
     } else if name == "theme.base" {
         "Theme"
     } else if name.starts_with("theme.colors.") {
@@ -580,6 +590,12 @@ impl Sidebar {
                 ] {
                     keys.push((self.labels(&self.normal_keys, action, false), what));
                 }
+                for binding in available_sequences(self.settings.settings.tmux_management_enabled) {
+                    let prefix = binding.sequence.as_bytes()[0];
+                    if action_for(&self.normal_keys, KeyChord::Printable(prefix)).is_none() {
+                        keys.push((binding.sequence.into(), binding.label.into()));
+                    }
+                }
                 let keys: String = keys
                     .iter()
                     .filter(|(label, _)| !label.is_empty())
@@ -649,6 +665,34 @@ impl Sidebar {
                     .collect();
                 text
             }
+            Some(Overlay::Create { target, name }) => {
+                let action = match target.action {
+                    SequenceAction::CreateWindow => "create window",
+                    SequenceAction::CreateSession => "create session",
+                    _ => return,
+                };
+                let name: String = name.chars().filter(|c| !c.is_control()).collect();
+                let hint = join(&[
+                    self.hint(&self.search_keys, Action::Accept, "create"),
+                    self.hint(&self.search_keys, Action::Cancel, "cancel"),
+                ]);
+                format!(
+                    "{E}[2J{E}[H{header}{title} — {action}{E}[0m\n\n\
+                     name (optional): {name}\n\n{muted}{hint}{E}[0m"
+                )
+            }
+            Some(Overlay::Confirm(target)) => {
+                let (kind, identity) = match target.action {
+                    SequenceAction::DeletePane => ("pane", &target.pane_id),
+                    SequenceAction::DeleteWindow => ("window", &target.window_id),
+                    SequenceAction::DeleteSession => ("session", &target.session_id),
+                    _ => return,
+                };
+                format!(
+                    "{E}[2J{E}[H{header}{title} — delete {kind}{E}[0m\n\n\
+                     delete {kind} {identity}? [y/N]\n\n{muted}y delete · Enter/n/Esc cancel{E}[0m"
+                )
+            }
             None => return,
         };
         let header_bg = top_bar.background();
@@ -679,39 +723,70 @@ impl Sidebar {
         self.emit(text, &click_rows, force);
     }
 
-    pub(super) fn overlay_key(&mut self, key: Key) {
+    pub(super) fn overlay_key(&mut self, key: Key) -> super::DispatchResult {
         if matches!(self.overlay, Some(Overlay::Settings(_))) {
             self.settings_key(key);
-            return;
+            return super::DispatchResult::Continue;
         }
-        if matches!(self.overlay, Some(Overlay::Help)) {
-            self.close_overlay();
-            return;
-        }
-        let tags = known_tags(&self.plugin_dir);
-        let cur = current_tag();
-        let mut switch = None;
-        let mut close = false;
-        if let Some(Overlay::Versions { sel, chosen }) = &mut self.overlay {
-            *sel = picker_sel(&tags, &cur, chosen.as_deref(), *sel);
-            match key {
-                Key::Down if !tags.is_empty() => *sel = (*sel + 1).min(tags.len() - 1),
-                Key::Up => *sel = sel.saturating_sub(1),
-                Key::Jump => {
-                    switch = tags.get(*sel).filter(|t| **t != cur).cloned();
-                    close = true;
+        let Some(overlay) = self.overlay.take() else {
+            return super::DispatchResult::Continue;
+        };
+        match overlay {
+            Overlay::Settings(_) => unreachable!("settings keys are routed above"),
+            Overlay::Help => self.close_overlay(),
+            Overlay::Versions {
+                mut sel,
+                mut chosen,
+            } => {
+                let tags = known_tags(&self.plugin_dir);
+                let cur = current_tag();
+                sel = picker_sel(&tags, &cur, chosen.as_deref(), sel);
+                match key {
+                    Key::Down if !tags.is_empty() => sel = (sel + 1).min(tags.len() - 1),
+                    Key::Up => sel = sel.saturating_sub(1),
+                    Key::Jump => {
+                        if let Some(tag) = tags.get(sel).filter(|tag| **tag != cur) {
+                            self.switch_version(tag);
+                        }
+                        self.close_overlay();
+                        return super::DispatchResult::Continue;
+                    }
+                    Key::Quit | Key::Close => {
+                        self.close_overlay();
+                        return super::DispatchResult::Continue;
+                    }
+                    _ => {}
                 }
-                Key::Quit | Key::Close => close = true,
-                _ => {}
+                chosen = tags.get(sel).cloned();
+                self.overlay = Some(Overlay::Versions { sel, chosen });
             }
-            *chosen = tags.get(*sel).cloned();
+            Overlay::Create { target, mut name } => match key {
+                Key::Text(text) => {
+                    name.extend(text.chars().filter(|c| !c.is_control()));
+                    name.truncate(128);
+                    self.overlay = Some(Overlay::Create { target, name });
+                }
+                Key::Backspace => {
+                    name.pop();
+                    self.overlay = Some(Overlay::Create { target, name });
+                }
+                Key::Jump => return self.execute_mutation(&target, &name),
+                Key::AllStates | Key::ClearSearch | Key::Quit | Key::Close => {
+                    self.restore_mutation_input(&target.client);
+                }
+                _ => self.overlay = Some(Overlay::Create { target, name }),
+            },
+            Overlay::Confirm(target) => {
+                let confirmed =
+                    matches!(key, Key::Text(ref text) if text.eq_ignore_ascii_case("y"));
+                if confirmed {
+                    return self.execute_mutation(&target, "");
+                }
+                self.restore_mutation_input(&target.client);
+            }
         }
-        if let Some(tag) = switch {
-            self.switch_version(&tag);
-            self.close_overlay();
-        } else if close {
-            self.close_overlay();
-        }
+        self.last_frame.clear();
+        super::DispatchResult::Continue
     }
 
     fn close_overlay(&mut self) {
@@ -1383,7 +1458,7 @@ mod tests {
             &crate::app_config::Palette::default(),
             true,
             50,
-            18,
+            19,
         );
 
         assert!(frame.contains("Display"), "{frame}");

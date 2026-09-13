@@ -85,7 +85,7 @@ impl ScanSchedule {
 pub use crate::input::send_key;
 use crate::input::{
     key_pending, poll_inputs, protocol_keys, read_key, read_search_key, settings_keys, Key,
-    KeySequence, RawMode, SequenceResult,
+    KeySequence, RawMode, SequenceAction, SequenceResult,
 };
 
 mod daemon;
@@ -130,6 +130,15 @@ struct PaneOccurrence {
     pane: String,
 }
 
+#[derive(Clone, Debug)]
+struct MutationTarget {
+    action: SequenceAction,
+    pane_id: String,
+    window_id: String,
+    session_id: String,
+    cwd: String,
+    client: String,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VisiblePane {
     Agent(usize),
@@ -166,6 +175,7 @@ pub struct Sidebar {
     state_filter: Option<StateFilter>,
     search_focused: bool,
     key_sequence: KeySequence,
+    refresh_requested: bool,
     sel: usize,    // 1-based index into visible, like the bash script
     scroll: usize, // first visible list line
     follow_selection: bool,
@@ -330,6 +340,7 @@ fn new_sidebar(
         state_filter: None,
         search_focused: false,
         key_sequence: KeySequence::default(),
+        refresh_requested: false,
         sel: 1,
         scroll: 0,
         sel_pane: String::new(),
@@ -421,6 +432,11 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         // Keys outrank scans: a scan blocks the loop for 30-200ms, and under
         // key repeat that queued presses which then replayed after release.
         let key_waiting = key_pending(key_fd);
+        let sequence_timeout = Duration::from_millis(sb.settings.settings.sequence_timeout_ms);
+        if sb.key_sequence.expire(now, sequence_timeout) {
+            sb.last_frame.clear();
+            sb.render(false);
+        }
         if let Some(periodic) = scans
             .due(now, sb.screens.next_expiry())
             .filter(|_| !key_waiting)
@@ -499,6 +515,9 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         if animating {
             wake = wake.min(next_tick.saturating_duration_since(now));
         }
+        if let Some(deadline) = sb.key_sequence.deadline(sequence_timeout) {
+            wake = wake.min(deadline.saturating_duration_since(now));
+        }
         let (key_ready, pipe_ready) = poll_inputs(key_fd, sb.tmux.fd(), sb.tmux.buffered(), wake);
         if pipe_ready {
             // focus notification (%window-pane-changed etc.) — rescan now so
@@ -521,7 +540,13 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             let mut drained = 0;
             loop {
                 let editing_settings = sb.settings_editing();
-                let mode = if sb.search_focused || editing_settings {
+                let text_input = sb.search_focused
+                    || editing_settings
+                    || matches!(
+                        sb.overlay,
+                        Some(Overlay::Create { .. } | Overlay::Confirm(_))
+                    );
+                let mode = if text_input {
                     KeyMode::Search
                 } else {
                     KeyMode::Normal
@@ -530,12 +555,12 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                     settings_keys()
                 } else if sb.daemon.is_some() {
                     protocol_keys(mode)
-                } else if sb.search_focused {
+                } else if text_input {
                     &sb.search_keys
                 } else {
                     &sb.normal_keys
                 };
-                let key = if (sb.search_focused || editing_settings) && sb.daemon.is_none() {
+                let key = if text_input && sb.daemon.is_none() {
                     read_search_key(key_fd, keys)
                 } else {
                     read_key(key_fd, keys)
@@ -549,6 +574,9 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 if drained >= 64 || !key_pending(key_fd) {
                     break;
                 }
+            }
+            if std::mem::take(&mut sb.refresh_requested) {
+                scans.request_immediate();
             }
             sb.render(false);
         }
@@ -576,21 +604,33 @@ impl Sidebar {
     /// Route every logical key through active UI mode. Overlay row maps may
     /// use mouse selection; normal list selection runs only after mode dispatch.
     fn dispatch_key(&mut self, key: Key) -> DispatchResult {
-        if let Key::Sequence(key) = key {
-            return match self
-                .key_sequence
-                .push(key, Instant::now(), &[("gg", Key::First)])
+        if let Key::Sequence(key, client) = key {
+            let timeout = Duration::from_millis(self.settings.settings.sequence_timeout_ms);
+            let prefix = self.key_sequence.pending_prefix().unwrap_or(key);
+            if crate::app_config::action_for(
+                &self.normal_keys,
+                crate::app_config::KeyChord::Printable(prefix as u8),
+            )
+            .is_some()
             {
-                SequenceResult::Match(action) => self.dispatch_key(action),
+                self.key_sequence.clear();
+                return DispatchResult::Continue;
+            }
+            return match self.key_sequence.push(
+                key,
+                client,
+                Instant::now(),
+                timeout,
+                self.settings.settings.tmux_management_enabled,
+            ) {
+                SequenceResult::Match(SequenceAction::First, _) => self.dispatch_key(Key::First),
+                SequenceResult::Match(action, client) => self.begin_mutation(action, client),
                 SequenceResult::Pending | SequenceResult::Miss => DispatchResult::Continue,
             };
         }
         self.key_sequence.clear();
         match dispatch_mode(self.overlay.as_ref(), self.search_focused) {
-            DispatchMode::Overlay => {
-                self.overlay_key(key);
-                return DispatchResult::Continue;
-            }
+            DispatchMode::Overlay => return self.overlay_key(key),
             DispatchMode::Search => {
                 self.search_key(key);
                 return DispatchResult::Continue;
@@ -640,7 +680,7 @@ impl Sidebar {
                 }
                 return DispatchResult::Break;
             }
-            Key::Sequence(_)
+            Key::Sequence(_, _)
             | Key::Backspace
             | Key::ClearSearch
             | Key::Text(_)
@@ -648,6 +688,249 @@ impl Sidebar {
             | Key::Other => {}
         }
         DispatchResult::Continue
+    }
+
+    fn begin_mutation(&mut self, action: SequenceAction, client: Option<String>) -> DispatchResult {
+        if !self.settings.settings.tmux_management_enabled {
+            return DispatchResult::Continue;
+        }
+        let client = client
+            .filter(|value| !value.is_empty())
+            .or_else(|| (!self.popup_client.is_empty()).then(|| self.popup_client.clone()));
+        let Some(client) = client else {
+            crate::diag::trace("mutation ignored: invoking tmux client is unknown");
+            return DispatchResult::Continue;
+        };
+        let Some(pane) = self
+            .panes
+            .iter()
+            .find(|pane| pane.pane == self.sel_pane)
+            .cloned()
+        else {
+            self.mutation_error(&client, "selected pane no longer exists");
+            return DispatchResult::Continue;
+        };
+        let target = MutationTarget {
+            action,
+            pane_id: pane.pane,
+            window_id: pane.window_id,
+            session_id: pane.session_id,
+            cwd: pane.path,
+            client,
+        };
+        match action {
+            SequenceAction::CreateWindow | SequenceAction::CreateSession => {
+                self.enter_mutation_input(&target.client);
+                self.overlay = Some(Overlay::Create {
+                    target,
+                    name: String::new(),
+                });
+                DispatchResult::Continue
+            }
+            SequenceAction::DeletePane
+            | SequenceAction::DeleteWindow
+            | SequenceAction::DeleteSession => {
+                if self.settings.settings.tmux_management_confirm_delete {
+                    self.enter_mutation_input(&target.client);
+                    self.overlay = Some(Overlay::Confirm(target));
+                    DispatchResult::Continue
+                } else {
+                    self.execute_mutation(&target, "")
+                }
+            }
+            SequenceAction::First => DispatchResult::Continue,
+        }
+    }
+
+    fn enter_mutation_input(&self, client: &str) {
+        if self.daemon.is_some() {
+            let _ = crate::tmux::command_status(&[
+                "switch-client",
+                "-c",
+                client,
+                "-T",
+                crate::setup::SEARCH_TABLE,
+            ]);
+        }
+    }
+
+    fn restore_mutation_input(&self, client: &str) {
+        if self.daemon.is_some() {
+            let _ = crate::tmux::command_status(&[
+                "switch-client",
+                "-c",
+                client,
+                "-T",
+                crate::setup::NORMAL_TABLE,
+            ]);
+        }
+    }
+
+    fn mutation_error(&mut self, client: &str, message: &str) {
+        self.refresh_requested = true;
+        let _ = crate::tmux::command_status(&[
+            "display-message",
+            "-c",
+            client,
+            "-d",
+            "3000",
+            &format!("agenmux: {message}"),
+        ]);
+    }
+
+    fn target_is_live(target: &MutationTarget) -> bool {
+        let (tmux_target, format, expected) = match target.action {
+            SequenceAction::CreateWindow | SequenceAction::CreateSession => (
+                target.pane_id.as_str(),
+                "#{pane_id}\t#{window_id}\t#{session_id}",
+                format!(
+                    "{}\t{}\t{}",
+                    target.pane_id, target.window_id, target.session_id
+                ),
+            ),
+            SequenceAction::DeletePane => (
+                target.pane_id.as_str(),
+                "#{pane_id}",
+                target.pane_id.clone(),
+            ),
+            SequenceAction::DeleteWindow => (
+                target.window_id.as_str(),
+                "#{window_id}",
+                target.window_id.clone(),
+            ),
+            SequenceAction::DeleteSession => (
+                target.session_id.as_str(),
+                "#{session_id}",
+                target.session_id.clone(),
+            ),
+            SequenceAction::First => return false,
+        };
+        crate::tmux::command(&["display-message", "-p", "-t", tmux_target, format])
+            .is_ok_and(|actual| actual.trim() == expected)
+    }
+
+    fn switch_client_to_pane(
+        &self,
+        client: &str,
+        pane: &str,
+    ) -> Result<(), crate::tmux::TmuxError> {
+        let location = crate::tmux::command(&[
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{session_id}\t#{window_id}\t#{pane_id}",
+        ])?;
+        let mut fields = location.trim().split('\t');
+        let (Some(session), Some(window), Some(actual_pane)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(crate::tmux::TmuxError::Error(
+                "created target has no tmux location".into(),
+            ));
+        };
+        if actual_pane != pane {
+            return Err(crate::tmux::TmuxError::Error(
+                "created target changed before client switch".into(),
+            ));
+        }
+        crate::tmux::command_status(&["switch-client", "-c", client, "-t", session])?;
+        crate::tmux::command_status(&["select-window", "-t", window])?;
+        crate::tmux::command_status(&["select-pane", "-t", pane])?;
+        crate::tmux::command_status(&["switch-client", "-c", client, "-T", "root"])
+    }
+
+    fn execute_mutation(&mut self, target: &MutationTarget, name: &str) -> DispatchResult {
+        self.restore_mutation_input(&target.client);
+        if !self.settings.settings.tmux_management_enabled {
+            self.refresh_requested = true;
+            return DispatchResult::Continue;
+        }
+        if !Self::target_is_live(target) {
+            self.mutation_error(&target.client, "target changed; nothing was modified");
+            return DispatchResult::Continue;
+        }
+        let name = name.trim();
+        let result = match target.action {
+            SequenceAction::CreateWindow => {
+                let session = format!("{}:", target.session_id);
+                let mut args = vec!["new-window", "-d", "-P", "-F", "#{pane_id}"];
+                if !name.is_empty() {
+                    args.extend(["-n", name]);
+                }
+                args.extend(["-t", session.as_str(), "-c", target.cwd.as_str()]);
+                crate::tmux::command(&args)
+            }
+            SequenceAction::CreateSession => {
+                let mut args = vec!["new-session", "-d", "-P", "-F", "#{pane_id}"];
+                if !name.is_empty() {
+                    args.extend(["-s", name]);
+                }
+                args.extend(["-c", target.cwd.as_str()]);
+                crate::tmux::command(&args)
+            }
+            SequenceAction::DeletePane => {
+                crate::tmux::command(&["kill-pane", "-t", &target.pane_id])
+            }
+            SequenceAction::DeleteWindow => {
+                crate::tmux::command(&["kill-window", "-t", &target.window_id])
+            }
+            SequenceAction::DeleteSession => (|| -> Result<String, TmuxError> {
+                let sessions = crate::tmux::command(&["list-sessions", "-F", "#{session_id}"])?;
+                let fallback = sessions
+                    .lines()
+                    .find(|session| *session != target.session_id)
+                    .ok_or_else(|| {
+                        TmuxError::Error(
+                            "cannot delete the last tmux session; nothing was modified".into(),
+                        )
+                    })?;
+                let clients =
+                    crate::tmux::command(&["list-clients", "-F", "#{client_name}\t#{session_id}"])?;
+                for line in clients.lines() {
+                    let Some((client, session)) = line.split_once('\t') else {
+                        continue;
+                    };
+                    if session == target.session_id {
+                        crate::tmux::command_status(&[
+                            "switch-client",
+                            "-c",
+                            client,
+                            "-t",
+                            fallback,
+                        ])?;
+                    }
+                }
+                crate::tmux::command(&["kill-session", "-t", &target.session_id])
+            })(),
+            SequenceAction::First => return DispatchResult::Continue,
+        };
+        let created_pane = match result {
+            Ok(output) => output.trim().to_string(),
+            Err(error) => {
+                self.mutation_error(&target.client, &error.to_string());
+                return DispatchResult::Continue;
+            }
+        };
+        self.refresh_requested = true;
+        if matches!(
+            target.action,
+            SequenceAction::CreateWindow | SequenceAction::CreateSession
+        ) {
+            if let Some(pin) = &self.pin {
+                let _ = std::fs::write(format!("{pin}.jump"), &created_pane);
+            } else if self
+                .switch_client_to_pane(&target.client, &created_pane)
+                .is_err()
+            {
+                self.mutation_error(&target.client, "created target, but client switch failed");
+            }
+        }
+        if self.daemon.is_none() {
+            DispatchResult::Break
+        } else {
+            DispatchResult::Continue
+        }
     }
 
     /// Adopt whatever a `config reload` just published. Keys the tmux tables
@@ -662,6 +945,30 @@ impl Sidebar {
         self.palette = Palette::resolve(&self.settings.settings.theme);
         self.normal_keys = self.settings.settings.normal.clone();
         self.search_keys = self.settings.settings.search.clone();
+        let management_enabled = self.settings.settings.tmux_management_enabled;
+        if !management_enabled {
+            let mutation_client = match self.overlay.as_ref() {
+                Some(Overlay::Create { target, .. } | Overlay::Confirm(target)) => {
+                    Some(target.client.clone())
+                }
+                _ => None,
+            };
+            if let Some(client) = mutation_client {
+                self.restore_mutation_input(&client);
+                self.overlay = None;
+            }
+        }
+        if let Some(prefix) = self.key_sequence.pending_prefix() {
+            let shadowed = crate::app_config::action_for(
+                &self.normal_keys,
+                crate::app_config::KeyChord::Printable(prefix as u8),
+            )
+            .is_some();
+            let disabled_mutation = !management_enabled && matches!(prefix, 'c' | 'd');
+            if shadowed || disabled_mutation {
+                self.key_sequence.clear();
+            }
+        }
         let show_all_panes = self.settings.settings.show_all_panes;
         if show_all_panes != self.adopted_show_all_panes {
             self.adopted_show_all_panes = show_all_panes;
@@ -731,13 +1038,17 @@ impl Sidebar {
         // notifications only cover the attached session — follow the user so
         // drags and focus changes where they're looking react instantly
         // (background sessions wait for the 2s scan, which nobody can see)
-        if self.daemon.is_some()
+        if self
+            .daemon
+            .as_ref()
+            .is_some_and(|daemon| daemon.attached != self.active_session)
             && !self.active_session.is_empty()
-            && self.daemon.as_ref().unwrap().attached != self.active_session
         {
             let sid = self.active_session.clone();
             if self.tmux.run(&format!("switch-client -t '{sid}'")).is_ok() {
-                self.daemon.as_mut().unwrap().attached = sid;
+                if let Some(daemon) = self.daemon.as_mut() {
+                    daemon.attached = sid;
+                }
             }
         }
 

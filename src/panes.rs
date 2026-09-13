@@ -50,7 +50,11 @@ impl PaneLock {
                 libc::openat(
                     dir.as_raw_fd(),
                     name.as_ptr(),
-                    libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                    libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC
+                        | libc::O_NONBLOCK,
                     0o600,
                 )
             };
