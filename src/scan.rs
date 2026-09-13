@@ -282,7 +282,14 @@ pub fn scan_cached(
                 tmux.run(&format!("capture-pane -b '{buf}' -t '{pane}'"))?;
                 used_buffer = true;
                 tmux.run(&format!("save-buffer -b '{buf}' '{}'", cap.display()))?;
-                std::fs::read_to_string(&cap).map_err(TmuxError::Io)
+                // only pipe failures are Io: the daemon exits on Io as a desync
+                std::fs::read(&cap)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .map_err(|e| {
+                        let message = format!("capture file {}: {e}", cap.display());
+                        crate::tmux::debug_note(&message);
+                        TmuxError::Error(message)
+                    })
             })?;
             if reused {
                 stats.reused += 1;
