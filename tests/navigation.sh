@@ -2,6 +2,11 @@
 # End-to-end regression for the preserved sidebar's native client key table.
 # The first invocation omits a client to verify newest-real-client discovery.
 set -euo pipefail
+
+# grep -q exits at the first match, and pipefail turns the writer's EPIPE into a failure
+has() { [[ $1 == *"$2"* ]]; }
+has_re() { [[ $1 =~ $2 ]]; }
+has_line() { [[ $'\n'"$1"$'\n' == *$'\n'"$2"$'\n'* ]]; }
 export TERM=xterm
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -116,12 +121,12 @@ env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
 # user's root binding and install synchronous search delivery before use.
 normal_keys="$(tmux -S "$sock" list-keys -T agenmux)"
 search_keys="$(tmux -S "$sock" list-keys -T agenmux-search)"
-tmux -S "$sock" show-option -gqv @agenmux-nav-version | grep -Eq '^14\.[0-9a-f]{16}$' &&
-  printf '%s' "$normal_keys" | grep -Fq 'C-l' &&
-  printf '%s' "$normal_keys" | grep -Fq " key 'sequence-67'" &&
-  printf '%s' "$normal_keys" | grep -Fq " key 'last'" &&
-  printf '%s' "$normal_keys" | grep -Fq " key 'search'" &&
-  printf '%s' "$search_keys" | grep -Fq 'text-6A' || {
+has_re "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" '^14\.[0-9a-f]{16}$' &&
+  has "$normal_keys" 'C-l' &&
+  has "$normal_keys" " key 'sequence-67'" &&
+  has "$normal_keys" " key 'last'" &&
+  has "$normal_keys" " key 'search'" &&
+  has "$search_keys" 'text-6A' || {
   echo "FAIL navigation-key-table: native setup contract missing"
   exit 1
 }
@@ -150,7 +155,7 @@ initial_focus="$(tmux -S "$sock" display-message -p -c "$client" \
 initial_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
 inactive_hint_hidden=0
 if [ -n "$initial_hint" ] &&
-  ! printf '%s' "$initial_hint" | grep -Eq 'esc clear|f status|/ search'; then
+  ! has_re "$initial_hint" 'esc clear|f status|/ search'; then
   inactive_hint_hidden=1
 fi
 
@@ -446,7 +451,7 @@ for _ in $(seq 1 60); do
   table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   restored_cursor="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '/❯/p' | head -n 1)"
-  [ "$table" = agenmux ] && printf '%s' "$restored_cursor" | grep -Fq " $valid_location " && break
+  [ "$table" = agenmux ] && has "$restored_cursor" " $valid_location " && break
   sleep 0.05
 done
 
@@ -456,7 +461,7 @@ for _ in $(seq 1 20); do
   control="$(tmux -S "$sock" show-option -gqv @agenmux-control-client)"
   control_flags="$(tmux -S "$sock" list-clients \
     -f "#{==:#{client_name},$control}" -F '#{client_flags}' 2>/dev/null)"
-  printf '%s' "$control_flags" | grep -Fq control-mode && break
+  has "$control_flags" control-mode && break
   sleep 0.05
 done
 # `k` is Up, and Up clamps at the top row rather than wrapping, so it can only
@@ -509,7 +514,7 @@ printf 'u' >&9
 picker_open=0
 for _ in $(seq 1 40); do
   picker_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
-  printf '%s\n' "$picker_frame" | grep -Eq 'no releases found|↵ switch' &&
+  has_re "$picker_frame" 'no releases found|↵ switch' &&
     {
       picker_open=1
       break
@@ -532,7 +537,7 @@ for _ in $(seq 1 20); do
   picker_click_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
   if [ "$picker_click_table" = agenmux ] &&
     [ "$picker_click_focus" = "$sidebar" ] &&
-    printf '%s\n' "$picker_click_frame" | grep -Eq 'no releases found|↵ switch'; then
+    has_re "$picker_click_frame" 'no releases found|↵ switch'; then
     picker_click_works=1
     break
   fi
@@ -553,7 +558,7 @@ for _ in $(seq 1 60); do
   picker_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
   picker_return="$(printf '%s\n' "$picker_frame" | sed -n '/❯/p' | head -n 1)"
   if [ "$picker_table" = agenmux ] && [ -n "$picker_return" ] &&
-    ! printf '%s\n' "$picker_frame" | grep -Eq 'no releases found|↵ switch'; then
+    ! has_re "$picker_frame" 'no releases found|↵ switch'; then
     picker_reclaimed=1
     break
   fi
@@ -727,8 +732,8 @@ for _ in $(seq 1 60); do
   search_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   if [ "$search_targets" -eq 2 ] &&
-    printf '%s' "$search_frame" | grep -Fq '/navigation' &&
-    printf '%s' "$search_hint" | grep -Fq 'esc clear' &&
+    has "$search_frame" '/navigation' &&
+    has "$search_hint" 'esc clear' &&
     [ "$search_table" = agenmux-search ]; then
     search_works=1
     break
@@ -743,8 +748,8 @@ for _ in $(seq 1 20); do
   accept_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
   accept_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
   if [ "$accept_table" = agenmux ] &&
-    printf '%s' "$accept_frame" | grep -Fq '/navigation' &&
-    printf '%s' "$accept_hint" | grep -Fq 'j/K'; then
+    has "$accept_frame" '/navigation' &&
+    has "$accept_hint" 'j/K'; then
     search_accept_works=1
     break
   fi
@@ -790,7 +795,7 @@ for _ in $(seq 1 20); do
     "$tmp/agenmux-rows")"
   blur_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
   if [ "$blur_table" = agenmux ] && [ "$blur_targets" -eq 2 ] &&
-    ! printf '%s' "$blur_frame" | grep -Fq '/navigation'; then
+    ! has "$blur_frame" '/navigation'; then
     search_blur_works=1
     break
   fi
@@ -807,9 +812,9 @@ for _ in $(seq 1 20); do
   blocked_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
   blocked_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
   if [ "$blocked_targets" -eq 0 ] &&
-    printf '%s' "$blocked_frame" | grep -Fq '[blocked]' &&
-    printf '%s' "$blocked_hint" | grep -Fq 'f status' &&
-    printf '%s' "$blocked_hint" | grep -Fq 'j/K'; then
+    has "$blocked_frame" '[blocked]' &&
+    has "$blocked_hint" 'f status' &&
+    has "$blocked_hint" 'j/K'; then
     blocked_filter_works=1
     break
   fi
@@ -822,7 +827,7 @@ for _ in $(seq 1 20); do
     "$tmp/agenmux-rows")"
   working_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
   if [ "$working_targets" -eq 0 ] &&
-    printf '%s' "$working_frame" | grep -Fq '[working]'; then
+    has "$working_frame" '[working]'; then
     working_filter_works=1
     break
   fi
@@ -835,7 +840,7 @@ for _ in $(seq 1 20); do
     "$tmp/agenmux-rows")"
   idle_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
   if [ "$idle_targets" -eq 2 ] &&
-    printf '%s' "$idle_frame" | grep -Fq '[idle]'; then
+    has "$idle_frame" '[idle]'; then
     idle_filter_works=1
     break
   fi
@@ -868,7 +873,7 @@ for _ in $(seq 1 20); do
     "$tmp/agenmux-rows")"
   all_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
   if [ "$all_targets" -eq 2 ] &&
-    ! printf '%s' "$all_frame" | grep -Eq '/navigation:1|\[(blocked|working|idle|done)\]'; then
+    ! has_re "$all_frame" '/navigation:1|\[(blocked|working|idle|done)\]'; then
     all_filter_works=1
     break
   fi
@@ -887,7 +892,7 @@ for _ in $(seq 1 40); do
   reload_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
   reload_key="$(tmux -S "$sock" list-keys -T agenmux |
     awk '$4 == "Z" { print $4; exit }')"
-  if printf '%s' "$reload_hint" | grep -Fq 'j/Z' && [ "$reload_key" = Z ]; then
+  if has "$reload_hint" 'j/Z' && [ "$reload_key" = Z ]; then
     reload_hint_follows=1
     break
   fi
@@ -908,7 +913,7 @@ for _ in $(seq 1 40); do
   reload_cleared="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
   reload_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
-  if ! printf '%s' "$reload_cleared" | grep -Fq '[' &&
+  if ! has "$reload_cleared" '[' &&
     [ "$reload_table" = agenmux ]; then
     break
   fi
@@ -1064,7 +1069,7 @@ done
 printf 'f' >&9
 for _ in $(seq 1 20); do
   escape_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar" | head -n 1)"
-  printf '%s' "$escape_frame" | grep -Fq '[blocked]' && break
+  has "$escape_frame" '[blocked]' && break
   sleep 0.05
 done
 printf '\033' >&9
@@ -1076,7 +1081,7 @@ for _ in $(seq 1 20); do
     '#{pane_title}')"
   escape_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar" | head -n 1)"
   if [ "$escape_table" = agenmux ] && [ "$escape_focus" = agenmux ] &&
-    ! printf '%s' "$escape_frame" | grep -Eq '\[(blocked|working|idle|done)\]'; then
+    ! has_re "$escape_frame" '\[(blocked|working|idle|done)\]'; then
     escape_reset=1
     break
   fi
@@ -1162,7 +1167,7 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   [ "$picker_open" -eq 1 ] && [ "$picker_click_works" -eq 1 ] &&
   [ "$picker_reclaimed" -eq 1 ] &&
   [ "$table_after_j" = agenmux ] &&
-  printf '%s' "$control_flags" | grep -Fq control-mode &&
+  has "$control_flags" control-mode &&
   [ "$second" != "$picker_return" ] && [ "$third" = "$picker_return" ] &&
   [ "$wheel_down" = "$wheel_selected" ] &&
   [ "$wheel_up" = "$wheel_selected" ] &&
