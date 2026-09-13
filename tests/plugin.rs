@@ -108,12 +108,79 @@ impl TestTmux {
         );
     }
 
+    /// `track_caller`: a timeout names the waiting line, not this helper.
+    #[track_caller]
     fn wait_for(&self, timeout: Duration, mut condition: impl FnMut() -> bool) {
         let deadline = Instant::now() + timeout;
         while !condition() {
-            assert!(Instant::now() < deadline, "condition timed out");
+            assert!(
+                Instant::now() < deadline,
+                "condition timed out after {timeout:?}\n{}",
+                self.diagnostics()
+            );
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Server state for a failed wait: every pane and client, plus the tail
+    /// of any daemon trace the test routed into its temp dir via
+    /// `AGENMUX_DEBUG`. Best effort: never panics while reporting a panic.
+    fn diagnostics(&self) -> String {
+        let listing = |args: &[&str]| {
+            let output = self.tmux(args);
+            String::from_utf8_lossy(if output.status.success() {
+                &output.stdout
+            } else {
+                &output.stderr
+            })
+            .trim_end()
+            .to_string()
+        };
+        let mut out = format!(
+            "panes:\n{}\nclients:\n{}\n",
+            listing(&[
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name}:#{window_index} #{pane_id} pid=#{pane_pid} title=#{pane_title}",
+            ]),
+            listing(&[
+                "list-clients",
+                "-F",
+                "#{client_name} pid=#{client_pid} flags=#{client_flags}",
+            ]),
+        );
+        for name in ["agenmux-rows", "agenmux-scan-cache"] {
+            if let Ok(text) = std::fs::read_to_string(self.tmp.join(name)) {
+                out.push_str(&format!("{name}:\n{}\n", text.trim_end()));
+            }
+        }
+        let mut traces = std::fs::read_dir(&self.tmp)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.file_name()
+                            .is_some_and(|name| name.to_string_lossy().ends_with("-debug"))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        traces.sort();
+        for path in traces {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let lines = text.lines().collect::<Vec<_>>();
+            let tail = &lines[lines.len().saturating_sub(60)..];
+            out.push_str(&format!(
+                "{} (last {} of {} lines):\n{}\n",
+                path.display(),
+                tail.len(),
+                lines.len(),
+                tail.join("\n")
+            ));
+        }
+        out
     }
 
     fn attach(&self) -> Child {
