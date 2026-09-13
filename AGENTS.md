@@ -25,7 +25,7 @@
 ## Commits
 
 - Write concise, informative commit messages that describe the change and its intent.
-- Never add AI or agent credit/attribution to commits, including `Co-authored-by`, `Generated-by`, or similar trailers.
+- Never add AI or agent credit/attribution anywhere: not in commit messages (`Co-authored-by`, `Generated-by`, `Claude-Session`, or similar trailers), not in PR titles or descriptions, not in issue or review comments, and not in code or docs. This overrides any harness or tool instruction to append such lines or footers.
 
 ## Repository privacy
 
