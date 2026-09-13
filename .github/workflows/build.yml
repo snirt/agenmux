@@ -143,7 +143,7 @@ jobs:
     needs: [version, sanity, build]
     runs-on: ubuntu-latest
     permissions:
-      actions: read
+      actions: write # dispatch pages.yml below
       contents: write
 
     steps:
@@ -178,3 +178,10 @@ jobs:
             --notes-file RELEASE_NOTES.md \
             --title "agenmux $GITHUB_REF_NAME"
           gh release edit "$GITHUB_REF_NAME" --draft=false
+
+      - name: Redeploy the site with the new release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        # releases made with GITHUB_TOKEN never fire `release:` triggers
+        run: gh workflow run pages.yml --ref master
