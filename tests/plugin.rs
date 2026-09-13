@@ -763,7 +763,7 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
     assert!(!text_action.contains("run-shell -b"), "{text_action}");
     let nav_version = tmux.text(&["show-option", "-gqv", "@agenmux-nav-version"]);
     assert!(
-        nav_version.starts_with("15.") && nav_version.len() == 19,
+        nav_version.starts_with("16.") && nav_version.len() == 19,
         "{nav_version}"
     );
     let status = tmux.tmux(&["show-option", "-gqv", "status-right"]);
@@ -1548,6 +1548,30 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             .unwrap_or_default()
     };
 
+    send_sequence("cc");
+    thread::sleep(Duration::from_millis(150));
+    let create_prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
+    assert!(
+        create_prompt.contains("name (optional):"),
+        "{create_prompt:?}"
+    );
+    for _ in 0..2 {
+        assert_success(
+            tmux.bin(&["key", "sequence-63", "missing-client"]),
+            "second client create sequence",
+        );
+    }
+    assert_success(tmux.bin(&["key", "escape"]), "cancel owned create");
+    tmux.wait_for(Duration::from_secs(2), || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]) == "agenmux"
+    });
+
     let original_window_name =
         tmux.text(&["display-message", "-p", "-t", &initial, "#{window_name}"]);
     let original_pane_title =
@@ -1674,6 +1698,37 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     });
     let session_pane = tmux.text(&["display-message", "-p", "-c", &client, "#{pane_id}"]);
     tmux.wait_for(Duration::from_secs(4), || selected() == session_pane);
+    let guarded_session = tmux.text(&[
+        "display-message",
+        "-p",
+        "-t",
+        &session_pane,
+        "#{session_id}",
+    ]);
+    send_sequence("dw");
+    assert_success(
+        tmux.bin(&["key", "text-79"]),
+        "confirm guarded last-window delete",
+    );
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        tmux.text(&["list-sessions", "-F", "#{session_id}"])
+            .lines()
+            .any(|session| session == guarded_session),
+        "window deletion must not implicitly destroy its session"
+    );
+    send_sequence("dp");
+    assert_success(
+        tmux.bin(&["key", "text-79"]),
+        "confirm guarded last-pane delete",
+    );
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
+            .lines()
+            .any(|pane| pane == session_pane),
+        "pane deletion must not implicitly destroy its session"
+    );
     send_sequence("ds");
     assert_success(tmux.bin(&["key", "text-79"]), "confirm session delete");
     tmux.wait_for(Duration::from_secs(4), || {
@@ -1705,6 +1760,15 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     ]);
     tmux.assert_tmux(&["select-pane", "-t", &extra]);
     tmux.wait_for(Duration::from_secs(4), || selected() == extra);
+    send_sequence("dp");
+    assert_success(tmux.bin(&["key", "text-59"]), "reject uppercase delete");
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
+            .lines()
+            .any(|pane| pane == extra),
+        "uppercase Y must cancel deletion"
+    );
     send_sequence("dp");
     assert_success(tmux.bin(&["key", "enter"]), "cancel pane delete");
     thread::sleep(Duration::from_millis(150));
@@ -2830,7 +2894,7 @@ fn toggle_reinstalls_key_tables_after_a_keymap_change() {
             .is_empty()
     });
     let first = tmux.text(&["show-option", "-gqv", "@agenmux-nav-version"]);
-    assert!(first.starts_with("15."), "{first}");
+    assert!(first.starts_with("16."), "{first}");
     assert!(tmux.binding("agenmux", "n").contains("key 'down'"));
     assert!(tmux.binding("agenmux", "j").is_empty());
 

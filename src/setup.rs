@@ -892,6 +892,6 @@ mod tests {
 
         assert_ne!(nav_version(&defaults), nav_version(&custom));
         assert_eq!(nav_version(&defaults), nav_version(&config("version = 1")));
-        assert!(nav_version(&defaults).starts_with("15."));
+        assert!(nav_version(&defaults).starts_with("16."));
     }
 }

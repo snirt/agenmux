@@ -155,6 +155,19 @@ fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMod
     }
 }
 
+fn post_mutation_dispatch(action: SequenceAction, daemon: bool) -> DispatchResult {
+    if !daemon
+        && matches!(
+            action,
+            SequenceAction::CreateWindow | SequenceAction::CreateSession
+        )
+    {
+        DispatchResult::Break
+    } else {
+        DispatchResult::Continue
+    }
+}
+
 pub struct Sidebar {
     tmux: Tmux,
     settings: crate::app_config::LiveConfig,
@@ -609,6 +622,12 @@ impl Sidebar {
     /// Route every logical key through active UI mode. Overlay row maps may
     /// use mouse selection; normal list selection runs only after mode dispatch.
     fn dispatch_key(&mut self, key: Key) -> DispatchResult {
+        if self.overlay.is_some() {
+            if let Key::Sequence(_, Some(client)) = &key {
+                self.restore_mutation_input(client);
+            }
+            return self.overlay_key(key);
+        }
         if let Key::Sequence(key, client) = key {
             let timeout = Duration::from_millis(self.settings.settings.sequence_timeout_ms);
             let prefix = self.key_sequence.pending_prefix().unwrap_or(key);
@@ -902,12 +921,41 @@ impl Sidebar {
                 }
                 crate::tmux::command(&["rename-session", "-t", &target.session_id, name])
             }
-            SequenceAction::DeletePane => {
+            SequenceAction::DeletePane => (|| -> Result<String, TmuxError> {
+                let panes = crate::tmux::command(&[
+                    "list-panes",
+                    "-s",
+                    "-t",
+                    &target.session_id,
+                    "-f",
+                    "#{!=:#{pane_title},agenmux}",
+                    "-F",
+                    "#{pane_id}",
+                ])?;
+                if panes.lines().count() <= 1 {
+                    return Err(TmuxError::Error(
+                        "cannot delete the last pane in a tmux session; delete the session explicitly"
+                            .into(),
+                    ));
+                }
                 crate::tmux::command(&["kill-pane", "-t", &target.pane_id])
-            }
-            SequenceAction::DeleteWindow => {
+            })(),
+            SequenceAction::DeleteWindow => (|| -> Result<String, TmuxError> {
+                let windows = crate::tmux::command(&[
+                    "list-windows",
+                    "-t",
+                    &target.session_id,
+                    "-F",
+                    "#{window_id}",
+                ])?;
+                if windows.lines().count() <= 1 {
+                    return Err(TmuxError::Error(
+                        "cannot delete the last window in a tmux session; delete the session explicitly"
+                            .into(),
+                    ));
+                }
                 crate::tmux::command(&["kill-window", "-t", &target.window_id])
-            }
+            })(),
             SequenceAction::DeleteSession => (|| -> Result<String, TmuxError> {
                 let sessions = crate::tmux::command(&["list-sessions", "-F", "#{session_id}"])?;
                 let fallback = sessions
@@ -961,11 +1009,7 @@ impl Sidebar {
                 self.mutation_error(&target.client, "created target, but client switch failed");
             }
         }
-        if self.daemon.is_none() {
-            DispatchResult::Break
-        } else {
-            DispatchResult::Continue
-        }
+        post_mutation_dispatch(target.action, self.daemon.is_some())
     }
 
     /// Adopt whatever a `config reload` just published. Keys the tmux tables
@@ -1002,8 +1046,9 @@ impl Sidebar {
                 crate::app_config::KeyChord::Printable(prefix as u8),
             )
             .is_some();
-            let disabled_mutation = !management_enabled && matches!(prefix, 'c' | 'd' | 'r');
-            if shadowed || disabled_mutation {
+            let unavailable = !crate::input::available_sequences(management_enabled)
+                .any(|binding| binding.sequence.starts_with(prefix));
+            if shadowed || unavailable {
                 self.key_sequence.clear();
             }
         }
@@ -1271,6 +1316,23 @@ mod tests {
         );
         assert_eq!(dispatch_mode(None, false), DispatchMode::Normal);
     }
+
+    #[test]
+    fn popup_deletes_continue_while_creates_handoff() {
+        assert_eq!(
+            post_mutation_dispatch(SequenceAction::DeletePane, false),
+            DispatchResult::Continue
+        );
+        assert_eq!(
+            post_mutation_dispatch(SequenceAction::CreateWindow, false),
+            DispatchResult::Break
+        );
+        assert_eq!(
+            post_mutation_dispatch(SequenceAction::DeletePane, true),
+            DispatchResult::Continue
+        );
+    }
+
     #[test]
     fn continuous_output_keeps_the_first_bounded_deadline() {
         let start = Instant::now();

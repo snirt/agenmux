@@ -537,6 +537,15 @@ fn render_settings(
     targets.truncate(frame.lines().count().saturating_sub(1));
     (frame, targets)
 }
+fn append_name(name: &mut String, text: &str) {
+    let remaining = 128usize.saturating_sub(name.chars().count());
+    name.extend(
+        text.chars()
+            .filter(|character| !character.is_control())
+            .take(remaining),
+    );
+}
+
 impl Sidebar {
     /// Version picker: update or roll back to any release the last check saw.
     /// Selecting one switches the source, the engine, and restarts the view.
@@ -815,8 +824,7 @@ impl Sidebar {
             }
             Overlay::Create { target, mut name } => match key {
                 Key::Text(text) => {
-                    name.extend(text.chars().filter(|c| !c.is_control()));
-                    name.truncate(128);
+                    append_name(&mut name, &text);
                     self.overlay = Some(Overlay::Create { target, name });
                 }
                 Key::Backspace => {
@@ -846,12 +854,7 @@ impl Sidebar {
             },
             Overlay::Rename { target, mut name } => match key {
                 Key::Text(text) => {
-                    for character in text.chars().filter(|c| !c.is_control()) {
-                        if name.chars().count() >= 128 {
-                            break;
-                        }
-                        name.push(character);
-                    }
+                    append_name(&mut name, &text);
                     self.overlay = Some(Overlay::Rename { target, name });
                 }
                 Key::Backspace => {
@@ -868,8 +871,7 @@ impl Sidebar {
                 _ => self.overlay = Some(Overlay::Rename { target, name }),
             },
             Overlay::Confirm(target) => {
-                let confirmed =
-                    matches!(key, Key::Text(ref text) if text.eq_ignore_ascii_case("y"));
+                let confirmed = matches!(key, Key::Text(ref text) if text == "y");
                 if confirmed {
                     return self.execute_mutation(&target, "");
                 }
@@ -1262,6 +1264,14 @@ mod tests {
         // a shorter tag is the same as trailing zeros
         assert!(!newer_than("v0.1", "v0.1.0"));
         assert!(newer_than("v0.1.1", "v0.1"));
+    }
+
+    #[test]
+    fn names_are_limited_by_characters_without_splitting_utf8() {
+        let mut name = "界".repeat(127);
+        append_name(&mut name, "界x\n");
+        assert_eq!(name.chars().count(), 128);
+        assert!(name.ends_with('界'));
     }
 
     #[test]

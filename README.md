@@ -291,8 +291,9 @@ for pane/window/session scope, then opens the current name for inline editing; e
 Enter or Escape cancels. Create prompts accept an optional name (leave it blank for
 tmux's default), inherit the selected pane's working directory, and move only the
 invoking client to the new target. Delete prompts name the exact stable tmux ID and
-cancel on Enter, `n`, Escape, or any input other than `y`. Set
-`confirm_delete = false` only if immediate deletion is intentional.
+cancel on Enter, `n`, Escape, or any input other than lowercase `y`. `dp` and `dw`
+refuse to implicitly destroy a session; use `ds` so attached clients can be moved
+safely first. Set `confirm_delete = false` only if immediate deletion is intentional.
 
 ```toml
 [tmux_management]
@@ -305,7 +306,7 @@ sequence_timeout_ms = 1000 # positive; applies live to gg/cc/cs/dp/dw/ds
 
 Disabled mutation sequences are not installed, shown in continuation hints, or
 listed in `?` help, and direct legacy key packets cannot bypass the gate. Reloading
-a disabled setting also clears a pending `c` or `d`. Every operation captures and
+a disabled setting also clears pending mutation prefixes. Every operation captures and
 revalidates tmux pane/window/session IDs before mutation; a stale target reports an
 error and refreshes instead of falling back to another resource. Pane splitting is
 not part of tmux management.

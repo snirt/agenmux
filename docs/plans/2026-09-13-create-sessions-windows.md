@@ -17,7 +17,7 @@
 - Escape, invalid continuation, or timeout clears pending state/hint; timeout expires without another key.
 - Create prompts for optional name. Enter accepts; blank lets tmux choose; Escape cancels.
 - Create inherits selected pane cwd, revalidates stable IDs, uses `new-window`/`new-session`, switches invoking client to created first pane, and refreshes surviving sidebars.
-- Delete revalidates stable pane/window/session IDs and uses `kill-pane`/`kill-window`/`kill-session`; stale targets error and refresh without fallback.
+- Delete revalidates stable pane/window/session IDs and uses `kill-pane`/`kill-window`/`kill-session`; `dp`/`dw` refuse to implicitly destroy a session, while `ds` moves attached clients first; stale targets error and refresh without fallback.
 - With confirmation enabled, overlay displays exact resource type and identity; only explicit `y` confirms. Enter, `n`, Escape, or any other key cancels.
 - Rename preloads the current pane/window/session name for inline typing and Backspace edits, revalidates the stable ID, and uses `select-pane -T`/`rename-window`/`rename-session`; control-only or empty names cancel and native tmux errors remain nonfatal.
 - With confirmation disabled, completed delete sequence executes immediately.
@@ -46,7 +46,7 @@
 - [x] Derive active setup bindings, prefix hints, help entries, and dispatch from same table; filter mutations when management is disabled or prefix is overridden by configured normal key.
 - [x] Add framed sequence packet test carrying exact client; retain legacy packet decode and optional no-client CLI form.
 - [x] Include pending deadline in event-loop poll wake; test default/custom expiry without follow-up input plus Escape/invalid dismissal.
-- [x] On live reload, apply timeout/gate and clear pending `c`/`d` when management becomes disabled.
+- [x] On live reload, apply timeout/gate and clear pending mutation prefixes when management becomes disabled.
 - [x] Run focused input/setup/sidebar tests.
 
 ### Slice 3: Create prompt and tmux creation
@@ -70,7 +70,7 @@
 - [x] Add `confirm_delete = false` immediate-execution test.
 - [x] Revalidate captured `%pane`, `@window`, or `$session` immediately before `kill-pane`, `kill-window`, or `kill-session`; no name/current-target fallback.
 - [x] Report stale/nonfatal errors to invoking client and request immediate refresh.
-- [x] Add real tmux tests for each delete scope, wrong-target prevention, sidebar self-removal, surviving-view refresh, and nearest valid selection.
+- [x] Add real tmux tests for each delete scope, implicit session-destruction guards, wrong-target prevention, sidebar self-removal, surviving-view refresh, and nearest valid selection.
 - [x] Run focused plugin and navigation tests.
 
 ### Slice 5: Documentation and full verification
