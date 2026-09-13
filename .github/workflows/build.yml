@@ -18,8 +18,15 @@ on:
 permissions:
   contents: read
 
+# a newer push to the same PR supersedes the run in flight; never cancel master or tags
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   version:
@@ -89,6 +96,11 @@ jobs:
       - name: Install macOS test tools
         if: runner.os == 'macOS'
         run: brew install tmux expect
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Test
         run: |

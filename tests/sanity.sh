@@ -4,6 +4,11 @@
 # through the plugin in an isolated tmux server.
 set -euo pipefail
 
+# grep -q exits at the first match, and pipefail turns the writer's EPIPE into a failure
+has() { [[ $1 == *"$2"* ]]; }
+has_re() { [[ $1 =~ $2 ]]; }
+has_line() { [[ $'\n'"$1"$'\n' == *$'\n'"$2"$'\n'* ]]; }
+
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "${AGENMUX_SANITY_NIX:-}" != 1 ]; then
   exec nix-shell "$DIR/tests/sanity.nix" \
@@ -55,7 +60,7 @@ run_tmux_case() {
 
   tmux -L "$socket" list-keys -T prefix |
     grep -Fq '/agenmux.tmux' &&
-    tmux -L "$socket" list-keys -T prefix | grep -Fq ' activate '
+    has "$(tmux -L "$socket" list-keys -T prefix)" ' activate '
   socket_path="$(tmux -L "$socket" display-message -p '#{socket_path}')"
   server_pid="$(tmux -L "$socket" display-message -p '#{pid}')"
   tmux_env="$socket_path,$server_pid,0"
@@ -92,12 +97,12 @@ run_tmux_case() {
       awk -F'\t' '$2 == "agenmux" { print $1; exit }')"
     if [ -n "$sidebar" ]; then
       frame="$(tmux -L "$socket" capture-pane -p -t "$sidebar" 2>/dev/null || true)"
-      printf '%s\n' "$frame" | grep -Fq codex && break
+      has "$frame" codex && break
     fi
     sleep 0.1
     i=$((i + 1))
   done
-  printf '%s\n' "$frame" | grep -Fq codex || {
+  has "$frame" codex || {
     printf 'FAIL %s: sidebar did not render Codex\n%s\n' "$name" "$frame" >&2
     return 1
   }
@@ -261,11 +266,11 @@ bootstrap_pid="$(tmux -L "$bootstrap_socket" display-message -p '#{pid}')"
 env PATH="$root/bootstrap-bin:$PATH" TMPDIR="$TMPDIR" \
   TMUX="$bootstrap_path,$bootstrap_pid,0" bash "$plugin/agenmux.tmux" activate '' ''
 for _ in $(seq 1 80); do
-  tmux -L "$bootstrap_socket" list-panes -a -F '#{pane_title}' | grep -qx agenmux && break
+  has_line "$(tmux -L "$bootstrap_socket" list-panes -a -F '#{pane_title}')" agenmux && break
   sleep 0.1
 done
 [ -x "$plugin/target/release/agenmux" ]
-tmux -L "$bootstrap_socket" list-panes -a -F '#{pane_title}' | grep -qx agenmux
+has_line "$(tmux -L "$bootstrap_socket" list-panes -a -F '#{pane_title}')" agenmux
 # The status segment runs the engine through tmux options rather than a baked
 # path, so the installed value names the option, not the binary.
 tmux -L "$bootstrap_socket" show-option -gqv status-right |

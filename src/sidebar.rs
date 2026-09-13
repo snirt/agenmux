@@ -328,7 +328,10 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 Ok(()) => {}
                 // a pipe I/O error can leave a response block half-read —
                 // the pipe is desynced, restarting is the only safe move
-                Err(TmuxError::Exited) | Err(TmuxError::Io(_)) => break,
+                Err(e @ TmuxError::Exited) | Err(e @ TmuxError::Io(_)) => {
+                    crate::tmux::debug_note(&format!("scan ended the daemon: {e}"));
+                    break;
+                }
                 Err(TmuxError::Error(_)) => {} // e.g. pane died mid-scan
             }
             if sb.daemon.is_some() && sb.superseded() {
