@@ -310,6 +310,8 @@ fn setup(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> Result<(),
         install_mouse(&bin)?;
         clone_root_table(NORMAL_TABLE)?;
         clone_root_table(SEARCH_TABLE)?;
+        // Editing uses a fixed table so changing normal/search bindings cannot
+        // strand an open TextEdit or Select control.
         clone_root_table(SETTINGS_TABLE)?;
         install_settings_keys()?;
         install_keys(config)?;
@@ -550,6 +552,8 @@ fn install_settings_keys() -> Result<(), TmuxError> {
             &key_command(&format!("text-{code:02X}"), SETTINGS_TABLE, false),
         )?;
     }
+    // Select widgets accept arrows; Left/Right mirror Up/Down for compact panes
+    // where horizontal movement is the natural dropdown gesture.
     for (key, action) in [
         ("Up", "up"),
         ("Down", "down"),

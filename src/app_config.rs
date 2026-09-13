@@ -1505,7 +1505,10 @@ fn parse_item(value: &str) -> Result<toml_edit::Item, ConfigError> {
     let document = format!("value = {value}\n")
         .parse::<toml_edit::DocumentMut>()
         .map_err(|_| document_error("invalid TOML value"))?;
-    Ok(document["value"].clone())
+    document
+        .get("value")
+        .cloned()
+        .ok_or_else(|| document_error("missing TOML value"))
 }
 
 fn set_document_path(
@@ -1597,9 +1600,22 @@ pub fn save_document(path: &Path, source: &str) -> Result<(), ConfigError> {
     parse(source)?;
     let link = fs::symlink_metadata(path);
     let target = match link {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            fs::canonicalize(path).map_err(|e| ConfigError::io(path, e))?
-        }
+        Ok(metadata) if metadata.file_type().is_symlink() => match fs::canonicalize(path) {
+            Ok(target) => target,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let target = fs::read_link(path).map_err(|e| ConfigError::io(path, e))?;
+                if target.is_absolute() {
+                    target
+                } else {
+                    path.parent()
+                        .ok_or_else(|| {
+                            ConfigError::invalid("file", "configuration path has no parent")
+                        })?
+                        .join(target)
+                }
+            }
+            Err(error) => return Err(ConfigError::io(path, error)),
+        },
         Ok(metadata) if metadata.is_file() => path.to_path_buf(),
         Ok(_) => {
             return Err(ConfigError::invalid(
@@ -1610,13 +1626,21 @@ pub fn save_document(path: &Path, source: &str) -> Result<(), ConfigError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => path.to_path_buf(),
         Err(error) => return Err(ConfigError::io(path, error)),
     };
+    let permissions = match fs::metadata(&target) {
+        Ok(metadata) if metadata.is_file() => Some(metadata.permissions()),
+        Ok(_) => {
+            return Err(ConfigError::invalid(
+                "file",
+                "configuration target is not a regular file",
+            ))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(ConfigError::io(&target, error)),
+    };
     let parent = target
         .parent()
         .ok_or_else(|| ConfigError::invalid("file", "configuration path has no parent"))?;
     fs::create_dir_all(parent).map_err(|e| ConfigError::io(parent, e))?;
-    let permissions = fs::metadata(&target)
-        .ok()
-        .map(|metadata| metadata.permissions());
     let mut temporary = None;
     for attempt in 0..100 {
         let candidate = parent.join(format!(
@@ -1647,7 +1671,8 @@ pub fn save_document(path: &Path, source: &str) -> Result<(), ConfigError> {
             file.set_permissions(permissions)?;
         }
         drop(file);
-        fs::rename(&temporary_path, &target)
+        fs::rename(&temporary_path, &target)?;
+        fs::File::open(parent)?.sync_all()
     })();
     if let Err(error) = result {
         let _ = fs::remove_file(&temporary_path);
@@ -2353,6 +2378,28 @@ clear = ["C-u"]
         let before = fs::read_to_string(&target).unwrap();
         assert!(save_document(&link, "[display]\nsidebar_width = 0\n").is_err());
         assert_eq!(fs::read_to_string(&target).unwrap(), before);
+
+        let dangling_target = dir.0.join("created.toml");
+        let dangling_link = dir.0.join("dangling.toml");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("created.toml", &dangling_link).unwrap();
+        save_document(&dangling_link, "version = 1\n").unwrap();
+        assert!(fs::symlink_metadata(&dangling_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(dangling_target).unwrap(),
+            "version = 1\n"
+        );
+
+        let directory_link = dir.0.join("directory.toml");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&dir.0, &directory_link).unwrap();
+        assert!(save_document(&directory_link, "version = 1\n")
+            .unwrap_err()
+            .to_string()
+            .contains("not a regular file"));
     }
 }
 

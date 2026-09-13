@@ -19,6 +19,7 @@ pub(super) struct Settings {
     scroll: usize,
     source: String,
     existed: bool,
+    editable: bool,
     edit: Option<SettingEdit>,
     confirm: bool,
     message: Option<(bool, String)>,
@@ -153,6 +154,11 @@ fn setting_group(name: &str) -> &'static str {
     }
 }
 
+fn setting_label(name: &str) -> &str {
+    name.strip_prefix("keys.")
+        .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name))
+}
+
 fn setting_value(name: &str, buffer: &str) -> Result<String, String> {
     let value = buffer.trim();
     if name.starts_with("keys.") {
@@ -181,8 +187,10 @@ fn setting_value(name: &str, buffer: &str) -> Result<String, String> {
             .ok_or_else(|| "expected 1..=10000".to_string())?;
         return Ok(value.into());
     }
-    if name.starts_with("theme.colors.") && value.parse::<u8>().is_ok() {
-        return Ok(value.into());
+    if name.starts_with("theme.colors.") {
+        if let Ok(color) = value.parse::<u8>() {
+            return Ok(color.to_string());
+        }
     }
     Ok(toml_edit::Value::from(value).to_string())
 }
@@ -193,6 +201,43 @@ fn choices(name: &str) -> Option<&'static [&'static str]> {
         "theme.base" => Some(&["dark", "light", "terminal"]),
         "display.show_all_panes" | "behavior.notifications" => Some(&["true", "false"]),
         _ => None,
+    }
+}
+
+fn initial_setting_value(row: &SettingRow) -> String {
+    if row.persisted != "—" {
+        return row.persisted.clone();
+    }
+    if matches!(row.effective.as_str(), "(unset)" | "(unbound)") {
+        return String::new();
+    }
+    if row.name.starts_with("theme.colors.") && row.effective == "terminal" {
+        return "default".into();
+    }
+    row.effective.clone()
+}
+
+fn settings_state(
+    document: Result<(PathBuf, bool, String), crate::app_config::ConfigError>,
+) -> Settings {
+    let (source, existed, editable, message) = match document {
+        Ok((_, existed, source)) => (source, existed, true, None),
+        Err(error) => (
+            "version = 1\n".into(),
+            false,
+            false,
+            Some((true, error.to_string())),
+        ),
+    };
+    Settings {
+        sel: 0,
+        scroll: 0,
+        source,
+        existed,
+        editable,
+        edit: None,
+        confirm: false,
+        message,
     }
 }
 
@@ -209,6 +254,12 @@ fn render_settings(
     let mut out = format!("{E}[2J{E}[H{E}[1m{} — settings{E}[0m\n", app_title());
     if settings.confirm {
         out.push_str("\nRevert to defaults?\n\nPersisted customizations will be removed.\nCLI and tmux overrides remain effective.\n\nEnter confirm · Esc cancel");
+        return clip_frame(&out, cols, rows.saturating_sub(1));
+    }
+    if !settings.editable {
+        if let Some((_, message)) = &settings.message {
+            out.push_str(&format!("\nerror: {message}\n\nEsc back"));
+        }
         return clip_frame(&out, cols, rows.saturating_sub(1));
     }
     if let Some(SettingEdit {
@@ -238,6 +289,8 @@ fn render_settings(
     if !narrow {
         out.push_str("  setting                          persisted      effective      source\n");
     }
+    // Reserve header/table chrome and expanded options before computing list rows;
+    // otherwise a short pane clips the active dropdown choice.
     let fixed_rows = if narrow { 6 } else { 3 };
     let height = rows
         .saturating_sub(fixed_rows + select.map_or(0, Select::height))
@@ -268,7 +321,7 @@ fn render_settings(
         last_group = group;
         let mark = if index == settings.sel { "❯" } else { " " };
         if narrow {
-            let name = row.name.rsplit('.').next().unwrap_or(&row.name);
+            let name = setting_label(&row.name);
             let label = format!(
                 "{}{name}",
                 if first {
@@ -631,6 +684,20 @@ impl Sidebar {
     }
 
     fn settings_key(&mut self, key: Key) {
+        let read_only = matches!(
+            &self.overlay,
+            Some(Overlay::Settings(Settings {
+                editable: false,
+                ..
+            }))
+        );
+        if read_only {
+            if matches!(key, Key::AllStates | Key::Quit | Key::Close) {
+                self.close_overlay();
+            }
+            self.last_frame.clear();
+            return;
+        }
         let rows = match &self.overlay {
             Some(Overlay::Settings(settings)) => {
                 settings_rows(&settings.source, &self.settings.settings)
@@ -699,14 +766,7 @@ impl Sidebar {
                     Key::Jump if settings.sel == rows.len() => settings.confirm = true,
                     Key::Jump => {
                         if let Some(row) = rows.get(settings.sel) {
-                            let mut value = if row.persisted == "—" {
-                                row.effective.clone()
-                            } else {
-                                row.persisted.clone()
-                            };
-                            if row.name.starts_with("theme.colors.") && value == "terminal" {
-                                value = "default".into();
-                            }
+                            let value = initial_setting_value(row);
                             let editor = choices(&row.name).map_or_else(
                                 || Editor::TextEdit(TextEdit::new(value.clone())),
                                 |options| Editor::Select(Select::new(&value, options)),
@@ -753,23 +813,9 @@ impl Sidebar {
     }
 
     pub(super) fn settings(&mut self) {
-        let (source, existed, message) = match crate::app_config::document() {
-            Ok((_, existed, source)) => (source, existed, None),
-            Err(error) => (
-                "version = 1\n".into(),
-                false,
-                Some((true, error.to_string())),
-            ),
-        };
-        self.overlay = Some(Overlay::Settings(Settings {
-            sel: 0,
-            scroll: 0,
-            source,
-            existed,
-            edit: None,
-            confirm: false,
-            message,
-        }));
+        self.overlay = Some(Overlay::Settings(settings_state(
+            crate::app_config::document(),
+        )));
         self.last_frame.clear();
     }
 
@@ -848,6 +894,7 @@ mod tests {
                 scroll: 0,
                 source: "version = 1\n".into(),
                 existed: false,
+                editable: true,
                 edit: None,
                 confirm: false,
                 message: None,
@@ -877,6 +924,7 @@ mod tests {
             scroll: 0,
             source: "version = 1\n".into(),
             existed: false,
+            editable: true,
             edit: None,
             confirm: true,
             message: None,
@@ -884,6 +932,19 @@ mod tests {
         let frame = render_settings(&mut settings, &effective, 50, 14);
         assert!(frame.contains("Revert to defaults"));
         assert!(frame.contains("CLI and tmux overrides remain effective"));
+        assert_eq!(
+            setting_value("theme.colors.header_bg", "0007").unwrap(),
+            "7"
+        );
+        let unset = SettingRow {
+            name: "behavior.hide_windows".into(),
+            persisted: "—".into(),
+            effective: "(unset)".into(),
+            source: "default".into(),
+        };
+        assert_eq!(initial_setting_value(&unset), "");
+        assert_eq!(setting_label("keys.normal.down"), "normal.down");
+        assert_eq!(setting_label("keys.search.down"), "search.down");
         let file = crate::app_config::parse("[display]\nsidebar_width = 44\n").unwrap();
         let options =
             std::collections::BTreeMap::from([("@agenmux-width".to_string(), "55".to_string())]);
@@ -900,6 +961,22 @@ mod tests {
     }
 
     #[test]
+    fn invalid_settings_document_is_read_only() {
+        let effective =
+            crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+        let error = crate::app_config::parse("[invalid").unwrap_err();
+        let mut settings = settings_state(Err(error));
+        assert!(!settings.editable);
+
+        let frame = render_settings(&mut settings, &effective, 50, 14);
+
+        assert!(frame.contains("error:"));
+        assert!(frame.contains("Esc back"));
+        assert!(!frame.contains("Enter edit"));
+        assert!(!frame.contains("Revert to defaults"));
+    }
+
+    #[test]
     fn closed_settings_expand_inline() {
         let effective =
             crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
@@ -912,6 +989,7 @@ mod tests {
             scroll: 0,
             source: "version = 1\n".into(),
             existed: false,
+            editable: true,
             edit: Some(SettingEdit {
                 name: "display.mode".into(),
                 editor: Editor::Select(Select::new("split", choices("display.mode").unwrap())),
