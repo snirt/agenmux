@@ -2542,8 +2542,12 @@ fn startup_populates_the_focused_sidebar_before_fanning_out() {
         .env("AGENMUX_DIR", &plugin_dir)
         .spawn()
         .unwrap();
-    // Generous: a loaded CI runner takes seconds to reach the second split.
-    tmux.wait_for(Duration::from_secs(10), || blocked.exists());
+    let block_deadline = Instant::now() + Duration::from_secs(10);
+    while !blocked.exists() && Instant::now() < block_deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let blocked_in_time = blocked.exists();
+    let block_timeout_diagnostics = (!blocked_in_time).then(|| tmux.diagnostics());
     let sidebar_windows = tmux.text(&[
         "list-panes",
         "-a",
@@ -2566,6 +2570,11 @@ fn startup_populates_the_focused_sidebar_before_fanning_out() {
     }
     std::fs::write(&release, "").unwrap();
     let output = child.wait_with_output().unwrap();
+    if let Some(diagnostics) = block_timeout_diagnostics {
+        let _ = viewer.kill();
+        let _ = viewer.wait();
+        panic!("second startup split timed out under parallel suite load\n{diagnostics}");
+    }
     let first_sidebar_was_focused = sidebar_windows == focused_window;
 
     assert_success(output, "start focused sidebar");
