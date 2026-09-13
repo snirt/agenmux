@@ -18,6 +18,7 @@ pub(super) struct Settings {
     sel: usize,
     scroll: usize,
     source: String,
+    path: PathBuf,
     existed: bool,
     editable: bool,
     edit: Option<SettingEdit>,
@@ -33,6 +34,7 @@ struct SettingEdit {
 struct SettingRow {
     name: String,
     persisted: String,
+    initial: String,
     effective: String,
     source: String,
 }
@@ -117,22 +119,39 @@ fn is_tag(t: &str) -> bool {
 }
 
 fn settings_rows(source: &str, effective: &crate::app_config::AppConfig) -> Vec<SettingRow> {
-    let persisted = crate::app_config::parse(source)
+    let persisted_config = crate::app_config::parse(source)
         .and_then(|file| crate::app_config::resolve(&file, &Default::default()))
-        .map(|config| crate::app_config::rows(&config))
+        .ok();
+    let persisted = persisted_config
+        .as_ref()
+        .map(crate::app_config::rows)
         .unwrap_or_default();
     crate::app_config::rows(effective)
         .into_iter()
         .map(|row| {
             let file = persisted
                 .iter()
-                .find(|candidate| candidate.name == row.name);
+                .find(|candidate| candidate.name == row.name)
+                .filter(|candidate| candidate.source == "file");
+            let initial = if row.name == "behavior.hide_windows" {
+                if file.is_some() {
+                    persisted_config
+                        .as_ref()
+                        .and_then(|config| config.hide_windows.clone())
+                        .unwrap_or_default()
+                } else {
+                    effective.hide_windows.clone().unwrap_or_default()
+                }
+            } else {
+                file.map(|candidate| candidate.value.clone())
+                    .unwrap_or_else(|| row.value.clone())
+            };
             SettingRow {
                 name: row.name,
                 persisted: file
-                    .filter(|candidate| candidate.source == "file")
                     .map(|candidate| candidate.value.clone())
                     .unwrap_or_else(|| "—".into()),
+                initial,
                 effective: row.value,
                 source: row.source,
             }
@@ -163,7 +182,9 @@ fn setting_value(name: &str, buffer: &str) -> Result<String, String> {
     let value = buffer.trim();
     if name.starts_with("keys.") {
         let mut array = toml_edit::Array::new();
-        if !value.is_empty() {
+        if value == "," {
+            array.push(value);
+        } else if !value.is_empty() {
             for chord in value.split(',').map(str::trim) {
                 crate::app_config::KeyChord::parse(chord).map_err(str::to_string)?;
                 array.push(chord);
@@ -180,12 +201,12 @@ fn setting_value(name: &str, buffer: &str) -> Result<String, String> {
     if matches!(name, "display.sidebar_width" | "display.popup_width")
         || (name == "display.popup_height" && value != "auto")
     {
-        value
+        let number = value
             .parse::<u16>()
             .ok()
             .filter(|number| (1..=10000).contains(number))
             .ok_or_else(|| "expected 1..=10000".to_string())?;
-        return Ok(value.into());
+        return Ok(number.to_string());
     }
     if name.starts_with("theme.colors.") {
         if let Ok(color) = value.parse::<u8>() {
@@ -205,24 +226,22 @@ fn choices(name: &str) -> Option<&'static [&'static str]> {
 }
 
 fn initial_setting_value(row: &SettingRow) -> String {
-    if row.persisted != "—" {
-        return row.persisted.clone();
-    }
-    if matches!(row.effective.as_str(), "(unset)" | "(unbound)") {
+    if matches!(row.initial.as_str(), "(unset)" | "(unbound)") {
         return String::new();
     }
-    if row.name.starts_with("theme.colors.") && row.effective == "terminal" {
+    if row.name.starts_with("theme.colors.") && row.initial == "terminal" {
         return "default".into();
     }
-    row.effective.clone()
+    row.initial.clone()
 }
 
 fn settings_state(
     document: Result<(PathBuf, bool, String), crate::app_config::ConfigError>,
 ) -> Settings {
-    let (source, existed, editable, message) = match document {
-        Ok((_, existed, source)) => (source, existed, true, None),
+    let (path, source, existed, editable, message) = match document {
+        Ok((path, existed, source)) => (path, source, existed, true, None),
         Err(error) => (
+            crate::app_config::config_path().unwrap_or_default(),
             "version = 1\n".into(),
             false,
             false,
@@ -233,6 +252,7 @@ fn settings_state(
         sel: 0,
         scroll: 0,
         source,
+        path,
         existed,
         editable,
         edit: None,
@@ -291,7 +311,7 @@ fn render_settings(
     }
     // Reserve header/table chrome and expanded options before computing list rows;
     // otherwise a short pane clips the active dropdown choice.
-    let fixed_rows = if narrow { 6 } else { 3 };
+    let fixed_rows = if narrow { 7 } else { 5 };
     let height = rows
         .saturating_sub(fixed_rows + select.map_or(0, Select::height))
         .max(1);
@@ -600,11 +620,16 @@ impl Sidebar {
 
     fn apply_settings_source(
         &mut self,
+        path: &std::path::Path,
         old_source: &str,
         old_existed: bool,
         source: &str,
     ) -> Result<(), String> {
-        let path = crate::app_config::config_path().ok_or("no configuration path")?;
+        let (current_path, current_existed, current_source) =
+            crate::app_config::document().map_err(|error| error.to_string())?;
+        if current_path != path || current_existed != old_existed || current_source != old_source {
+            return Err("configuration changed on disk; reopen settings".into());
+        }
         let file = crate::app_config::parse(source).map_err(|error| error.to_string())?;
         let options = crate::app_config::read_options(|command| self.tmux.run(command))
             .map_err(|error| error.to_string())?;
@@ -617,12 +642,12 @@ impl Sidebar {
             .settings
             .resolve(&old_file, &options)
             .map_err(|error| error.to_string())?;
-        crate::app_config::save_document(&path, source).map_err(|error| error.to_string())?;
+        crate::app_config::save_document(path, source).map_err(|error| error.to_string())?;
         let rollback = || -> Result<(), String> {
             if old_existed {
-                crate::app_config::save_document(&path, old_source)
+                crate::app_config::save_document(path, old_source)
                     .map_err(|error| error.to_string())?;
-            } else if let Err(error) = std::fs::remove_file(&path) {
+            } else if let Err(error) = std::fs::remove_file(path) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     return Err(error.to_string());
                 }
@@ -706,7 +731,6 @@ impl Sidebar {
         };
         let mut candidate = None;
         let mut close = false;
-        let mut editing = false;
         if let Some(Overlay::Settings(settings)) = &mut self.overlay {
             settings.message = None;
             if settings.confirm {
@@ -756,7 +780,6 @@ impl Sidebar {
                     Key::AllStates | Key::Quit | Key::Close => settings.edit = None,
                     _ => {}
                 }
-                editing = settings.edit.is_some() && candidate.is_none();
             } else {
                 match key {
                     Key::Down if !rows.is_empty() => {
@@ -775,7 +798,6 @@ impl Sidebar {
                                 name: row.name.clone(),
                                 editor,
                             });
-                            editing = true;
                         }
                     }
                     Key::AllStates | Key::Quit | Key::Close => close = true,
@@ -784,11 +806,15 @@ impl Sidebar {
             }
         }
         if let Some(source) = candidate {
-            let (old_source, old_existed) = match &self.overlay {
-                Some(Overlay::Settings(settings)) => (settings.source.clone(), settings.existed),
+            let (path, old_source, old_existed) = match &self.overlay {
+                Some(Overlay::Settings(settings)) => (
+                    settings.path.clone(),
+                    settings.source.clone(),
+                    settings.existed,
+                ),
                 _ => return,
             };
-            let result = self.apply_settings_source(&old_source, old_existed, &source);
+            let result = self.apply_settings_source(&path, &old_source, old_existed, &source);
             if let Some(Overlay::Settings(settings)) = &mut self.overlay {
                 match result {
                     Ok(()) => {
@@ -802,6 +828,10 @@ impl Sidebar {
                 }
             }
         }
+        let editing = matches!(
+            &self.overlay,
+            Some(Overlay::Settings(Settings { edit: Some(_), .. }))
+        );
         if close {
             self.close_overlay();
         } else if editing {
@@ -893,6 +923,7 @@ mod tests {
                 sel: 0,
                 scroll: 0,
                 source: "version = 1\n".into(),
+                path: PathBuf::new(),
                 existed: false,
                 editable: true,
                 edit: None,
@@ -903,6 +934,12 @@ mod tests {
             assert!(frame.lines().count() <= rows);
             assert!(frame.lines().all(|line| line.chars().count() <= cols + 20));
             assert!(frame.contains("agenmux"));
+            if rows >= 16 {
+                assert!(frame.contains("Esc back"), "{frame}");
+                settings.message = Some((false, "saved".into()));
+                let saved = render_settings(&mut settings, &effective, cols, rows);
+                assert!(saved.contains("saved"), "{saved}");
+            }
             settings.sel = settings_rows(&settings.source, &effective).len();
             let end = render_settings(&mut settings, &effective, cols, rows);
             assert!(end.contains("Revert to defaults"));
@@ -912,17 +949,23 @@ mod tests {
     #[test]
     fn settings_values_validate_and_revert_confirmation_names_overrides() {
         assert_eq!(setting_value("display.sidebar_width", "44").unwrap(), "44");
+        assert_eq!(
+            setting_value("display.sidebar_width", "0044").unwrap(),
+            "44"
+        );
         assert!(setting_value("display.sidebar_width", "0").is_err());
         assert_eq!(
             setting_value("keys.normal.down", "j, Down").unwrap(),
             "[\"j\", \"Down\"]"
         );
+        assert_eq!(setting_value("keys.normal.down", ",").unwrap(), "[\",\"]");
         let effective =
             crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
         let mut settings = Settings {
             sel: 0,
             scroll: 0,
             source: "version = 1\n".into(),
+            path: PathBuf::new(),
             existed: false,
             editable: true,
             edit: None,
@@ -939,10 +982,26 @@ mod tests {
         let unset = SettingRow {
             name: "behavior.hide_windows".into(),
             persisted: "—".into(),
+            initial: String::new(),
             effective: "(unset)".into(),
             source: "default".into(),
         };
         assert_eq!(initial_setting_value(&unset), "");
+        let source = "[behavior]\nhide_windows = 'a\\b'\n";
+        let raw_config = crate::app_config::parse(source)
+            .and_then(|file| crate::app_config::resolve(&file, &Default::default()))
+            .unwrap();
+        let raw_row = settings_rows(source, &raw_config)
+            .into_iter()
+            .find(|row| row.name == "behavior.hide_windows")
+            .unwrap();
+        assert_eq!(initial_setting_value(&raw_row), "a\\b");
+        let value = setting_value(&raw_row.name, &initial_setting_value(&raw_row)).unwrap();
+        let edited = crate::app_config::edit_document(source, &raw_row.name, Some(&value)).unwrap();
+        let round_trip = crate::app_config::parse(&edited)
+            .and_then(|file| crate::app_config::resolve(&file, &Default::default()))
+            .unwrap();
+        assert_eq!(round_trip.hide_windows.as_deref(), Some("a\\b"));
         assert_eq!(setting_label("keys.normal.down"), "normal.down");
         assert_eq!(setting_label("keys.search.down"), "search.down");
         let file = crate::app_config::parse("[display]\nsidebar_width = 44\n").unwrap();
@@ -988,6 +1047,7 @@ mod tests {
             sel,
             scroll: 0,
             source: "version = 1\n".into(),
+            path: PathBuf::new(),
             existed: false,
             editable: true,
             edit: Some(SettingEdit {

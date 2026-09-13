@@ -1120,10 +1120,15 @@ for _ in $(seq 1 40); do
   sleep 0.05
 done
 tmux -S "$sock" resize-pane -t "$escape_sidebar" -x 22
-sleep 0.1
-settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
-settings_width="$(tmux -S "$sock" display-message -p -t "$escape_sidebar" '#{pane_width}')"
-has "$settings_frame" 'display.mode' && [ "$settings_width" -eq 22 ] && settings_responsive=1
+for _ in $(seq 1 20); do
+  settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
+  settings_width="$(tmux -S "$sock" display-message -p -t "$escape_sidebar" '#{pane_width}')"
+  if has "$settings_frame" 'display.mode' && [ "$settings_width" -eq 22 ]; then
+    settings_responsive=1
+    break
+  fi
+  sleep 0.05
+done
 printf '\r' >&9
 for _ in $(seq 1 20); do
   [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux-settings-edit ] && break
@@ -1224,11 +1229,7 @@ for _ in $(seq 1 40); do
   [ "$(tmux -S "$sock" display-message -p -c "$client" '#{popup_active}')" = 1 ] && break
   sleep 0.05
 done
-printf 's' >&9
-sleep 0.1
-printf '\r' >&9
-sleep 0.1
-printf '\033[B\r' >&9
+printf 's\r\033[B\r' >&9
 for _ in $(seq 1 40); do
   if grep -q '^mode = "popup"' "$XDG_CONFIG_HOME/agenmux/config.toml"; then
     settings_popup=1
@@ -1236,9 +1237,7 @@ for _ in $(seq 1 40); do
   fi
   sleep 0.05
 done
-printf '\r' >&9
-sleep 0.1
-printf '\033[A\r' >&9
+printf '\r\033[A\r' >&9
 for _ in $(seq 1 40); do
   grep -q '^mode = "split"' "$XDG_CONFIG_HOME/agenmux/config.toml" && break
   sleep 0.05
