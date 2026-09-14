@@ -440,6 +440,35 @@ pub(crate) fn restore_layout(window: &str) {
     }
 }
 
+/// Stop the running daemon and wait for its own cleanup to finish. Read the
+/// ownership options first: `teardown` unsets them. A daemon left behind
+/// dies on its next empty tick and runs the global `teardown` below, which
+/// lands on whatever panes the next activation has created by then.
+pub fn stop_daemon() {
+    let option = |name: &str| {
+        tmux::command(&["show-option", "-gqv", name])
+            .unwrap_or_default()
+            .trim_end()
+            .to_string()
+    };
+    let client = option("@agenmux-control-client");
+    let runtime = option("@agenmux-runtime-dir");
+    if client.is_empty() {
+        return;
+    }
+    // Losing its control pipe ends the daemon's loop; it removes the keys
+    // FIFO as the last step of its teardown.
+    let _ = tmux::command_status(&["detach-client", "-t", &client]);
+    if runtime.is_empty() {
+        return;
+    }
+    let keys = std::path::Path::new(&runtime).join("agenmux-keys");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while keys.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 pub fn teardown() -> i32 {
     let sidebar_filter = ["#{||:", IS_SIDEBAR, ",#{==:#{pane_title},agents-mon}}"].concat();
     let panes = tmux::lines(&[

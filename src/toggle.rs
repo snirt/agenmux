@@ -151,6 +151,7 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
             && window.as_deref().is_none_or(window_has_sidebar);
     }
     if !reuse {
+        panes::stop_daemon();
         panes::teardown();
         if tmux::command_status(&["set-option", "-g", "@agenmux-on", "1"]).is_err() {
             return 1;
