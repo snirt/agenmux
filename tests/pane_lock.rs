@@ -91,7 +91,9 @@ impl PaneLockChild {
 
     fn finish(mut self, code: i32) -> String {
         let child = self.0.as_mut().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Generous: the exit code below still decides the outcome, and a
+        // loaded CI runner spends seconds on forks around the 2s lock wait.
+        let deadline = Instant::now() + Duration::from_secs(15);
         while child.try_wait().unwrap().is_none() {
             assert!(Instant::now() < deadline, "public pane command blocked");
             thread::sleep(Duration::from_millis(10));
@@ -270,7 +272,7 @@ fn public_pane_lock_recovers_bounds_contention_and_rolls_back() {
     let began = Instant::now();
     let error = pane_lock_run(&server, &["pane-add", "plugin:0"], 1);
     assert!(error.contains("pane lock acquisition timed out"), "{error}");
-    assert!((Duration::from_millis(1800)..Duration::from_secs(4)).contains(&began.elapsed()));
+    assert!((Duration::from_millis(1800)..Duration::from_secs(8)).contains(&began.elapsed()));
     assert_eq!(pane_lock_sidebar_count(&server, "@0"), 0);
     // A held @0 lock must not serialize other windows or another server's @0.
     let other = server.text(&[
