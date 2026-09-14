@@ -1,3 +1,5 @@
+use super::E;
+
 pub(super) struct TopBar<'a> {
     palette: &'a crate::app_config::Palette,
     focused: bool,
@@ -31,6 +33,51 @@ impl<'a> TopBar<'a> {
         } else {
             String::new()
         }
+    }
+}
+
+pub(super) fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
+    if bg.is_empty() {
+        return line.into();
+    }
+    let body = line.replace(&format!("{E}[0m"), &format!("{E}[0m{bg}"));
+    format!(
+        "{bg}{body}{}{E}[0m",
+        " ".repeat(cols.saturating_sub(width))
+    )
+}
+
+pub(super) struct SelectedRow<'a> {
+    palette: &'a crate::app_config::Palette,
+    selected: bool,
+    focused: bool,
+}
+
+impl<'a> SelectedRow<'a> {
+    pub(super) fn new(
+        palette: &'a crate::app_config::Palette,
+        selected: bool,
+        focused: bool,
+    ) -> Self {
+        Self {
+            palette,
+            selected,
+            focused,
+        }
+    }
+
+    pub(super) fn render(&self, line: &str, cols: usize) -> String {
+        if !self.selected {
+            return line.into();
+        }
+        let bg = self.palette.state_bg("idle", self.focused);
+        if bg.is_empty() || bg == format!("{E}[49m") {
+            return format!(
+                "{E}[7m{line}{}{E}[0m",
+                " ".repeat(cols.saturating_sub(line.chars().count()))
+            );
+        }
+        bar(line, &bg, cols, line.chars().count())
     }
 }
 
@@ -159,6 +206,23 @@ mod tests {
         let explicit = TopBar::new(&palette, false, false);
         assert_eq!(explicit.foreground("1"), palette.header_fg.fg("1"));
         assert_eq!(explicit.background(), "");
+    }
+
+    #[test]
+    fn selected_row_fills_width_with_theme_or_reverse_background() {
+        let palette = crate::app_config::Palette::default();
+        let selected = SelectedRow::new(&palette, true, true).render("❯ mode", 10);
+        assert!(selected.starts_with(&palette.state_bg("idle", true)));
+        assert!(selected.ends_with(&format!("    {E}[0m")));
+        assert_eq!(
+            SelectedRow::new(&palette, false, true).render("  mode", 10),
+            "  mode"
+        );
+
+        let file = crate::app_config::parse("[theme]\nbase = 'terminal'").unwrap();
+        let terminal = crate::app_config::Palette::resolve(file.theme.as_ref().unwrap());
+        let selected = SelectedRow::new(&terminal, true, true).render("❯ mode", 10);
+        assert_eq!(selected, format!("{E}[7m❯ mode    {E}[0m"));
     }
 
     #[test]

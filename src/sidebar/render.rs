@@ -3,7 +3,7 @@ use crate::input::term_size;
 use std::io::Write;
 
 use super::overlay::current_tag;
-use super::ui::TopBar;
+use super::ui::{bar, TopBar};
 use super::{Sidebar, VisiblePane, E};
 
 const SPIN: [char; 8] = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
@@ -16,14 +16,6 @@ pub(super) fn join(parts: &[String]) -> String {
         .cloned()
         .collect::<Vec<_>>()
         .join(" · ")
-}
-
-pub(super) fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
-    if bg.is_empty() {
-        return line.into();
-    }
-    let body = line.replace(&format!("{E}[0m"), &format!("{E}[0m{bg}"));
-    format!("{bg}{body}{}{E}[0m", " ".repeat(cols.saturating_sub(width)))
 }
 
 pub(super) fn cursor_mark(

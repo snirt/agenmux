@@ -4,8 +4,8 @@ use crate::release;
 use crate::tmux::command_spawn;
 use std::path::PathBuf;
 
-use super::render::{app_title, bar, clip_frame, cursor_mark, join};
-use super::ui::{Action as UiAction, Editor, Label, Select, TextEdit, TopBar};
+use super::render::{app_title, clip_frame, cursor_mark, join};
+use super::ui::{bar, Action as UiAction, Editor, Label, Select, SelectedRow, TextEdit, TopBar};
 use super::{Sidebar, E};
 
 pub(super) enum Overlay {
@@ -300,6 +300,8 @@ fn settings_state(
 fn render_settings(
     settings: &mut Settings,
     effective: &crate::app_config::AppConfig,
+    palette: &crate::app_config::Palette,
+    focused: bool,
     cols: usize,
     rows: usize,
 ) -> String {
@@ -394,10 +396,11 @@ fn render_settings(
         .unwrap_or("");
     for index in settings.scroll..end {
         if index == all.len() {
-            out.push_str(&format!(
-                "{}\n",
-                UiAction::new("Revert to defaults").render(index == settings.sel)
-            ));
+            let line = UiAction::new("Revert to defaults").render(index == settings.sel);
+            out.push_str(
+                &SelectedRow::new(palette, index == settings.sel, focused).render(&line, cols),
+            );
+            out.push('\n');
             continue;
         }
         let row = &all[index];
@@ -409,17 +412,18 @@ fn render_settings(
             out.push_str(&format!("  {E}[7m {group} {E}[0m\n"));
         }
         let name = setting_label(&row.name);
-        if narrow {
-            out.push_str(&format!(
-                "{}\n",
-                Label::new(name).render(mark, &row.effective)
-            ));
+        let line = if narrow {
+            Label::new(name).render(mark, &row.effective)
         } else {
-            out.push_str(&format!(
-                "{mark} {:<26} {:<14} {:<14} {}\n",
+            format!(
+                "{mark} {:<26} {:<14} {:<14} {}",
                 name, row.persisted, row.effective, row.source
-            ));
-        }
+            )
+        };
+        out.push_str(
+            &SelectedRow::new(palette, index == settings.sel, focused).render(&line, cols),
+        );
+        out.push('\n');
         if index == settings.sel {
             if let Some(select) = select {
                 for option in select.render() {
@@ -582,7 +586,14 @@ impl Sidebar {
                     .as_ref()
                     .map(|daemon| daemon.size)
                     .unwrap_or_else(term_size);
-                render_settings(settings, &self.settings.settings, cols, rows)
+                render_settings(
+                    settings,
+                    &self.settings.settings,
+                    &self.palette,
+                    self.plugin_selected,
+                    cols,
+                    rows,
+                )
             }
             None => return,
         };
@@ -1087,18 +1098,39 @@ mod tests {
                 confirm: false,
                 message: None,
             };
-            let frame = render_settings(&mut settings, &effective, cols, rows);
+            let frame = render_settings(
+                &mut settings,
+                &effective,
+                &crate::app_config::Palette::default(),
+                true,
+                cols,
+                rows,
+            );
             assert!(frame.lines().count() <= rows);
             assert!(frame.lines().all(|line| line.chars().count() <= cols + 20));
             assert!(frame.contains("agenmux"));
             if rows >= 16 {
                 assert!(frame.contains("Esc back"), "{frame}");
                 settings.message = Some((false, "saved".into()));
-                let saved = render_settings(&mut settings, &effective, cols, rows);
+                let saved = render_settings(
+                    &mut settings,
+                    &effective,
+                    &crate::app_config::Palette::default(),
+                    true,
+                    cols,
+                    rows,
+                );
                 assert!(saved.contains("saved"), "{saved}");
             }
             settings.sel = settings_rows(&settings.source, &effective).len();
-            let end = render_settings(&mut settings, &effective, cols, rows);
+            let end = render_settings(
+                &mut settings,
+                &effective,
+                &crate::app_config::Palette::default(),
+                true,
+                cols,
+                rows,
+            );
             assert!(end.contains("Revert to defaults"));
         }
     }
@@ -1117,14 +1149,28 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["display.sidebar_width"]
         );
-        let frame = render_settings(&mut settings, &effective, 80, 20);
+        let frame = render_settings(
+            &mut settings,
+            &effective,
+            &crate::app_config::Palette::default(),
+            true,
+            80,
+            20,
+        );
         assert!(frame.contains("Display"), "{frame}");
         assert!(frame.contains("\u{1b}[7m Display "), "{frame}");
         assert!(frame.contains("sidebar_width"), "{frame}");
 
         settings.search = Some(TextEdit::new("split".into()));
         assert!(visible_settings_rows(&settings, &effective).is_empty());
-        let empty = render_settings(&mut settings, &effective, 80, 20);
+        let empty = render_settings(
+            &mut settings,
+            &effective,
+            &crate::app_config::Palette::default(),
+            true,
+            80,
+            20,
+        );
         assert!(empty.contains("No settings match"), "{empty}");
     }
 
@@ -1156,7 +1202,14 @@ mod tests {
             confirm: true,
             message: None,
         };
-        let frame = render_settings(&mut settings, &effective, 50, 14);
+        let frame = render_settings(
+            &mut settings,
+            &effective,
+            &crate::app_config::Palette::default(),
+            true,
+            50,
+            14,
+        );
         assert!(frame.contains("Revert to defaults"));
         assert!(frame.contains("CLI and tmux overrides remain effective"));
         assert_eq!(
@@ -1211,7 +1264,14 @@ mod tests {
         let mut settings = settings_state(Err(error));
         assert!(!settings.editable);
 
-        let frame = render_settings(&mut settings, &effective, 50, 14);
+        let frame = render_settings(
+            &mut settings,
+            &effective,
+            &crate::app_config::Palette::default(),
+            true,
+            50,
+            14,
+        );
 
         assert!(frame.contains("error:"));
         assert!(frame.contains("Esc back"));
@@ -1253,7 +1313,14 @@ mod tests {
             message: None,
         };
 
-        let frame = render_settings(&mut settings, &effective, 50, 18);
+        let frame = render_settings(
+            &mut settings,
+            &effective,
+            &crate::app_config::Palette::default(),
+            true,
+            50,
+            18,
+        );
 
         assert!(frame.contains("Display"), "{frame}");
         assert!(frame.contains("mode: split"), "{frame}");
