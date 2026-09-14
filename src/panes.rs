@@ -38,14 +38,26 @@ impl PaneLock {
         let name = std::ffi::CString::new(format!("{server}-{started}-{window}.lock"))?;
         // Open relative to the validated directory descriptor, not its path.
         // NONBLOCK prevents a substituted FIFO from blocking before validation.
-        let fd = unsafe {
-            libc::openat(
-                dir.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-                0o600,
-            )
-        };
+        // macOS returns a spurious ENOENT to the losers of a concurrent
+        // O_CREAT race on the same name (roughly a third of eight racers);
+        // the file exists by the next attempt.
+        let mut fd = -1;
+        for attempt in 0..20 {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                    0o600,
+                )
+            };
+            if fd >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::NotFound {
+                break;
+            }
+        }
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -425,6 +437,35 @@ pub(crate) fn restore_layout(window: &str) {
     .unwrap_or_default();
     if layout_size(layout) == Some(current.trim()) {
         let _ = tmux::command_status(&["select-layout", "-t", window, layout]);
+    }
+}
+
+/// Stop the running daemon and wait for its own cleanup to finish. Read the
+/// ownership options first: `teardown` unsets them. A daemon left behind
+/// dies on its next empty tick and runs the global `teardown` below, which
+/// lands on whatever panes the next activation has created by then.
+pub fn stop_daemon() {
+    let option = |name: &str| {
+        tmux::command(&["show-option", "-gqv", name])
+            .unwrap_or_default()
+            .trim_end()
+            .to_string()
+    };
+    let client = option("@agenmux-control-client");
+    let runtime = option("@agenmux-runtime-dir");
+    if client.is_empty() {
+        return;
+    }
+    // Losing its control pipe ends the daemon's loop; it removes the keys
+    // FIFO as the last step of its teardown.
+    let _ = tmux::command_status(&["detach-client", "-t", &client]);
+    if runtime.is_empty() {
+        return;
+    }
+    let keys = std::path::Path::new(&runtime).join("agenmux-keys");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while keys.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
