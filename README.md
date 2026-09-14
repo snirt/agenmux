@@ -154,6 +154,7 @@ set -g status-right '#{agenmux} | %H:%M'
 | `@agenmux-height` | auto, up to available height | Fixed popup height; auto prefers at least `15` rows when they fit |
 | `@agenmux-hide-windows` | unset | Leave the picker unchanged; a glob excludes matches, `''` restores default picker |
 | `@agenmux-notifications` | `on` | Desktop notifications; set `off` to disable |
+| `@agenmux-debug` | unset | Absolute path of a trace file for the next sidebar start; see [Troubleshooting](#troubleshooting) |
 
 **Opening bindings belong to tmux configuration, not app TOML.** Bootstrap
 reads `@agenmux-key` and `@agenmux-popup-key` (legacy `@agents-mon-*` aliases
@@ -545,6 +546,40 @@ and extract it; its native engine is already installed at
 Each release includes `SHA256SUMS` for verification. Builds from untagged commits
 remain available as temporary artifacts on their **Build and Release** workflow
 run.
+
+## Troubleshooting
+
+The sidebar daemon keeps its diagnostics in `agenmux-daemon.log` inside the
+runtime directory (`$TMPDIR`, or `/tmp`). The file is owner-only, starts over on
+every sidebar launch, and restarts itself past 256 KiB. Look there first when
+the sidebar disappears or a configuration reload does nothing: every
+`agenmux: ...` message the daemon would have printed is in it.
+
+For detection bugs and timing questions, enable the trace. It is off by default
+and only costs anything when enabled:
+
+```tmux
+set -g @agenmux-debug /tmp/agenmux-trace.log   # then reopen the sidebar
+```
+
+`AGENMUX_DEBUG=<file>` does the same for direct commands (`agenmux scan`) and
+wins over the option when both are set. Each line carries the writing process,
+a UTC clock, and the number of the scan it belongs to:
+
+```text
+[4242] 12:34:56.789 s17 # scan 23ms reason=output captured=1 reused=3
+[4242] 12:34:56.790 s17 # state %5 claude working->idle shown=working ticks=1
+[4242] 12:34:56.802 s17 3ms capture-pane -b 'agenmux-4242' -t '%5' -> ok 0B ""
+```
+
+Per-scan lines record the trigger, duration, and how many screens were
+captured versus reused; per-command lines record every tmux round trip; `state`
+lines record each pane's detected state, what the sidebar shows, and the
+debounce tick that held a transition back. Release builds never write captured
+screen text to the trace. Debug builds (`make dev-use`) add `detect` lines with the
+pane title and the last two screen lines, which is what tuning an
+`agents/*.conf` rule needs. Review and sanitize either file before attaching it
+to an issue: paths, session names, and titles come from your own panes.
 
 ## Known limits
 

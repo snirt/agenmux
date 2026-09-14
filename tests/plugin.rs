@@ -1863,7 +1863,7 @@ fn sidebar_refresh_uses_one_content_enumeration() {
         std::fs::read_to_string(&debug)
             .unwrap_or_default()
             .lines()
-            .filter(|line| line.contains("] # scan "))
+            .filter(|line| line.contains(" # scan "))
             .count()
             >= 2
     });
@@ -1876,7 +1876,7 @@ fn sidebar_refresh_uses_one_content_enumeration() {
     let debug = std::fs::read_to_string(debug).unwrap();
     let completed = debug
         .lines()
-        .filter(|line| line.contains("] # scan "))
+        .filter(|line| line.contains(" # scan "))
         .count();
     let content_queries = debug
         .lines()

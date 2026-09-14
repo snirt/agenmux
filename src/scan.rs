@@ -225,6 +225,7 @@ pub fn scan_cached(
     screens: &mut ScreenCache,
     policy: ScanPolicy<'_>,
 ) -> Result<(ScanSnapshot, ScanStats), TmuxError> {
+    crate::diag::begin_scan();
     tmux.sync()?;
     let rows = tmux.run(LIST_FMT)?;
     let mut snap: Option<Snapshot> = None;
@@ -287,7 +288,7 @@ pub fn scan_cached(
                     .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                     .map_err(|e| {
                         let message = format!("capture file {}: {e}", cap.display());
-                        crate::tmux::debug_note(&message);
+                        trace!("{message}");
                         TmuxError::Error(message)
                     })
             })?;
@@ -297,6 +298,18 @@ pub fn scan_cached(
                 stats.captured += 1;
             }
             let state = crate::detect::detect_state(&confs[idx], title, &screen);
+            // Pane content never leaves a release binary: title and screen
+            // tail are dev-build evidence for tuning agents/*.conf rules.
+            if cfg!(debug_assertions) && !reused {
+                let tail = screen
+                    .lines()
+                    .rev()
+                    .filter(|line| !line.trim().is_empty())
+                    .take(2)
+                    .map(|line| line.chars().take(80).collect::<String>())
+                    .collect::<Vec<_>>();
+                trace!("detect {pane} {name} state={state} title={title:?} tail={tail:?}");
+            }
             let mut subject = crate::detect::subject(&confs[idx], title, &screen, path);
             if state != "idle" {
                 subj.remove(pane); // pane got a new prompt — cached subject is stale
@@ -317,10 +330,7 @@ pub fn scan_cached(
                         let started = procs::agent_start(&confs[idx], &mut snap, pid);
                         subject = crate::detect::subject_cmd(&confs[idx], pane, path, started)
                             .unwrap_or_default();
-                        crate::tmux::debug_note(&format!(
-                            "subject_cmd {pane} {}ms",
-                            t0.elapsed().as_millis()
-                        ));
+                        trace!("subject_cmd {pane} {}ms", t0.elapsed().as_millis());
                         subj.insert(pane.to_string(), (path.to_string(), subject.clone()));
                     }
                 }
@@ -339,11 +349,7 @@ pub fn scan_cached(
             });
             panes.push(meta);
         }
-        crate::tmux::debug_note(&format!(
-            "snapshot panes={} agents={}",
-            panes.len(),
-            agents.len()
-        ));
+        trace!("snapshot panes={} agents={}", panes.len(), agents.len());
         Ok(ScanSnapshot { panes, agents })
     })();
     if used_buffer {

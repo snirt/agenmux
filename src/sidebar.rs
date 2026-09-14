@@ -329,7 +329,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 // a pipe I/O error can leave a response block half-read —
                 // the pipe is desynced, restarting is the only safe move
                 Err(e @ TmuxError::Exited) | Err(e @ TmuxError::Io(_)) => {
-                    crate::tmux::debug_note(&format!("scan ended the daemon: {e}"));
+                    trace!("scan ended the daemon: {e}");
                     break;
                 }
                 Err(TmuxError::Error(_)) => {} // e.g. pane died mid-scan
@@ -342,6 +342,12 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             // transient tmux layouts twice and mistake them for a user drag.
             if sb.daemon.is_some() && periodic && !sb.mirror_tick() {
                 break; // all preserved panes gone — nothing left to display
+            }
+            if sb.daemon.is_some() && periodic {
+                crate::diag::cap_daemon_log(
+                    &crate::diag::daemon_log_path(),
+                    crate::diag::DAEMON_LOG_LIMIT,
+                );
             }
             if sb.daemon.as_ref().is_some_and(|d| !d.keys_path.exists()) {
                 break; // runtime dir vanished: deaf to keys, better gone than a zombie
@@ -573,12 +579,12 @@ impl Sidebar {
         } else {
             "scheduled"
         };
-        crate::tmux::debug_note(&format!(
+        trace!(
             "scan {}ms reason={reason} captured={} reused={}",
             t0.elapsed().as_millis(),
             stats.captured,
             stats.reused
-        ));
+        );
         let _ = std::fs::write(&self.cache_file, scan::to_tsv(&scanned));
         let mut focus = self.client_focus().unwrap_or_default();
         // A popup owns the terminal's input even though tmux still reports the
