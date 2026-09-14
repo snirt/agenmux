@@ -11,7 +11,7 @@ diagnose() {
   echo "--- daemon processes"
   pgrep -fl "agenmux daemon" 2>/dev/null || true
   echo "--- daemon trace tail"
-  tail -n 200 "$tmp/daemon-trace.log" 2>/dev/null || true
+  tail -n 60 "$tmp/daemon-trace.log" 2>/dev/null || true
 }
 trap 'echo "FAIL navigation-key-table: command failed at line $LINENO"; diagnose' ERR
 
@@ -233,14 +233,16 @@ has_re "$delete_prompt" 'delete (window|pane)\? y/N' || {
   echo "FAIL navigation-key-table: dd did not open inline deletion confirmation"
   exit 1
 }
-{
-  echo "# probe: client table before cancel = $(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
-  tmux -S "$sock" list-keys -T agenmux | sed 's/^/# probe agenmux: /'
-  tmux -S "$sock" list-keys -T agenmux-search | sed 's/^/# probe search: /'
-} >>"$tmp/daemon-trace.log" 2>&1
 printf '\033' >&9
-sleep 0.5
-echo "# probe: client table after cancel = $(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" >>"$tmp/daemon-trace.log"
+# A lone Escape sits in tmux for escape-time (500ms before tmux 3.5); wait for
+# the cancel to land before touching the key tables again.
+for _ in $(seq 1 40); do
+  if [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ] &&
+    ! has_re "$(tmux -S "$sock" capture-pane -p -t "$sidebar")" 'delete (window|pane)\? y/N'; then
+    break
+  fi
+  sleep 0.05
+done
 windows_after="$(tmux -S "$sock" list-windows -a -F '#{window_id}' | wc -l | tr -d ' ')"
 [ "$windows_after" = "$windows_before" ] || {
   echo "FAIL navigation-key-table: cancelling dd deleted a window"
