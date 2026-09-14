@@ -445,6 +445,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
     let mut next_tick = Instant::now();
     loop {
         if QUIT.load(Ordering::Relaxed) {
+            trace!("event loop exit: termination signal");
             break;
         }
         let mut now = Instant::now();
@@ -486,7 +487,8 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             // reconciliation. Running them for output/focus scans can sample
             // transient tmux layouts twice and mistake them for a user drag.
             if sb.daemon.is_some() && periodic && !sb.mirror_tick() {
-                break; // all preserved panes gone — nothing left to display
+                trace!("event loop exit: no preserved panes left");
+                break;
             }
             if sb.daemon.is_some() && periodic {
                 if let Some(log) = crate::diag::cap_daemon_log(
@@ -502,7 +504,9 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 sb.refocus_writers();
             }
             if sb.daemon.as_ref().is_some_and(|d| !d.keys_path.exists()) {
-                break; // runtime dir vanished: deaf to keys, better gone than a zombie
+                // Deaf to keys without the FIFO: better gone than a zombie.
+                trace!("event loop exit: runtime keys path vanished");
+                break;
             }
             sb.render(false);
             // a scan takes tens of ms — with the pre-scan `now`, a tick due
@@ -591,8 +595,14 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 };
                 match sb.dispatch_key(key) {
                     DispatchResult::Continue => {}
-                    DispatchResult::Break => return false,
-                    DispatchResult::QuietExit => return true,
+                    DispatchResult::Break => {
+                        trace!("event loop exit: key requested teardown");
+                        return false;
+                    }
+                    DispatchResult::QuietExit => {
+                        trace!("event loop exit: replaced, leaving panes");
+                        return true;
+                    }
                 }
                 drained += 1;
                 if drained >= 64 || !key_pending(key_fd) {
