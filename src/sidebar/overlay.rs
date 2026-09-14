@@ -1,4 +1,4 @@
-use crate::app_config::{action_for, Action, KeyChord, Palette};
+use crate::app_config::{action_for, Action, KeyChord};
 use crate::input::{term_size, Key};
 use crate::release;
 use crate::tmux::command_spawn;
@@ -23,6 +23,7 @@ pub(super) struct Settings {
     editable: bool,
     edit: Option<SettingEdit>,
     search: Option<TextEdit>,
+    search_editing: bool,
     confirm: bool,
     message: Option<(bool, String)>,
 }
@@ -290,6 +291,7 @@ fn settings_state(
         editable,
         edit: None,
         search: None,
+        search_editing: false,
         confirm: false,
         message,
     }
@@ -350,7 +352,11 @@ fn render_settings(
         Editor::TextEdit(_) => None,
     });
     if let Some(search) = &settings.search {
-        out.push_str(&format!("\n/ {}_\n", search.value()));
+        out.push_str(&format!(
+            "\n/ {}{}\n",
+            search.value(),
+            if settings.search_editing { "_" } else { "" }
+        ));
     } else {
         out.push_str("\n/ search\n");
     }
@@ -446,11 +452,13 @@ fn render_settings(
         } else {
             "\n↑↓/jk choose · Enter save · Esc cancel"
         });
+    } else if settings.search_editing {
+        out.push_str("\ntype to filter · Enter apply · Esc clear");
     } else if settings.search.is_some() {
         out.push_str(if narrow {
-            "\ntype filter · ↑↓ move · Enter · Esc clear"
+            "\njk move · Enter edit · / refine · Esc clear"
         } else {
-            "\ntype to filter · ↑↓ move · Enter edit · Esc clear"
+            "\n↑↓/jk move · Enter edit · / refine · Esc clear"
         });
     } else {
         out.push_str(if narrow {
@@ -481,7 +489,11 @@ impl Sidebar {
 
     pub(super) fn render_overlay(&mut self, force: bool) {
         let title = app_title();
-        let header = self.palette.header_fg.fg("1");
+        let header = if !self.plugin_selected && self.header_inherited {
+            self.palette.header_bg.fg("1")
+        } else {
+            self.palette.header_fg.fg("1")
+        };
         let muted = self.palette.muted_fg.fg("2");
         let idle = self.palette.idle_fg.fg("");
         let working = self.palette.working_fg.fg("");
@@ -573,7 +585,12 @@ impl Sidebar {
             }
             None => return,
         };
-        let text = if self.palette.header_bg == Palette::default().header_bg {
+        let header_bg = if !self.plugin_selected && self.header_inherited {
+            String::new()
+        } else {
+            self.palette.header_bg.bg()
+        };
+        let text = if header_bg.is_empty() {
             text
         } else {
             let (header, body) = text.split_once('\n').unwrap_or((&text, ""));
@@ -594,7 +611,7 @@ impl Sidebar {
                 };
             format!(
                 "{E}[2J{E}[H{}\n{body}",
-                bar(header, &self.palette.header_bg.bg(), cols, width)
+                bar(header, &header_bg, cols, width)
             )
         };
         self.emit(text, "", force);
@@ -671,7 +688,7 @@ impl Sidebar {
                 edit: Some(_),
                 ..
             })) | Some(Overlay::Settings(Settings {
-                search: Some(_),
+                search_editing: true,
                 ..
             }))
         )
@@ -880,31 +897,41 @@ impl Sidebar {
                 }
             } else {
                 match key {
-                    Key::Text(text) if settings.search.is_some() => {
+                    Key::Text(text) if settings.search_editing => {
                         settings.search.as_mut().unwrap().push(&text);
                         settings.sel = 0;
                         settings.scroll = 0;
                     }
-                    Key::Backspace if settings.search.is_some() => {
+                    Key::Backspace if settings.search_editing => {
                         settings.search.as_mut().unwrap().backspace();
                         settings.sel = 0;
                         settings.scroll = 0;
                     }
-                    Key::ClearSearch if settings.search.is_some() => {
+                    Key::ClearSearch if settings.search_editing => {
                         settings.search.as_mut().unwrap().clear();
                         settings.sel = 0;
                         settings.scroll = 0;
                     }
-                    _ if search_start => {
-                        settings.search = Some(TextEdit::new(String::new()));
+                    Key::Jump if settings.search_editing => {
+                        settings.search_editing = false;
                         settings.sel = 0;
                         settings.scroll = 0;
                     }
-                    Key::Down if !rows.is_empty() => {
+                    _ if search_start => {
+                        if settings.search.is_none() {
+                            settings.search = Some(TextEdit::new(String::new()));
+                        }
+                        settings.search_editing = true;
+                        settings.sel = 0;
+                        settings.scroll = 0;
+                    }
+                    _ if select_delta == Some(1) && !rows.is_empty() => {
                         let last = rows.len() + usize::from(show_revert) - 1;
                         settings.sel = (settings.sel + 1).min(last);
                     }
-                    Key::Up => settings.sel = settings.sel.saturating_sub(1),
+                    _ if select_delta == Some(-1) => {
+                        settings.sel = settings.sel.saturating_sub(1);
+                    }
                     Key::Jump if show_revert && settings.sel == rows.len() => {
                         settings.confirm = true
                     }
@@ -923,6 +950,7 @@ impl Sidebar {
                     }
                     Key::AllStates | Key::Quit | Key::Close if settings.search.is_some() => {
                         settings.search = None;
+                        settings.search_editing = false;
                         settings.sel = 0;
                         settings.scroll = 0;
                     }
@@ -958,7 +986,7 @@ impl Sidebar {
             &self.overlay,
             Some(Overlay::Settings(Settings { edit: Some(_), .. }))
                 | Some(Overlay::Settings(Settings {
-                    search: Some(_),
+                    search_editing: true,
                     ..
                 }))
         );
@@ -1058,6 +1086,7 @@ mod tests {
                 editable: true,
                 edit: None,
                 search: None,
+                search_editing: false,
                 confirm: false,
                 message: None,
             };
@@ -1126,6 +1155,7 @@ mod tests {
             editable: true,
             edit: None,
             search: None,
+            search_editing: false,
             confirm: true,
             message: None,
         };
@@ -1221,6 +1251,7 @@ mod tests {
                 editor: Editor::Select(Select::new("split", choices("display.mode").unwrap())),
             }),
             search: None,
+            search_editing: false,
             confirm: false,
             message: None,
         };

@@ -1311,13 +1311,27 @@ mod tests {
                                 assert!(sb.last_frame.contains(&p.muted_fg.fg("2")));
                             }
                             if mode == 5 || mode == 6 {
-                                assert!(sb.last_frame.contains(&p.header_fg.fg("1")));
+                                let overlay_header = if focused || !sb.header_inherited {
+                                    p.header_fg.fg("1")
+                                } else {
+                                    p.header_bg.fg("1")
+                                };
+                                assert!(sb.last_frame.contains(&overlay_header));
                                 if p.header_bg != Palette::default().header_bg {
-                                    assert!(sb.last_frame.starts_with(&format!(
-                                        "{}{E}[2J{E}[H{}",
-                                        p.text_fg.fg(""),
-                                        p.header_bg.bg()
-                                    )));
+                                    if focused || !sb.header_inherited {
+                                        assert!(sb.last_frame.starts_with(&format!(
+                                            "{}{E}[2J{E}[H{}",
+                                            p.text_fg.fg(""),
+                                            p.header_bg.bg()
+                                        )));
+                                    } else {
+                                        assert!(!sb
+                                            .last_frame
+                                            .lines()
+                                            .next()
+                                            .unwrap()
+                                            .contains(&p.header_bg.bg()));
+                                    }
                                 }
                             }
                             if mode == 6 {
