@@ -750,7 +750,7 @@ impl Sidebar {
             .filter(|value| !value.is_empty())
             .or_else(|| (!self.popup_client.is_empty()).then(|| self.popup_client.clone()));
         let Some(client) = client else {
-            crate::diag::trace("mutation ignored: invoking tmux client is unknown");
+            trace!("mutation ignored: invoking tmux client is unknown");
             return DispatchResult::Continue;
         };
         let Some(pane) = self
