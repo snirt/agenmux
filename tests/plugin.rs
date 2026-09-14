@@ -1573,10 +1573,14 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             "#{pane_id}",
         ])
     };
+    let sidebar_shows = |needle: &str| {
+        tmux.wait_for(Duration::from_secs(4), || {
+            tmux.text(&["capture-pane", "-p", "-t", &sidebar])
+                .contains(needle)
+        });
+    };
     send_sequence("cc");
-    thread::sleep(Duration::from_millis(150));
-    let create_prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
-    assert!(create_prompt.contains("new window: ▏"), "{create_prompt:?}");
+    sidebar_shows("new window: ▏");
     for _ in 0..2 {
         assert_success(
             tmux.bin(&["key", "sequence-63", "missing-client"]),
@@ -1613,12 +1617,8 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         tmux.text(&["display-message", "-p", "-t", &initial, "#{session_name}"]);
 
     send_sequence("r");
-    thread::sleep(Duration::from_millis(200));
-    let rename_scope = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
-    assert!(
-        rename_scope.contains("rename: p/w/s") && rename_scope.contains("p pane"),
-        "{rename_scope:?}"
-    );
+    sidebar_shows("rename: p/w/s");
+    sidebar_shows("p pane");
     send_text("w");
     thread::sleep(Duration::from_millis(150));
     let rename_prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
@@ -1655,12 +1655,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
 
     send_sequence("r");
     send_text("s");
-    thread::sleep(Duration::from_millis(150));
-    let rename_prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
-    assert!(
-        rename_prompt.contains(&format!("name: {original_session_name}")),
-        "{rename_prompt:?}"
-    );
+    sidebar_shows(&format!("name: {original_session_name}"));
     send_text("-renamed");
     assert_success(tmux.bin(&["key", "enter"]), "rename session");
     let renamed_session = format!("{original_session_name}-renamed");
@@ -1673,13 +1668,9 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         .lines()
         .count();
     send_sequence("cc");
-    thread::sleep(Duration::from_millis(200));
-    let prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
-    assert!(prompt.contains("new window: ▏"), "{prompt:?}");
+    sidebar_shows("new window: ▏");
     send_text("w");
-    thread::sleep(Duration::from_millis(200));
-    let prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
-    assert!(prompt.contains("new window: w▏"), "{prompt:?}");
+    sidebar_shows("new window: w▏");
     assert_success(tmux.bin(&["key", "enter"]), "accept window name");
     tmux.wait_for(Duration::from_secs(4), || {
         tmux.text(&["list-windows", "-a", "-F", "#{window_id}"])
@@ -1828,6 +1819,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             .count()
             == sessions
     });
+    assert_on_sidebar();
 
     tmux.wait_for(Duration::from_secs(4), || selected() == window_pane);
     send_sequence("dd");
@@ -1841,6 +1833,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             .count()
             == windows
     });
+    assert_on_sidebar();
 
     let extra = tmux.text(&[
         "split-window",
@@ -1944,6 +1937,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             .lines()
             .any(|pane| pane == extra)
     });
+    assert_on_sidebar();
 
     let stale = tmux.text(&[
         "split-window",
@@ -1996,6 +1990,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             .lines()
             .any(|pane| pane == immediate)
     });
+    assert_on_sidebar();
     tmux.wait_for(Duration::from_secs(4), || selected() == initial);
 
     let protected = tmux.text(&[

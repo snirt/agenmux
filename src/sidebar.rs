@@ -749,16 +749,18 @@ impl Sidebar {
             trace!("mutation ignored: invoking tmux client is unknown");
             return DispatchResult::Continue;
         };
-        let Some(pane) = self
-            .panes
-            .iter()
-            .find(|pane| pane.pane == self.sel_pane)
-            .cloned()
-        else {
+        // The row the user sees: with the client elsewhere, the cursor
+        // follows the active pane while `sel` may lag one scan behind.
+        let selected = self
+            .cursor_row()
+            .and_then(|row| self.visible.get(row).copied());
+        let Some(pane) = selected.and_then(|row| {
+            let id = self.visible_pane_id(row);
+            self.panes.iter().find(|pane| pane.pane == id).cloned()
+        }) else {
             self.mutation_error(&client, "selected pane no longer exists");
             return DispatchResult::Continue;
         };
-        let selected = self.visible.get(self.sel.wrapping_sub(1)).copied();
         // dd deletes whatever record the cursor is on; a collapsed window row
         // is its only pane, so it deletes the window.
         let action = match (action, selected) {
@@ -934,22 +936,28 @@ impl Sidebar {
             return; // the popup already owns the client's input
         }
         let deadline = Instant::now() + Duration::from_millis(1500);
+        let location = format!("#{{window_id}}\t#{{?{},1,0}}", crate::panes::IS_SIDEBAR);
         loop {
-            let sidebar =
-                crate::tmux::command(&["display-message", "-p", "-c", client, "#{window_id}"])
-                    .and_then(|window| {
-                        crate::tmux::command(&[
-                            "list-panes",
-                            "-t",
-                            window.trim(),
-                            "-f",
-                            crate::panes::IS_SIDEBAR,
-                            "-F",
-                            "#{pane_id}",
-                        ])
-                    })
-                    .ok()
-                    .and_then(|panes| panes.lines().next().map(str::to_string));
+            let Ok(location) =
+                crate::tmux::command(&["display-message", "-p", "-c", client, &location])
+            else {
+                break;
+            };
+            let (window, on_sidebar) = location.trim().split_once('\t').unwrap_or(("", "0"));
+            if on_sidebar == "1" {
+                break; // already there: never fight a newer focus change
+            }
+            let sidebar = crate::tmux::command(&[
+                "list-panes",
+                "-t",
+                window,
+                "-f",
+                crate::panes::IS_SIDEBAR,
+                "-F",
+                "#{pane_id}",
+            ])
+            .ok()
+            .and_then(|panes| panes.lines().next().map(str::to_string));
             if let Some(pane) = sidebar {
                 let _ = crate::tmux::command_status(&["select-pane", "-t", &pane]);
                 break;
