@@ -5,7 +5,7 @@ use crate::tmux::command_spawn;
 use std::path::PathBuf;
 
 use super::render::{app_title, bar, clip_frame, cursor_mark, join};
-use super::ui::{Action as UiAction, Editor, Label, Select, TextEdit};
+use super::ui::{Action as UiAction, Editor, Label, Select, TextEdit, TopBar};
 use super::{Sidebar, E};
 
 pub(super) enum Overlay {
@@ -489,11 +489,12 @@ impl Sidebar {
 
     pub(super) fn render_overlay(&mut self, force: bool) {
         let title = app_title();
-        let header = if !self.plugin_selected && self.header_inherited {
-            self.palette.header_bg.fg("1")
-        } else {
-            self.palette.header_fg.fg("1")
-        };
+        let top_bar = TopBar::new(
+            &self.palette,
+            self.plugin_selected,
+            self.header_inherited,
+        );
+        let header = top_bar.foreground("1");
         let muted = self.palette.muted_fg.fg("2");
         let idle = self.palette.idle_fg.fg("");
         let working = self.palette.working_fg.fg("");
@@ -585,11 +586,7 @@ impl Sidebar {
             }
             None => return,
         };
-        let header_bg = if !self.plugin_selected && self.header_inherited {
-            String::new()
-        } else {
-            self.palette.header_bg.bg()
-        };
+        let header_bg = top_bar.background();
         let text = if header_bg.is_empty() {
             text
         } else {

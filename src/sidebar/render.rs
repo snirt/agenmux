@@ -3,6 +3,7 @@ use crate::input::term_size;
 use std::io::Write;
 
 use super::overlay::current_tag;
+use super::ui::TopBar;
 use super::{Sidebar, VisiblePane, E};
 
 const SPIN: [char; 8] = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
@@ -378,12 +379,13 @@ impl Sidebar {
         let cap = trows.saturating_sub(1); // last row's newline would scroll
 
         let muted = self.palette.muted_fg.fg("2");
-        let header_fg = if !self.plugin_selected && self.header_inherited {
-            self.palette.header_bg.fg("")
-        } else {
-            self.palette.header_fg.fg("")
-        };
-        let header_bg = self.palette.header_bg.bg();
+        let top_bar = TopBar::new(
+            &self.palette,
+            self.plugin_selected,
+            self.header_inherited,
+        );
+        let header_fg = top_bar.foreground("");
+        let header_bg = top_bar.background();
         let accent = self.palette.accent_fg.fg("1");
         // Update notice rides the header. Nonempty contextual/update hints add
         // one row; vis records it so mouse coordinates stay exact.
@@ -450,11 +452,12 @@ impl Sidebar {
         let hint: String = hint.chars().take(cols).collect();
         let has_hint = !hint.is_empty();
         let space = cap.saturating_sub(1 + usize::from(has_hint));
-        let (hdr, hdr_pad) = if self.plugin_selected {
-            let used = title_len + filter.chars().count() + notice_len;
-            (header_bg.as_str(), " ".repeat(cols.saturating_sub(used)))
+        let used = title_len + filter.chars().count() + notice_len;
+        let hdr = header_bg.as_str();
+        let hdr_pad = if header_bg.is_empty() {
+            String::new()
         } else {
-            ("", String::new())
+            " ".repeat(cols.saturating_sub(used))
         };
         // Preserve historical header bytes regardless of unrelated role overrides.
         // Only non-default header styles need restoration after the notice reset.

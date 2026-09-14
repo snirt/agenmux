@@ -1,3 +1,39 @@
+pub(super) struct TopBar<'a> {
+    palette: &'a crate::app_config::Palette,
+    focused: bool,
+    inherited: bool,
+}
+
+impl<'a> TopBar<'a> {
+    pub(super) fn new(
+        palette: &'a crate::app_config::Palette,
+        focused: bool,
+        inherited: bool,
+    ) -> Self {
+        Self {
+            palette,
+            focused,
+            inherited,
+        }
+    }
+
+    pub(super) fn foreground(&self, effect: &str) -> String {
+        if !self.focused && self.inherited {
+            self.palette.header_bg.fg(effect)
+        } else {
+            self.palette.header_fg.fg(effect)
+        }
+    }
+
+    pub(super) fn background(&self) -> String {
+        if self.focused {
+            self.palette.header_bg.bg()
+        } else {
+            String::new()
+        }
+    }
+}
+
 pub(super) struct Label<'a> {
     text: &'a str,
 }
@@ -108,6 +144,22 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn top_bar_centralizes_focus_aware_colors() {
+        let palette = crate::app_config::Palette::default();
+        let focused = TopBar::new(&palette, true, true);
+        assert_eq!(focused.foreground("1"), palette.header_fg.fg("1"));
+        assert_eq!(focused.background(), palette.header_bg.bg());
+
+        let inherited = TopBar::new(&palette, false, true);
+        assert_eq!(inherited.foreground("1"), palette.header_bg.fg("1"));
+        assert_eq!(inherited.background(), "");
+
+        let explicit = TopBar::new(&palette, false, false);
+        assert_eq!(explicit.foreground("1"), palette.header_fg.fg("1"));
+        assert_eq!(explicit.background(), "");
+    }
 
     #[test]
     fn select_moves_wraps_and_renders_inline() {

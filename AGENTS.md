@@ -22,6 +22,10 @@
 - Before splitting an existing file into multiple modules, ask for approval unless the task explicitly requests the split.
 - Recommend splitting when a file owns multiple responsibilities that change independently, not based on line count alone. Prefer cohesive modules; avoid tiny wrappers and speculative abstractions.
 
+## UI components
+
+- Reuse shared UI components and style primitives across main views and overlays. Do not duplicate common chrome such as top bars, headers, controls, focus states, or color-selection logic.
+
 ## Commits
 
 - Write concise, informative commit messages that describe the change and its intent.
