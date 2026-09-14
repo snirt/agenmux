@@ -86,7 +86,7 @@ use crate::input::{
     RawMode, SequenceResult,
 };
 #[allow(unused_imports)]
-pub use crate::input::{select, send_key};
+pub use crate::input::send_key;
 
 mod daemon;
 pub use daemon::run_daemon;

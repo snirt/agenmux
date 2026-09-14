@@ -399,17 +399,12 @@ pub fn send_key(name: &str) -> i32 {
     send_bytes(&bytes)
 }
 
-pub fn select(index: usize) -> i32 {
-    let Ok(index) = u32::try_from(index) else {
-        return 2;
-    };
-    let mut bytes = vec![0x05];
-    bytes.extend(index.to_be_bytes());
-    send_bytes(&bytes)
+fn send_bytes(bytes: &[u8]) -> i32 {
+    send_bytes_to(&crate::tmux::runtime_dir(), bytes)
 }
 
-fn send_bytes(bytes: &[u8]) -> i32 {
-    let path = crate::tmux::runtime_dir().join("agenmux-keys");
+fn send_bytes_to(runtime: &std::path::Path, bytes: &[u8]) -> i32 {
+    let path = runtime.join("agenmux-keys");
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
         return 1;
     };
@@ -431,45 +426,54 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
     if client.is_empty() {
         return 0;
     }
-    let clients = match tmux::lines(&["list-clients", "-F", "#{client_name}"]) {
-        Ok(clients) => clients,
-        Err(_) => return 0,
-    };
-    if !clients.iter().any(|name| name == client) {
+    // One fork validates both tmux-supplied identities: the command fails
+    // for an unknown client or pane, and echoes the pane it resolved.
+    let resolved = tmux::command(&["display-message", "-p", "-c", client, "-t", pane, "#{pane_id}"]);
+    if !resolved.is_ok_and(|id| id.trim() == pane) {
         return 0;
     }
-    let panes = match tmux::lines(&["list-panes", "-a", "-F", "#{pane_id}"]) {
-        Ok(panes) => panes,
-        Err(_) => return 0,
-    };
-    if !panes.iter().any(|id| id == pane) {
-        return 0;
-    }
+    let runtime = tmux::runtime_dir();
 
     let target = y
         .checked_sub(1)
         .and_then(|line| {
-            let rows = std::fs::read_to_string(tmux::runtime_dir().join("agenmux-rows")).ok()?;
+            let rows = std::fs::read_to_string(runtime.join("agenmux-rows")).ok()?;
             let mut fields = rows.lines().nth(line)?.split_whitespace();
             let target = fields.next()?.to_string();
-            let index = fields.next()?.parse::<usize>().ok()?;
+            let index = fields.next()?.parse::<u32>().ok()?;
             let selected = fields.next() == Some("1");
             Some((target, index, selected))
         })
-        .filter(|(target, _, _)| target.starts_with('%') && panes.iter().any(|id| id == target));
+        .filter(|(target, _, _)| {
+            target.starts_with('%')
+                && tmux::command(&["display-message", "-p", "-t", target, "#{pane_id}"])
+                    .is_ok_and(|id| id.trim() == target)
+        });
 
+    // Every hop below is one tmux fork: chained commands, not one per step.
     if let Some((target, index, selected)) = target {
         if selected {
-            let _ = send_key("all");
-            let _ = tmux::command_status(&["switch-client", "-c", client, "-t", &target]);
-            let _ = tmux::command_status(&["select-window", "-t", &target]);
-            let _ = tmux::command_status(&["select-pane", "-t", &target]);
-        } else if tmux::command_status(&["switch-client", "-c", client, "-t", pane]).is_ok() {
-            let _ = tmux::command_status(&["switch-client", "-c", client, "-T", "agenmux"]);
-            let _ = select(index);
+            let _ = send_bytes_to(&runtime, &[0x0c]); // "all"
+            let _ = tmux::command_status(&[
+                "switch-client", "-c", client, "-t", &target, ";",
+                "select-window", "-t", &target, ";",
+                "select-pane", "-t", &target,
+            ]);
+        } else if tmux::command_status(&[
+            "switch-client", "-c", client, "-t", pane, ";",
+            "switch-client", "-c", client, "-T", "agenmux",
+        ])
+        .is_ok()
+        {
+            let mut bytes = vec![0x05];
+            bytes.extend(index.to_be_bytes());
+            let _ = send_bytes_to(&runtime, &bytes);
         }
-    } else if tmux::command_status(&["switch-client", "-c", client, "-t", pane]).is_ok() {
-        let _ = tmux::command_status(&["switch-client", "-c", client, "-T", "agenmux"]);
+    } else {
+        let _ = tmux::command_status(&[
+            "switch-client", "-c", client, "-t", pane, ";",
+            "switch-client", "-c", client, "-T", "agenmux",
+        ]);
     }
     0
 }
