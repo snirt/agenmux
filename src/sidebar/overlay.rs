@@ -667,7 +667,13 @@ impl Sidebar {
     pub(super) fn settings_editing(&self) -> bool {
         matches!(
             &self.overlay,
-            Some(Overlay::Settings(Settings { edit: Some(_), .. }))
+            Some(Overlay::Settings(Settings {
+                edit: Some(_),
+                ..
+            })) | Some(Overlay::Settings(Settings {
+                search: Some(_),
+                ..
+            }))
         )
     }
 
