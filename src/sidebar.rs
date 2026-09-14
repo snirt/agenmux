@@ -151,6 +151,7 @@ pub struct Sidebar {
     settings: crate::app_config::LiveConfig,
     adopted_show_all_panes: bool,
     palette: Palette,    // immutable startup snapshot shared by popup and split
+    header_inherited: bool,
     normal_keys: Keymap, // startup snapshot: keys never change while running
     search_keys: Keymap,
     confs: Vec<AgentConf>,
@@ -236,7 +237,7 @@ fn apply_tmux_header(settings: &mut crate::app_config::AppConfig, active: &str, 
                 .get_or_insert_with(Default::default)
                 .header_bg = Some(color);
             settings.sources.insert(
-                "theme.colors.header_bg".into(),
+                "theme.colors.header_bg",
                 "tmux pane-active-border-style fg".into(),
             );
         }
@@ -259,7 +260,7 @@ fn apply_tmux_header(settings: &mut crate::app_config::AppConfig, active: &str, 
             .header_fg = Some(color);
         settings
             .sources
-            .insert("theme.colors.header_fg".into(), source.into());
+            .insert("theme.colors.header_fg", source.into());
     }
 }
 
@@ -270,6 +271,13 @@ fn inherit_tmux_header(settings: &mut crate::app_config::AppConfig) {
     let pane = std::env::var("AGENMUX_TMUX_WINDOW_STYLE")
         .unwrap_or_else(|_| command(&["show-option", "-gv", "window-style"]).unwrap_or_default());
     apply_tmux_header(settings, &active, &pane);
+}
+
+fn uses_tmux_header_contrast(settings: &crate::app_config::AppConfig) -> bool {
+    settings
+        .sources
+        .get("theme.colors.header_bg")
+        .is_some_and(|source| source.starts_with("tmux "))
 }
 
 /// `self_pane` is the pane the sidebar itself occupies, skipped by every scan.
@@ -289,6 +297,7 @@ fn new_sidebar(
     let update = update_available(&plugin_dir);
     let adopted_show_all_panes = settings.show_all_panes;
     inherit_tmux_header(&mut settings);
+    let header_inherited = uses_tmux_header_contrast(&settings);
     let palette = Palette::resolve(&settings.theme);
     let cached_rows = std::fs::read_to_string(&cache_file)
         .map(|tsv| scan::from_tsv(&tsv))
@@ -304,6 +313,7 @@ fn new_sidebar(
     let mut sb = Sidebar {
         tmux,
         palette,
+        header_inherited,
         normal_keys: settings.normal.clone(),
         search_keys: settings.search.clone(),
         settings: crate::app_config::LiveConfig::new(settings),
@@ -649,6 +659,7 @@ impl Sidebar {
             return;
         }
         inherit_tmux_header(&mut self.settings.settings);
+        self.header_inherited = uses_tmux_header_contrast(&self.settings.settings);
         self.palette = Palette::resolve(&self.settings.settings.theme);
         self.normal_keys = self.settings.settings.normal.clone();
         self.search_keys = self.settings.settings.search.clone();

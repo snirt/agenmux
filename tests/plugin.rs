@@ -1309,6 +1309,31 @@ fn default_header_inherits_tmux_active_border_contrast() {
         "header background: {frame:?}"
     );
     assert!(frame.contains("38;5;236"), "header foreground: {frame:?}");
+    let ordinary = tmux.text(&[
+        "list-panes",
+        "-f",
+        "#{!=:#{pane_title},agenmux}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-t", &ordinary]);
+    for _ in 0..80 {
+        frame = capture();
+        if frame.contains("38;2;245;169;127")
+            && !frame.contains("48;2;245;169;127")
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        frame.contains("38;2;245;169;127"),
+        "unfocused header foreground: {frame:?}"
+    );
+    assert!(
+        !frame.contains("48;2;245;169;127"),
+        "unfocused header background: {frame:?}"
+    );
     assert_success(tmux.bin(&["key", "close"]), "close inherited header");
     let _ = viewer.kill();
     let _ = viewer.wait();
@@ -1318,7 +1343,7 @@ fn default_header_inherits_tmux_active_border_contrast() {
 fn daemon_theme_is_a_startup_snapshot_without_global_color_mutation() {
     for base in ["light", "terminal"] {
         let tmux = TestTmux::new(&format!("theme-{base}"));
-        app_file(&tmux, &format!("[theme]\nbase='{base}'\n[theme.colors]\nheader_fg='#123456'\nmuted_fg=99\n[behavior]\nnotifications=false"));
+        app_file(&tmux, &format!("[theme]\nbase='{base}'\n[theme.colors]\nheader_fg='#123456'\nheader_bg='default'\nmuted_fg=99\n[behavior]\nnotifications=false"));
         tmux.assert_tmux(&[
             "set-option",
             "-g",

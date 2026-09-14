@@ -374,7 +374,11 @@ impl Sidebar {
         let cap = trows.saturating_sub(1); // last row's newline would scroll
 
         let muted = self.palette.muted_fg.fg("2");
-        let header_fg = self.palette.header_fg.fg("");
+        let header_fg = if !self.plugin_selected && self.header_inherited {
+            self.palette.header_bg.fg("")
+        } else {
+            self.palette.header_fg.fg("")
+        };
         let header_bg = self.palette.header_bg.bg();
         let accent = self.palette.accent_fg.fg("1");
         // Update notice rides the header. Nonempty contextual/update hints add
