@@ -365,13 +365,7 @@ impl Sidebar {
             }
             w = width; // render for the adopted width now, not the stale min
         }
-        let visible_sessions: HashSet<String> = self
-            .tmux
-            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{session_id}'")
-            .unwrap_or_default()
-            .lines()
-            .map(String::from)
-            .collect();
+        let visible_sessions = self.visible_sessions();
         let visible_panes = if visible_sessions.is_empty() {
             // Detached startup and integration tests have no real client yet.
             // Keep one session warm; the first real client notification
@@ -382,8 +376,11 @@ impl Sidebar {
                 .map(|m| m.pane.clone())
                 .collect::<Vec<_>>()
         } else {
+            // Every window of a viewed session, not just the active one: a
+            // window switch shows the target pane's last frame instantly, and
+            // only a pane that was being fed has a current one.
             ms.iter()
-                .filter(|m| m.active && visible_sessions.contains(&m.sess))
+                .filter(|m| visible_sessions.contains(&m.sess))
                 .map(|m| m.pane.clone())
                 .collect::<Vec<_>>()
         };
@@ -399,6 +396,41 @@ impl Sidebar {
         d.seen_mirror = true;
         d.size = (w, h);
         true
+    }
+
+    /// Sessions a real (non control-mode) client is looking at.
+    fn visible_sessions(&mut self) -> HashSet<String> {
+        self.tmux
+            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{session_id}'")
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    /// Focus moved: point the writers at the sidebar panes of the sessions now
+    /// on screen. Sizing and the drag probe stay periodic in mirror_tick (see
+    /// event_loop), but writer targets cannot wait for it: a session switch
+    /// lands on panes that show whatever frame they last received until a
+    /// writer reaches them.
+    pub(super) fn refocus_writers(&mut self) {
+        let sessions = self.visible_sessions();
+        if sessions.is_empty() {
+            return; // no real client: leave mirror_tick's warm-one fallback alone
+        }
+        let out = self
+            .tmux
+            .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}\t#{session_id}'")
+            .unwrap_or_default();
+        let panes: Vec<String> = out
+            .lines()
+            .filter_map(|l| l.split_once('\t'))
+            .filter(|(_, sess)| sessions.contains(*sess))
+            .map(|(pane, _)| pane.to_string())
+            .collect();
+        if self.daemon.as_mut().unwrap().writers.reconcile(panes) {
+            self.last_frame.clear();
+        }
     }
 
     /// Preserved-pane shutdown: close visible writers, kill empty panes and

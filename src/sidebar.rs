@@ -82,11 +82,11 @@ impl ScanSchedule {
 }
 
 use crate::input::{
-    poll_inputs, protocol_keys, read_key, read_search_key, Key, KeySequence, RawMode,
-    SequenceResult,
+    key_pending, poll_inputs, protocol_keys, read_key, read_search_key, Key, KeySequence,
+    RawMode, SequenceResult,
 };
 #[allow(unused_imports)]
-pub use crate::input::{select, send_key};
+pub use crate::input::send_key;
 
 mod daemon;
 pub use daemon::run_daemon;
@@ -320,10 +320,22 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             break;
         }
         let mut now = Instant::now();
-        if let Some(periodic) = scans.due(now, sb.screens.next_expiry()) {
+        // Keys outrank scans: a scan blocks the loop for 30-200ms, and under
+        // key repeat that queued presses which then replayed after release.
+        let key_waiting = key_pending(key_fd);
+        if let Some(periodic) = scans
+            .due(now, sb.screens.next_expiry())
+            .filter(|_| !key_waiting)
+        {
             // Consume first: output observed by command-response reads during
             // this scan belongs to the next pass.
-            let changes = sb.tmux.take_pending_changes();
+            let mut changes = sb.tmux.take_pending_changes();
+            // Focus first, output after: captures cost 30-130ms and the
+            // cursor must not wait behind them. Deferred panes stay pending
+            // and reach the next output scan under its usual throttle.
+            if !periodic && changes.focus && !changes.full {
+                sb.tmux.defer_output(std::mem::take(&mut changes.panes));
+            }
             match sb.scan_tick(periodic, &changes) {
                 Ok(()) => {}
                 // a pipe I/O error can leave a response block half-read —
@@ -350,6 +362,11 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 ) {
                     crate::diag::adopt_stderr(&log);
                 }
+            }
+            // A focus change lands the user on a pane the writers may not be
+            // feeding yet; retarget now instead of after the next periodic tick.
+            if sb.daemon.is_some() && !periodic && changes.focus {
+                sb.refocus_writers();
             }
             if sb.daemon.as_ref().is_some_and(|d| !d.keys_path.exists()) {
                 break; // runtime dir vanished: deaf to keys, better gone than a zombie
@@ -401,27 +418,36 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             }
         }
         if key_ready {
-            let mode = if sb.search_focused {
-                KeyMode::Search
-            } else {
-                KeyMode::Normal
-            };
-            let keys = if sb.daemon.is_some() {
-                protocol_keys(mode)
-            } else if sb.search_focused {
-                &sb.search_keys
-            } else {
-                &sb.normal_keys
-            };
-            let key = if sb.search_focused && sb.daemon.is_none() {
-                read_search_key(key_fd, keys)
-            } else {
-                read_key(key_fd, keys)
-            };
-            match sb.dispatch_key(key) {
-                DispatchResult::Continue => {}
-                DispatchResult::Break => break,
-                DispatchResult::QuietExit => return true,
+            // Drain every queued key before one render: each frame goes to
+            // every sidebar pane of the session, too costly per repeat step.
+            let mut drained = 0;
+            loop {
+                let mode = if sb.search_focused {
+                    KeyMode::Search
+                } else {
+                    KeyMode::Normal
+                };
+                let keys = if sb.daemon.is_some() {
+                    protocol_keys(mode)
+                } else if sb.search_focused {
+                    &sb.search_keys
+                } else {
+                    &sb.normal_keys
+                };
+                let key = if sb.search_focused && sb.daemon.is_none() {
+                    read_search_key(key_fd, keys)
+                } else {
+                    read_key(key_fd, keys)
+                };
+                match sb.dispatch_key(key) {
+                    DispatchResult::Continue => {}
+                    DispatchResult::Break => return false,
+                    DispatchResult::QuietExit => return true,
+                }
+                drained += 1;
+                if drained >= 64 || !key_pending(key_fd) {
+                    break;
+                }
             }
             sb.render(false);
         }

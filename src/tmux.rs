@@ -211,6 +211,11 @@ impl Tmux {
         &self.notifications.pending
     }
 
+    /// Hand output panes back to the pending set for a later scan.
+    pub fn defer_output(&mut self, panes: HashSet<String>) {
+        self.notifications.pending.panes.extend(panes);
+    }
+
     /// Take before scanning so notifications observed by `run` during the
     /// scan remain pending for the following pass.
     pub fn take_pending_changes(&mut self) -> PendingChanges {
