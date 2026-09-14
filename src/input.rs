@@ -445,7 +445,15 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
     }
     // One fork validates both tmux-supplied identities: the command fails
     // for an unknown client or pane, and echoes the pane it resolved.
-    let resolved = tmux::command(&["display-message", "-p", "-c", client, "-t", pane, "#{pane_id}"]);
+    let resolved = tmux::command(&[
+        "display-message",
+        "-p",
+        "-c",
+        client,
+        "-t",
+        pane,
+        "#{pane_id}",
+    ]);
     if !resolved.is_ok_and(|id| id.trim() == pane) {
         return 0;
     }
@@ -461,10 +469,13 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
             let selected = fields.next() == Some("1");
             Some((target, index, selected))
         })
+        // "=" is the clicked sidebar pane itself: overlay rows are rendered
+        // into every sidebar pane, so the row map cannot name one up front.
         .filter(|(target, _, _)| {
-            target.starts_with('%')
-                && tmux::command(&["display-message", "-p", "-t", target, "#{pane_id}"])
-                    .is_ok_and(|id| id.trim() == target)
+            target == "="
+                || target.starts_with('%')
+                    && tmux::command(&["display-message", "-p", "-t", target, "#{pane_id}"])
+                        .is_ok_and(|id| id.trim() == target)
         });
 
     // Every hop below is one tmux fork: chained commands, not one per step.
@@ -472,13 +483,32 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
         if selected {
             let _ = send_bytes_to(&runtime, &[0x0c]); // "all"
             let _ = tmux::command_status(&[
-                "switch-client", "-c", client, "-t", &target, ";",
-                "select-window", "-t", &target, ";",
-                "select-pane", "-t", &target,
+                "switch-client",
+                "-c",
+                client,
+                "-t",
+                &target,
+                ";",
+                "select-window",
+                "-t",
+                &target,
+                ";",
+                "select-pane",
+                "-t",
+                &target,
             ]);
         } else if tmux::command_status(&[
-            "switch-client", "-c", client, "-t", pane, ";",
-            "switch-client", "-c", client, "-T", "agenmux",
+            "switch-client",
+            "-c",
+            client,
+            "-t",
+            pane,
+            ";",
+            "switch-client",
+            "-c",
+            client,
+            "-T",
+            "agenmux",
         ])
         .is_ok()
         {
@@ -488,8 +518,17 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
         }
     } else {
         let _ = tmux::command_status(&[
-            "switch-client", "-c", client, "-t", pane, ";",
-            "switch-client", "-c", client, "-T", "agenmux",
+            "switch-client",
+            "-c",
+            client,
+            "-t",
+            pane,
+            ";",
+            "switch-client",
+            "-c",
+            client,
+            "-T",
+            "agenmux",
         ]);
     }
     0

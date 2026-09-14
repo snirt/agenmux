@@ -81,12 +81,12 @@ impl ScanSchedule {
     }
 }
 
+#[allow(unused_imports)]
+pub use crate::input::send_key;
 use crate::input::{
     key_pending, poll_inputs, protocol_keys, read_key, read_search_key, settings_keys, Key,
     KeySequence, RawMode, SequenceResult,
 };
-#[allow(unused_imports)]
-pub use crate::input::send_key;
 
 mod daemon;
 pub use daemon::run_daemon;
@@ -150,7 +150,7 @@ pub struct Sidebar {
     tmux: Tmux,
     settings: crate::app_config::LiveConfig,
     adopted_show_all_panes: bool,
-    palette: Palette,    // immutable startup snapshot shared by popup and split
+    palette: Palette, // immutable startup snapshot shared by popup and split
     header_inherited: bool,
     normal_keys: Keymap, // startup snapshot: keys never change while running
     search_keys: Keymap,
@@ -573,9 +573,8 @@ fn cleanup(rows_file: &PathBuf, pin: &Option<String>) {
 }
 
 impl Sidebar {
-    /// Route every logical key through the active UI mode. Mouse selection is
-    /// handled before mode dispatch; overlays clear their row map, so they cannot
-    /// receive a stale click on the hidden list.
+    /// Route every logical key through active UI mode. Overlay row maps may
+    /// use mouse selection; normal list selection runs only after mode dispatch.
     fn dispatch_key(&mut self, key: Key) -> DispatchResult {
         if let Key::Sequence(key) = key {
             return match self
@@ -587,10 +586,6 @@ impl Sidebar {
             };
         }
         self.key_sequence.clear();
-        if let Key::Select(index) = &key {
-            self.select_index(*index);
-            return DispatchResult::Continue;
-        }
         match dispatch_mode(self.overlay.as_ref(), self.search_focused) {
             DispatchMode::Overlay => {
                 self.overlay_key(key);
@@ -601,6 +596,10 @@ impl Sidebar {
                 return DispatchResult::Continue;
             }
             DispatchMode::Normal => {}
+        }
+        if let Key::Select(index) = &key {
+            self.select_index(*index);
+            return DispatchResult::Continue;
         }
         match key {
             Key::First => self.select_index(1),

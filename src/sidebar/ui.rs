@@ -41,10 +41,7 @@ pub(super) fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
         return line.into();
     }
     let body = line.replace(&format!("{E}[0m"), &format!("{E}[0m{bg}"));
-    format!(
-        "{bg}{body}{}{E}[0m",
-        " ".repeat(cols.saturating_sub(width))
-    )
+    format!("{bg}{body}{}{E}[0m", " ".repeat(cols.saturating_sub(width)))
 }
 
 pub(super) struct SelectedRow<'a> {
@@ -127,6 +124,14 @@ impl Select {
     pub(super) fn move_by(&mut self, direction: isize) {
         self.selected =
             (self.selected as isize + direction).rem_euclid(self.options.len() as isize) as usize;
+    }
+
+    pub(super) fn select(&mut self, index: usize) -> bool {
+        if index >= self.options.len() {
+            return false;
+        }
+        self.selected = index;
+        true
     }
 
     pub(super) fn value(&self) -> &str {

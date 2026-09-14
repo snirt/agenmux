@@ -215,7 +215,11 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
             if let Some(mode) = cli_mode(config) {
                 command.env("AGENMUX_DISPLAY_OVERRIDE", mode);
             }
-            child = Some(command.spawn().map_err(|_| "cannot launch daemon; check executable")?);
+            child = Some(
+                command
+                    .spawn()
+                    .map_err(|_| "cannot launch daemon; check executable")?,
+            );
             // Record only panes made by this activation, not arbitrary panes
             // that appear while the daemon is starting. The focused window goes
             // first so its sidebar can render while the remaining panes fan out.

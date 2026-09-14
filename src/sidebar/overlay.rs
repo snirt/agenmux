@@ -41,6 +41,43 @@ struct SettingRow {
     source: String,
 }
 
+const SETTINGS_MOUSE_OPTION: usize = 1 << 31;
+const SETTINGS_MOUSE_SEARCH: usize = u32::MAX as usize;
+
+fn settings_mouse_key(settings: &mut Settings, key: Key, total: usize) -> Key {
+    let Key::Select(target) = key else {
+        return key;
+    };
+    if target == SETTINGS_MOUSE_SEARCH {
+        return if settings.edit.is_none() && !settings.confirm {
+            Key::Search
+        } else {
+            Key::Other
+        };
+    }
+    if let Some(SettingEdit {
+        editor: Editor::Select(select),
+        ..
+    }) = &mut settings.edit
+    {
+        return target
+            .checked_sub(SETTINGS_MOUSE_OPTION)
+            .is_some_and(|option| select.select(option))
+            .then_some(Key::Jump)
+            .unwrap_or(Key::Other);
+    }
+    if settings.edit.is_none() && !settings.confirm && target < total {
+        if target == settings.sel {
+            Key::Jump
+        } else {
+            settings.sel = target;
+            Key::Other
+        }
+    } else {
+        Key::Other
+    }
+}
+
 /// The release this engine belongs to. install-bin.sh installs the binary that
 /// matches the checkout's Cargo.toml, so this is also the plugin's version.
 pub(super) fn current_tag() -> String {
@@ -258,8 +295,8 @@ fn select_move(
     normal: &std::collections::BTreeMap<Action, Vec<KeyChord>>,
 ) -> Option<isize> {
     match key {
-        Key::Up => Some(-1),
-        Key::Down => Some(1),
+        Key::Up | Key::WheelUp => Some(-1),
+        Key::Down | Key::WheelDown => Some(1),
         Key::Text(text) => match action_for(normal, KeyChord::parse(text).ok()?) {
             Some(Action::Up) => Some(-1),
             Some(Action::Down) => Some(1),
@@ -304,7 +341,7 @@ fn render_settings(
     focused: bool,
     cols: usize,
     rows: usize,
-) -> String {
+) -> (String, Vec<Option<usize>>) {
     let all = visible_settings_rows(settings, effective);
     let search_query = settings
         .search
@@ -320,15 +357,16 @@ fn render_settings(
     };
     let selected = all.get(settings.sel);
     let mut out = format!("{E}[2J{E}[H{E}[1m{} — settings{E}[0m\n", app_title());
+    let mut targets = Vec::new();
     if settings.confirm {
         out.push_str("\nRevert to defaults?\n\nPersisted customizations will be removed.\nCLI and tmux overrides remain effective.\n\nEnter confirm · Esc cancel");
-        return clip_frame(&out, cols, rows.saturating_sub(1));
+        return (clip_frame(&out, cols, rows.saturating_sub(1)), targets);
     }
     if !settings.editable {
         if let Some((_, message)) = &settings.message {
             out.push_str(&format!("\nerror: {message}\n\nEsc back"));
         }
-        return clip_frame(&out, cols, rows.saturating_sub(1));
+        return (clip_frame(&out, cols, rows.saturating_sub(1)), targets);
     }
     if let Some(SettingEdit {
         name,
@@ -347,7 +385,7 @@ fn render_settings(
                 E
             ));
         }
-        return clip_frame(&out, cols, rows.saturating_sub(1));
+        return (clip_frame(&out, cols, rows.saturating_sub(1)), targets);
     }
     let select = settings.edit.as_ref().and_then(|edit| match &edit.editor {
         Editor::Select(select) => Some(select),
@@ -362,9 +400,11 @@ fn render_settings(
     } else {
         out.push_str("\n/ search\n");
     }
+    targets.extend([None, Some(SETTINGS_MOUSE_SEARCH)]);
     let narrow = cols < 80;
     if !narrow {
         out.push_str("  setting                    persisted      effective      source\n");
+        targets.push(None);
     }
     // Reserve chrome, category headers, and expanded options before computing
     // selectable rows so short panes keep the active control visible.
@@ -401,6 +441,7 @@ fn render_settings(
                 &SelectedRow::new(palette, index == settings.sel, focused).render(&line, cols),
             );
             out.push('\n');
+            targets.push(Some(index));
             continue;
         }
         let row = &all[index];
@@ -410,6 +451,7 @@ fn render_settings(
         let mark = if index == settings.sel { "❯" } else { " " };
         if first {
             out.push_str(&format!("  {E}[7m {group} {E}[0m\n"));
+            targets.push(None);
         }
         let name = setting_label(&row.name);
         let line = if narrow {
@@ -424,17 +466,20 @@ fn render_settings(
             &SelectedRow::new(palette, index == settings.sel, focused).render(&line, cols),
         );
         out.push('\n');
+        targets.push(Some(index));
         if index == settings.sel {
             if let Some(select) = select {
-                for option in select.render() {
+                for (option_index, option) in select.render().into_iter().enumerate() {
                     out.push_str(&option);
                     out.push('\n');
+                    targets.push(Some(SETTINGS_MOUSE_OPTION + option_index));
                 }
             }
         }
     }
     if all.is_empty() && !search_query.is_empty() {
         out.push_str("  No settings match\n");
+        targets.push(None);
     }
     if narrow {
         if let Some(row) = selected {
@@ -442,6 +487,7 @@ fn render_settings(
                 "\n{}\npersisted: {} · effective: {} ({})\n",
                 row.name, row.persisted, row.effective, row.source
             ));
+            targets.extend([None, None, None]);
         }
     }
     if let Some((error, message)) = &settings.message {
@@ -471,7 +517,10 @@ fn render_settings(
             "\n↑↓/jk move · Enter edit · / search · Esc back"
         });
     }
-    clip_frame(&out, cols, rows.saturating_sub(1))
+    targets.extend([None, None]);
+    let frame = clip_frame(&out, cols, rows.saturating_sub(1));
+    targets.truncate(frame.lines().count().saturating_sub(1));
+    (frame, targets)
 }
 impl Sidebar {
     /// Version picker: update or roll back to any release the last check saw.
@@ -493,11 +542,7 @@ impl Sidebar {
 
     pub(super) fn render_overlay(&mut self, force: bool) {
         let title = app_title();
-        let top_bar = TopBar::new(
-            &self.palette,
-            self.plugin_selected,
-            self.header_inherited,
-        );
+        let top_bar = TopBar::new(&self.palette, self.plugin_selected, self.header_inherited);
         let header = top_bar.foreground("1");
         let muted = self.palette.muted_fg.fg("2");
         let idle = self.palette.idle_fg.fg("");
@@ -505,6 +550,7 @@ impl Sidebar {
         let blocked = self.palette.blocked_fg.fg("");
         let done = self.palette.done_fg.fg("");
         let error = self.palette.error_fg.fg("2");
+        let mut click_rows = String::new();
         let text = match &mut self.overlay {
             Some(Overlay::Help) => {
                 let accept = self.search_keys[&Action::Accept]
@@ -586,14 +632,22 @@ impl Sidebar {
                     .as_ref()
                     .map(|daemon| daemon.size)
                     .unwrap_or_else(term_size);
-                render_settings(
+                let (text, targets) = render_settings(
                     settings,
                     &self.settings.settings,
                     &self.palette,
                     self.plugin_selected,
                     cols,
                     rows,
-                )
+                );
+                click_rows = targets
+                    .into_iter()
+                    .map(|target| match target {
+                        Some(index) => format!("=\t{index}\t0\n"),
+                        None => "-\n".into(),
+                    })
+                    .collect();
+                text
             }
             None => return,
         };
@@ -622,7 +676,7 @@ impl Sidebar {
                 bar(header, &header_bg, cols, width)
             )
         };
-        self.emit(text, "", force);
+        self.emit(text, &click_rows, force);
     }
 
     pub(super) fn overlay_key(&mut self, key: Key) {
@@ -692,13 +746,11 @@ impl Sidebar {
     pub(super) fn settings_editing(&self) -> bool {
         matches!(
             &self.overlay,
-            Some(Overlay::Settings(Settings {
-                edit: Some(_),
-                ..
-            })) | Some(Overlay::Settings(Settings {
-                search_editing: true,
-                ..
-            }))
+            Some(Overlay::Settings(Settings { edit: Some(_), .. }))
+                | Some(Overlay::Settings(Settings {
+                    search_editing: true,
+                    ..
+                }))
         )
     }
 
@@ -835,6 +887,12 @@ impl Sidebar {
                     .unwrap_or_default()
                     .is_empty(),
             ),
+            _ => return,
+        };
+        let key = match &mut self.overlay {
+            Some(Overlay::Settings(settings)) => {
+                settings_mouse_key(settings, key, rows.len() + usize::from(show_revert))
+            }
             _ => return,
         };
         let search_start = matches!(key, Key::Search)
@@ -1098,7 +1156,7 @@ mod tests {
                 confirm: false,
                 message: None,
             };
-            let frame = render_settings(
+            let (frame, targets) = render_settings(
                 &mut settings,
                 &effective,
                 &crate::app_config::Palette::default(),
@@ -1107,12 +1165,18 @@ mod tests {
                 rows,
             );
             assert!(frame.lines().count() <= rows);
+            assert_eq!(targets.len(), frame.lines().count().saturating_sub(1));
+            assert!(targets.iter().any(Option::is_some));
+            assert_eq!(
+                targets.iter().flatten().next(),
+                Some(&SETTINGS_MOUSE_SEARCH)
+            );
             assert!(frame.lines().all(|line| line.chars().count() <= cols + 20));
             assert!(frame.contains("agenmux"));
             if rows >= 16 {
                 assert!(frame.contains("Esc back"), "{frame}");
                 settings.message = Some((false, "saved".into()));
-                let saved = render_settings(
+                let (saved, _) = render_settings(
                     &mut settings,
                     &effective,
                     &crate::app_config::Palette::default(),
@@ -1123,7 +1187,7 @@ mod tests {
                 assert!(saved.contains("saved"), "{saved}");
             }
             settings.sel = settings_rows(&settings.source, &effective).len();
-            let end = render_settings(
+            let (end, _) = render_settings(
                 &mut settings,
                 &effective,
                 &crate::app_config::Palette::default(),
@@ -1149,7 +1213,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["display.sidebar_width"]
         );
-        let frame = render_settings(
+        let (frame, _) = render_settings(
             &mut settings,
             &effective,
             &crate::app_config::Palette::default(),
@@ -1163,7 +1227,7 @@ mod tests {
 
         settings.search = Some(TextEdit::new("split".into()));
         assert!(visible_settings_rows(&settings, &effective).is_empty());
-        let empty = render_settings(
+        let (empty, _) = render_settings(
             &mut settings,
             &effective,
             &crate::app_config::Palette::default(),
@@ -1202,7 +1266,7 @@ mod tests {
             confirm: true,
             message: None,
         };
-        let frame = render_settings(
+        let (frame, _) = render_settings(
             &mut settings,
             &effective,
             &crate::app_config::Palette::default(),
@@ -1264,7 +1328,7 @@ mod tests {
         let mut settings = settings_state(Err(error));
         assert!(!settings.editable);
 
-        let frame = render_settings(
+        let (frame, _) = render_settings(
             &mut settings,
             &effective,
             &crate::app_config::Palette::default(),
@@ -1313,7 +1377,7 @@ mod tests {
             message: None,
         };
 
-        let frame = render_settings(
+        let (frame, targets) = render_settings(
             &mut settings,
             &effective,
             &crate::app_config::Palette::default(),
@@ -1327,5 +1391,47 @@ mod tests {
         assert!(frame.contains("❯ split"), "{frame}");
         assert!(frame.contains("  popup"), "{frame}");
         assert!(frame.contains("sidebar_width"), "{frame}");
+        assert!(targets.contains(&Some(SETTINGS_MOUSE_OPTION)));
+        assert!(targets.contains(&Some(SETTINGS_MOUSE_OPTION + 1)));
+        assert!(matches!(
+            settings_mouse_key(
+                &mut settings,
+                Key::Select(SETTINGS_MOUSE_OPTION + 1),
+                settings_rows("version = 1\n", &effective).len() + 1,
+            ),
+            Key::Jump
+        ));
+        let Some(SettingEdit {
+            editor: Editor::Select(select),
+            ..
+        }) = &settings.edit
+        else {
+            panic!("select editor closed")
+        };
+        assert_eq!(select.value(), "popup");
+    }
+
+    #[test]
+    fn settings_mouse_selects_opens_searches_and_scrolls() {
+        let effective =
+            crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+        let mut settings = settings_state(Ok((PathBuf::new(), false, "version = 1\n".into())));
+        let total = settings_rows(&settings.source, &effective).len() + 1;
+
+        assert!(matches!(
+            settings_mouse_key(&mut settings, Key::Select(2), total),
+            Key::Other
+        ));
+        assert_eq!(settings.sel, 2);
+        assert!(matches!(
+            settings_mouse_key(&mut settings, Key::Select(2), total),
+            Key::Jump
+        ));
+        assert!(matches!(
+            settings_mouse_key(&mut settings, Key::Select(SETTINGS_MOUSE_SEARCH), total),
+            Key::Search
+        ));
+        assert_eq!(select_move(&Key::WheelUp, &effective.normal), Some(-1));
+        assert_eq!(select_move(&Key::WheelDown, &effective.normal), Some(1));
     }
 }

@@ -304,10 +304,7 @@ impl Sidebar {
                     } else if expanded {
                         format!("{window_icon}▢{E}[0m {muted}{}{E}[0m", pane.command)
                     } else {
-                        format!(
-                            "{window_icon}{E}[0m {muted}{}{E}[0m",
-                            window.window_name
-                        )
+                        format!("{window_icon}{E}[0m {muted}{}{E}[0m", window.window_name)
                     };
                     let row = format!(" {mark}{prefix}{detail}");
                     let row_bg = match (agent, selected) {
@@ -371,11 +368,7 @@ impl Sidebar {
         let cap = trows.saturating_sub(1); // last row's newline would scroll
 
         let muted = self.palette.muted_fg.fg("2");
-        let top_bar = TopBar::new(
-            &self.palette,
-            self.plugin_selected,
-            self.header_inherited,
-        );
+        let top_bar = TopBar::new(&self.palette, self.plugin_selected, self.header_inherited);
         let header_fg = top_bar.foreground("");
         let header_bg = top_bar.background();
         let accent = self.palette.accent_fg.fg("1");
@@ -1361,10 +1354,12 @@ mod tests {
                                 } else {
                                     p.header_bg.fg("")
                                 };
-                                assert!(sb.last_frame.lines().next().unwrap().contains(&format!(
-                                    "{E}[0m{}{hdr}{fg}",
-                                    p.text_fg.fg("")
-                                )));
+                                assert!(sb
+                                    .last_frame
+                                    .lines()
+                                    .next()
+                                    .unwrap()
+                                    .contains(&format!("{E}[0m{}{hdr}{fg}", p.text_fg.fg(""))));
                             }
                             // Same engine/output bytes for tty popup and daemon at
                             // matching dimensions. Only the sink and row file differ.
