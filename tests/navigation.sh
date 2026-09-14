@@ -1065,28 +1065,34 @@ for _ in $(seq 1 40); do
   [ -n "$selected_target" ] && [ "$selected_target" != "$ordinary_target" ] && break
   sleep 0.05
 done
-ordinary_row="$(awk -v target="$ordinary_target" '$1 == target { print NR; exit }' \
-  "$tmp/agenmux-rows")"
 sidebar_left="$(tmux -S "$sock" display-message -p -t "$sidebar" '#{pane_left}')"
 sidebar_top="$(tmux -S "$sock" display-message -p -t "$sidebar" '#{pane_top}')"
 mouse_x=$((sidebar_left + 1))
-mouse_y=$((sidebar_top + ordinary_row + 1))
-tmux -S "$sock" switch-client -c "$client" -t "$work"
-tmux -S "$sock" switch-client -c "$client" -T root
-printf '\033[<0;%d;%dM' "$mouse_x" "$mouse_y" >&9
-for _ in $(seq 1 40); do
-  ordinary_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
-  ordinary_table="$(tmux -S "$sock" display-message -p -c "$client" \
-    '#{client_key_table}')"
-  selected_target="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
-  if [ "$ordinary_focus" = "$sidebar" ] && [ "$ordinary_table" = agenmux ] &&
-    [ "$selected_target" = "$ordinary_target" ]; then
-    ordinary_first_click=1
-    break
-  fi
-  sleep 0.05
+# The row map is rewritten on the daemon's schedule; a click aimed with a map
+# that a scan then shifted lands one row off. Re-aim and retry a few times.
+for _ in 1 2 3; do
+  ordinary_row="$(awk -v target="$ordinary_target" '$1 == target { print NR; exit }' \
+    "$tmp/agenmux-rows")"
+  mouse_y=$((sidebar_top + ordinary_row + 1))
+  tmux -S "$sock" switch-client -c "$client" -t "$work"
+  tmux -S "$sock" switch-client -c "$client" -T root
+  printf '\033[<0;%d;%dM' "$mouse_x" "$mouse_y" >&9
+  for _ in $(seq 1 40); do
+    ordinary_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
+    ordinary_table="$(tmux -S "$sock" display-message -p -c "$client" \
+      '#{client_key_table}')"
+    selected_target="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
+    if [ "$ordinary_focus" = "$sidebar" ] && [ "$ordinary_table" = agenmux ] &&
+      [ "$selected_target" = "$ordinary_target" ]; then
+      ordinary_first_click=1
+      break
+    fi
+    sleep 0.05
+  done
+  printf '\033[<0;%d;%dm' "$mouse_x" "$mouse_y" >&9
+  [ "$ordinary_first_click" -eq 1 ] && break
+  sleep 0.6
 done
-printf '\033[<0;%d;%dm' "$mouse_x" "$mouse_y" >&9
 # Keep these as two clicks rather than tmux's DoubleClick1Pane event.
 sleep 0.6
 ordinary_row="$(awk -v target="$ordinary_target" '$1 == target { print NR; exit }' \

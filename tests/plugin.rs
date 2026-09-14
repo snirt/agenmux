@@ -35,7 +35,7 @@ impl TestTmux {
             "120",
             "-y",
             "40",
-            "exec sleep 60",
+            "exec sleep 3600",
         ]);
         server
     }
