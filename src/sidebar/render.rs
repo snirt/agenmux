@@ -309,7 +309,7 @@ impl Sidebar {
                             pane.command
                         )
                     } else if expanded {
-                        format!("{window_icon}▦{E}[0m {muted}{}{E}[0m", pane.command)
+                        format!("{window_icon}▢{E}[0m {muted}{}{E}[0m", pane.command)
                     } else {
                         format!(
                             "{window_icon}{E}[0m {muted}{}{E}[0m",
@@ -858,7 +858,7 @@ mod tests {
             .unwrap();
         let single_window_marker = format!("{}", sb.palette.done_fg.fg(""));
         let parent_window_marker = format!("{}", sb.palette.accent_fg.fg("1"));
-        let pane_marker = format!("{}▦", sb.palette.done_fg.fg(""));
+        let pane_marker = format!("{}▢", sb.palette.done_fg.fg(""));
         assert!(
             collapsed_pane.contains(&single_window_marker)
                 && parent_window.contains(&parent_window_marker)
@@ -872,7 +872,7 @@ mod tests {
         );
         assert_eq!(
             ansi.replace_all(expanded_pane, ""),
-            "     ▦ npm",
+            "     ▢ npm",
             "expanded ordinary panes use nested pane markers"
         );
         let selected_agent_plain = ansi.replace_all(selected_agent, "");
@@ -980,7 +980,7 @@ mod tests {
                 let plain = ansi.replace_all(&sb.last_frame, "");
                 assert!(
                     plain.lines().any(|line| line.starts_with("    server"))
-                        && plain.lines().any(|line| line.trim_end().ends_with("▦ npm")),
+                        && plain.lines().any(|line| line.trim_end().ends_with("▢ npm")),
                     "a physical multi-pane window stays expanded after filtering"
                 );
             }
