@@ -96,7 +96,7 @@ fn read_byte(fd: libc::c_int) -> Option<u8> {
     (n == 1).then_some(b[0])
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum Key {
     First,
     Last,

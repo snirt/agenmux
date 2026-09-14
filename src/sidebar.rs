@@ -593,6 +593,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 } else {
                     read_key(key_fd, keys)
                 };
+                trace!("key {key:?}");
                 match sb.dispatch_key(key) {
                     DispatchResult::Continue => {}
                     DispatchResult::Break => {
