@@ -11,7 +11,7 @@ diagnose() {
   echo "--- daemon processes"
   pgrep -fl "agenmux daemon" 2>/dev/null || true
   echo "--- daemon trace tail"
-  tail -n 60 "$tmp/daemon-trace.log" 2>/dev/null || true
+  tail -n 200 "$tmp/daemon-trace.log" 2>/dev/null || true
 }
 trap 'echo "FAIL navigation-key-table: command failed at line $LINENO"; diagnose' ERR
 
@@ -233,8 +233,14 @@ has_re "$delete_prompt" 'delete (window|pane)\? y/N' || {
   echo "FAIL navigation-key-table: dd did not open inline deletion confirmation"
   exit 1
 }
+{
+  echo "# probe: client table before cancel = $(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
+  tmux -S "$sock" list-keys -T agenmux | sed 's/^/# probe agenmux: /'
+  tmux -S "$sock" list-keys -T agenmux-search | sed 's/^/# probe search: /'
+} >>"$tmp/daemon-trace.log" 2>&1
 printf '\033' >&9
-sleep 0.1
+sleep 0.5
+echo "# probe: client table after cancel = $(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" >>"$tmp/daemon-trace.log"
 windows_after="$(tmux -S "$sock" list-windows -a -F '#{window_id}' | wc -l | tr -d ' ')"
 [ "$windows_after" = "$windows_before" ] || {
   echo "FAIL navigation-key-table: cancelling dd deleted a window"
