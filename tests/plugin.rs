@@ -2014,7 +2014,8 @@ fn startup_populates_the_focused_sidebar_before_fanning_out() {
         .env("AGENMUX_DIR", &plugin_dir)
         .spawn()
         .unwrap();
-    tmux.wait_for(Duration::from_secs(3), || blocked.exists());
+    // Generous: a loaded CI runner takes seconds to reach the second split.
+    tmux.wait_for(Duration::from_secs(10), || blocked.exists());
     let sidebar_windows = tmux.text(&[
         "list-panes",
         "-a",
@@ -2023,7 +2024,7 @@ fn startup_populates_the_focused_sidebar_before_fanning_out() {
         "-F",
         "#{window_id}",
     ]);
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(6);
     let mut loaded_before_fanout = false;
     while Instant::now() < deadline {
         if std::fs::read_to_string(tmux.tmp.join("agenmux-rows"))
