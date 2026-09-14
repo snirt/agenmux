@@ -1,4 +1,4 @@
-use crate::app_config::{Action, Palette};
+use crate::app_config::{action_for, Action, KeyChord, Palette};
 use crate::input::{term_size, Key};
 use crate::release;
 use crate::tmux::command_spawn;
@@ -22,6 +22,7 @@ pub(super) struct Settings {
     existed: bool,
     editable: bool,
     edit: Option<SettingEdit>,
+    search: Option<TextEdit>,
     confirm: bool,
     message: Option<(bool, String)>,
 }
@@ -159,6 +160,22 @@ fn settings_rows(source: &str, effective: &crate::app_config::AppConfig) -> Vec<
         .collect()
 }
 
+fn visible_settings_rows(
+    settings: &Settings,
+    effective: &crate::app_config::AppConfig,
+) -> Vec<SettingRow> {
+    let query = settings
+        .search
+        .as_ref()
+        .map(TextEdit::value)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    settings_rows(&settings.source, effective)
+        .into_iter()
+        .filter(|row| query.is_empty() || row.name.to_ascii_lowercase().contains(&query))
+        .collect()
+}
+
 fn setting_group(name: &str) -> &'static str {
     if name.starts_with("display.") {
         "Display"
@@ -235,6 +252,22 @@ fn initial_setting_value(row: &SettingRow) -> String {
     row.initial.clone()
 }
 
+fn select_move(
+    key: &Key,
+    normal: &std::collections::BTreeMap<Action, Vec<KeyChord>>,
+) -> Option<isize> {
+    match key {
+        Key::Up => Some(-1),
+        Key::Down => Some(1),
+        Key::Text(text) => match action_for(normal, KeyChord::parse(text).ok()?) {
+            Some(Action::Up) => Some(-1),
+            Some(Action::Down) => Some(1),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn settings_state(
     document: Result<(PathBuf, bool, String), crate::app_config::ConfigError>,
 ) -> Settings {
@@ -256,6 +289,7 @@ fn settings_state(
         existed,
         editable,
         edit: None,
+        search: None,
         confirm: false,
         message,
     }
@@ -267,9 +301,19 @@ fn render_settings(
     cols: usize,
     rows: usize,
 ) -> String {
-    let all = settings_rows(&settings.source, effective);
-    let total = all.len() + 1;
-    settings.sel = settings.sel.min(total.saturating_sub(1));
+    let all = visible_settings_rows(settings, effective);
+    let search_query = settings
+        .search
+        .as_ref()
+        .map(TextEdit::value)
+        .unwrap_or_default();
+    let show_revert = search_query.is_empty();
+    let total = all.len() + usize::from(show_revert);
+    settings.sel = if total == 0 {
+        0
+    } else {
+        settings.sel.min(total - 1)
+    };
     let selected = all.get(settings.sel);
     let mut out = format!("{E}[2J{E}[H{E}[1m{} — settings{E}[0m\n", app_title());
     if settings.confirm {
@@ -305,15 +349,30 @@ fn render_settings(
         Editor::Select(select) => Some(select),
         Editor::TextEdit(_) => None,
     });
+    if let Some(search) = &settings.search {
+        out.push_str(&format!("\n/ {}_\n", search.value()));
+    } else {
+        out.push_str("\n/ search\n");
+    }
     let narrow = cols < 80;
     if !narrow {
-        out.push_str("  setting                          persisted      effective      source\n");
+        out.push_str("  setting                    persisted      effective      source\n");
     }
-    // Reserve header/table chrome and expanded options before computing list rows;
-    // otherwise a short pane clips the active dropdown choice.
-    let fixed_rows = if narrow { 7 } else { 5 };
+    // Reserve chrome, category headers, and expanded options before computing
+    // selectable rows so short panes keep the active control visible.
+    let groups = all
+        .iter()
+        .map(|row| setting_group(&row.name))
+        .fold(Vec::<&str>::new(), |mut groups, group| {
+            if groups.last().copied() != Some(group) {
+                groups.push(group);
+            }
+            groups
+        })
+        .len();
+    let fixed_rows = if narrow { 8 } else { 6 };
     let height = rows
-        .saturating_sub(fixed_rows + select.map_or(0, Select::height))
+        .saturating_sub(fixed_rows + groups + select.map_or(0, Select::height))
         .max(1);
     if settings.sel < settings.scroll {
         settings.scroll = settings.sel;
@@ -340,24 +399,19 @@ fn render_settings(
         let first = group != last_group;
         last_group = group;
         let mark = if index == settings.sel { "❯" } else { " " };
+        if first {
+            out.push_str(&format!("  {E}[7m {group} {E}[0m\n"));
+        }
+        let name = setting_label(&row.name);
         if narrow {
-            let name = setting_label(&row.name);
-            let label = format!(
-                "{}{name}",
-                if first {
-                    format!("{group} · ")
-                } else {
-                    String::new()
-                }
-            );
             out.push_str(&format!(
                 "{}\n",
-                Label::new(&label).render(mark, &row.effective)
+                Label::new(name).render(mark, &row.effective)
             ));
         } else {
             out.push_str(&format!(
-                "{mark} {:<32} {:<14} {:<14} {}\n",
-                row.name, row.persisted, row.effective, row.source
+                "{mark} {:<26} {:<14} {:<14} {}\n",
+                name, row.persisted, row.effective, row.source
             ));
         }
         if index == settings.sel {
@@ -368,6 +422,9 @@ fn render_settings(
                 }
             }
         }
+    }
+    if all.is_empty() && !search_query.is_empty() {
+        out.push_str("  No settings match\n");
     }
     if narrow {
         if let Some(row) = selected {
@@ -384,9 +441,23 @@ fn render_settings(
             message
         ));
     } else if select.is_some() {
-        out.push_str("\n↑↓ choose · Enter save · Esc cancel");
+        out.push_str(if narrow {
+            "\njk choose · Enter save · Esc cancel"
+        } else {
+            "\n↑↓/jk choose · Enter save · Esc cancel"
+        });
+    } else if settings.search.is_some() {
+        out.push_str(if narrow {
+            "\ntype filter · ↑↓ move · Enter · Esc clear"
+        } else {
+            "\ntype to filter · ↑↓ move · Enter edit · Esc clear"
+        });
     } else {
-        out.push_str("\n↑↓ move · Enter edit · Esc back");
+        out.push_str(if narrow {
+            "\njk move · Enter edit · / find · Esc back"
+        } else {
+            "\n↑↓/jk move · Enter edit · / search · Esc back"
+        });
     }
     clip_frame(&out, cols, rows.saturating_sub(1))
 }
@@ -723,12 +794,28 @@ impl Sidebar {
             self.last_frame.clear();
             return;
         }
-        let rows = match &self.overlay {
-            Some(Overlay::Settings(settings)) => {
-                settings_rows(&settings.source, &self.settings.settings)
-            }
+        let (rows, show_revert) = match &self.overlay {
+            Some(Overlay::Settings(settings)) => (
+                visible_settings_rows(settings, &self.settings.settings),
+                settings
+                    .search
+                    .as_ref()
+                    .map(TextEdit::value)
+                    .unwrap_or_default()
+                    .is_empty(),
+            ),
             _ => return,
         };
+        let search_start = matches!(key, Key::Search)
+            || matches!(
+                &key,
+                Key::Text(text)
+                    if KeyChord::parse(text)
+                        .ok()
+                        .and_then(|chord| action_for(&self.settings.settings.normal, chord))
+                        == Some(Action::Search)
+            );
+        let select_delta = select_move(&key, &self.settings.settings.normal);
         let mut candidate = None;
         let mut close = false;
         if let Some(Overlay::Settings(settings)) = &mut self.overlay {
@@ -744,11 +831,14 @@ impl Sidebar {
                 }
             } else if let Some(edit) = &mut settings.edit {
                 match key {
-                    Key::Text(text) => {
-                        if let Editor::TextEdit(editor) = &mut edit.editor {
-                            editor.push(&text);
+                    Key::Text(text) => match &mut edit.editor {
+                        Editor::TextEdit(editor) => editor.push(&text),
+                        Editor::Select(select) => {
+                            if let Some(delta) = select_delta {
+                                select.move_by(delta);
+                            }
                         }
-                    }
+                    },
                     Key::Backspace => {
                         if let Editor::TextEdit(editor) = &mut edit.editor {
                             editor.backspace();
@@ -760,8 +850,10 @@ impl Sidebar {
                         }
                     }
                     Key::Up | Key::Down => {
-                        if let Editor::Select(select) = &mut edit.editor {
-                            select.move_by(if matches!(key, Key::Up) { -1 } else { 1 });
+                        if let (Editor::Select(select), Some(delta)) =
+                            (&mut edit.editor, select_delta)
+                        {
+                            select.move_by(delta);
                         }
                     }
                     Key::Jump => {
@@ -782,11 +874,34 @@ impl Sidebar {
                 }
             } else {
                 match key {
+                    Key::Text(text) if settings.search.is_some() => {
+                        settings.search.as_mut().unwrap().push(&text);
+                        settings.sel = 0;
+                        settings.scroll = 0;
+                    }
+                    Key::Backspace if settings.search.is_some() => {
+                        settings.search.as_mut().unwrap().backspace();
+                        settings.sel = 0;
+                        settings.scroll = 0;
+                    }
+                    Key::ClearSearch if settings.search.is_some() => {
+                        settings.search.as_mut().unwrap().clear();
+                        settings.sel = 0;
+                        settings.scroll = 0;
+                    }
+                    _ if search_start => {
+                        settings.search = Some(TextEdit::new(String::new()));
+                        settings.sel = 0;
+                        settings.scroll = 0;
+                    }
                     Key::Down if !rows.is_empty() => {
-                        settings.sel = (settings.sel + 1).min(rows.len())
+                        let last = rows.len() + usize::from(show_revert) - 1;
+                        settings.sel = (settings.sel + 1).min(last);
                     }
                     Key::Up => settings.sel = settings.sel.saturating_sub(1),
-                    Key::Jump if settings.sel == rows.len() => settings.confirm = true,
+                    Key::Jump if show_revert && settings.sel == rows.len() => {
+                        settings.confirm = true
+                    }
                     Key::Jump => {
                         if let Some(row) = rows.get(settings.sel) {
                             let value = initial_setting_value(row);
@@ -799,6 +914,11 @@ impl Sidebar {
                                 editor,
                             });
                         }
+                    }
+                    Key::AllStates | Key::Quit | Key::Close if settings.search.is_some() => {
+                        settings.search = None;
+                        settings.sel = 0;
+                        settings.scroll = 0;
                     }
                     Key::AllStates | Key::Quit | Key::Close => close = true,
                     _ => {}
@@ -828,13 +948,17 @@ impl Sidebar {
                 }
             }
         }
-        let editing = matches!(
+        let interacting = matches!(
             &self.overlay,
             Some(Overlay::Settings(Settings { edit: Some(_), .. }))
+                | Some(Overlay::Settings(Settings {
+                    search: Some(_),
+                    ..
+                }))
         );
         if close {
             self.close_overlay();
-        } else if editing {
+        } else if interacting {
             self.use_key_table("agenmux-settings-edit");
         } else {
             self.reclaim_key_table();
@@ -927,6 +1051,7 @@ mod tests {
                 existed: false,
                 editable: true,
                 edit: None,
+                search: None,
                 confirm: false,
                 message: None,
             };
@@ -944,6 +1069,31 @@ mod tests {
             let end = render_settings(&mut settings, &effective, cols, rows);
             assert!(end.contains("Revert to defaults"));
         }
+    }
+
+    #[test]
+    fn settings_search_matches_names_and_keeps_category_headers() {
+        let effective =
+            crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+        let mut settings = settings_state(Ok((PathBuf::new(), false, "version = 1\n".into())));
+        settings.search = Some(TextEdit::new("sidebar".into()));
+        let visible = visible_settings_rows(&settings, &effective);
+        assert_eq!(
+            visible
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["display.sidebar_width"]
+        );
+        let frame = render_settings(&mut settings, &effective, 80, 20);
+        assert!(frame.contains("Display"), "{frame}");
+        assert!(frame.contains("\u{1b}[7m Display "), "{frame}");
+        assert!(frame.contains("sidebar_width"), "{frame}");
+
+        settings.search = Some(TextEdit::new("split".into()));
+        assert!(visible_settings_rows(&settings, &effective).is_empty());
+        let empty = render_settings(&mut settings, &effective, 80, 20);
+        assert!(empty.contains("No settings match"), "{empty}");
     }
 
     #[test]
@@ -969,6 +1119,7 @@ mod tests {
             existed: false,
             editable: true,
             edit: None,
+            search: None,
             confirm: true,
             message: None,
         };
@@ -1039,6 +1190,15 @@ mod tests {
     fn closed_settings_expand_inline() {
         let effective =
             crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+        assert_eq!(
+            select_move(&Key::Text("j".into()), &effective.normal),
+            Some(1)
+        );
+        assert_eq!(
+            select_move(&Key::Text("k".into()), &effective.normal),
+            Some(-1)
+        );
+        assert_eq!(select_move(&Key::Text("q".into()), &effective.normal), None);
         let sel = settings_rows("version = 1\n", &effective)
             .iter()
             .position(|row| row.name == "display.mode")
@@ -1054,13 +1214,15 @@ mod tests {
                 name: "display.mode".into(),
                 editor: Editor::Select(Select::new("split", choices("display.mode").unwrap())),
             }),
+            search: None,
             confirm: false,
             message: None,
         };
 
         let frame = render_settings(&mut settings, &effective, 50, 18);
 
-        assert!(frame.contains("Display · mode: split"), "{frame}");
+        assert!(frame.contains("Display"), "{frame}");
+        assert!(frame.contains("mode: split"), "{frame}");
         assert!(frame.contains("❯ split"), "{frame}");
         assert!(frame.contains("  popup"), "{frame}");
         assert!(frame.contains("sidebar_width"), "{frame}");
