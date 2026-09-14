@@ -1254,6 +1254,67 @@ fn runtime_binary_path_uses_tmux_shell_argument_quoting() {
 }
 
 #[test]
+fn default_header_inherits_tmux_active_border_contrast() {
+    let tmux = TestTmux::new("tmux-header");
+    app_file(&tmux, "[behavior]\nnotifications=false");
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "pane-active-border-style",
+        "fg=#f5a97f,bg=colour236",
+    ]);
+    assert_eq!(
+        tmux.text(&["show-option", "-gv", "pane-active-border-style"]),
+        "fg=#f5a97f,bg=colour236"
+    );
+    let mut viewer = tmux.attach();
+    tmux.wait_for(Duration::from_secs(2), || {
+        !tmux
+            .text(&["list-clients", "-F", "#{client_name}"])
+            .is_empty()
+    });
+    let client = tmux.text(&["list-clients", "-F", "#{client_name}"]);
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agenmux-bin",
+        env!("CARGO_BIN_EXE_agenmux"),
+    ]);
+    assert_success(
+        tmux.bin(&["toggle", "split", &client]),
+        "start inherited header",
+    );
+    assert_eq!(
+        tmux.text(&["show-option", "-gv", "pane-active-border-style"]),
+        "fg=#f5a97f,bg=colour236"
+    );
+    let pane = tmux.text(&[
+        "list-panes",
+        "-f",
+        "#{==:#{pane_title},agenmux}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    let capture = || tmux.text(&["capture-pane", "-p", "-e", "-t", &pane]);
+    let mut frame = String::new();
+    for _ in 0..80 {
+        frame = capture();
+        if frame.contains("48;2;245;169;127") && frame.contains("38;5;236") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        frame.contains("48;2;245;169;127"),
+        "header background: {frame:?}"
+    );
+    assert!(frame.contains("38;5;236"), "header foreground: {frame:?}");
+    assert_success(tmux.bin(&["key", "close"]), "close inherited header");
+    let _ = viewer.kill();
+    let _ = viewer.wait();
+}
+
+#[test]
 fn daemon_theme_is_a_startup_snapshot_without_global_color_mutation() {
     for base in ["light", "terminal"] {
         let tmux = TestTmux::new(&format!("theme-{base}"));

@@ -8,12 +8,12 @@
 //    processless panes visible in attached clients; keys arrive over a FIFO.
 //    The panes never move between windows, so switching causes no join-pane
 //    reflow (the "bump").
-use crate::app_config::{KeyMode, Keymap, Palette};
+use crate::app_config::{Color, KeyMode, Keymap, Palette};
 use crate::attention::Tracker;
 use crate::conf::AgentConf;
 use crate::procs::IdentCache;
 use crate::scan::{self, PaneMeta, PaneRow};
-use crate::tmux::{command_status, PendingChanges, Tmux, TmuxError};
+use crate::tmux::{command, command_status, PendingChanges, Tmux, TmuxError};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -187,6 +187,91 @@ pub struct Sidebar {
     overlay: Option<Overlay>,
 }
 
+fn tmux_style_color(style: &str, role: &str) -> Option<Color> {
+    let prefix = format!("{role}=");
+    let value = &style[style.find(&prefix)? + prefix.len()..];
+    if value.starts_with("default") {
+        return Some(Color::Default);
+    }
+    if let Some(index) = [
+        "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+    ]
+    .iter()
+    .position(|name| value.starts_with(name))
+    {
+        return Some(Color::Indexed(index as u8));
+    }
+    if let Some(rest) = value
+        .strip_prefix("colour")
+        .or_else(|| value.strip_prefix("color"))
+    {
+        let digits = rest
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
+        return digits.parse().ok().map(Color::Indexed);
+    }
+    if value.starts_with('#')
+        && value.len() >= 7
+        && value[1..7].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        let rgb = u32::from_str_radix(&value[1..7], 16).ok()?;
+        return Some(Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8));
+    }
+    None
+}
+
+fn apply_tmux_header(settings: &mut crate::app_config::AppConfig, active: &str, pane: &str) {
+    if settings
+        .theme
+        .colors
+        .as_ref()
+        .and_then(|colors| colors.header_bg.as_ref())
+        .is_none()
+    {
+        if let Some(color) = tmux_style_color(active, "fg") {
+            settings
+                .theme
+                .colors
+                .get_or_insert_with(Default::default)
+                .header_bg = Some(color);
+            settings.sources.insert(
+                "theme.colors.header_bg".into(),
+                "tmux pane-active-border-style fg".into(),
+            );
+        }
+    }
+    if settings
+        .theme
+        .colors
+        .as_ref()
+        .and_then(|colors| colors.header_fg.as_ref())
+        .is_none()
+    {
+        let (color, source) = tmux_style_color(active, "bg")
+            .map(|color| (color, "tmux pane-active-border-style bg"))
+            .or_else(|| tmux_style_color(pane, "bg").map(|color| (color, "tmux window-style bg")))
+            .unwrap_or((Color::Default, "terminal background"));
+        settings
+            .theme
+            .colors
+            .get_or_insert_with(Default::default)
+            .header_fg = Some(color);
+        settings
+            .sources
+            .insert("theme.colors.header_fg".into(), source.into());
+    }
+}
+
+fn inherit_tmux_header(settings: &mut crate::app_config::AppConfig) {
+    let active = std::env::var("AGENMUX_TMUX_ACTIVE_BORDER_STYLE").unwrap_or_else(|_| {
+        command(&["show-option", "-gv", "pane-active-border-style"]).unwrap_or_default()
+    });
+    let pane = std::env::var("AGENMUX_TMUX_WINDOW_STYLE")
+        .unwrap_or_else(|_| command(&["show-option", "-gv", "window-style"]).unwrap_or_default());
+    apply_tmux_header(settings, &active, &pane);
+}
+
 /// `self_pane` is the pane the sidebar itself occupies, skipped by every scan.
 /// The daemon is headless and owns no pane, so it MUST pass "" — inheriting
 /// TMUX_PANE from whoever pressed the toggle key hid that pane's agent.
@@ -196,13 +281,15 @@ fn new_sidebar(
     cache_file: PathBuf,
     rows_file: PathBuf,
     self_pane: String,
-    settings: crate::app_config::AppConfig,
+    mut settings: crate::app_config::AppConfig,
 ) -> Sidebar {
     let confs = crate::conf::load_all(&plugin_dir);
     // read once: the check behind it runs at most daily, and switching version
     // restarts the engine anyway
     let update = update_available(&plugin_dir);
     let adopted_show_all_panes = settings.show_all_panes;
+    inherit_tmux_header(&mut settings);
+    let palette = Palette::resolve(&settings.theme);
     let cached_rows = std::fs::read_to_string(&cache_file)
         .map(|tsv| scan::from_tsv(&tsv))
         .unwrap_or_default();
@@ -216,7 +303,7 @@ fn new_sidebar(
         .collect();
     let mut sb = Sidebar {
         tmux,
-        palette: Palette::resolve(&settings.theme),
+        palette,
         normal_keys: settings.normal.clone(),
         search_keys: settings.search.clone(),
         settings: crate::app_config::LiveConfig::new(settings),
@@ -561,6 +648,7 @@ impl Sidebar {
         if !refreshed.reloaded {
             return;
         }
+        inherit_tmux_header(&mut self.settings.settings);
         self.palette = Palette::resolve(&self.settings.settings.theme);
         self.normal_keys = self.settings.settings.normal.clone();
         self.search_keys = self.settings.settings.search.clone();
@@ -767,6 +855,43 @@ impl Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmux_style_colors_drive_default_header_contrast() {
+        assert_eq!(
+            tmux_style_color("fg=#f5a97f,bg=default", "fg"),
+            Some(Color::Rgb(245, 169, 127))
+        );
+        assert_eq!(
+            tmux_style_color("fg=colour42,bg=color7", "bg"),
+            Some(Color::Indexed(7))
+        );
+        assert_eq!(
+            tmux_style_color("fg=#f5a97f,bg=default", "bg"),
+            Some(Color::Default)
+        );
+        assert_eq!(tmux_style_color("fg=red", "fg"), Some(Color::Indexed(1)));
+        assert_eq!(
+            tmux_style_color("pane-active-border-style fg=colour202,bg=default", "fg",),
+            Some(Color::Indexed(202))
+        );
+        let mut settings =
+            crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+        apply_tmux_header(&mut settings, "fg=#f5a97f,bg=colour236", "bg=colour235");
+        let palette = Palette::resolve(&settings.theme);
+        assert_eq!(
+            palette.header_bg,
+            crate::app_config::Ink::Typed(Color::Rgb(245, 169, 127))
+        );
+        assert_eq!(
+            palette.header_fg,
+            crate::app_config::Ink::Typed(Color::Indexed(236))
+        );
+        assert_eq!(
+            settings.sources["theme.colors.header_bg"],
+            "tmux pane-active-border-style fg"
+        );
+    }
 
     #[test]
     fn input_modes_route_search_help_and_versions() {

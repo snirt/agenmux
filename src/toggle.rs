@@ -201,6 +201,17 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
             if let Some(trace) = trace_file() {
                 command.env("AGENMUX_DEBUG", trace);
             }
+            for (name, option) in [
+                (
+                    "AGENMUX_TMUX_ACTIVE_BORDER_STYLE",
+                    "pane-active-border-style",
+                ),
+                ("AGENMUX_TMUX_WINDOW_STYLE", "window-style"),
+            ] {
+                if let Ok(style) = tmux::command(&["show-option", "-gv", option]) {
+                    command.env(name, style.trim_end());
+                }
+            }
             if let Some(mode) = cli_mode(config) {
                 command.env("AGENMUX_DISPLAY_OVERRIDE", mode);
             }
