@@ -344,10 +344,12 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 break; // all preserved panes gone — nothing left to display
             }
             if sb.daemon.is_some() && periodic {
-                crate::diag::cap_daemon_log(
+                if let Some(log) = crate::diag::cap_daemon_log(
                     &crate::diag::daemon_log_path(),
                     crate::diag::DAEMON_LOG_LIMIT,
-                );
+                ) {
+                    crate::diag::adopt_stderr(&log);
+                }
             }
             if sb.daemon.as_ref().is_some_and(|d| !d.keys_path.exists()) {
                 break; // runtime dir vanished: deaf to keys, better gone than a zombie

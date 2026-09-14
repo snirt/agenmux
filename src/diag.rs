@@ -15,9 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Daemon stderr destination inside the runtime directory (`temp_dir`).
+/// Daemon stderr destination inside the runtime directory (`temp_dir`). The
+/// previous generation survives as `<name>.1`; nothing older is kept.
 pub const DAEMON_LOG: &str = "agenmux-daemon.log";
-/// Above this the daemon log starts over: it only ever holds diagnostics, so a
+/// Above this the daemon log rotates: it only ever holds diagnostics, so a
 /// reload that keeps failing must not fill the disk over a long session.
 pub const DAEMON_LOG_LIMIT: u64 = 256 * 1024;
 
@@ -110,14 +111,35 @@ pub fn daemon_log_path() -> PathBuf {
     std::env::temp_dir().join(DAEMON_LOG)
 }
 
-/// A fresh, owner-only log for a daemon about to start. Truncated on every
-/// launch: the previous daemon's diagnostics only matter until it is replaced.
+pub fn previous_daemon_log(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".1");
+    PathBuf::from(name)
+}
+
+/// Exactly one prior generation survives, as `<log>.1`: the log a daemon
+/// wrote replaces it, and a daemon that wrote nothing removes it. Anything
+/// older is gone either way.
+pub fn rotate_daemon_log(path: &Path) {
+    let previous = previous_daemon_log(path);
+    if std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0) {
+        let _ = std::fs::rename(path, previous);
+    } else {
+        let _ = std::fs::remove_file(previous);
+    }
+}
+
+/// A fresh, owner-only log for a daemon about to start, after rotating the
+/// previous one. Opened for append so every writer lands at the end even
+/// after the file is replaced underneath it.
 pub fn create_daemon_log(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
+    rotate_daemon_log(path);
+    // std refuses append+truncate in one open; an empty leftover goes first
+    let _ = std::fs::remove_file(path);
     let file = OpenOptions::new()
         .create(true)
-        .write(true)
-        .truncate(true)
+        .append(true)
         .mode(0o600)
         .open(path)?;
     // mode() only applies to a file created by this open
@@ -125,16 +147,29 @@ pub fn create_daemon_log(path: &Path) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
-/// Starts the log over once it outgrows `limit`. Called by the daemon on its
-/// periodic tick: one metadata read every couple of seconds.
-pub fn cap_daemon_log(path: &Path, limit: u64) -> bool {
-    let oversized = std::fs::metadata(path).is_ok_and(|meta| meta.len() > limit);
-    if oversized {
-        if let Ok(mut file) = std::fs::File::create(path) {
-            let _ = writeln!(file, "agenmux: log restarted after exceeding {limit} bytes");
-        }
+/// Rotates the log once it outgrows `limit` and returns the fresh file the
+/// daemon must adopt as stderr: its old descriptor still points at the
+/// rotated inode. Called on the periodic tick: one metadata read every couple
+/// of seconds.
+pub fn cap_daemon_log(path: &Path, limit: u64) -> Option<std::fs::File> {
+    if !std::fs::metadata(path).is_ok_and(|meta| meta.len() > limit) {
+        return None;
     }
-    oversized
+    let mut file = create_daemon_log(path).ok()?;
+    let _ = writeln!(
+        file,
+        "agenmux: log restarted after exceeding {limit} bytes; previous generation kept as .1"
+    );
+    Some(file)
+}
+
+/// Points this process's stderr at `file`, so the diagnostics that follow a
+/// rotation reach the new log instead of the rotated one.
+pub fn adopt_stderr(file: &std::fs::File) {
+    use std::os::unix::io::AsRawFd;
+    unsafe {
+        libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO);
+    }
 }
 
 use std::os::unix::fs::PermissionsExt;
@@ -166,10 +201,17 @@ mod tests {
         assert_eq!(fields.next().unwrap(), "# scan 3ms");
     }
 
+    fn remove(path: &Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(previous_daemon_log(path));
+    }
+
     #[test]
-    fn daemon_log_is_private_and_starts_empty() {
+    fn daemon_log_is_private_and_keeps_one_previous_generation() {
         let path = temp_path("daemon.log");
-        std::fs::write(&path, "stale diagnostics\n").unwrap();
+        let previous = previous_daemon_log(&path);
+        std::fs::write(&previous, "two launches ago\n").unwrap();
+        std::fs::write(&path, "previous daemon\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         let mut file = create_daemon_log(&path).unwrap();
@@ -177,27 +219,60 @@ mod tests {
         drop(file);
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "agenmux: fresh\n");
+        assert_eq!(
+            std::fs::read_to_string(&previous).unwrap(),
+            "previous daemon\n"
+        );
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-        let _ = std::fs::remove_file(path);
+        remove(&path);
     }
 
     #[test]
-    fn daemon_log_restarts_only_past_its_limit() {
+    fn silent_daemon_removes_the_older_generation() {
+        let path = temp_path("silent.log");
+        let previous = previous_daemon_log(&path);
+        std::fs::write(&previous, "two launches ago\n").unwrap();
+        std::fs::write(&path, "").unwrap();
+
+        drop(create_daemon_log(&path).unwrap());
+
+        assert!(!previous.exists());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        remove(&path);
+    }
+
+    #[test]
+    fn appended_writes_land_at_the_end_after_truncation() {
+        let path = temp_path("append.log");
+        let mut file = create_daemon_log(&path).unwrap();
+        writeln!(file, "first").unwrap();
+        std::fs::File::create(&path).unwrap();
+        writeln!(file, "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second\n");
+        remove(&path);
+    }
+
+    #[test]
+    fn daemon_log_rotates_only_past_its_limit() {
         let path = temp_path("cap.log");
+        let previous = previous_daemon_log(&path);
         std::fs::write(&path, "x".repeat(10)).unwrap();
-        assert!(!cap_daemon_log(&path, 10));
+        assert!(cap_daemon_log(&path, 10).is_none());
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 10);
+        assert!(!previous.exists());
 
         std::fs::write(&path, "x".repeat(11)).unwrap();
-        assert!(cap_daemon_log(&path, 10));
+        let fresh = cap_daemon_log(&path, 10).expect("rotated");
+        drop(fresh);
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.starts_with("agenmux: log restarted"), "{content}");
-        let _ = std::fs::remove_file(path);
+        assert_eq!(std::fs::metadata(&previous).unwrap().len(), 11);
+        remove(&path);
     }
 
     #[test]
     fn missing_daemon_log_is_not_oversized() {
-        assert!(!cap_daemon_log(&temp_path("absent.log"), 0));
+        assert!(cap_daemon_log(&temp_path("absent.log"), 0).is_none());
     }
 }
