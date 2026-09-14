@@ -8,6 +8,10 @@ diagnose() {
   tmux -S "$sock" list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_id} #{pane_title}' 2>&1 || true
   echo "--- daemon log tail"
   tail -n 40 "$XDG_STATE_HOME/agenmux/daemon.log" 2>/dev/null || true
+  echo "--- daemon processes"
+  pgrep -fl "agenmux daemon" 2>/dev/null || true
+  echo "--- daemon trace tail"
+  tail -n 60 "$tmp/daemon-trace.log" 2>/dev/null || true
 }
 trap 'echo "FAIL navigation-key-table: command failed at line $LINENO"; diagnose' ERR
 
@@ -124,6 +128,7 @@ done
 server_pid="$(tmux -S "$sock" display-message -p '#{pid}')"
 # No client argument exercises native newest-real-client discovery.
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
+  AGENMUX_DEBUG="$tmp/daemon-trace.log" \
   "$BIN" toggle split
 
 # Native toggle invokes setup, which must preserve the
