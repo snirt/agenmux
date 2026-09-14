@@ -323,7 +323,13 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         if let Some(periodic) = scans.due(now, sb.screens.next_expiry()) {
             // Consume first: output observed by command-response reads during
             // this scan belongs to the next pass.
-            let changes = sb.tmux.take_pending_changes();
+            let mut changes = sb.tmux.take_pending_changes();
+            // Focus first, output after: captures cost 30-130ms and the
+            // cursor must not wait behind them. Deferred panes stay pending
+            // and reach the next output scan under its usual throttle.
+            if !periodic && changes.focus && !changes.full {
+                sb.tmux.defer_output(std::mem::take(&mut changes.panes));
+            }
             match sb.scan_tick(periodic, &changes) {
                 Ok(()) => {}
                 // a pipe I/O error can leave a response block half-read —
@@ -350,6 +356,11 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 ) {
                     crate::diag::adopt_stderr(&log);
                 }
+            }
+            // A focus change lands the user on a pane the writers may not be
+            // feeding yet; retarget now instead of after the next periodic tick.
+            if sb.daemon.is_some() && !periodic && changes.focus {
+                sb.refocus_writers();
             }
             if sb.daemon.as_ref().is_some_and(|d| !d.keys_path.exists()) {
                 break; // runtime dir vanished: deaf to keys, better gone than a zombie
