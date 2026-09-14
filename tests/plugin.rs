@@ -1500,7 +1500,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         &initial,
         "-c",
         &cwd.to_string_lossy(),
-        "exec sleep 60",
+        "exec sleep 300",
     ]);
     assert_success(
         tmux.bin(&["toggle", "split", &client]),
@@ -1844,8 +1844,19 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         "agenmux-search",
         "non-owner sequence must leave confirmation active"
     );
-    assert_success(tmux.bin(&["key", "text-59"]), "reject uppercase delete");
-    thread::sleep(Duration::from_millis(150));
+    assert_success(
+        tmux.bin(&["key", "text-59", &client]),
+        "reject uppercase delete",
+    );
+    tmux.wait_for(Duration::from_secs(2), || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]) == "agenmux"
+    });
     assert!(
         tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
             .lines()
@@ -1853,8 +1864,16 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         "uppercase Y must cancel deletion"
     );
     send_sequence("dp");
-    assert_success(tmux.bin(&["key", "enter"]), "cancel pane delete");
-    thread::sleep(Duration::from_millis(150));
+    assert_success(tmux.bin(&["key", "enter", &client]), "cancel pane delete");
+    tmux.wait_for(Duration::from_secs(2), || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]) == "agenmux"
+    });
     assert!(
         tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
             .lines()
@@ -1862,8 +1881,11 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         "Enter must safely cancel deletion"
     );
     send_sequence("dp");
-    assert_success(tmux.bin(&["key", "text-79"]), "confirm pane delete");
-    tmux.wait_for(Duration::from_secs(4), || {
+    assert_success(
+        tmux.bin(&["key", "text-79", &client]),
+        "confirm pane delete",
+    );
+    tmux.wait_for(Duration::from_secs(10), || {
         !tmux
             .text(&["list-panes", "-a", "-F", "#{pane_id}"])
             .lines()

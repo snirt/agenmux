@@ -192,12 +192,33 @@ has "$rename_input" "name: ${rename_window}▏" || {
   exit 1
 }
 printf '\033' >&9
-sleep 0.1
-printf 'gG' >&9
-sleep 0.1
+for _ in $(seq 1 40); do
+  table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
+  [ "$table" = agenmux ] && break
+  sleep 0.05
+done
+[ "$table" = agenmux ] || {
+  echo "FAIL navigation-key-table: rename cancel did not restore normal table"
+  exit 1
+}
+printf 'g' >&9
+for _ in $(seq 1 40); do
+  table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
+  [ "$table" = agenmux-sequence ] && break
+  sleep 0.05
+done
+[ "$table" = agenmux-sequence ] || {
+  echo "FAIL navigation-key-table: g did not enter sequence table"
+  exit 1
+}
+printf 'G' >&9
+for _ in $(seq 1 40); do
+  table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
+  [ "$table" = agenmux ] && break
+  sleep 0.05
+done
 invalid_sequence_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
-invalid_sequence_table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
-[ "$invalid_sequence_table" = agenmux ] &&
+[ "$table" = agenmux ] &&
   ! has "$invalid_sequence_frame" 'returned 2' || {
   echo "FAIL navigation-key-table: invalid continuation leaked an error"
   exit 1
