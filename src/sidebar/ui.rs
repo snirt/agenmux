@@ -72,8 +72,9 @@ impl<'a> SelectedRow<'a> {
         }
         let bg = self.palette.state_bg("idle", self.focused);
         if bg.is_empty() || bg == format!("{E}[49m") {
+            let icon = self.palette.state_fg("idle").fg("");
             return format!(
-                "{E}[7m{line}{}{E}[0m",
+                "{icon}{E}[7m{line}{}{E}[0m",
                 " ".repeat(cols.saturating_sub(line.chars().count()))
             );
         }
@@ -222,7 +223,10 @@ mod tests {
         let file = crate::app_config::parse("[theme]\nbase = 'terminal'").unwrap();
         let terminal = crate::app_config::Palette::resolve(file.theme.as_ref().unwrap());
         let selected = SelectedRow::new(&terminal, true, true).render("❯ mode", 10);
-        assert_eq!(selected, format!("{E}[7m❯ mode    {E}[0m"));
+        assert_eq!(
+            selected,
+            format!("{}{E}[7m❯ mode    {E}[0m", terminal.state_fg("idle").fg(""))
+        );
     }
 
     #[test]
