@@ -809,13 +809,7 @@ mod tests {
                 .map(|(_, _, command)| command.as_str()),
             Some(key_command("sequence-72", NORMAL_TABLE, false).as_str())
         );
-        for (key, code) in [
-            ("c", 0x63),
-            ("s", 0x73),
-            ("p", 0x70),
-            ("w", 0x77),
-            ("g", 0x67),
-        ] {
+        for (key, code) in [("c", 0x63), ("s", 0x73), ("d", 0x64), ("g", 0x67)] {
             assert_eq!(
                 enabled_keys
                     .iter()

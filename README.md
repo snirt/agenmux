@@ -284,17 +284,23 @@ each chord to a fixed internal action, never to a command from the file.
 views; the next toggle does the same for the tables on its own.
 
 Tmux mutations are opt-in. With management enabled, the built-ins are `cc`
-(create a window in the selected pane's session), `cs` (create a session), `dp`
-(delete the selected pane), `dw` (delete its window), `ds` (delete its session),
-and `r` (rename). `gg` remains available regardless of this setting. Rename asks
-for pane/window/session scope, then opens the current name for inline editing; empty
-Enter or Escape cancels. Create prompts accept an optional name (leave it blank for
-tmux's default), inherit the selected pane's working directory, and move only the
-invoking client to the new target. Mutation prompts accept input only from that
-invoking client. Delete prompts name the exact stable tmux ID and cancel on Enter,
-`n`, Escape, or any input other than lowercase `y`. `dp` and `dw`
-refuse to implicitly destroy a session; use `ds` so attached clients can be moved
-safely first. Set `confirm_delete = false` only if immediate deletion is intentional.
+(create a window in the selected pane's session), `cs` (create a session), `dd`
+(delete the selected record), and `r` (rename). `gg` remains available regardless
+of this setting. With management on, session rows and multi-pane window rows
+become selectable, so the cursor can stand on any record; `dd` deletes that
+record with everything under it: a session row kills the session, a window row
+(or a window's only pane) kills the window, a pane inside a split window kills
+just that pane. Rename asks for pane/window/session scope, then opens the current
+name for inline editing; empty Enter or Escape cancels. Create prompts accept an
+optional name (leave it blank for tmux's default), inherit the selected pane's
+working directory, and show the new target in the invoking client while keeping
+input in the sidebar. Every mutation leaves the client on the sidebar pane, in the
+sidebar key table. Mutation prompts accept input only from that invoking client.
+The delete confirmation is inline: the hint row shows the record's name and
+stable tmux ID and cancels on Enter, `n`, Escape, or any input other than
+lowercase `y`. Window and pane deletes refuse to implicitly destroy a session;
+delete the session row so attached clients can be moved safely first. Set
+`confirm_delete = false` only if immediate deletion is intentional.
 
 ```toml
 [tmux_management]
@@ -302,7 +308,7 @@ enabled = false       # required for every create/delete sequence
 confirm_delete = true
 
 [keys]
-sequence_timeout_ms = 1000 # positive; applies live to gg/cc/cs/dp/dw/ds
+sequence_timeout_ms = 1000 # positive; applies live to gg/cc/cs/dd
 ```
 
 Disabled mutation sequences are not installed, shown in continuation hints, or

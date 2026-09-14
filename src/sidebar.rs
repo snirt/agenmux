@@ -139,10 +139,15 @@ struct MutationTarget {
     cwd: String,
     client: String,
 }
+/// One selectable row. Session and Window rows exist only with tmux
+/// management on; they carry the index of their first listed pane so jump
+/// and the row map keep a pane target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VisiblePane {
     Agent(usize),
     Inventory(usize),
+    Session(usize),
+    Window(usize),
 }
 
 fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMode {
@@ -152,19 +157,6 @@ fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMod
         DispatchMode::Search
     } else {
         DispatchMode::Normal
-    }
-}
-
-fn post_mutation_dispatch(action: SequenceAction, daemon: bool) -> DispatchResult {
-    if !daemon
-        && matches!(
-            action,
-            SequenceAction::CreateWindow | SequenceAction::CreateSession
-        )
-    {
-        DispatchResult::Break
-    } else {
-        DispatchResult::Continue
     }
 }
 
@@ -205,6 +197,9 @@ pub struct Sidebar {
     sel_pane: String,
     sel_occurrence: Option<PaneOccurrence>,
     last_active: String,
+    /// Row to select once the next scan lists it: a pane this sidebar just
+    /// created, which the focus follower cannot see because focus stays here.
+    pending_select: Option<String>,
     active: String,
     active_session: String,
     plugin_selected: bool,
@@ -370,6 +365,7 @@ fn new_sidebar(
         sel_occurrence: None,
         follow_selection: true,
         last_active: String::new(),
+        pending_select: None,
         active: String::new(),
         active_session: String::new(),
         plugin_selected: false,
@@ -762,6 +758,34 @@ impl Sidebar {
             self.mutation_error(&client, "selected pane no longer exists");
             return DispatchResult::Continue;
         };
+        let selected = self.visible.get(self.sel.wrapping_sub(1)).copied();
+        // dd deletes whatever record the cursor is on; a collapsed window row
+        // is its only pane, so it deletes the window.
+        let action = match (action, selected) {
+            (SequenceAction::Delete, Some(VisiblePane::Session(_))) => {
+                SequenceAction::DeleteSession
+            }
+            (SequenceAction::Delete, Some(VisiblePane::Window(_))) => SequenceAction::DeleteWindow,
+            (SequenceAction::Delete, _) => {
+                let siblings = self
+                    .panes
+                    .iter()
+                    .filter(|other| other.window_id == pane.window_id)
+                    .count();
+                if siblings > 1 {
+                    SequenceAction::DeletePane
+                } else {
+                    SequenceAction::DeleteWindow
+                }
+            }
+            (action, _) => action,
+        };
+        trace!(
+            "mutation {action:?} on {} {} {} by {client}",
+            pane.pane,
+            pane.window_id,
+            pane.session_id
+        );
         let target = MutationTarget {
             action,
             pane_id: pane.pane,
@@ -796,6 +820,7 @@ impl Sidebar {
                 }
             }
             SequenceAction::First
+            | SequenceAction::Delete
             | SequenceAction::RenamePane
             | SequenceAction::RenameWindow
             | SequenceAction::RenameSession => DispatchResult::Continue,
@@ -865,17 +890,16 @@ impl Sidebar {
                 "#{session_id}",
                 target.session_id.clone(),
             ),
-            SequenceAction::First => return false,
+            SequenceAction::First | SequenceAction::Delete => return false,
         };
         crate::tmux::command(&["display-message", "-p", "-t", tmux_target, format])
             .is_ok_and(|actual| actual.trim() == expected)
     }
 
-    fn switch_client_to_pane(
-        &self,
-        client: &str,
-        pane: &str,
-    ) -> Result<(), crate::tmux::TmuxError> {
+    /// Show the created target in the client without leaving the sidebar:
+    /// the client moves to its session and window, then lands on the sidebar
+    /// pane there so the next key still navigates the plugin.
+    fn show_created_pane(&self, client: &str, pane: &str) -> Result<(), crate::tmux::TmuxError> {
         let location = crate::tmux::command(&[
             "display-message",
             "-p",
@@ -898,8 +922,44 @@ impl Sidebar {
         }
         crate::tmux::command_status(&["switch-client", "-c", client, "-t", session])?;
         crate::tmux::command_status(&["select-window", "-t", window])?;
-        crate::tmux::command_status(&["select-pane", "-t", pane])?;
-        crate::tmux::command_status(&["switch-client", "-c", client, "-T", "root"])
+        self.focus_sidebar(client);
+        Ok(())
+    }
+
+    /// Put the client on the sidebar pane of its current window and back in
+    /// the plugin key table. A window this sidebar just created gets its pane
+    /// from the background pane-add hook, so wait briefly for it to appear.
+    fn focus_sidebar(&self, client: &str) {
+        if self.daemon.is_none() {
+            return; // the popup already owns the client's input
+        }
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        loop {
+            let sidebar =
+                crate::tmux::command(&["display-message", "-p", "-c", client, "#{window_id}"])
+                    .and_then(|window| {
+                        crate::tmux::command(&[
+                            "list-panes",
+                            "-t",
+                            window.trim(),
+                            "-f",
+                            crate::panes::IS_SIDEBAR,
+                            "-F",
+                            "#{pane_id}",
+                        ])
+                    })
+                    .ok()
+                    .and_then(|panes| panes.lines().next().map(str::to_string));
+            if let Some(pane) = sidebar {
+                let _ = crate::tmux::command_status(&["select-pane", "-t", &pane]);
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.restore_mutation_input(client);
     }
 
     fn execute_mutation(&mut self, target: &MutationTarget, name: &str) -> DispatchResult {
@@ -1013,10 +1073,19 @@ impl Sidebar {
                 }
                 crate::tmux::command(&["kill-session", "-t", &target.session_id])
             })(),
-            SequenceAction::First | SequenceAction::Rename => {
+            SequenceAction::First | SequenceAction::Rename | SequenceAction::Delete => {
                 return DispatchResult::Continue;
             }
         };
+        trace!(
+            "mutation {:?} on {}: {}",
+            target.action,
+            target.pane_id,
+            match &result {
+                Ok(output) => format!("ok {}", output.trim()),
+                Err(error) => format!("error {error}"),
+            }
+        );
         let created_pane = match result {
             Ok(output) => output.trim().to_string(),
             Err(error) => {
@@ -1025,20 +1094,24 @@ impl Sidebar {
             }
         };
         self.refresh_requested = true;
-        if matches!(
-            target.action,
-            SequenceAction::CreateWindow | SequenceAction::CreateSession
-        ) {
-            if let Some(pin) = &self.pin {
-                let _ = std::fs::write(format!("{pin}.jump"), &created_pane);
-            } else if self
-                .switch_client_to_pane(&target.client, &created_pane)
-                .is_err()
-            {
-                self.mutation_error(&target.client, "created target, but client switch failed");
+        match target.action {
+            SequenceAction::CreateWindow | SequenceAction::CreateSession => {
+                self.pending_select = Some(created_pane.clone());
+                if self
+                    .show_created_pane(&target.client, &created_pane)
+                    .is_err()
+                {
+                    self.mutation_error(&target.client, "created target, but client switch failed");
+                }
             }
+            // tmux moves the client when its window or session dies; land it
+            // back on the sidebar instead of whatever pane it fell onto.
+            SequenceAction::DeletePane
+            | SequenceAction::DeleteWindow
+            | SequenceAction::DeleteSession => self.focus_sidebar(&target.client),
+            _ => {}
         }
-        post_mutation_dispatch(target.action, self.daemon.is_some())
+        DispatchResult::Continue
     }
 
     /// Adopt whatever a `config reload` just published. Keys the tmux tables
@@ -1178,6 +1251,15 @@ impl Sidebar {
                 self.select_index(i + 1);
             }
             self.last_active = self.active.clone();
+        }
+        if let Some(pane) = self.pending_select.take() {
+            if let Some(i) = self
+                .visible
+                .iter()
+                .position(|&row| row.is_pane() && self.visible_pane_id(row) == pane)
+            {
+                self.select_index(i + 1);
+            }
         }
         Ok(())
     }
@@ -1344,26 +1426,6 @@ mod tests {
             DispatchMode::Overlay
         );
         assert_eq!(dispatch_mode(None, false), DispatchMode::Normal);
-    }
-
-    #[test]
-    fn popup_deletes_continue_while_creates_handoff() {
-        assert_eq!(
-            post_mutation_dispatch(SequenceAction::DeletePane, false),
-            DispatchResult::Continue
-        );
-        assert_eq!(
-            post_mutation_dispatch(SequenceAction::RenamePane, false),
-            DispatchResult::Continue
-        );
-        assert_eq!(
-            post_mutation_dispatch(SequenceAction::CreateWindow, false),
-            DispatchResult::Break
-        );
-        assert_eq!(
-            post_mutation_dispatch(SequenceAction::DeletePane, true),
-            DispatchResult::Continue
-        );
     }
 
     #[test]

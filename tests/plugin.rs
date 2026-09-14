@@ -719,7 +719,7 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
     );
     assert!(!delete_prefix.contains("run-shell -b"), "{delete_prefix}");
     let sequence = tmux.text(&["list-keys", "-T", "agenmux-sequence"]);
-    for code in ["63", "67", "70", "73", "77"] {
+    for code in ["63", "64", "67", "73"] {
         assert!(
             sequence.contains(&format!("key \'sequence-{code}\'")),
             "missing {code}: {sequence}"
@@ -1548,13 +1548,35 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             .unwrap_or_default()
     };
 
+    // Mutations never hand the client off: it stays on a sidebar pane, in the
+    // plugin key table, so the next key keeps navigating agenmux.
+    let assert_on_sidebar = || {
+        tmux.wait_for(Duration::from_secs(4), || {
+            tmux.text(&[
+                "display-message",
+                "-p",
+                "-c",
+                &client,
+                "#{pane_title}\t#{client_key_table}",
+            ]) == "agenmux\tagenmux"
+        });
+    };
+    let created_pane = |window_name: &str| {
+        tmux.text(&[
+            "list-panes",
+            "-a",
+            "-f",
+            &format!(
+                "#{{&&:#{{==:#{{window_name}},{window_name}}},#{{!=:#{{pane_title}},agenmux}}}}"
+            ),
+            "-F",
+            "#{pane_id}",
+        ])
+    };
     send_sequence("cc");
     thread::sleep(Duration::from_millis(150));
     let create_prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
-    assert!(
-        create_prompt.contains("name (optional):"),
-        "{create_prompt:?}"
-    );
+    assert!(create_prompt.contains("new window: ▏"), "{create_prompt:?}");
     for _ in 0..2 {
         assert_success(
             tmux.bin(&["key", "sequence-63", "missing-client"]),
@@ -1594,7 +1616,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     thread::sleep(Duration::from_millis(200));
     let rename_scope = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
     assert!(
-        rename_scope.contains("rename") && rename_scope.contains("p  pane"),
+        rename_scope.contains("rename: p/w/s") && rename_scope.contains("p pane"),
         "{rename_scope:?}"
     );
     send_text("w");
@@ -1653,11 +1675,11 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     send_sequence("cc");
     thread::sleep(Duration::from_millis(200));
     let prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
-    assert!(prompt.contains("name (optional):"), "{prompt:?}");
+    assert!(prompt.contains("new window: ▏"), "{prompt:?}");
     send_text("w");
     thread::sleep(Duration::from_millis(200));
     let prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
-    assert!(prompt.contains("name (optional): w"), "{prompt:?}");
+    assert!(prompt.contains("new window: w▏"), "{prompt:?}");
     assert_success(tmux.bin(&["key", "enter"]), "accept window name");
     tmux.wait_for(Duration::from_secs(4), || {
         tmux.text(&["list-windows", "-a", "-F", "#{window_id}"])
@@ -1668,17 +1690,9 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     tmux.wait_for(Duration::from_secs(4), || {
         tmux.text(&["display-message", "-p", "-c", &client, "#{window_name}"]) == "w"
     });
-    let window_pane = tmux.text(&["display-message", "-p", "-c", &client, "#{pane_id}"]);
-    assert_eq!(
-        tmux.text(&[
-            "display-message",
-            "-p",
-            "-t",
-            &window_pane,
-            "#{window_name}"
-        ]),
-        "w"
-    );
+    assert_on_sidebar();
+    let window_pane = created_pane("w");
+    assert!(window_pane.starts_with('%'), "{window_pane:?}");
     assert_eq!(
         tmux.text(&[
             "display-message",
@@ -1707,7 +1721,16 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     tmux.wait_for(Duration::from_secs(4), || {
         tmux.text(&["display-message", "-p", "-c", &client, "#{session_name}"]) == "s"
     });
-    let session_pane = tmux.text(&["display-message", "-p", "-c", &client, "#{pane_id}"]);
+    assert_on_sidebar();
+    let session_pane = tmux.text(&[
+        "list-panes",
+        "-a",
+        "-f",
+        "#{&&:#{==:#{session_name},s},#{!=:#{pane_title},agenmux}}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    assert!(session_pane.starts_with('%'), "{session_pane:?}");
     tmux.wait_for(Duration::from_secs(4), || selected() == session_pane);
     let guarded_session = tmux.text(&[
         "display-message",
@@ -1716,7 +1739,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         &session_pane,
         "#{session_id}",
     ]);
-    send_sequence("dw");
+    send_sequence("dd");
     assert_success(
         tmux.bin(&["key", "text-79", &client]),
         "confirm guarded last-window delete",
@@ -1754,7 +1777,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         "-T",
         "sidebar-fixture",
     ]);
-    send_sequence("dp");
+    send_sequence("dd");
     assert_success(
         tmux.bin(&["key", "text-79", &client]),
         "confirm guarded last-pane delete",
@@ -1774,7 +1797,27 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             .any(|pane| pane == session_pane),
         "pane deletion must not implicitly destroy its session"
     );
-    send_sequence("ds");
+    tmux.wait_for(Duration::from_secs(4), || selected() == session_pane);
+    assert_success(tmux.bin(&["key", "up", &client]), "move to session row");
+    thread::sleep(Duration::from_millis(150));
+    send_sequence("dd");
+    // dd on a session row must confirm the whole session, inline.
+    // Only sidebars in the client's session are repainted: read the one
+    // the client sits on.
+    let confirm_pane = tmux.text(&["display-message", "-p", "-c", &client, "#{pane_id}"]);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut session_prompt = String::new();
+    while Instant::now() < deadline {
+        session_prompt = tmux.text(&["capture-pane", "-p", "-t", &confirm_pane]);
+        if session_prompt.contains("delete session? y/N") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        session_prompt.contains("delete session? y/N"),
+        "dd on a session row must confirm the whole session: {session_prompt:?}"
+    );
     assert_success(
         tmux.bin(&["key", "text-79", &client]),
         "confirm session delete",
@@ -1787,7 +1830,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     });
 
     tmux.wait_for(Duration::from_secs(4), || selected() == window_pane);
-    send_sequence("dw");
+    send_sequence("dd");
     assert_success(
         tmux.bin(&["key", "text-79", &client]),
         "confirm window delete",
@@ -1811,7 +1854,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     ]);
     tmux.assert_tmux(&["select-pane", "-t", &extra]);
     tmux.wait_for(Duration::from_secs(4), || selected() == extra);
-    send_sequence("dp");
+    send_sequence("dd");
     assert_success(
         tmux.bin(&["key", "text-79", "missing-client"]),
         "ignore non-owner confirmation",
@@ -1871,7 +1914,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     );
     tmux.assert_tmux(&["select-pane", "-t", &extra]);
     tmux.wait_for(Duration::from_secs(10), || selected() == extra);
-    send_sequence("dp");
+    send_sequence("dd");
     assert_success(tmux.bin(&["key", "enter", &client]), "cancel pane delete");
     tmux.wait_for(Duration::from_secs(10), || {
         tmux.text(&[
@@ -1890,7 +1933,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     );
     tmux.assert_tmux(&["select-pane", "-t", &extra]);
     tmux.wait_for(Duration::from_secs(10), || selected() == extra);
-    send_sequence("dp");
+    send_sequence("dd");
     assert_success(
         tmux.bin(&["key", "text-79", &client]),
         "confirm pane delete",
@@ -1914,7 +1957,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     ]);
     tmux.assert_tmux(&["select-pane", "-t", &stale]);
     tmux.wait_for(Duration::from_secs(4), || selected() == stale);
-    send_sequence("dp");
+    send_sequence("dd");
     tmux.assert_tmux(&["kill-pane", "-t", &stale]);
     assert_success(
         tmux.bin(&["key", "text-79", &client]),
@@ -1946,7 +1989,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     );
     assert_success(tmux.bin(&["config", "reload"]), "disable confirmation");
     thread::sleep(Duration::from_millis(2200));
-    send_sequence("dp");
+    send_sequence("dd");
     tmux.wait_for(Duration::from_secs(4), || {
         !tmux
             .text(&["list-panes", "-a", "-F", "#{pane_id}"])
@@ -1973,7 +2016,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     );
     assert_success(tmux.bin(&["config", "reload"]), "enable confirmation");
     thread::sleep(Duration::from_millis(2200));
-    send_sequence("dp");
+    send_sequence("dd");
     app_file(
         &tmux,
         "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false\n[tmux_management]\nenabled=false",
@@ -1985,7 +2028,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     tmux.wait_for(Duration::from_secs(4), || {
         !tmux
             .text(&["capture-pane", "-p", "-t", &sidebar])
-            .contains("delete pane")
+            .contains("? y/N")
     });
     assert_success(
         tmux.bin(&["key", "text-79"]),
@@ -2008,7 +2051,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     thread::sleep(Duration::from_millis(150));
     assert!(
         tmux.text(&["capture-pane", "-p", "-t", &sidebar])
-            .contains("p delete pane"),
+            .contains("d delete selected"),
         "delete prefix should be pending before override"
     );
     app_file(
@@ -2019,10 +2062,10 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     tmux.wait_for(Duration::from_secs(4), || {
         !tmux
             .text(&["capture-pane", "-p", "-t", &sidebar])
-            .contains("delete pane")
+            .contains("delete selected")
     });
     assert_success(
-        tmux.bin(&["key", "sequence-70", &client]),
+        tmux.bin(&["key", "sequence-64", &client]),
         "ignore continuation after prefix override",
     );
     assert!(
@@ -2040,7 +2083,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     send_sequence("d");
     thread::sleep(Duration::from_millis(150));
     let pending = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
-    assert!(pending.contains("p delete pane"), "{pending:?}");
+    assert!(pending.contains("d delete selected"), "{pending:?}");
     app_file(
         &tmux,
         "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false\n[tmux_management]\nenabled=false",
@@ -2049,10 +2092,10 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     tmux.wait_for(Duration::from_secs(4), || {
         !tmux
             .text(&["capture-pane", "-p", "-t", &sidebar])
-            .contains("delete pane")
+            .contains("delete selected")
     });
     assert_success(
-        tmux.bin(&["key", "sequence-70", &client]),
+        tmux.bin(&["key", "sequence-64", &client]),
         "ignored disabled delete continuation",
     );
     thread::sleep(Duration::from_millis(150));

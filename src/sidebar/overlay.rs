@@ -91,6 +91,41 @@ fn settings_mouse_key(settings: &mut Settings, key: Key, total: usize) -> Key {
     }
 }
 
+impl Overlay {
+    /// Text a mutation prompt shows on the cursor row, with whether it is a
+    /// destructive confirmation. None for full-screen overlays.
+    pub(super) fn inline_prompt(&self) -> Option<(String, bool)> {
+        let typed = |name: &str| -> String { name.chars().filter(|c| !c.is_control()).collect() };
+        Some(match self {
+            Overlay::Confirm(target) => {
+                let kind = match target.action {
+                    SequenceAction::DeleteSession => "session",
+                    SequenceAction::DeleteWindow => "window",
+                    _ => "pane",
+                };
+                (format!("delete {kind}? y/N"), true)
+            }
+            Overlay::Create { target, name } => {
+                let kind = match target.action {
+                    SequenceAction::CreateSession => "session",
+                    _ => "window",
+                };
+                (format!("new {kind}: {}▏", typed(name)), false)
+            }
+            Overlay::RenameScope(_) => ("rename: p/w/s".into(), false),
+            Overlay::Rename { target, name } => {
+                let kind = match target.action {
+                    SequenceAction::RenamePane => "pane",
+                    SequenceAction::RenameWindow => "window",
+                    _ => "session",
+                };
+                (format!("{kind} name: {}▏", typed(name)), false)
+            }
+            Overlay::Help | Overlay::Versions { .. } | Overlay::Settings(_) => return None,
+        })
+    }
+}
+
 /// The release this engine belongs to. install-bin.sh installs the binary that
 /// matches the checkout's Cargo.toml, so this is also the plugin's version.
 pub(super) fn current_tag() -> String {
@@ -248,6 +283,16 @@ fn setting_label(name: &str) -> &str {
         .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name))
 }
 
+fn is_bool_setting(name: &str) -> bool {
+    matches!(
+        name,
+        "display.show_all_panes"
+            | "behavior.notifications"
+            | "tmux_management.enabled"
+            | "tmux_management.confirm_delete"
+    )
+}
+
 fn setting_value(name: &str, buffer: &str) -> Result<String, String> {
     let value = buffer.trim();
     if name.starts_with("keys.") {
@@ -262,7 +307,7 @@ fn setting_value(name: &str, buffer: &str) -> Result<String, String> {
         }
         return Ok(toml_edit::Value::Array(array).to_string());
     }
-    if matches!(name, "display.show_all_panes" | "behavior.notifications") {
+    if is_bool_setting(name) {
         return match value {
             "true" | "false" => Ok(value.into()),
             _ => Err("expected true or false".into()),
@@ -290,7 +335,7 @@ fn choices(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "display.mode" => Some(&["split", "popup"]),
         "theme.base" => Some(&["dark", "light", "terminal"]),
-        "display.show_all_panes" | "behavior.notifications" => Some(&["true", "false"]),
+        _ if is_bool_setting(name) => Some(&["true", "false"]),
         _ => None,
     }
 }
@@ -679,59 +724,14 @@ impl Sidebar {
                     .collect();
                 text
             }
-            Some(Overlay::Create { target, name }) => {
-                let action = match target.action {
-                    SequenceAction::CreateWindow => "create window",
-                    SequenceAction::CreateSession => "create session",
-                    _ => return,
-                };
-                let name: String = name.chars().filter(|c| !c.is_control()).collect();
-                let hint = join(&[
-                    self.hint(&self.search_keys, Action::Accept, "create"),
-                    self.hint(&self.search_keys, Action::Cancel, "cancel"),
-                ]);
-                format!(
-                    "{E}[2J{E}[H{header}{title} — {action}{E}[0m\n\n\
-                     name (optional): {name}\n\n{muted}{hint}{E}[0m"
-                )
-            }
-            Some(Overlay::RenameScope(_)) => format!(
-                "{E}[2J{E}[H{header}{title} — rename{E}[0m\n\n\
-                 rename:\n\n\
-                 p  pane\n\
-                 w  window\n\
-                 s  session\n\n{muted}p/w/s choose · Esc cancel{E}[0m"
-            ),
-            Some(Overlay::Rename { target, name, .. }) => {
-                let kind = match target.action {
-                    SequenceAction::RenamePane => "pane",
-                    SequenceAction::RenameWindow => "window",
-                    SequenceAction::RenameSession => "session",
-                    _ => return,
-                };
-                let name: String = name.chars().filter(|c| !c.is_control()).collect();
-                let hint = join(&[
-                    self.hint(&self.search_keys, Action::Accept, "rename"),
-                    self.hint(&self.search_keys, Action::Cancel, "cancel"),
-                ]);
-                format!(
-                    "{E}[2J{E}[H{header}{title} — rename {kind}{E}[0m\n\n\
-                     name: {name}▏\n\n{muted}{hint}{E}[0m"
-                )
-            }
-            Some(Overlay::Confirm(target)) => {
-                let (kind, identity) = match target.action {
-                    SequenceAction::DeletePane => ("pane", &target.pane_id),
-                    SequenceAction::DeleteWindow => ("window", &target.window_id),
-                    SequenceAction::DeleteSession => ("session", &target.session_id),
-                    _ => return,
-                };
-                format!(
-                    "{E}[2J{E}[H{header}{title} — delete {kind}{E}[0m\n\n\
-                     delete {kind} {identity}? [y/N]\n\n{muted}y delete · Enter/n/Esc cancel{E}[0m"
-                )
-            }
-            None => return,
+            // Mutation prompts render inline in the list frame.
+            Some(
+                Overlay::Create { .. }
+                | Overlay::RenameScope(_)
+                | Overlay::Rename { .. }
+                | Overlay::Confirm(_),
+            )
+            | None => return,
         };
         let header_bg = top_bar.background();
         let text = if header_bg.is_empty() {

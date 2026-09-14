@@ -127,6 +127,8 @@ pub(crate) enum SequenceAction {
     First,
     CreateWindow,
     CreateSession,
+    /// `dd`: resolved to the selected record's scope when it fires.
+    Delete,
     DeletePane,
     DeleteWindow,
     DeleteSession,
@@ -164,21 +166,9 @@ pub(crate) const BUILTIN_SEQUENCES: &[BuiltinSequence] = &[
         mutation: true,
     },
     BuiltinSequence {
-        sequence: "dp",
-        action: SequenceAction::DeletePane,
-        label: "delete pane",
-        mutation: true,
-    },
-    BuiltinSequence {
-        sequence: "dw",
-        action: SequenceAction::DeleteWindow,
-        label: "delete window",
-        mutation: true,
-    },
-    BuiltinSequence {
-        sequence: "ds",
-        action: SequenceAction::DeleteSession,
-        label: "delete session",
+        sequence: "dd",
+        action: SequenceAction::Delete,
+        label: "delete selected session/window/pane",
         mutation: true,
     },
     BuiltinSequence {

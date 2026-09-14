@@ -12,14 +12,15 @@
 - `[keys] sequence_timeout_ms = 1000` by default and must be positive.
 - All fields are typed, validated, shown in effective config/example/docs, and live-reloaded.
 - Disabled mutations are absent from prefix hints/help, cannot execute, and disabling clears pending `c`/`d`/`r`.
-- Shared built-ins: `gg` first, `cc` create window, `cs` create session, `dp` delete pane, `dw` delete window, `ds` delete session, and `r` rename.
+- Shared built-ins: `gg` first, `cc` create window, `cs` create session, `dd` delete the selected record (session, window, or pane, with its subtree), and `r` rename.
+- With management on, session rows and multi-pane window rows are selectable cursor targets.
 - First `c`/`d`/`g` shows valid continuations from the same mapping used by dispatch and help; `r` opens a pane/window/session scope chooser.
 - Escape, invalid continuation, or timeout clears pending state/hint; timeout expires without another key.
 - Create prompts for optional name. Enter accepts; blank lets tmux choose; Escape cancels.
-- Create inherits selected pane cwd, revalidates stable IDs, uses `new-window`/`new-session`, switches invoking client to created first pane, and refreshes surviving sidebars.
+- Create inherits selected pane cwd, revalidates stable IDs, uses `new-window`/`new-session`, shows the created target in the invoking client while input stays on the sidebar pane, and refreshes surviving sidebars.
 - Mutation overlays accept framed daemon input only from the invoking client; legacy unowned packets remain compatible for popup/direct input.
-- Delete revalidates stable pane/window/session IDs and uses `kill-pane`/`kill-window`/`kill-session`; `dp`/`dw` refuse to implicitly destroy a session, while `ds` moves attached clients first; stale targets error and refresh without fallback.
-- With confirmation enabled, overlay displays exact resource type and identity; only explicit `y` confirms. Enter, `n`, Escape, or any other key cancels.
+- Delete revalidates stable pane/window/session IDs and uses `kill-pane`/`kill-window`/`kill-session`; window and pane deletes refuse to implicitly destroy a session, while a session delete moves attached clients first; stale targets error and refresh without fallback.
+- With confirmation enabled, the hint row shows the record's type, name, and identity inline; only explicit `y` confirms. Enter, `n`, Escape, or any other key cancels.
 - Rename preloads the current pane/window/session name for inline typing and Backspace edits, revalidates the stable ID, and uses `select-pane -T`/`rename-window`/`rename-session`; control-only or empty names cancel and native tmux errors remain nonfatal.
 - With confirmation disabled, completed delete sequence executes immediately.
 - Sidebar self-removal is safe; surviving views refresh and preserve nearest valid selection.

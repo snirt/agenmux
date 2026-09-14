@@ -165,7 +165,7 @@ sequence_keys="$(tmux -S "$sock" list-keys -T agenmux-sequence)"
 has "$normal_keys" " key 'sequence-64'" &&
   has "$normal_keys" " key 'sequence-72'" &&
   has "$normal_keys" 'switch-client -T agenmux-sequence' &&
-  has "$sequence_keys" " key 'sequence-77'" || {
+  has "$sequence_keys" " key 'sequence-64'" || {
   echo "FAIL navigation-key-table: management sequence tables missing after reload"
   exit 1
 }
@@ -205,25 +205,25 @@ invalid_sequence_table="$(tmux -S "$sock" display-message -p -c "$client" '#{cli
   echo "FAIL navigation-key-table: invalid continuation leaked an error"
   exit 1
 }
-# Exercise the real attached client's key tables: `dw` must reach the daemon
-# and open confirmation without deleting anything.
+# Exercise the real attached client's key tables: `dd` must reach the daemon
+# and open the inline confirmation without deleting anything.
 windows_before="$(tmux -S "$sock" list-windows -a -F '#{window_id}' | wc -l | tr -d ' ')"
-printf 'dw' >&9
+printf 'dd' >&9
 delete_prompt=''
 for _ in $(seq 1 40); do
   delete_prompt="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
-  has "$delete_prompt" 'delete window' && break
+  has_re "$delete_prompt" 'delete (window|pane)\? y/N' && break
   sleep 0.05
 done
-has "$delete_prompt" 'delete window' || {
-  echo "FAIL navigation-key-table: dw did not open window deletion confirmation"
+has_re "$delete_prompt" 'delete (window|pane)\? y/N' || {
+  echo "FAIL navigation-key-table: dd did not open inline deletion confirmation"
   exit 1
 }
 printf '\033' >&9
 sleep 0.1
 windows_after="$(tmux -S "$sock" list-windows -a -F '#{window_id}' | wc -l | tr -d ' ')"
 [ "$windows_after" = "$windows_before" ] || {
-  echo "FAIL navigation-key-table: cancelling dw deleted a window"
+  echo "FAIL navigation-key-table: cancelling dd deleted a window"
   exit 1
 }
 printf '[keys.normal]\nup = ["K"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
