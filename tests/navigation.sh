@@ -2,7 +2,14 @@
 # End-to-end regression for the preserved sidebar's native client key table.
 # The first invocation omits a client to verify newest-real-client discovery.
 set -euo pipefail
-trap 'echo "FAIL navigation-key-table: command failed at line $LINENO"' ERR
+# On failure, show what the daemon saw: CI runners have no other trace.
+diagnose() {
+  echo "--- panes"
+  tmux -S "$sock" list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_id} #{pane_title}' 2>&1 || true
+  echo "--- daemon log tail"
+  tail -n 40 "$XDG_STATE_HOME/agenmux/daemon.log" 2>/dev/null || true
+}
+trap 'echo "FAIL navigation-key-table: command failed at line $LINENO"; diagnose' ERR
 
 # grep -q exits at the first match, and pipefail turns the writer's EPIPE into a failure
 has() { [[ $1 == *"$2"* ]]; }
@@ -1446,5 +1453,6 @@ else
   echo "edge-nav: long=$edge_long_list_works slow=$slow_gg_expires search=$search_edges_work state=$state_edges_work"
   echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$blocked_filter_works/$blocked_targets/$blocked_frame/$blocked_hint/$working_filter_works/$working_targets/$working_frame/$idle_filter_works/$idle_targets/$idle_frame/$all_filter_works/$all_targets/$all_frame] reload=[$reload_hint_follows/$reload_hint] ordinary=[$ordinary_keyboard_jump/$ordinary_first_click/$ordinary_mouse_jump/$ordinary_restored_false target=$ordinary_target focus=$ordinary_focus table=$ordinary_table] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
   echo "settings: open=$settings_open search=$settings_search backspace=$settings_backspace applied=$settings_search_applied navigation=$settings_search_navigation dropdown=$settings_dropdown cancelled=$settings_cancelled saved=$settings_saved responsive=$settings_responsive returned=$settings_returned popup=$settings_popup"
+  diagnose
   exit 1
 fi
