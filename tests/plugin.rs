@@ -1535,6 +1535,23 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             thread::sleep(Duration::from_millis(80));
         }
     };
+    let wait_for_prompt = |needle: &str| {
+        tmux.wait_for(Duration::from_secs(10), || {
+            let active_sidebar = tmux.text(&[
+                "list-panes",
+                "-t",
+                &client,
+                "-f",
+                "#{==:#{pane_title},agenmux}",
+                "-F",
+                "#{pane_id}",
+            ]);
+            !active_sidebar.is_empty()
+                && tmux
+                    .text(&["capture-pane", "-p", "-t", &active_sidebar])
+                    .contains(needle)
+        });
+    };
     let selected = || {
         std::fs::read_to_string(tmux.tmp.join("agenmux-rows"))
             .unwrap_or_default()
@@ -1717,11 +1734,12 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         "#{session_id}",
     ]);
     send_sequence("dw");
+    wait_for_prompt("delete window");
     assert_success(
-        tmux.bin(&["key", "text-79"]),
+        tmux.bin(&["key", "text-79", &client]),
         "confirm guarded last-window delete",
     );
-    tmux.wait_for(Duration::from_secs(2), || {
+    tmux.wait_for(Duration::from_secs(10), || {
         tmux.text(&[
             "display-message",
             "-p",
@@ -1755,11 +1773,12 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         "sidebar-fixture",
     ]);
     send_sequence("dp");
+    wait_for_prompt("delete pane");
     assert_success(
-        tmux.bin(&["key", "text-79"]),
+        tmux.bin(&["key", "text-79", &client]),
         "confirm guarded last-pane delete",
     );
-    tmux.wait_for(Duration::from_secs(2), || {
+    tmux.wait_for(Duration::from_secs(10), || {
         tmux.text(&[
             "display-message",
             "-p",
@@ -1775,7 +1794,11 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         "pane deletion must not implicitly destroy its session"
     );
     send_sequence("ds");
-    assert_success(tmux.bin(&["key", "text-79"]), "confirm session delete");
+    wait_for_prompt("delete session");
+    assert_success(
+        tmux.bin(&["key", "text-79", &client]),
+        "confirm session delete",
+    );
     tmux.wait_for(Duration::from_secs(4), || {
         tmux.text(&["list-sessions", "-F", "#{session_id}"])
             .lines()
@@ -1785,7 +1808,11 @@ fn tmux_management_creates_and_deletes_stable_targets() {
 
     tmux.wait_for(Duration::from_secs(4), || selected() == window_pane);
     send_sequence("dw");
-    assert_success(tmux.bin(&["key", "text-79"]), "confirm window delete");
+    wait_for_prompt("delete window");
+    assert_success(
+        tmux.bin(&["key", "text-79", &client]),
+        "confirm window delete",
+    );
     tmux.wait_for(Duration::from_secs(4), || {
         tmux.text(&["list-windows", "-a", "-F", "#{window_id}"])
             .lines()
@@ -1806,6 +1833,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     tmux.assert_tmux(&["select-pane", "-t", &extra]);
     tmux.wait_for(Duration::from_secs(4), || selected() == extra);
     send_sequence("dp");
+    wait_for_prompt("delete pane");
     assert_success(
         tmux.bin(&["key", "text-79", "missing-client"]),
         "ignore non-owner confirmation",
@@ -1848,7 +1876,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         tmux.bin(&["key", "text-59", &client]),
         "reject uppercase delete",
     );
-    tmux.wait_for(Duration::from_secs(2), || {
+    tmux.wait_for(Duration::from_secs(10), || {
         tmux.text(&[
             "display-message",
             "-p",
@@ -1864,8 +1892,9 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         "uppercase Y must cancel deletion"
     );
     send_sequence("dp");
+    wait_for_prompt("delete pane");
     assert_success(tmux.bin(&["key", "enter", &client]), "cancel pane delete");
-    tmux.wait_for(Duration::from_secs(2), || {
+    tmux.wait_for(Duration::from_secs(10), || {
         tmux.text(&[
             "display-message",
             "-p",
@@ -1881,6 +1910,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         "Enter must safely cancel deletion"
     );
     send_sequence("dp");
+    wait_for_prompt("delete pane");
     assert_success(
         tmux.bin(&["key", "text-79", &client]),
         "confirm pane delete",
@@ -1905,8 +1935,12 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     tmux.assert_tmux(&["select-pane", "-t", &stale]);
     tmux.wait_for(Duration::from_secs(4), || selected() == stale);
     send_sequence("dp");
+    wait_for_prompt("delete pane");
     tmux.assert_tmux(&["kill-pane", "-t", &stale]);
-    assert_success(tmux.bin(&["key", "text-79"]), "confirm stale pane delete");
+    assert_success(
+        tmux.bin(&["key", "text-79", &client]),
+        "confirm stale pane delete",
+    );
     tmux.wait_for(Duration::from_secs(4), || selected() == initial);
     assert!(
         tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
@@ -1961,6 +1995,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     assert_success(tmux.bin(&["config", "reload"]), "enable confirmation");
     thread::sleep(Duration::from_millis(2200));
     send_sequence("dp");
+    wait_for_prompt("delete pane");
     app_file(
         &tmux,
         "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false\n[tmux_management]\nenabled=false",
