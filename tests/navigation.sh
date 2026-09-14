@@ -127,6 +127,8 @@ done
 
 server_pid="$(tmux -S "$sock" display-message -p '#{pid}')"
 # No client argument exercises native newest-real-client discovery.
+# Key bindings run the engine through tmux: hand them the trace file too.
+tmux -S "$sock" set-environment -g AGENMUX_DEBUG "$tmp/daemon-trace.log"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   AGENMUX_DEBUG="$tmp/daemon-trace.log" \
   "$BIN" toggle split

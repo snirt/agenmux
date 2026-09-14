@@ -537,6 +537,12 @@ pub(crate) fn read_search_key(fd: libc::c_int, keys: &Keymap) -> Key {
 /// reader. Each invocation is intentionally short-lived; the daemon remains
 /// the only persistent agenmux process.
 pub fn send_key(name: &str, client: Option<&str>) -> i32 {
+    let status = send_key_inner(name, client);
+    trace!("send key {name} for {client:?} -> {status}");
+    status
+}
+
+fn send_key_inner(name: &str, client: Option<&str>) -> i32 {
     let bytes: Vec<u8> = if let Some(hex) = name.strip_prefix("text-") {
         let Ok(byte) = u8::from_str_radix(hex, 16) else {
             return 2;

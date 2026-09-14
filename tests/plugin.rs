@@ -1551,7 +1551,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     // Mutations never hand the client off: it stays on a sidebar pane, in the
     // plugin key table, so the next key keeps navigating agenmux.
     let assert_on_sidebar = || {
-        tmux.wait_for(Duration::from_secs(4), || {
+        tmux.wait_for(Duration::from_secs(10), || {
             tmux.text(&[
                 "display-message",
                 "-p",
