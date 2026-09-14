@@ -1,3 +1,5 @@
+#[macro_use]
+mod diag;
 mod app_config;
 mod attention;
 mod conf;

@@ -440,25 +440,11 @@ fn block_tag(rest: &str) -> &str {
     rest.split_whitespace().nth(1).unwrap_or("")
 }
 
-/// AGENMUX_DEBUG=<file>: free-form trace line (timings, counters).
-pub fn debug_note(msg: &str) {
-    let Some(path) = crate::compat_env("AGENMUX_DEBUG", "AGENTS_MON_DEBUG") else {
-        return;
-    };
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(f, "[{}] # {msg}", std::process::id());
-    }
-}
-
-/// AGENMUX_DEBUG=<file>: trace every command/response pair with timing.
+/// Trace every command/response pair with timing when the trace is enabled.
 fn debug_log(cmd: &str, r: &Result<String, TmuxError>, took: std::time::Duration) {
-    let Some(path) = crate::compat_env("AGENMUX_DEBUG", "AGENTS_MON_DEBUG") else {
+    if !crate::diag::enabled() {
         return;
-    };
+    }
     let summary = match r {
         Ok(b) => format!(
             "ok {}B {:?}",
@@ -467,20 +453,12 @@ fn debug_log(cmd: &str, r: &Result<String, TmuxError>, took: std::time::Duration
         ),
         Err(e) => format!("ERR {e}"),
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(
-            f,
-            "[{}] {}ms {:.60} -> {}",
-            std::process::id(),
-            took.as_millis(),
-            cmd,
-            summary
-        );
-    }
+    crate::diag::trace_command(&format!(
+        "{}ms {:.60} -> {}",
+        took.as_millis(),
+        cmd,
+        summary
+    ));
 }
 
 impl Drop for Tmux {

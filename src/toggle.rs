@@ -7,7 +7,8 @@ use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 // stdout is a private one-byte startup acknowledgement, not a diagnostic log.
-// Never relay child stderr: it may contain configuration values or terminal controls.
+// Never relay child stderr to the user's terminal: it may contain configuration
+// values or terminal controls. It goes to an owner-only file instead.
 fn await_daemon(child: &mut Child) -> Result<(), &'static str> {
     let stdout = child.stdout.as_mut().ok_or("daemon readiness channel unavailable")?;
     let fd = stdout.as_raw_fd();
@@ -99,6 +100,23 @@ fn option(name: &str) -> String {
         .to_string()
 }
 
+/// Where the daemon's diagnostics go. A log that cannot be created falls back
+/// to discarding them, as before; it never blocks the launch.
+fn daemon_log() -> Stdio {
+    crate::diag::create_daemon_log(&crate::diag::daemon_log_path())
+        .map_or_else(|_| Stdio::null(), Stdio::from)
+}
+
+/// `@agenmux-debug` reaches a daemon that tmux spawns, where a shell export
+/// would not. An explicit environment variable still wins. Only an absolute
+/// path is accepted: the daemon's working directory is nothing the user chose.
+fn trace_file() -> Option<String> {
+    if crate::compat_env("AGENMUX_DEBUG", "AGENTS_MON_DEBUG").is_some() {
+        return None;
+    }
+    Some(option("@agenmux-debug")).filter(|path| path.starts_with('/'))
+}
+
 fn binary(plugin_dir: &Path) -> PathBuf {
     let configured = option("@agenmux-bin");
     if configured.is_empty() {
@@ -153,14 +171,18 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
                     windows.insert(0, focused);
                 }
             }
-            child = Some(Command::new(&bin)
+            let mut command = Command::new(&bin);
+            command
                 .arg("daemon")
                 .env("AGENMUX_DIR", plugin_dir)
                 .env("AGENMUX_STARTUP_ACK", "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn().map_err(|_| "cannot launch daemon; check executable")?);
+                .stderr(daemon_log());
+            if let Some(trace) = trace_file() {
+                command.env("AGENMUX_DEBUG", trace);
+            }
+            child = Some(command.spawn().map_err(|_| "cannot launch daemon; check executable")?);
             // Record only panes made by this activation, not arbitrary panes
             // that appear while the daemon is starting. The focused window goes
             // first so its sidebar can render while the remaining panes fan out.
@@ -198,6 +220,12 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
                     if let Err(e) = std::fs::remove_file(path) {
                         cleanup_failed |= e.kind() != std::io::ErrorKind::NotFound;
                     }
+                }
+                // A daemon killed before it said anything leaves an empty log;
+                // one that reported why it died is the evidence worth keeping.
+                let log = crate::diag::daemon_log_path();
+                if std::fs::metadata(&log).is_ok_and(|meta| meta.len() == 0) {
+                    let _ = std::fs::remove_file(log);
                 }
             }
             eprintln!("agenmux: {error}{}", if cleanup_failed { "; startup cleanup incomplete" } else { "" });
@@ -318,6 +346,9 @@ fn popup(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
                 "-e".to_string(),
                 format!("AGENMUX_POPUP_CLIENT={owner}"),
             ]);
+        }
+        if let Some(trace) = trace_file() {
+            args.extend(["-e".to_string(), format!("AGENMUX_DEBUG={trace}")]);
         }
         args.push(bin.to_string_lossy().into_owned());
         args.push("sidebar".to_owned());

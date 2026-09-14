@@ -22,7 +22,7 @@ impl Snapshot {
             true,
             ProcessRefreshKind::nothing(),
         );
-        crate::tmux::debug_note(&format!("snapshot bulk {}ms", t0.elapsed().as_millis()));
+        trace!("snapshot bulk {}ms", t0.elapsed().as_millis());
         let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
         for (pid, p) in sys.processes() {
             if let Some(pp) = p.parent() {

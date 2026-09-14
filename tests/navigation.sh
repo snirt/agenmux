@@ -20,6 +20,7 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/agenmux-navigation.XXXXXX")"
 # remap one navigation key so the split-mode hints are proven to come from the
 # configured keymap rather than the daemon's protocol defaults.
 export XDG_CONFIG_HOME="$tmp/xdg"
+export XDG_STATE_HOME="$tmp/state"
 mkdir -p "$XDG_CONFIG_HOME/agenmux"
 printf '[keys.normal]\nup = ["K"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
 sock="$tmp/sock"

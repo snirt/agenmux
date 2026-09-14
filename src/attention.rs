@@ -79,6 +79,21 @@ impl Tracker {
                 (row.state.clone(), row.state.clone(), 0)
             };
 
+            // One line per remembered change: the detector's verdict, what the
+            // sidebar shows, and the debounce tick that held a state back.
+            if stored_state != previous_state || next_ticks != ticks {
+                trace!(
+                    "state {} {} {}->{} shown={shown_state} ticks={next_ticks}",
+                    row.pane,
+                    row.agent,
+                    if previous_state.is_empty() {
+                        "new"
+                    } else {
+                        previous_state
+                    },
+                    row.state
+                );
+            }
             next.insert(
                 row.pane.clone(),
                 PaneMemory {
@@ -91,6 +106,11 @@ impl Tracker {
             rows.push(row);
         }
 
+        if crate::diag::enabled() {
+            for pane in self.panes.keys().filter(|pane| !next.contains_key(*pane)) {
+                trace!("state {pane} gone");
+            }
+        }
         self.panes = next;
         Update { rows, events }
     }

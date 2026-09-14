@@ -182,10 +182,7 @@ pub fn deliver(enabled: bool, event: &AttentionEvent) -> DeliveryOutcome {
         DeliveryOutcome::Unavailable
     });
 
-    crate::tmux::debug_note(&format!(
-        "notification {} {:?}: {outcome:?}",
-        event.pane, event.kind
-    ));
+    trace!("notification {} {:?}: {outcome:?}", event.pane, event.kind);
     outcome
 }
 
