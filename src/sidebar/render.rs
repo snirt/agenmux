@@ -267,6 +267,7 @@ impl Sidebar {
                 .entry((pane.session_id.as_str(), pane.window_id.as_str()))
                 .or_insert(0usize) += 1;
         }
+        let window_icon = self.palette.done_fg.fg("");
         let mut lines = Vec::new();
         let (mut sel_top, mut sel_bot) = (0usize, 0usize);
         for (session_i, windows) in &groups {
@@ -308,9 +309,12 @@ impl Sidebar {
                             pane.command
                         )
                     } else if expanded {
-                        format!("{muted}▦ {}{E}[0m", pane.command)
+                        format!("{window_icon}▦{E}[0m {muted}{}{E}[0m", pane.command)
                     } else {
-                        format!("{muted} {}{E}[0m", window.window_name)
+                        format!(
+                            "{window_icon}{E}[0m {muted}{}{E}[0m",
+                            window.window_name
+                        )
                     };
                     let row = format!(" {mark}{prefix}{detail}");
                     let row_bg = match (agent, selected) {
@@ -842,16 +846,24 @@ mod tests {
             .lines()
             .find(|line| line.contains("editor"))
             .unwrap();
+        let parent_window = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains(" server"))
+            .unwrap();
         let expanded_pane = sb
             .last_frame
             .lines()
             .find(|line| line.contains("npm"))
             .unwrap();
-        let single_window_marker = format!("{}", sb.palette.muted_fg.fg("2"));
-        let pane_marker = format!("{}▦", sb.palette.muted_fg.fg("2"));
+        let single_window_marker = format!("{}", sb.palette.done_fg.fg(""));
+        let parent_window_marker = format!("{}", sb.palette.accent_fg.fg("1"));
+        let pane_marker = format!("{}▦", sb.palette.done_fg.fg(""));
         assert!(
-            collapsed_pane.contains(&single_window_marker) && expanded_pane.contains(&pane_marker),
-            "ordinary rows distinguish single windows from nested panes"
+            collapsed_pane.contains(&single_window_marker)
+                && parent_window.contains(&parent_window_marker)
+                && expanded_pane.contains(&pane_marker),
+            "container windows use session color; leaf windows and panes use done color"
         );
         assert_eq!(
             ansi.replace_all(collapsed_pane, ""),
@@ -1335,10 +1347,14 @@ mod tests {
                                 } else {
                                     String::new()
                                 };
-                                assert!(sb.last_frame.lines().next().unwrap().contains(&format!(
-                                    "{E}[0m{}{hdr}{}",
-                                    p.text_fg.fg(""),
+                                let fg = if focused || !sb.header_inherited {
                                     p.header_fg.fg("")
+                                } else {
+                                    p.header_bg.fg("")
+                                };
+                                assert!(sb.last_frame.lines().next().unwrap().contains(&format!(
+                                    "{E}[0m{}{hdr}{fg}",
+                                    p.text_fg.fg("")
                                 )));
                             }
                             // Same engine/output bytes for tty popup and daemon at
