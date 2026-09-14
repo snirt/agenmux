@@ -100,6 +100,20 @@ impl TestTmux {
             .unwrap_or_default()
     }
 
+    /// `list-keys` equals `before`. Re-read first: a loaded server sometimes
+    /// prints one line garbled or missing, and only a real binding change
+    /// stays different.
+    #[track_caller]
+    fn assert_keys_unchanged(&self, before: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut keys = self.text(&["list-keys"]);
+        while keys != before && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+            keys = self.text(&["list-keys"]);
+        }
+        assert_eq!(keys, before);
+    }
+
     fn assert_tmux(&self, args: &[&str]) {
         let output = self.tmux(args);
         assert!(
@@ -920,7 +934,7 @@ fn invalid_layers_do_not_mutate_and_recovery_remains_available() {
     ] {
         let result = tmux.bin(args);
         assert_eq!(result.status.code(), Some(2), "{args:?}");
-        assert_eq!(tmux.text(&["list-keys"]), before);
+        tmux.assert_keys_unchanged(&before);
         assert_eq!(
             tmux.text(&["display-message", "-p", "#{window_layout}"]),
             layout
@@ -1167,7 +1181,7 @@ esac
         .output()
         .unwrap();
     assert_eq!(rejected.status.code(), Some(2));
-    assert_eq!(tmux.text(&["list-keys"]), before);
+    tmux.assert_keys_unchanged(&before);
     assert_eq!(tmux.text(&["show-hooks", "-g"]), hooks);
     assert_eq!(
         tmux.text(&["display-message", "-p", "#{window_layout}"]),
@@ -1434,7 +1448,7 @@ fn setup_restores_touched_bindings_and_reports_rollback_failure() {
             assert_eq!(tmux.text(&["show-options", "-w"]), windows_before);
             assert_eq!(tmux.text(&["show-hooks", "-g"]), hooks_before);
             assert_eq!(tmux.text(&["show-hooks", "-gw"]), window_hooks_before);
-            assert_eq!(tmux.text(&["list-keys"]), before);
+            tmux.assert_keys_unchanged(&before);
             // Notes are deliberately not compared: `list-keys -F` is newer than
             // tmux 3.4, so the snapshot reads the default output, which omits
             // them. The keys above still carry notes to prove a noted binding

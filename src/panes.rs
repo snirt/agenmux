@@ -38,14 +38,26 @@ impl PaneLock {
         let name = std::ffi::CString::new(format!("{server}-{started}-{window}.lock"))?;
         // Open relative to the validated directory descriptor, not its path.
         // NONBLOCK prevents a substituted FIFO from blocking before validation.
-        let fd = unsafe {
-            libc::openat(
-                dir.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-                0o600,
-            )
-        };
+        // macOS returns a spurious ENOENT to the losers of a concurrent
+        // O_CREAT race on the same name (roughly a third of eight racers);
+        // the file exists by the next attempt.
+        let mut fd = -1;
+        for attempt in 0..20 {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                    0o600,
+                )
+            };
+            if fd >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::NotFound {
+                break;
+            }
+        }
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
