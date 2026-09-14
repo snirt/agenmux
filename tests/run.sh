@@ -5,6 +5,7 @@ fail=0
 # Never let a developer's application file affect isolated harness fixtures.
 config_home="$(mktemp -d)"
 export XDG_CONFIG_HOME="$config_home"
+export XDG_STATE_HOME="$config_home/state"
 trap 'rm -rf "$config_home"' EXIT
 
 BIN="${AGENMUX_BIN:-$DIR/target/release/agenmux}"

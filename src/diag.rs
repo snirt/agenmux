@@ -15,9 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Daemon stderr destination inside the runtime directory (`temp_dir`). The
-/// previous generation survives as `<name>.1`; nothing older is kept.
-pub const DAEMON_LOG: &str = "agenmux-daemon.log";
+/// Daemon stderr destination inside the state directory. The previous
+/// generation survives as `<name>.1`; nothing older is kept.
+pub const DAEMON_LOG: &str = "daemon.log";
 /// Above this the daemon log rotates: it only ever holds diagnostics, so a
 /// reload that keeps failing must not fill the disk over a long session.
 pub const DAEMON_LOG_LIMIT: u64 = 256 * 1024;
@@ -107,8 +107,30 @@ fn format_clock(epoch_secs: u64, millis: u32) -> String {
     )
 }
 
+/// `$XDG_STATE_HOME/agenmux/daemon.log`, else `~/.local/state/agenmux/daemon.log`:
+/// where the XDG spec puts logs, and where a reboot or a temp-dir sweep does
+/// not erase the evidence of yesterday's failure. The runtime temp dir is the
+/// fallback when neither root is usable.
 pub fn daemon_log_path() -> PathBuf {
-    std::env::temp_dir().join(DAEMON_LOG)
+    let xdg = std::env::var_os("XDG_STATE_HOME");
+    let home = std::env::var_os("HOME");
+    state_dir(
+        xdg.as_deref().map(Path::new),
+        home.as_deref().map(Path::new),
+    )
+    .unwrap_or_else(std::env::temp_dir)
+    .join(DAEMON_LOG)
+}
+
+/// Pure discovery, like the configuration file's: relative or empty roots
+/// never make the daemon write next to whatever directory it happens to be in.
+pub fn state_dir(xdg: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    xdg.filter(|p| p.is_absolute())
+        .map(|p| p.join("agenmux"))
+        .or_else(|| {
+            home.filter(|p| p.is_absolute())
+                .map(|p| p.join(".local/state/agenmux"))
+        })
 }
 
 pub fn previous_daemon_log(path: &Path) -> PathBuf {
@@ -133,7 +155,13 @@ pub fn rotate_daemon_log(path: &Path) {
 /// previous one. Opened for append so every writer lands at the end even
 /// after the file is replaced underneath it.
 pub fn create_daemon_log(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    if let Some(dir) = path.parent() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+    }
     rotate_daemon_log(path);
     // std refuses append+truncate in one open; an empty leftover goes first
     let _ = std::fs::remove_file(path);
@@ -269,6 +297,40 @@ mod tests {
         assert!(content.starts_with("agenmux: log restarted"), "{content}");
         assert_eq!(std::fs::metadata(&previous).unwrap().len(), 11);
         remove(&path);
+    }
+
+    #[test]
+    fn state_dir_prefers_absolute_xdg_root_then_home() {
+        let xdg = Path::new("/xdg");
+        let home = Path::new("/home/u");
+        assert_eq!(
+            state_dir(Some(xdg), Some(home)),
+            Some(PathBuf::from("/xdg/agenmux"))
+        );
+        assert_eq!(
+            state_dir(Some(Path::new("relative")), Some(home)),
+            Some(PathBuf::from("/home/u/.local/state/agenmux"))
+        );
+        assert_eq!(
+            state_dir(Some(Path::new("")), Some(home)),
+            Some(PathBuf::from("/home/u/.local/state/agenmux"))
+        );
+        assert_eq!(state_dir(None, Some(Path::new("relative"))), None);
+        assert_eq!(state_dir(None, None), None);
+    }
+
+    #[test]
+    fn daemon_log_creates_its_private_directory() {
+        let dir = temp_path("state-dir");
+        let path = dir.join("nested").join("daemon.log");
+        drop(create_daemon_log(&path).unwrap());
+        let mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

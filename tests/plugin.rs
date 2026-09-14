@@ -64,6 +64,7 @@ impl TestTmux {
             .args(args)
             .env("TMPDIR", &self.tmp)
             .env("XDG_CONFIG_HOME", self.tmp.join("config"))
+            .env("XDG_STATE_HOME", self.tmp.join("state"))
             .env("TMUX", self.tmux_env())
             .env("AGENMUX_DIR", env!("CARGO_MANIFEST_DIR"));
         command
@@ -978,6 +979,7 @@ esac
             .env("TMUX", tmux.tmux_env())
             .env("TMPDIR", &tmux.tmp)
             .env("XDG_CONFIG_HOME", tmux.tmp.join("config"))
+        .env("XDG_STATE_HOME", tmux.tmp.join("state"))
             .env("AGENMUX_INSTALL_REFRESH", "1")
             .output()
             .unwrap()
@@ -1161,6 +1163,7 @@ esac
         .env("TMUX", tmux.tmux_env())
         .env("TMPDIR", &tmux.tmp)
         .env("XDG_CONFIG_HOME", tmux.tmp.join("config"))
+        .env("XDG_STATE_HOME", tmux.tmp.join("state"))
         .output()
         .unwrap();
     assert_eq!(rejected.status.code(), Some(2));
@@ -1192,6 +1195,7 @@ fn runtime_binary_path_uses_tmux_shell_argument_quoting() {
         .env("TMUX", tmux.tmux_env())
         .env("TMPDIR", &tmux.tmp)
         .env("XDG_CONFIG_HOME", tmux.tmp.join("config"))
+        .env("XDG_STATE_HOME", tmux.tmp.join("state"))
         .env("AGENMUX_DIR", env!("CARGO_MANIFEST_DIR"))
         .output()
         .unwrap();

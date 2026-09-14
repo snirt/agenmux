@@ -13,6 +13,7 @@ sock="$tmp/tmux.sock"
 debug="$tmp/debug.log"
 cache="$tmp/agenmux-scan-cache"
 export XDG_CONFIG_HOME="$tmp/config"
+export XDG_STATE_HOME="$tmp/state"
 mkdir -p "$XDG_CONFIG_HOME/agenmux/agents"
 
 cleanup() {
@@ -57,7 +58,7 @@ server_pid="$(tmux -S "$sock" display-message -p '#{pid}')"
 
 # Launch as a tmux job so the daemon outlives this harness's command runner.
 tmux -S "$sock" run-shell -b \
-  "env TMPDIR='$tmp' XDG_CONFIG_HOME='$XDG_CONFIG_HOME' TMUX='$sock,$server_pid,0' AGENMUX_DIR='$DIR' AGENMUX_DEBUG='$debug' '$BIN' daemon"
+  "env TMPDIR='$tmp' XDG_CONFIG_HOME='$XDG_CONFIG_HOME' XDG_STATE_HOME='$XDG_STATE_HOME' TMUX='$sock,$server_pid,0' AGENMUX_DIR='$DIR' AGENMUX_DEBUG='$debug' '$BIN' daemon"
 
 state_count() {
   awk -F '\t' -v state="$1" '$4 == state { n++ } END { print n + 0 }' "$cache" 2>/dev/null || printf '0\n'

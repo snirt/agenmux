@@ -549,11 +549,11 @@ run.
 
 ## Troubleshooting
 
-The sidebar daemon keeps its diagnostics in `agenmux-daemon.log` inside the
-runtime directory (`$TMPDIR`, or `/tmp`). The file is owner-only and starts
-over on every sidebar launch and past 256 KiB. The generation before it is
-kept as `agenmux-daemon.log.1`; anything older is removed, and a daemon that
-wrote nothing removes the `.1` as well. Look there first when the sidebar
+The sidebar daemon keeps its diagnostics in `$XDG_STATE_HOME/agenmux/daemon.log`
+(`~/.local/state/agenmux/daemon.log` when the variable is unset). The file is
+owner-only and starts over on every sidebar launch and past 256 KiB. The
+generation before it is kept as `daemon.log.1`; anything older is removed, and
+a daemon that wrote nothing removes the `.1` as well. Look there first when the sidebar
 disappears or a configuration reload does nothing: every `agenmux: ...`
 message the daemon would have printed is in it.
 
