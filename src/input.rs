@@ -52,6 +52,11 @@ fn poll_fd(fd: libc::c_int, timeout: Option<Duration>) -> bool {
     unsafe { libc::poll(&mut fds, 1, ms) > 0 && fds.revents & libc::POLLIN != 0 }
 }
 
+/// Is a key already waiting on `fd`? Never blocks.
+pub(crate) fn key_pending(fd: libc::c_int) -> bool {
+    poll_fd(fd, Some(Duration::ZERO))
+}
+
 /// poll the key fd + the tmux control pipe; returns (key_ready, pipe_ready).
 /// pipe_buffered short-circuits the wait — data is already in the BufReader.
 pub(crate) fn poll_inputs(
