@@ -2,6 +2,7 @@
 # End-to-end regression for the preserved sidebar's native client key table.
 # The first invocation omits a client to verify newest-real-client discovery.
 set -euo pipefail
+trap 'echo "FAIL navigation-key-table: command failed at line $LINENO"' ERR
 
 # grep -q exits at the first match, and pipefail turns the writer's EPIPE into a failure
 has() { [[ $1 == *"$2"* ]]; }
