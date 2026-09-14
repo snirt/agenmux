@@ -6,7 +6,8 @@ use std::process::{Command, Stdio};
 
 const NORMAL_TABLE: &str = "agenmux";
 const SEARCH_TABLE: &str = "agenmux-search";
-const NAV_LAYOUT: &str = "14";
+const SETTINGS_TABLE: &str = "agenmux-settings-edit";
+const NAV_LAYOUT: &str = "15";
 // These are trusted runtime identities, not application-file settings. q
 // quotes them for the shell only when tmux executes the installed command.
 const ENGINE: &str = "AGENMUX_DIR=#{q:@agenmux-plugin-dir} #{q:@agenmux-runtime-bin}";
@@ -18,7 +19,6 @@ fn key_arg(key: &str) -> &str {
         key
     }
 }
-
 
 /// `list-keys` with no arguments lists every table, and a table with no
 /// bindings does not exist as far as tmux is concerned.
@@ -98,7 +98,7 @@ impl BindingBackup {
         // Check server connectivity before accepting an absent plugin table.
         tmux::command(&["list-keys", "-T", "root"])?;
         let mut tables = Vec::new();
-        for table in [NORMAL_TABLE, SEARCH_TABLE] {
+        for table in [NORMAL_TABLE, SEARCH_TABLE, SETTINGS_TABLE] {
             tables.push((table, bindings(table)?.into_values().collect()));
         }
         let mut keys = Vec::new();
@@ -119,19 +119,26 @@ impl BindingBackup {
         let mut failures = Vec::new();
         for (table, text) in &self.tables {
             // Only plugin-owned tables may be bulk-cleared.
-            if clear_table(table).is_err() { failures.push(format!("clear {table}")); }
+            if clear_table(table).is_err() {
+                failures.push(format!("clear {table}"));
+            }
             if !text.is_empty() && source(text).is_err() {
                 failures.push(format!("restore {table}"));
             }
         }
         for (table, key, text) in &self.keys {
-            if remove_binding(table, key).is_err() { failures.push(format!("clear {table}/{key}")); }
+            if remove_binding(table, key).is_err() {
+                failures.push(format!("clear {table}/{key}"));
+            }
             if !text.is_empty() && source(text).is_err() {
                 failures.push(format!("restore {table}/{key}"));
             }
         }
         if !failures.is_empty() {
-            Err(TmuxError::Error(format!("binding rollback failed: {}", failures.join(", "))))
+            Err(TmuxError::Error(format!(
+                "binding rollback failed: {}",
+                failures.join(", ")
+            )))
         } else {
             Ok(())
         }
@@ -140,12 +147,18 @@ impl BindingBackup {
 
 // Only slots setup mutates: never snapshot/replace whole user hook arrays.
 const HOOKS: &[&str] = &[
-    "after-select-window[42]", "client-session-changed[42]",
-    "session-window-changed[42]", "pane-exited[42]",
-    "window-pane-changed[42]", "window-layout-changed[42]",
-    "window-resized[42]", "pane-mode-changed[44]",
-    "after-select-window[43]", "session-window-changed[43]",
-    "client-session-changed[43]", "window-layout-changed[43]",
+    "after-select-window[42]",
+    "client-session-changed[42]",
+    "session-window-changed[42]",
+    "pane-exited[42]",
+    "window-pane-changed[42]",
+    "window-layout-changed[42]",
+    "window-resized[42]",
+    "pane-mode-changed[44]",
+    "after-select-window[43]",
+    "session-window-changed[43]",
+    "client-session-changed[43]",
+    "window-layout-changed[43]",
     "after-select-pane[44]",
 ];
 
@@ -158,31 +171,57 @@ struct OptionBackup {
 impl OptionBackup {
     fn capture(window: Option<&str>, name: &str, hook: bool) -> Result<Self, TmuxError> {
         let mut args = vec!["show-options", if window.is_some() { "-wq" } else { "-gq" }];
-        if let Some(window) = window { args.extend(["-t", window]); }
+        if let Some(window) = window {
+            args.extend(["-t", window]);
+        }
         // Query the array, not a missing index: tmux prints "name[index] "
         // even for an absent slot when queried directly.
-        args.push(if hook { name.split('[').next().unwrap() } else { name });
+        args.push(if hook {
+            name.split('[').next().unwrap()
+        } else {
+            name
+        });
         let listing = tmux::command(&args)?;
         let present = if hook {
-            listing.lines().any(|line| line.strip_prefix(name).is_some_and(|rest| rest.starts_with(' ')))
-        } else { !listing.is_empty() };
+            listing.lines().any(|line| {
+                line.strip_prefix(name)
+                    .is_some_and(|rest| rest.starts_with(' '))
+            })
+        } else {
+            !listing.is_empty()
+        };
         *args.last_mut().unwrap() = name;
         args[1] = if window.is_some() { "-wqv" } else { "-gqv" };
         let value = if present {
             let raw = tmux::command(&args)?;
             Some(raw.strip_suffix('\n').unwrap_or(&raw).to_owned())
-        } else { None };
-        Ok(Self { window: window.map(str::to_owned), name: name.into(), value, hook })
+        } else {
+            None
+        };
+        Ok(Self {
+            window: window.map(str::to_owned),
+            name: name.into(),
+            value,
+            hook,
+        })
     }
     fn restore(&self) -> Result<(), TmuxError> {
-        let mut args = vec![if self.hook { "set-hook" } else { "set-option" },
+        let mut args = vec![
+            if self.hook { "set-hook" } else { "set-option" },
             match (self.window.is_some(), self.value.is_some()) {
-                (true, true) => "-w", (true, false) => "-wu",
-                (false, true) => "-g", (false, false) => "-gu",
-            }];
-        if let Some(window) = self.window.as_deref() { args.extend(["-t", window]); }
+                (true, true) => "-w",
+                (true, false) => "-wu",
+                (false, true) => "-g",
+                (false, false) => "-gu",
+            },
+        ];
+        if let Some(window) = self.window.as_deref() {
+            args.extend(["-t", window]);
+        }
         args.push(&self.name);
-        if let Some(value) = self.value.as_deref() { args.push(value); }
+        if let Some(value) = self.value.as_deref() {
+            args.push(value);
+        }
         tmux::command_status(&args)
     }
 }
@@ -233,11 +272,19 @@ fn setup(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> Result<(),
     let bin = std::env::current_exe()?.to_string_lossy().into_owned();
     let backup = BindingBackup::capture(config.hide_windows.is_some())?;
     let mut options = Vec::new();
-    for name in ["@agenmux-bin", "@agenmux-runtime-bin", "@agenmux-plugin-dir",
-        "@agenmux-nav-version", "status-left", "status-right"] {
+    for name in [
+        "@agenmux-bin",
+        "@agenmux-runtime-bin",
+        "@agenmux-plugin-dir",
+        "@agenmux-nav-version",
+        "status-left",
+        "status-right",
+    ] {
         options.push(OptionBackup::capture(None, name, false)?);
     }
-    for hook in HOOKS { options.push(OptionBackup::capture(None, hook, true)?); }
+    for hook in HOOKS {
+        options.push(OptionBackup::capture(None, hook, true)?);
+    }
     let windows = tmux::lines(&["list-windows", "-a", "-F", "#{window_id}"])?;
     for window in &windows {
         for name in ["@agenmux-sidebar", "@agents-mon-sidebar"] {
@@ -263,11 +310,20 @@ fn setup(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> Result<(),
         install_mouse(&bin)?;
         clone_root_table(NORMAL_TABLE)?;
         clone_root_table(SEARCH_TABLE)?;
+        // Editing uses a fixed table so changing normal/search bindings cannot
+        // strand an open TextEdit or Select control.
+        clone_root_table(SETTINGS_TABLE)?;
+        install_settings_keys()?;
         install_keys(config)?;
         install_wheel_keys(&bin)?;
         install_picker_filter(config.hide_windows.as_deref())?;
         install_status(&bin)?;
-        tmux::command_status(&["set-option", "-g", "@agenmux-nav-version", &nav_version(config)])
+        tmux::command_status(&[
+            "set-option",
+            "-g",
+            "@agenmux-nav-version",
+            &nav_version(config),
+        ])
     })();
     if let Err(error) = result {
         let binding_error = backup.restore().err();
@@ -417,12 +473,20 @@ fn key_bindings(normal: &Keymap, search: &Keymap) -> Vec<(&'static str, String, 
     // First: later binds win, so the catch-all must not overwrite a user chord.
     // `Any` is tmux's fallback for keys nothing else claims, so it never does.
     for key in ["Space", "Any"] {
-        out.push((NORMAL_TABLE, key.into(), key_command("space", NORMAL_TABLE, true)));
+        out.push((
+            NORMAL_TABLE,
+            key.into(),
+            key_command("space", NORMAL_TABLE, true),
+        ));
     }
     // Edge navigation is fixed, not a configurable action, but it is still a
     // default: a configured chord on the same key replaces it below.
     for (key, action) in [("G", "last"), ("g", "sequence-67")] {
-        out.push((NORMAL_TABLE, key.into(), key_command(action, NORMAL_TABLE, true)));
+        out.push((
+            NORMAL_TABLE,
+            key.into(),
+            key_command(action, NORMAL_TABLE, true),
+        ));
     }
     for (action, chords) in normal {
         let (name, next, background) = match action {
@@ -430,6 +494,7 @@ fn key_bindings(normal: &Keymap, search: &Keymap) -> Vec<(&'static str, String, 
             Up => ("up", NORMAL_TABLE, true),
             Help => ("help", NORMAL_TABLE, true),
             Versions => ("versions", NORMAL_TABLE, true),
+            Settings => ("settings", NORMAL_TABLE, true),
             Jump => ("enter", "root", true),
             Close => ("close", "root", true),
             Search => ("search", SEARCH_TABLE, false),
@@ -438,12 +503,20 @@ fn key_bindings(normal: &Keymap, search: &Keymap) -> Vec<(&'static str, String, 
             Accept | Cancel | Backspace | Clear => continue,
         };
         for chord in chords {
-            out.push((NORMAL_TABLE, chord.tmux_name(), key_command(name, next, background)));
+            out.push((
+                NORMAL_TABLE,
+                chord.tmux_name(),
+                key_command(name, next, background),
+            ));
         }
     }
     for code in 32u8..=126 {
         let key = KeyChord::Printable(code).tmux_name();
-        out.push((SEARCH_TABLE, key, key_command(&format!("text-{code:02X}"), SEARCH_TABLE, false)));
+        out.push((
+            SEARCH_TABLE,
+            key,
+            key_command(&format!("text-{code:02X}"), SEARCH_TABLE, false),
+        ));
     }
     for (action, chords) in search {
         let (name, next) = match action {
@@ -453,14 +526,55 @@ fn key_bindings(normal: &Keymap, search: &Keymap) -> Vec<(&'static str, String, 
             Clear => ("clear-search", SEARCH_TABLE),
             Cancel => ("escape", NORMAL_TABLE),
             Accept => ("enter", NORMAL_TABLE),
-            Jump | Search | Filter | Reset | Help | Versions | Close => continue,
+            Jump | Search | Filter | Reset | Help | Versions | Settings | Close => continue,
         };
         for chord in chords {
-            out.push((SEARCH_TABLE, chord.tmux_name(), key_command(name, next, false)));
+            out.push((
+                SEARCH_TABLE,
+                chord.tmux_name(),
+                key_command(name, next, false),
+            ));
         }
     }
-    out.push((SEARCH_TABLE, "Any".into(), "switch-client -T agenmux-search".into()));
+    out.push((
+        SEARCH_TABLE,
+        "Any".into(),
+        "switch-client -T agenmux-search".into(),
+    ));
     out
+}
+
+fn install_settings_keys() -> Result<(), TmuxError> {
+    for code in 32u8..=126 {
+        bind(
+            SETTINGS_TABLE,
+            &KeyChord::Printable(code).tmux_name(),
+            &key_command(&format!("text-{code:02X}"), SETTINGS_TABLE, false),
+        )?;
+    }
+    // Select widgets accept arrows; Left/Right mirror Up/Down for compact panes
+    // where horizontal movement is the natural dropdown gesture.
+    for (key, action) in [
+        ("Up", "up"),
+        ("Down", "down"),
+        ("Left", "up"),
+        ("Right", "down"),
+        ("Enter", "enter"),
+        ("Escape", "escape"),
+        ("BSpace", "backspace"),
+        ("C-u", "clear-search"),
+    ] {
+        bind(
+            SETTINGS_TABLE,
+            key,
+            &key_command(action, SETTINGS_TABLE, false),
+        )?;
+    }
+    bind(
+        SETTINGS_TABLE,
+        "Any",
+        "switch-client -T agenmux-settings-edit",
+    )
 }
 
 fn install_keys(config: &crate::app_config::AppConfig) -> Result<(), TmuxError> {
@@ -593,16 +707,38 @@ mod tests {
                 .find(|(t, k, _)| *t == table && k == key)
                 .map(|(_, _, command)| command.as_str())
         };
-        assert_eq!(find(NORMAL_TABLE, "j"), Some(key_command("down", NORMAL_TABLE, true).as_str()));
-        assert_eq!(find(NORMAL_TABLE, "Enter"), Some(key_command("enter", "root", true).as_str()));
-        assert_eq!(find(NORMAL_TABLE, "/"), Some(key_command("search", SEARCH_TABLE, false).as_str()));
-        assert_eq!(find(SEARCH_TABLE, "C-u"), Some(key_command("clear-search", SEARCH_TABLE, false).as_str()));
-        assert_eq!(find(SEARCH_TABLE, "Escape"), Some(key_command("escape", NORMAL_TABLE, false).as_str()));
-        assert_eq!(find(SEARCH_TABLE, "\\;"), Some(key_command("text-3B", SEARCH_TABLE, false).as_str()));
+        assert_eq!(
+            find(NORMAL_TABLE, "s"),
+            Some(key_command("settings", NORMAL_TABLE, true).as_str())
+        );
+        assert_eq!(
+            find(NORMAL_TABLE, "j"),
+            Some(key_command("down", NORMAL_TABLE, true).as_str())
+        );
+        assert_eq!(
+            find(NORMAL_TABLE, "Enter"),
+            Some(key_command("enter", "root", true).as_str())
+        );
+        assert_eq!(
+            find(NORMAL_TABLE, "/"),
+            Some(key_command("search", SEARCH_TABLE, false).as_str())
+        );
+        assert_eq!(
+            find(SEARCH_TABLE, "C-u"),
+            Some(key_command("clear-search", SEARCH_TABLE, false).as_str())
+        );
+        assert_eq!(
+            find(SEARCH_TABLE, "Escape"),
+            Some(key_command("escape", NORMAL_TABLE, false).as_str())
+        );
+        assert_eq!(
+            find(SEARCH_TABLE, "\\;"),
+            Some(key_command("text-3B", SEARCH_TABLE, false).as_str())
+        );
         assert!(find(SEARCH_TABLE, "Any").is_some() && find(NORMAL_TABLE, "Any").is_some());
 
         let custom = config(
-            "[keys.normal]\ndown = ['n', 'C-k']\nclose = []\n[keys.search]\ncancel = ['C-g']\nclear = ['Tab']\n",
+            "[keys.normal]\ndown = ['n', 'C-k']\nclose = []\nsettings = []\n[keys.search]\ncancel = ['C-g']\nclear = ['Tab']\n",
         );
         let keys = key_bindings(&custom.normal, &custom.search);
         let find = |table: &str, key: &str| {
@@ -610,14 +746,27 @@ mod tests {
                 .find(|(t, k, _)| *t == table && k == key)
                 .map(|(_, _, command)| command.as_str())
         };
-        assert_eq!(find(NORMAL_TABLE, "n"), Some(key_command("down", NORMAL_TABLE, true).as_str()));
-        assert_eq!(find(NORMAL_TABLE, "C-k"), Some(key_command("down", NORMAL_TABLE, true).as_str()));
+        assert_eq!(
+            find(NORMAL_TABLE, "n"),
+            Some(key_command("down", NORMAL_TABLE, true).as_str())
+        );
+        assert_eq!(
+            find(NORMAL_TABLE, "C-k"),
+            Some(key_command("down", NORMAL_TABLE, true).as_str())
+        );
         assert_eq!(find(NORMAL_TABLE, "j"), None);
         assert_eq!(find(NORMAL_TABLE, "q"), None);
         assert_eq!(find(NORMAL_TABLE, "Q"), None);
-        assert_eq!(find(SEARCH_TABLE, "C-g"), Some(key_command("escape", NORMAL_TABLE, false).as_str()));
+        assert_eq!(find(NORMAL_TABLE, "s"), None);
+        assert_eq!(
+            find(SEARCH_TABLE, "C-g"),
+            Some(key_command("escape", NORMAL_TABLE, false).as_str())
+        );
         assert_eq!(find(SEARCH_TABLE, "Escape"), None);
-        assert_eq!(find(SEARCH_TABLE, "Tab"), Some(key_command("clear-search", SEARCH_TABLE, false).as_str()));
+        assert_eq!(
+            find(SEARCH_TABLE, "Tab"),
+            Some(key_command("clear-search", SEARCH_TABLE, false).as_str())
+        );
         assert_eq!(find(SEARCH_TABLE, "C-u"), None);
         // Search text keys remain the printable set regardless of overrides.
         assert!(find(SEARCH_TABLE, "n").unwrap().contains("text-6E"));
@@ -640,6 +789,6 @@ mod tests {
 
         assert_ne!(nav_version(&defaults), nav_version(&custom));
         assert_eq!(nav_version(&defaults), nav_version(&config("version = 1")));
-        assert!(nav_version(&defaults).starts_with("14."));
+        assert!(nav_version(&defaults).starts_with("15."));
     }
 }

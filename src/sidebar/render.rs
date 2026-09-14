@@ -3,6 +3,7 @@ use crate::input::term_size;
 use std::io::Write;
 
 use super::overlay::current_tag;
+use super::ui::{bar, TopBar};
 use super::{Sidebar, VisiblePane, E};
 
 const SPIN: [char; 8] = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
@@ -15,14 +16,6 @@ pub(super) fn join(parts: &[String]) -> String {
         .cloned()
         .collect::<Vec<_>>()
         .join(" · ")
-}
-
-pub(super) fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
-    if bg.is_empty() {
-        return line.into();
-    }
-    let body = line.replace(&format!("{E}[0m"), &format!("{E}[0m{bg}"));
-    format!("{bg}{body}{}{E}[0m", " ".repeat(cols.saturating_sub(width)))
 }
 
 pub(super) fn cursor_mark(
@@ -42,7 +35,7 @@ pub(super) fn cursor_mark(
 
 /// Clip generated SGR/CSI frames without splitting an escape or wrapping a
 /// logical click row. Layout elsewhere uses the same character-cell metric.
-fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
+pub(super) fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
     if cols == 0 || cap == 0 {
         return format!("{E}[H{E}[0m{E}[J");
     }
@@ -267,6 +260,7 @@ impl Sidebar {
                 .entry((pane.session_id.as_str(), pane.window_id.as_str()))
                 .or_insert(0usize) += 1;
         }
+        let window_icon = self.palette.done_fg.fg("");
         let mut lines = Vec::new();
         let (mut sel_top, mut sel_bot) = (0usize, 0usize);
         for (session_i, windows) in &groups {
@@ -308,9 +302,9 @@ impl Sidebar {
                             pane.command
                         )
                     } else if expanded {
-                        format!("{muted}▦ {}{E}[0m", pane.command)
+                        format!("{window_icon}▢{E}[0m {muted}{}{E}[0m", pane.command)
                     } else {
-                        format!("{muted} {}{E}[0m", window.window_name)
+                        format!("{window_icon}{E}[0m {muted}{}{E}[0m", window.window_name)
                     };
                     let row = format!(" {mark}{prefix}{detail}");
                     let row_bg = match (agent, selected) {
@@ -374,8 +368,9 @@ impl Sidebar {
         let cap = trows.saturating_sub(1); // last row's newline would scroll
 
         let muted = self.palette.muted_fg.fg("2");
-        let header_fg = self.palette.header_fg.fg("");
-        let header_bg = self.palette.header_bg.bg();
+        let top_bar = TopBar::new(&self.palette, self.plugin_selected, self.header_inherited);
+        let header_fg = top_bar.foreground("");
+        let header_bg = top_bar.background();
         let accent = self.palette.accent_fg.fg("1");
         // Update notice rides the header. Nonempty contextual/update hints add
         // one row; vis records it so mouse coordinates stay exact.
@@ -442,11 +437,12 @@ impl Sidebar {
         let hint: String = hint.chars().take(cols).collect();
         let has_hint = !hint.is_empty();
         let space = cap.saturating_sub(1 + usize::from(has_hint));
-        let (hdr, hdr_pad) = if self.plugin_selected {
-            let used = title_len + filter.chars().count() + notice_len;
-            (header_bg.as_str(), " ".repeat(cols.saturating_sub(used)))
+        let used = title_len + filter.chars().count() + notice_len;
+        let hdr = header_bg.as_str();
+        let hdr_pad = if header_bg.is_empty() {
+            String::new()
         } else {
-            ("", String::new())
+            " ".repeat(cols.saturating_sub(used))
         };
         // Preserve historical header bytes regardless of unrelated role overrides.
         // Only non-default header styles need restoration after the notice reset.
@@ -833,14 +829,29 @@ mod tests {
             .find(|line| line.contains("Implement sidebar tree"))
             .unwrap();
         let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap();
-        let collapsed_pane = sb.last_frame.lines().find(|line| line.contains("editor")).unwrap();
-        let expanded_pane = sb.last_frame.lines().find(|line| line.contains("npm")).unwrap();
-        let single_window_marker = format!("{}", sb.palette.muted_fg.fg("2"));
-        let pane_marker = format!("{}▦", sb.palette.muted_fg.fg("2"));
+        let collapsed_pane = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("editor"))
+            .unwrap();
+        let parent_window = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains(" server"))
+            .unwrap();
+        let expanded_pane = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("npm"))
+            .unwrap();
+        let single_window_marker = format!("{}", sb.palette.done_fg.fg(""));
+        let parent_window_marker = format!("{}", sb.palette.accent_fg.fg("1"));
+        let pane_marker = format!("{}▢", sb.palette.done_fg.fg(""));
         assert!(
             collapsed_pane.contains(&single_window_marker)
+                && parent_window.contains(&parent_window_marker)
                 && expanded_pane.contains(&pane_marker),
-            "ordinary rows distinguish single windows from nested panes"
+            "container windows use session color; leaf windows and panes use done color"
         );
         assert_eq!(
             ansi.replace_all(collapsed_pane, ""),
@@ -849,7 +860,7 @@ mod tests {
         );
         assert_eq!(
             ansi.replace_all(expanded_pane, ""),
-            "     ▦ npm",
+            "     ▢ npm",
             "expanded ordinary panes use nested pane markers"
         );
         let selected_agent_plain = ansi.replace_all(selected_agent, "");
@@ -892,18 +903,23 @@ mod tests {
         );
         let plain_frame = ansi.replace_all(&sb.last_frame, "");
         assert!(
-            ['├', '└', '│'].iter().all(|glyph| !plain_frame.contains(*glyph)),
+            ['├', '└', '│']
+                .iter()
+                .all(|glyph| !plain_frame.contains(*glyph)),
             "inventory hierarchy uses indentation without tree connectors"
         );
         assert!(
-            ansi
-                .replace_all(selected_title, "")
+            ansi.replace_all(selected_title, "")
                 .starts_with("       Implement sidebar tree"),
             "inventory description is indented beneath its pane"
         );
         sb.select_index(1);
         sb.render(true);
-        let selected_pane = sb.last_frame.lines().find(|line| line.contains("editor")).unwrap();
+        let selected_pane = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("editor"))
+            .unwrap();
         assert!(
             selected_pane.starts_with(&pane_bg)
                 && ansi.replace_all(selected_pane, "").chars().count()
@@ -952,7 +968,7 @@ mod tests {
                 let plain = ansi.replace_all(&sb.last_frame, "");
                 assert!(
                     plain.lines().any(|line| line.starts_with("    server"))
-                        && plain.lines().any(|line| line.trim_end().ends_with("▦ npm")),
+                        && plain.lines().any(|line| line.trim_end().ends_with("▢ npm")),
                     "a physical multi-pane window stays expanded after filtering"
                 );
             }
@@ -1283,13 +1299,27 @@ mod tests {
                                 assert!(sb.last_frame.contains(&p.muted_fg.fg("2")));
                             }
                             if mode == 5 || mode == 6 {
-                                assert!(sb.last_frame.contains(&p.header_fg.fg("1")));
+                                let overlay_header = if focused || !sb.header_inherited {
+                                    p.header_fg.fg("1")
+                                } else {
+                                    p.header_bg.fg("1")
+                                };
+                                assert!(sb.last_frame.contains(&overlay_header));
                                 if p.header_bg != Palette::default().header_bg {
-                                    assert!(sb.last_frame.starts_with(&format!(
-                                        "{}{E}[2J{E}[H{}",
-                                        p.text_fg.fg(""),
-                                        p.header_bg.bg()
-                                    )));
+                                    if focused || !sb.header_inherited {
+                                        assert!(sb.last_frame.starts_with(&format!(
+                                            "{}{E}[2J{E}[H{}",
+                                            p.text_fg.fg(""),
+                                            p.header_bg.bg()
+                                        )));
+                                    } else {
+                                        assert!(!sb
+                                            .last_frame
+                                            .lines()
+                                            .next()
+                                            .unwrap()
+                                            .contains(&p.header_bg.bg()));
+                                    }
                                 }
                             }
                             if mode == 6 {
@@ -1319,11 +1349,17 @@ mod tests {
                                 } else {
                                     String::new()
                                 };
-                                assert!(sb.last_frame.lines().next().unwrap().contains(&format!(
-                                    "{E}[0m{}{hdr}{}",
-                                    p.text_fg.fg(""),
+                                let fg = if focused || !sb.header_inherited {
                                     p.header_fg.fg("")
-                                )));
+                                } else {
+                                    p.header_bg.fg("")
+                                };
+                                assert!(sb
+                                    .last_frame
+                                    .lines()
+                                    .next()
+                                    .unwrap()
+                                    .contains(&format!("{E}[0m{}{hdr}{fg}", p.text_fg.fg(""))));
                             }
                             // Same engine/output bytes for tty popup and daemon at
                             // matching dimensions. Only the sink and row file differ.

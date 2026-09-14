@@ -113,6 +113,7 @@ pub(crate) enum Key {
     Close,
     Help,
     Versions,
+    Settings,
     Search,
     Backspace,
     ClearSearch,
@@ -227,6 +228,7 @@ fn action_key(keys: &Keymap, chord: KeyChord) -> Option<Key> {
         Action::Reset | Action::Cancel => Key::AllStates,
         Action::Help => Key::Help,
         Action::Versions => Key::Versions,
+        Action::Settings => Key::Settings,
         Action::Close => Key::Close,
         Action::Backspace => Key::Backspace,
         Action::Clear => Key::ClearSearch,
@@ -249,6 +251,20 @@ pub(crate) fn protocol_keys(mode: KeyMode) -> &'static Keymap {
         KeyMode::Normal => normal,
         KeyMode::Search => search,
     }
+}
+
+pub(crate) fn settings_keys() -> &'static Keymap {
+    static KEYS: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        let mut keys = protocol_keys(KeyMode::Search).clone();
+        if let Some(up) = keys.get_mut(&Action::Up) {
+            up.push(KeyChord::Left);
+        }
+        if let Some(down) = keys.get_mut(&Action::Down) {
+            down.push(KeyChord::Right);
+        }
+        keys
+    })
 }
 
 pub(crate) fn read_key(fd: libc::c_int, keys: &Keymap) -> Key {
@@ -393,6 +409,7 @@ pub fn send_key(name: &str) -> i32 {
             "close" => b"Q".to_vec(),
             "help" => b"?".to_vec(),
             "versions" => b"u".to_vec(),
+            "settings" => b"s".to_vec(),
             _ => return 2,
         }
     };
@@ -428,7 +445,15 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
     }
     // One fork validates both tmux-supplied identities: the command fails
     // for an unknown client or pane, and echoes the pane it resolved.
-    let resolved = tmux::command(&["display-message", "-p", "-c", client, "-t", pane, "#{pane_id}"]);
+    let resolved = tmux::command(&[
+        "display-message",
+        "-p",
+        "-c",
+        client,
+        "-t",
+        pane,
+        "#{pane_id}",
+    ]);
     if !resolved.is_ok_and(|id| id.trim() == pane) {
         return 0;
     }
@@ -444,10 +469,13 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
             let selected = fields.next() == Some("1");
             Some((target, index, selected))
         })
+        // "=" is the clicked sidebar pane itself: overlay rows are rendered
+        // into every sidebar pane, so the row map cannot name one up front.
         .filter(|(target, _, _)| {
-            target.starts_with('%')
-                && tmux::command(&["display-message", "-p", "-t", target, "#{pane_id}"])
-                    .is_ok_and(|id| id.trim() == target)
+            target == "="
+                || target.starts_with('%')
+                    && tmux::command(&["display-message", "-p", "-t", target, "#{pane_id}"])
+                        .is_ok_and(|id| id.trim() == target)
         });
 
     // Every hop below is one tmux fork: chained commands, not one per step.
@@ -455,13 +483,32 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
         if selected {
             let _ = send_bytes_to(&runtime, &[0x0c]); // "all"
             let _ = tmux::command_status(&[
-                "switch-client", "-c", client, "-t", &target, ";",
-                "select-window", "-t", &target, ";",
-                "select-pane", "-t", &target,
+                "switch-client",
+                "-c",
+                client,
+                "-t",
+                &target,
+                ";",
+                "select-window",
+                "-t",
+                &target,
+                ";",
+                "select-pane",
+                "-t",
+                &target,
             ]);
         } else if tmux::command_status(&[
-            "switch-client", "-c", client, "-t", pane, ";",
-            "switch-client", "-c", client, "-T", "agenmux",
+            "switch-client",
+            "-c",
+            client,
+            "-t",
+            pane,
+            ";",
+            "switch-client",
+            "-c",
+            client,
+            "-T",
+            "agenmux",
         ])
         .is_ok()
         {
@@ -471,8 +518,17 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
         }
     } else {
         let _ = tmux::command_status(&[
-            "switch-client", "-c", client, "-t", pane, ";",
-            "switch-client", "-c", client, "-T", "agenmux",
+            "switch-client",
+            "-c",
+            client,
+            "-t",
+            pane,
+            ";",
+            "switch-client",
+            "-c",
+            client,
+            "-T",
+            "agenmux",
         ]);
     }
     0
@@ -664,6 +720,14 @@ mod tests {
             Some(Key::ClearSearch)
         ));
         assert!(action_key(&normal, KeyChord::Control(21)).is_none());
+        assert!(matches!(
+            action_key(settings_keys(), KeyChord::Left),
+            Some(Key::Up)
+        ));
+        assert!(matches!(
+            action_key(settings_keys(), KeyChord::Right),
+            Some(Key::Down)
+        ));
     }
 
     #[test]

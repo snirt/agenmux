@@ -113,7 +113,7 @@ window retains its compact agent row. Pane rows and agent description rows are s
 session and split-window headers provide context. `Enter` and repeated clicks can jump to
 ordinary panes as well as agent panes.
 All-pane hierarchy uses indentation without connector glyphs. Nested ordinary panes use a
-muted `▦ command` row; when selected, their full row uses `theme.colors.pane_bg`. Agent
+done-colored `▢ command` row; when selected, its full row uses `theme.colors.pane_bg`. Agent
 rows keep their state styling and show the animated status glyph, agent name in its original
 style, then pane command. Agent descriptions stay on the next indented line.
 
@@ -212,6 +212,19 @@ notifications = true
 and default. A complete annotated example ships as
 [`examples/config.toml`](examples/config.toml).
 
+Press `s` in either split or popup mode to open **Settings** (`keys.normal.settings`
+changes or unbinds this opener). The view lists every application setting and
+adapts from value/source columns to compact rows with selected-setting details on
+narrow panes. `↑`/`↓` moves, `Enter` edits, `C-u` clears the edit buffer, and
+`Esc` cancels or returns. Saved values are validated before an atomic file update;
+errors keep both last valid file and live configuration.
+
+Each row distinguishes persisted file value from effective value and its winning
+source. **Revert to defaults** removes persisted display, behavior, theme, color,
+and keymap customizations after confirmation. Higher-precedence CLI or tmux
+overrides remain visible and effective. Launcher keys and `agents/*.conf` are not
+application settings and are unchanged.
+
 After editing the file, run `agenmux config reload`. It validates the file,
 reinstalls the key tables when the keymap moved, and tells running views to
 re-read; an invalid file is refused and changes nothing, so a typo cannot take
@@ -250,12 +263,13 @@ activation to consume the new palette.
 down = ["n", "PageDown"] # replaces the whole default list ["j", "Down"]
 up = ["p", "PageUp"]
 close = []               # unbind; Ctrl-C/Ctrl-D still close the popup
+settings = ["s"]          # opens the in-app Settings view
 [keys.search]
 cancel = ["Escape", "C-g"]
 ```
 
 Normal actions: `down`, `up`, `jump`, `search`, `filter`, `reset`, `help`,
-`versions`, `close`. Search actions: `up`, `down`, `accept`, `cancel`,
+`versions`, `settings`, `close`. Search actions: `up`, `down`, `accept`, `cancel`,
 `backspace`, `clear`. Each value replaces that action's default list (at most
 16 chords); `[]` unbinds it and drops it from hints and help. Chords are one
 printable ASCII character, `Space`, `Up`/`Down`/`Left`/`Right`, `Home`/`End`,

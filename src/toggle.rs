@@ -1,16 +1,19 @@
 use crate::{panes, setup, tmux};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::io::Read;
 use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 // stdout is a private one-byte startup acknowledgement, not a diagnostic log.
 // Never relay child stderr to the user's terminal: it may contain configuration
 // values or terminal controls. It goes to an owner-only file instead.
 fn await_daemon(child: &mut Child) -> Result<(), &'static str> {
-    let stdout = child.stdout.as_mut().ok_or("daemon readiness channel unavailable")?;
+    let stdout = child
+        .stdout
+        .as_mut()
+        .ok_or("daemon readiness channel unavailable")?;
     let fd = stdout.as_raw_fd();
     unsafe {
         if libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) < 0 {
@@ -19,17 +22,23 @@ fn await_daemon(child: &mut Child) -> Result<(), &'static str> {
     }
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if child.try_wait().map_err(|_| "daemon startup observation failed")?.is_some() {
+        if child
+            .try_wait()
+            .map_err(|_| "daemon startup observation failed")?
+            .is_some()
+        {
             return Err("daemon exited during startup; check configuration and executable");
         }
         let mut byte = [0];
         match child.stdout.as_mut().unwrap().read(&mut byte) {
             Ok(1) if byte[0] == b'R' => return Ok(()),
             Ok(0) => return Err("daemon closed readiness channel before startup"),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {},
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             _ => return Err("invalid daemon readiness acknowledgement"),
         }
-        if Instant::now() >= deadline { return Err("daemon readiness timed out"); }
+        if Instant::now() >= deadline {
+            return Err("daemon readiness timed out");
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -135,6 +144,14 @@ fn control_alive() -> bool {
         // caller tears down and starts fresh instead of re-selecting a zombie
         && tmux::runtime_dir().join("agenmux-keys").exists()
 }
+fn cli_mode(config: &crate::app_config::AppConfig) -> Option<&'static str> {
+    (config.sources.get("display.mode").map(String::as_str) == Some("CLI")).then_some(match config
+        .mode
+    {
+        crate::app_config::DisplayMode::Split => "split",
+        crate::app_config::DisplayMode::Popup => "popup",
+    })
+}
 
 fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::AppConfig) -> i32 {
     let window = client.as_deref().and_then(client_window);
@@ -162,7 +179,9 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
         let runtime = std::env::temp_dir();
         let new_files = ["agenmux-rows", "agenmux-scan-cache"]
             .map(|name| runtime.join(name))
-            .into_iter().filter(|path| !path.exists()).collect::<Vec<_>>();
+            .into_iter()
+            .filter(|path| !path.exists())
+            .collect::<Vec<_>>();
         let result = (|| {
             let mut windows = tmux::lines(&["list-windows", "-a", "-F", "#{window_id}"])
                 .map_err(|_| "cannot enumerate startup windows")?;
@@ -183,7 +202,25 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
             if let Some(trace) = trace_file() {
                 command.env("AGENMUX_DEBUG", trace);
             }
-            child = Some(command.spawn().map_err(|_| "cannot launch daemon; check executable")?);
+            for (name, option) in [
+                (
+                    "AGENMUX_TMUX_ACTIVE_BORDER_STYLE",
+                    "pane-active-border-style",
+                ),
+                ("AGENMUX_TMUX_WINDOW_STYLE", "window-style"),
+            ] {
+                if let Ok(style) = tmux::command(&["show-option", "-gv", option]) {
+                    command.env(name, style.trim_end());
+                }
+            }
+            if let Some(mode) = cli_mode(config) {
+                command.env("AGENMUX_DISPLAY_OVERRIDE", mode);
+            }
+            child = Some(
+                command
+                    .spawn()
+                    .map_err(|_| "cannot launch daemon; check executable")?,
+            );
             // Record only panes made by this activation, not arbitrary panes
             // that appear while the daemon is starting. The focused window goes
             // first so its sidebar can render while the remaining panes fan out.
@@ -193,8 +230,16 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
                 }
             }
             await_daemon(child.as_mut().unwrap())?;
-            if setup::run_config(plugin_dir, config) != 0 { return Err("daemon setup failed"); }
-            if child.as_mut().unwrap().try_wait().map_err(|_| "cannot observe daemon")?.is_some() {
+            if setup::run_config(plugin_dir, config) != 0 {
+                return Err("daemon setup failed");
+            }
+            if child
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .map_err(|_| "cannot observe daemon")?
+                .is_some()
+            {
                 return Err("daemon exited during setup");
             }
             Ok(())
@@ -210,10 +255,16 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
                 cleanup_failed |= tmux::command_status(&["kill-pane", "-t", &pane]).is_err();
                 panes::restore_layout(&window);
                 for prefix in ["@agenmux-layout-", "@agenmux-winsize-"] {
-                    cleanup_failed |= tmux::command_status(&["set-option", "-gu", &format!("{prefix}{window}")]).is_err();
+                    cleanup_failed |=
+                        tmux::command_status(&["set-option", "-gu", &format!("{prefix}{window}")])
+                            .is_err();
                 }
             }
-            for name in ["@agenmux-on", "@agenmux-control-client", "@agenmux-runtime-dir"] {
+            for name in [
+                "@agenmux-on",
+                "@agenmux-control-client",
+                "@agenmux-runtime-dir",
+            ] {
                 cleanup_failed |= tmux::command_status(&["set-option", "-gu", name]).is_err();
             }
             if child.is_some() {
@@ -229,7 +280,14 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
                     let _ = std::fs::remove_file(log);
                 }
             }
-            eprintln!("agenmux: {error}{}", if cleanup_failed { "; startup cleanup incomplete" } else { "" });
+            eprintln!(
+                "agenmux: {error}{}",
+                if cleanup_failed {
+                    "; startup cleanup incomplete"
+                } else {
+                    ""
+                }
+            );
             return 1;
         }
     }
@@ -315,7 +373,7 @@ fn popup(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
     while pin.exists() {
         // A popup jump reopens native geometry, not a render frame. Reuse this
         // process's file snapshot and keep last-valid live overrides on errors.
-        settings.accept(crate::app_config::current(None));
+        settings.accept(crate::app_config::current(cli_mode(config)));
         let width = settings
             .settings
             .popup_width
@@ -340,6 +398,9 @@ fn popup(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
             "-e".to_string(),
             format!("AGENMUX_DIR={}", plugin_dir.to_string_lossy()),
         ];
+        if let Some(mode) = cli_mode(config) {
+            args.extend(["-e".to_string(), format!("AGENMUX_DISPLAY_OVERRIDE={mode}")]);
+        }
         if let Some(owner) = client.as_deref() {
             args.extend([
                 "-c".to_string(),

@@ -122,11 +122,14 @@ env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
 # user's root binding and install synchronous search delivery before use.
 normal_keys="$(tmux -S "$sock" list-keys -T agenmux)"
 search_keys="$(tmux -S "$sock" list-keys -T agenmux-search)"
-has_re "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" '^14\.[0-9a-f]{16}$' &&
+settings_keys="$(tmux -S "$sock" list-keys -T agenmux-settings-edit)"
+has_re "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" '^15\.[0-9a-f]{16}$' &&
   has "$normal_keys" 'C-l' &&
   has "$normal_keys" " key 'sequence-67'" &&
   has "$normal_keys" " key 'last'" &&
   has "$normal_keys" " key 'search'" &&
+  has "$normal_keys" " key 'settings'" &&
+  has "$settings_keys" " key 'text-6A'" &&
   has "$search_keys" 'text-6A' || {
   echo "FAIL navigation-key-table: native setup contract missing"
   exit 1
@@ -1067,6 +1070,138 @@ for _ in $(seq 1 40); do
   fi
   sleep 0.05
 done
+# Settings uses the public split-mode key transport, persists through the existing
+# config file, and stays usable when narrowed.
+settings_open=0
+settings_saved=0
+settings_search=0
+settings_backspace=0
+settings_search_applied=0
+settings_search_navigation=0
+settings_dropdown=0
+settings_cancelled=0
+settings_responsive=0
+settings_returned=0
+printf 's' >&9
+for _ in $(seq 1 30); do
+  settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
+  settings_table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
+  if has "$settings_frame" 'Display' && has "$settings_frame" 'mode:'; then
+    settings_open=1
+    break
+  fi
+  sleep 0.05
+done
+printf '/width' >&9
+for _ in $(seq 1 30); do
+  settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
+  if has "$settings_frame" '/ width_' && has "$settings_frame" 'sidebar_width' && has "$settings_frame" 'popup_width' && ! has "$settings_frame" 'mode:'; then
+    settings_search=1
+    break
+  fi
+  sleep 0.05
+done
+printf '\177' >&9
+for _ in $(seq 1 20); do
+  settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
+  if has "$settings_frame" '/ widt_'; then
+    settings_backspace=1
+    break
+  fi
+  sleep 0.05
+done
+printf 'h\r' >&9
+for _ in $(seq 1 30); do
+  settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
+  settings_table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
+  if has "$settings_frame" '/ width' && ! has "$settings_frame" '/ width_' && [ "$settings_table" = agenmux ]; then
+    settings_search_applied=1
+    break
+  fi
+  sleep 0.05
+done
+printf 'j' >&9
+for _ in $(seq 1 30); do
+  settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
+  if has "$settings_frame" '❯ popup_width'; then
+    settings_search_navigation=1
+    break
+  fi
+  sleep 0.05
+done
+printf '\033' >&9
+for _ in $(seq 1 20); do
+  settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
+  if has "$settings_frame" '/ search' && [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
+    break
+  fi
+  sleep 0.05
+done
+printf '\r' >&9
+for _ in $(seq 1 20); do
+  settings_table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
+  [ "$settings_table" = agenmux-settings-edit ] && break
+  sleep 0.05
+done
+settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
+has "$settings_frame" '❯ split' && has "$settings_frame" '  popup' && settings_dropdown=1
+printf '\033[B\033' >&9
+for _ in $(seq 1 20); do
+  if ! grep -q '^mode = ' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
+    [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
+    settings_cancelled=1
+    break
+  fi
+  sleep 0.05
+done
+printf '\r' >&9
+for _ in $(seq 1 20); do
+  [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux-settings-edit ] && break
+  sleep 0.05
+done
+printf '\033[B\r' >&9
+for _ in $(seq 1 40); do
+  if grep -q '^mode = "popup"' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
+    [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
+    settings_saved=1
+    break
+  fi
+  sleep 0.05
+done
+tmux -S "$sock" resize-pane -t "$escape_sidebar" -x 22
+for _ in $(seq 1 20); do
+  settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
+  settings_width="$(tmux -S "$sock" display-message -p -t "$escape_sidebar" '#{pane_width}')"
+  if has "$settings_frame" 'display.mode' && [ "$settings_width" -eq 22 ]; then
+    settings_responsive=1
+    break
+  fi
+  sleep 0.05
+done
+printf '\r' >&9
+for _ in $(seq 1 20); do
+  [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux-settings-edit ] && break
+  sleep 0.05
+done
+printf '\033[A\r' >&9
+for _ in $(seq 1 40); do
+  if grep -q '^mode = "split"' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
+    [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
+    break
+  fi
+  sleep 0.05
+done
+printf '\033' >&9
+for _ in $(seq 1 20); do
+  settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
+  settings_table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
+  if [ "$settings_table" = agenmux ] && has "$settings_frame" 'codex'; then
+    settings_returned=1
+    break
+  fi
+  sleep 0.05
+done
+
 printf 'f' >&9
 for _ in $(seq 1 20); do
   escape_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar" | head -n 1)"
@@ -1134,6 +1269,36 @@ for _ in $(seq 1 20); do
   sleep 0.05
 done
 
+# Popup mode shares the same Settings editor and persistence path.
+settings_popup=0
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
+  "$BIN" toggle popup "$client" &
+popup_pid=$!
+for _ in $(seq 1 40); do
+  [ "$(tmux -S "$sock" display-message -p -c "$client" '#{popup_active}')" = 1 ] && break
+  sleep 0.05
+done
+printf 's\rj\r' >&9
+for _ in $(seq 1 40); do
+  if grep -q '^mode = "popup"' "$XDG_CONFIG_HOME/agenmux/config.toml"; then
+    settings_popup=1
+    break
+  fi
+  sleep 0.05
+done
+printf '\r\033[A\r' >&9
+for _ in $(seq 1 40); do
+  grep -q '^mode = "split"' "$XDG_CONFIG_HOME/agenmux/config.toml" && break
+  sleep 0.05
+done
+printf '\033q' >&9
+for _ in $(seq 1 30); do
+  kill -0 "$popup_pid" 2>/dev/null || break
+  sleep 0.05
+done
+kill "$popup_pid" 2>/dev/null || true
+wait "$popup_pid" 2>/dev/null || true
+
 # The notification click helper must target the exact pane through the most
 # recently active real client, and a stale notification must be a no-op.
 notification_client="$(tmux -S "$sock" list-clients \
@@ -1187,14 +1352,21 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   [ "$ordinary_keyboard_jump" -eq 1 ] && [ "$ordinary_first_click" -eq 1 ] &&
   [ "$ordinary_mouse_jump" -eq 1 ] && [ "$ordinary_restored_false" -eq 1 ] &&
   [ "$exit_table" = root ] && [ "$q_left" -eq 1 ] &&
+  [ "$settings_open" -eq 1 ] && [ "$settings_search" -eq 1 ] && [ "$settings_backspace" -eq 1 ] &&
+  [ "$settings_search_applied" -eq 1 ] && [ "$settings_search_navigation" -eq 1 ] && [ "$settings_dropdown" -eq 1 ] &&
+  [ "$settings_cancelled" -eq 1 ] &&
+  [ "$settings_saved" -eq 1 ] &&
+  [ "$settings_responsive" -eq 1 ] && [ "$settings_returned" -eq 1 ] &&
   [ "$escape_ready" -eq 1 ] && [ "$escape_reset" -eq 1 ] &&
   [ "$escape_left" -eq 1 ] && [ "$close_ready" -eq 1 ] &&
   [ "$q_closed" -eq 1 ] &&
+  [ "$settings_popup" -eq 1 ] &&
   [ "$notification_open_works" -eq 1 ] &&
   [ "$notification_stale_noop" -eq 1 ]; then
   echo "ok   attached-client-jk-navigation"
 else
   echo "edge-nav: long=$edge_long_list_works slow=$slow_gg_expires search=$search_edges_work state=$state_edges_work"
   echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$blocked_filter_works/$blocked_targets/$blocked_frame/$blocked_hint/$working_filter_works/$working_targets/$working_frame/$idle_filter_works/$idle_targets/$idle_frame/$all_filter_works/$all_targets/$all_frame] reload=[$reload_hint_follows/$reload_hint] ordinary=[$ordinary_keyboard_jump/$ordinary_first_click/$ordinary_mouse_jump/$ordinary_restored_false target=$ordinary_target focus=$ordinary_focus table=$ordinary_table] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
+  echo "settings: open=$settings_open search=$settings_search backspace=$settings_backspace applied=$settings_search_applied navigation=$settings_search_navigation dropdown=$settings_dropdown cancelled=$settings_cancelled saved=$settings_saved responsive=$settings_responsive returned=$settings_returned popup=$settings_popup"
   exit 1
 fi
