@@ -152,6 +152,7 @@ const HOOKS: &[&str] = &[
     "client-session-changed[42]",
     "session-window-changed[42]",
     "pane-exited[42]",
+    "after-kill-pane[45]",
     "window-pane-changed[42]",
     "window-layout-changed[42]",
     "window-resized[42]",
@@ -382,7 +383,11 @@ fn install_hooks(_bin: &str) -> Result<(), TmuxError> {
     for (hook, command) in [
         (
             "pane-exited[42]",
-            format!("run-shell \"{bin} pane-orphan\""),
+            format!("run-shell \"{bin} pane-orphan; {bin} pane-pin\""),
+        ),
+        (
+            "after-kill-pane[45]",
+            format!("run-shell \"{bin} pane-pin\""),
         ),
         (
             "window-pane-changed[42]",

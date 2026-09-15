@@ -674,6 +674,7 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
     let mut installed_hooks = String::new();
     for (hook, expected) in [
         ("pane-exited", "pane-exited[42]"),
+        ("after-kill-pane", "after-kill-pane[45]"),
         ("window-pane-changed", "window-pane-changed[42]"),
         ("window-layout-changed", "window-layout-changed[42]"),
         ("window-resized", "window-resized[42]"),
@@ -2178,6 +2179,22 @@ fn daemon_live_width_keeps_startup_file_and_last_valid_overrides() {
     tmux.wait_for(Duration::from_secs(4), || {
         tmux.text(&["show-option", "-gqv", "@agenmux-width"]) == "35"
     });
+    // Killing the sidebar's neighbour hands it the freed columns; the daemon
+    // gives them back instead of reading the growth as a drag.
+    let neighbour = tmux.text(&[
+        "list-panes",
+        "-f",
+        "#{!=:#{pane_title},agenmux}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    tmux.assert_tmux(&["split-window", "-h", "-t", &neighbour]);
+    thread::sleep(Duration::from_millis(2500)); // past one periodic tick
+    assert_eq!(width(), "35");
+    tmux.assert_tmux(&["kill-pane", "-t", &neighbour]);
+    tmux.wait_for(Duration::from_millis(1500), || width() == "35");
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(tmux.text(&["show-option", "-gqv", "@agenmux-width"]), "35");
     assert_success(tmux.bin(&["key", "close"]), "broken file daemon close");
     tmux.wait_for(Duration::from_secs(4), || {
         tmux.text(&[

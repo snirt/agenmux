@@ -378,6 +378,32 @@ impl Sidebar {
             }
             w = width; // render for the adopted width now, not the stale min
         }
+        // A killed neighbour hands its columns to the sidebar. The pane count
+        // changed, so the drag probe above stays quiet; put the width back.
+        let mut argv: Vec<String> = Vec::new();
+        for m in &mut ms {
+            let want = wopt.min(m.win_size.0.saturating_sub(2).max(1));
+            let counted = self.daemon.as_ref().unwrap().win_sizes.get(&m.win);
+            if m.w == want || counted.is_none_or(|&(_, n)| n == m.panes) {
+                continue;
+            }
+            if !argv.is_empty() {
+                argv.push(";".into());
+            }
+            argv.extend([
+                "resize-pane".into(),
+                "-t".into(),
+                m.pane.clone(),
+                "-x".into(),
+                want.to_string(),
+            ]);
+            m.w = want;
+        }
+        if !argv.is_empty() {
+            let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+            let _ = command_status(&args);
+            w = ms.iter().map(|m| m.w).min().unwrap_or(w);
+        }
         let visible_sessions = self.visible_sessions();
         let visible_panes = if visible_sessions.is_empty() {
             // Detached startup and integration tests have no real client yet.
