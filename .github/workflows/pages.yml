@@ -31,6 +31,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/site-release.py
+      - name: Serve the one-line installer next to the page
+        run: cp install.sh site/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
