@@ -173,6 +173,12 @@ pub struct Sidebar {
     tmux: Tmux,
     settings: crate::app_config::LiveConfig,
     adopted_show_all_panes: bool,
+    /// Last config-derived show_all_panes value; a change means the user
+    /// edited the config, which then wins over a live "." toggle.
+    config_show_all: bool,
+    /// Live "." view toggle. `Some` overrides the config until the config
+    /// value itself changes or the user toggles again. Never persisted.
+    panes_override: Option<bool>,
     palette: Palette, // immutable startup snapshot shared by popup and split
     header_inherited: bool,
     normal_keys: Keymap, // startup snapshot: keys never change while running
@@ -323,6 +329,7 @@ fn new_sidebar(
     // restarts the engine anyway
     let update = update_available(&plugin_dir);
     let adopted_show_all_panes = settings.show_all_panes;
+    let config_show_all = settings.show_all_panes;
     inherit_tmux_header(&mut settings);
     let header_inherited = uses_tmux_header_contrast(&settings);
     let palette = Palette::resolve(&settings.theme);
@@ -345,6 +352,8 @@ fn new_sidebar(
         search_keys: settings.search.clone(),
         settings: crate::app_config::LiveConfig::new(settings),
         adopted_show_all_panes,
+        config_show_all,
+        panes_override: None,
         confs,
         ident: IdentCache::new(),
         subj: seeded_subjects,
@@ -1178,21 +1187,35 @@ impl Sidebar {
                 self.key_sequence.clear();
             }
         }
-        let show_all_panes = self.settings.settings.show_all_panes;
-        if show_all_panes != self.adopted_show_all_panes {
-            self.adopted_show_all_panes = show_all_panes;
+        self.last_frame.clear(); // colors or projection changed: redraw every pane
+    }
+
+    /// Re-stamp the live panes view over the config value re-resolved by every
+    /// `refresh()`, so a periodic reload cannot silently revert a "." toggle.
+    /// An edited config value clears the override; the toggle then follows it.
+    pub(super) fn sync_panes_view(&mut self) {
+        let config_show = self.settings.settings.show_all_panes;
+        if config_show != self.config_show_all {
+            self.config_show_all = config_show;
+            self.panes_override = None;
+        }
+        let effective = self.panes_override.unwrap_or(self.config_show_all);
+        self.settings.settings.show_all_panes = effective;
+        if effective != self.adopted_show_all_panes {
+            self.adopted_show_all_panes = effective;
             self.rebuild_visible(false);
             if let Some(index) = self.active_visible_index() {
                 self.select_index(index + 1);
             }
+            self.last_frame.clear();
         }
-        self.last_frame.clear(); // colors or projection changed: redraw every pane
     }
 
     fn scan_tick(&mut self, periodic: bool, changes: &PendingChanges) -> Result<(), TmuxError> {
         if self.daemon.is_none() {
             let refreshed = self.settings.refresh(&mut self.tmux);
             self.adopt_reload(refreshed);
+            self.sync_panes_view();
         }
         let t0 = Instant::now();
         let covered_session = self.tmux.attached_session().map(str::to_string);

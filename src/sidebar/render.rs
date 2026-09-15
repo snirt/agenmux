@@ -1045,6 +1045,8 @@ mod tests {
         }
         let false_frames = frames.clone();
         sb.settings.settings.show_all_panes = true;
+        sb.config_show_all = true; // keep the toggle's config baseline in sync
+        sb.adopted_show_all_panes = true;
         sb.rows = vec![PaneRow {
             pane: "%22".into(),
             loc: "work:2.2".into(),
@@ -1274,6 +1276,29 @@ mod tests {
         );
         sb.toggle_all_panes();
         assert!(sb.settings.settings.show_all_panes);
+        // Toggle off, then simulate a config refresh (which re-resolves the
+        // unchanged config value into settings) — the live toggle must survive.
+        sb.toggle_all_panes();
+        assert!(!sb.settings.settings.show_all_panes);
+        sb.settings.settings.show_all_panes = sb.config_show_all; // refresh restores config
+        sb.sync_panes_view();
+        assert!(
+            !sb.settings.settings.show_all_panes,
+            "a config refresh must not revert the live . toggle"
+        );
+        // Editing the config value itself (differs from the tracked baseline)
+        // clears the override and wins.
+        let edited = !sb.config_show_all;
+        sb.settings.settings.show_all_panes = edited;
+        sb.sync_panes_view();
+        assert!(
+            sb.settings.settings.show_all_panes == edited && sb.panes_override.is_none(),
+            "an edited config value overrides the live toggle"
+        );
+        sb.settings.settings.show_all_panes = true;
+        sb.config_show_all = true;
+        sb.panes_override = None;
+        sb.adopted_show_all_panes = true;
         sb.rebuild_visible(false);
 
         sb.select_index(3);

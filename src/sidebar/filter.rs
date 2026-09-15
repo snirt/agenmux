@@ -336,9 +336,13 @@ impl Sidebar {
     /// Live view toggle between the agent list and the full tmux tree. Not
     /// written to config; a reload restores the configured default.
     pub(super) fn toggle_all_panes(&mut self) {
-        let show = !self.settings.settings.show_all_panes;
-        self.settings.settings.show_all_panes = show;
-        self.adopted_show_all_panes = show;
+        // Flip the shown value directly and remember it as the override; the
+        // next refresh re-applies it over the re-resolved config via
+        // sync_panes_view, so a reload cannot revert it.
+        let effective = !self.adopted_show_all_panes;
+        self.panes_override = Some(effective);
+        self.settings.settings.show_all_panes = effective;
+        self.adopted_show_all_panes = effective;
         self.rebuild_visible(false);
         if let Some(index) = self.active_visible_index() {
             self.select_index(index + 1);
