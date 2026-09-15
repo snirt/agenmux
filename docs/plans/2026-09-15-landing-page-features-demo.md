@@ -27,8 +27,9 @@ CI contexts and `pages.yml` deploys on master.
 - Copy says agenmux is also a tmux navigator/manager (title, meta description
   and hero headline) because that is now a first-class use, not only monitoring.
 - **Installation follows Pi's compact method picker:** the real one-line
-  installer is selected by default, manual setup is one keyboard-selectable tab
-  away, and both reuse the site's code-block copy control.
+  installer is selected by default and explicitly says to paste it in a
+  terminal. The manual tab shows the common TPM config line and links to the
+  no-TPM clone procedure; both reuse the site's code-block copy control.
 
 ## Verified
 

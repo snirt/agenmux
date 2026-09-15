@@ -315,6 +315,7 @@ confirm_delete = true</code></pre>
           <label class="trait-tab" for="install-manual">manual</label>
         </div>
         <div class="install-panel install-panel-installer">
+          <p>Paste this command into your terminal:</p>
           <pre><code>curl -fsSL https://snirt.github.io/agenmux/install.sh | sh</code></pre>
           <p>
             Recommended. Clones or updates agenmux, asks for the launcher keys,
@@ -322,13 +323,14 @@ confirm_delete = true</code></pre>
           </p>
         </div>
         <div class="install-panel install-panel-manual">
-          <pre><code>git clone https://github.com/snirt/agenmux ~/.tmux/plugins/agenmux
-echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf
-tmux source-file ~/.tmux.conf</code></pre>
+          <p>With TPM, add this line to <code>~/.tmux.conf</code>:</p>
+          <pre><code>set -g @plugin 'snirt/agenmux'</code></pre>
           <p>
-            Using <a href="https://github.com/tmux-plugins/tpm">TPM</a>? Add
-            <code>set -g @plugin 'snirt/agenmux'</code> before TPM initializes,
-            then press <kbd>prefix + I</kbd>.
+            Put it before TPM initializes, reload your tmux config, then press
+            <kbd>prefix + I</kbd> to install. Without TPM, follow the
+            <a href="https://github.com/snirt/agenmux#manual-install"
+              >manual clone steps</a
+            >.
           </p>
         </div>
       </fieldset>
