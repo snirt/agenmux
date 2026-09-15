@@ -1393,15 +1393,17 @@ for _ in $(seq 1 40); do
   sleep 0.05
 done
 printf 's\rj\r' >&9
-for _ in $(seq 1 40); do
+# A popup save reinstalls the key tables through config reload; a slow runner
+# has taken over five seconds for that, so wait well past it.
+for _ in $(seq 1 200); do
   if grep -q '^mode = "popup"' "$XDG_CONFIG_HOME/agenmux/config.toml"; then
     settings_popup=1
     break
   fi
   sleep 0.05
 done
-printf '\r\033[A\r' >&9
-for _ in $(seq 1 40); do
+printf '\rZ\r' >&9
+for _ in $(seq 1 200); do
   grep -q '^mode = "split"' "$XDG_CONFIG_HOME/agenmux/config.toml" && break
   sleep 0.05
 done
