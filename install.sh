@@ -34,7 +34,7 @@ ask() {
     return
   }
   if [ "$2" = y ]; then hint="[Y/n]"; else hint="[y/N]"; fi
-  printf '\n  %s %s%s%s ' "$1" "$dim" "$hint" "$reset" >/dev/tty
+  printf '  %s %s%s%s ' "$1" "$dim" "$hint" "$reset" >/dev/tty
   read -r answer </dev/tty || answer=""
   case "${answer:-$2}" in y | Y | yes | YES) return 0 ;; *) return 1 ;; esac
 }
@@ -72,6 +72,14 @@ else
   ok plugin "cloned $(version) to $(tilde "$DIR")"
 fi
 
+# same root the engine resolves: XDG_CONFIG_HOME when absolute, else ~/.config
+case "${XDG_CONFIG_HOME:-}" in
+/*) CFG="$XDG_CONFIG_HOME/agenmux" ;;
+*) CFG="$HOME/.config/agenmux" ;;
+esac
+mkdir -p "$CFG/agents" || die "cannot create $(tilde "$CFG")"
+ok config "$(tilde "$CFG")/ (config.toml optional, agents/ for overrides)"
+
 if [ -n "${AGENMUX_TMUX_CONF:-}" ]; then
   CONF="$AGENMUX_TMUX_CONF"
 elif [ -f "$HOME/.tmux.conf" ]; then
@@ -95,7 +103,7 @@ else
   else
     tpm_user="" plugin="run-shell \"$(tilde "$DIR")/agenmux.tmux\""
   fi
-  printf '\n  Line for %s%s%s:\n\n      %s\n' "$bold" "$(tilde "$CONF")" "$reset" "$plugin"
+  printf '\n  Line for %s%s%s:\n\n      %s\n\n' "$bold" "$(tilde "$CONF")" "$reset" "$plugin"
   if ask "Add it to $(tilde "$CONF")?" y; then
     if [ -n "$tpm_user" ]; then
       # ENVIRON, not -v: BSD awk rejects newlines in -v values
@@ -120,4 +128,5 @@ else
 fi
 
 printf '\n  Next: inside tmux press %sprefix + A%s for the sidebar, %sprefix + e%s for a popup.\n' "$bold" "$reset" "$bold" "$reset"
-printf '  %sStatus-bar summary, keys, width, notifications: https://github.com/snirt/agenmux#usage%s\n\n' "$dim" "$reset"
+printf '  %sStatus-bar summary, keys, width, notifications: https://github.com/snirt/agenmux#usage%s\n' "$dim" "$reset"
+printf '  %sApp config and agent overrides live in %s/%s\n\n' "$dim" "$(tilde "$CFG")" "$reset"

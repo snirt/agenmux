@@ -279,6 +279,32 @@ printf 'ok   clean checkout first activation installs and opens native split\n'
 tmux -L "$bootstrap_socket" kill-server
 active_socket=""
 
+# The one-line installer against a live server: it must write the conf line,
+# create the config root, and its reload must run agenmux.tmux (the launcher
+# binding is the proof). Cloned from a branch because this checkout may be
+# detached, and with HOME under $root so nothing touches the runner's dotfiles.
+install_socket="agenmux-sanity-install-$$"
+active_socket="$install_socket"
+git init -q "$root/src"
+git -C "$root/src" fetch -q "$DIR" HEAD
+git -C "$root/src" checkout -q -b main FETCH_HEAD
+tmux -L "$install_socket" -f /dev/null new-session -d -s install -x 100 -y 30
+install_path="$(tmux -L "$install_socket" display-message -p '#{socket_path}')"
+install_pid="$(tmux -L "$install_socket" display-message -p '#{pid}')"
+install_out="$(TMUX="$install_path,$install_pid,0" AGENMUX_REPO="$root/src" \
+  sh "$DIR/install.sh" 2>&1)" || {
+  printf 'FAIL installer: %s\n' "$install_out" >&2
+  exit 1
+}
+has_line "$(cat "$HOME/.tmux.conf")" 'run-shell "~/.tmux/plugins/agenmux/agenmux.tmux"'
+[ -d "$XDG_CONFIG_HOME/agenmux/agents" ]
+has "$(tmux -L "$install_socket" list-keys -T prefix)" '/agenmux.tmux'
+has "$install_out" 'reloaded'
+tmux -L "$install_socket" kill-server
+active_socket=""
+rm -rf "$HOME/.tmux" "$HOME/.tmux.conf"
+printf 'ok   one-line installer wrote conf, config root, and reloaded a live server\n'
+
 phase=$SECONDS
 bash "$plugin/scripts/install-bin.sh"
 download_seconds=$((SECONDS - phase))

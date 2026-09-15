@@ -33,10 +33,10 @@ hooks to install, nothing runs inside your agents.
 curl -fsSL https://snirt.github.io/agenmux/install.sh | sh
 ```
 
-The script clones the plugin to `~/.tmux/plugins/agenmux`, shows the one line
-it wants in your tmux.conf (a `@plugin` entry if you use TPM, `run-shell`
-otherwise), writes it once you confirm, and reloads tmux. Run it again to
-update.
+The script clones the plugin to `~/.tmux/plugins/agenmux`, creates
+`~/.config/agenmux/agents/`, shows the one line it wants in your tmux.conf (a
+`@plugin` entry if you use TPM, `run-shell` otherwise), writes it once you
+confirm, and reloads tmux. Run it again to update.
 
 Or install with [TPM](https://github.com/tmux-plugins/tpm) directly:
 

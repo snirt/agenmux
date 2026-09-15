@@ -29,6 +29,7 @@ sh "$DIR/install.sh" >/dev/null && sh "$DIR/install.sh" >/dev/null
 check fresh-conf "$(cat "$home/.tmux.conf")" \
   'run-shell "~/.tmux/plugins/agenmux/agenmux.tmux"'
 check clone "$([ -x "$home/.tmux/plugins/agenmux/agenmux.tmux" ] && echo yes)" yes
+check config-dir "$([ -d "$home/.config/agenmux/agents" ] && echo yes)" yes
 
 # TPM present: @plugin above the tpm run line, still only once
 mkdir -p "$home/.tmux/plugins/tpm"
@@ -49,5 +50,9 @@ mkdir -p "$home/.config/tmux"
 sh "$DIR/install.sh" >/dev/null
 check xdg-conf "$(grep -c agenmux "$home/.config/tmux/tmux.conf")" 1
 check no-dotfile "$([ -e "$home/.tmux.conf" ] || echo absent)" absent
+
+# an absolute XDG_CONFIG_HOME moves the config root, like the engine does
+XDG_CONFIG_HOME="$home/xdg" sh "$DIR/install.sh" >/dev/null
+check xdg-config-dir "$([ -d "$home/xdg/agenmux/agents" ] && echo yes)" yes
 
 exit "$fail"
