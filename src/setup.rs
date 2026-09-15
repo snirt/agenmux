@@ -1,13 +1,14 @@
-use crate::app_config::{KeyChord, Keymap};
+use crate::app_config::KeyChord;
 use crate::tmux::{self, TmuxError};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-const NORMAL_TABLE: &str = "agenmux";
-const SEARCH_TABLE: &str = "agenmux-search";
+pub(crate) const NORMAL_TABLE: &str = "agenmux";
+pub(crate) const SEARCH_TABLE: &str = "agenmux-search";
 const SETTINGS_TABLE: &str = "agenmux-settings-edit";
-const NAV_LAYOUT: &str = "15";
+pub(crate) const SEQUENCE_TABLE: &str = "agenmux-sequence";
+const NAV_LAYOUT: &str = "16";
 // These are trusted runtime identities, not application-file settings. q
 // quotes them for the shell only when tmux executes the installed command.
 const ENGINE: &str = "AGENMUX_DIR=#{q:@agenmux-plugin-dir} #{q:@agenmux-runtime-bin}";
@@ -98,7 +99,7 @@ impl BindingBackup {
         // Check server connectivity before accepting an absent plugin table.
         tmux::command(&["list-keys", "-T", "root"])?;
         let mut tables = Vec::new();
-        for table in [NORMAL_TABLE, SEARCH_TABLE, SETTINGS_TABLE] {
+        for table in [NORMAL_TABLE, SEARCH_TABLE, SETTINGS_TABLE, SEQUENCE_TABLE] {
             tables.push((table, bindings(table)?.into_values().collect()));
         }
         let mut keys = Vec::new();
@@ -314,6 +315,7 @@ fn setup(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> Result<(),
         // strand an open TextEdit or Select control.
         clone_root_table(SETTINGS_TABLE)?;
         install_settings_keys()?;
+        clear_table(SEQUENCE_TABLE)?;
         install_keys(config)?;
         install_wheel_keys(&bin)?;
         install_picker_filter(config.hide_windows.as_deref())?;
@@ -457,7 +459,7 @@ fn bind(table: &str, key: &str, command: &str) -> Result<(), TmuxError> {
 
 fn key_command(action: &str, next: &str, background: bool) -> String {
     format!(
-        "run-shell {}\"{} key '{}'\"; switch-client -T '{}'",
+        "run-shell {}\"{} key '{}' #{{q:client_name}}\"; switch-client -T '{}'",
         if background { "-b " } else { "" },
         ENGINE,
         action,
@@ -467,7 +469,7 @@ fn key_command(action: &str, next: &str, background: bool) -> String {
 
 /// Plugin-table bindings generated from the resolved keymaps. Chord names and
 /// action names are closed sets: a config value never reaches a command body.
-fn key_bindings(normal: &Keymap, search: &Keymap) -> Vec<(&'static str, String, String)> {
+fn key_bindings(config: &crate::app_config::AppConfig) -> Vec<(&'static str, String, String)> {
     use crate::app_config::Action::*;
     let mut out = Vec::new();
     // First: later binds win, so the catch-all must not overwrite a user chord.
@@ -481,14 +483,69 @@ fn key_bindings(normal: &Keymap, search: &Keymap) -> Vec<(&'static str, String, 
     }
     // Edge navigation is fixed, not a configurable action, but it is still a
     // default: a configured chord on the same key replaces it below.
-    for (key, action) in [("G", "last"), ("g", "sequence-67")] {
+    out.push((
+        NORMAL_TABLE,
+        "G".into(),
+        key_command("last", NORMAL_TABLE, true),
+    ));
+    // Live toggle between the agent list and the full tmux tree, unless the
+    // user has claimed "." for a configured action.
+    if crate::app_config::action_for(&config.normal, KeyChord::Printable(b'.')).is_none() {
         out.push((
             NORMAL_TABLE,
-            key.into(),
-            key_command(action, NORMAL_TABLE, true),
+            ".".into(),
+            key_command("toggle-panes", NORMAL_TABLE, true),
         ));
     }
-    for (action, chords) in normal {
+    let mut prefixes = Vec::new();
+    let mut continuations = Vec::new();
+    for binding in crate::input::available_sequences(config.tmux_management_enabled) {
+        let bytes = binding.sequence.as_bytes();
+        let prefix = bytes[0];
+        if crate::app_config::action_for(&config.normal, KeyChord::Printable(prefix)).is_some() {
+            continue;
+        }
+        if bytes.len() == 1 {
+            if !prefixes.contains(&prefix) {
+                prefixes.push(prefix);
+                out.push((
+                    NORMAL_TABLE,
+                    char::from(prefix).to_string(),
+                    key_command(&format!("sequence-{prefix:02X}"), NORMAL_TABLE, false),
+                ));
+            }
+            continue;
+        }
+        let continuation = bytes[1];
+        if !continuations.contains(&continuation) {
+            continuations.push(continuation);
+            out.push((
+                SEQUENCE_TABLE,
+                char::from(continuation).to_string(),
+                key_command(&format!("sequence-{continuation:02X}"), NORMAL_TABLE, false),
+            ));
+        }
+        if prefixes.contains(&prefix) {
+            continue;
+        }
+        prefixes.push(prefix);
+        out.push((
+            NORMAL_TABLE,
+            char::from(prefix).to_string(),
+            key_command(&format!("sequence-{prefix:02X}"), SEQUENCE_TABLE, false),
+        ));
+    }
+    out.push((
+        SEQUENCE_TABLE,
+        "Escape".into(),
+        key_command("all", NORMAL_TABLE, false),
+    ));
+    out.push((
+        SEQUENCE_TABLE,
+        "Any".into(),
+        key_command("escape", NORMAL_TABLE, false),
+    ));
+    for (action, chords) in &config.normal {
         let (name, next, background) = match action {
             Down => ("down", NORMAL_TABLE, true),
             Up => ("up", NORMAL_TABLE, true),
@@ -518,7 +575,7 @@ fn key_bindings(normal: &Keymap, search: &Keymap) -> Vec<(&'static str, String, 
             key_command(&format!("text-{code:02X}"), SEARCH_TABLE, false),
         ));
     }
-    for (action, chords) in search {
+    for (action, chords) in &config.search {
         let (name, next) = match action {
             Up => ("up", SEARCH_TABLE),
             Down => ("down", SEARCH_TABLE),
@@ -578,7 +635,7 @@ fn install_settings_keys() -> Result<(), TmuxError> {
 }
 
 fn install_keys(config: &crate::app_config::AppConfig) -> Result<(), TmuxError> {
-    for (table, key, command) in key_bindings(&config.normal, &config.search) {
+    for (table, key, command) in key_bindings(config) {
         bind(table, &key, &command)?;
     }
     Ok(())
@@ -588,7 +645,7 @@ fn install_keys(config: &crate::app_config::AppConfig) -> Result<(), TmuxError> 
 /// either changes, so edited keys apply without a manual setup.
 pub fn nav_version(config: &crate::app_config::AppConfig) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for (table, key, command) in key_bindings(&config.normal, &config.search) {
+    for (table, key, command) in key_bindings(config) {
         for byte in [table.as_bytes(), key.as_bytes(), command.as_bytes(), b"\0"].concat() {
             hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
         }
@@ -701,7 +758,7 @@ mod tests {
     #[test]
     fn bindings_follow_the_resolved_keymaps() {
         let defaults = config("");
-        let keys = key_bindings(&defaults.normal, &defaults.search);
+        let keys = key_bindings(&defaults);
         let find = |table: &str, key: &str| {
             keys.iter()
                 .find(|(t, k, _)| *t == table && k == key)
@@ -736,11 +793,60 @@ mod tests {
             Some(key_command("text-3B", SEARCH_TABLE, false).as_str())
         );
         assert!(find(SEARCH_TABLE, "Any").is_some() && find(NORMAL_TABLE, "Any").is_some());
+        assert!(find(NORMAL_TABLE, "g").is_some());
+        assert_eq!(find(NORMAL_TABLE, "c"), None);
+        assert_eq!(find(NORMAL_TABLE, "d"), None);
+        assert_eq!(find(NORMAL_TABLE, "r"), None);
+        let enabled = config("[tmux_management]\nenabled = true");
+        let enabled_keys = key_bindings(&enabled);
+        for key in ["c", "d", "g", "r"] {
+            assert!(enabled_keys
+                .iter()
+                .any(|(table, bound, _)| *table == NORMAL_TABLE && bound == key));
+        }
+        assert_eq!(
+            enabled_keys
+                .iter()
+                .find(|(table, key, _)| *table == NORMAL_TABLE && key == "d")
+                .map(|(_, _, command)| command.as_str()),
+            Some(key_command("sequence-64", SEQUENCE_TABLE, false).as_str())
+        );
+        assert_eq!(
+            enabled_keys
+                .iter()
+                .find(|(table, key, _)| *table == NORMAL_TABLE && key == "r")
+                .map(|(_, _, command)| command.as_str()),
+            Some(key_command("sequence-72", NORMAL_TABLE, false).as_str())
+        );
+        for (key, code) in [("c", 0x63), ("s", 0x73), ("d", 0x64), ("g", 0x67)] {
+            assert_eq!(
+                enabled_keys
+                    .iter()
+                    .find(|(table, bound, _)| *table == SEQUENCE_TABLE && bound == key)
+                    .map(|(_, _, command)| command.as_str()),
+                Some(key_command(&format!("sequence-{code:02X}"), NORMAL_TABLE, false).as_str())
+            );
+        }
+        assert_eq!(
+            enabled_keys
+                .iter()
+                .find(|(table, key, _)| *table == SEQUENCE_TABLE && key == "Any")
+                .map(|(_, _, command)| command.as_str()),
+            Some(key_command("escape", NORMAL_TABLE, false).as_str())
+        );
+        let overridden = config("[tmux_management]\nenabled=true\n[keys.normal]\ndown=['c']");
+        let overridden_keys = key_bindings(&overridden);
+        let c_commands: Vec<_> = overridden_keys
+            .iter()
+            .filter(|(table, key, _)| *table == NORMAL_TABLE && key == "c")
+            .collect();
+        assert_eq!(c_commands.len(), 1);
+        assert!(c_commands[0].2.contains("key 'down'"));
 
         let custom = config(
             "[keys.normal]\ndown = ['n', 'C-k']\nclose = []\nsettings = []\n[keys.search]\ncancel = ['C-g']\nclear = ['Tab']\n",
         );
-        let keys = key_bindings(&custom.normal, &custom.search);
+        let keys = key_bindings(&custom);
         let find = |table: &str, key: &str| {
             keys.iter()
                 .find(|(t, k, _)| *t == table && k == key)
@@ -777,7 +883,7 @@ mod tests {
 
         // The catch-all Space bind must not overwrite a user chord.
         let spaced = config("[keys.normal]\nversions = ['Space']\n");
-        let keys = key_bindings(&spaced.normal, &spaced.search);
+        let keys = key_bindings(&spaced);
         let space: Vec<_> = keys
             .iter()
             .filter(|(t, k, _)| *t == NORMAL_TABLE && k == "Space")
@@ -789,6 +895,6 @@ mod tests {
 
         assert_ne!(nav_version(&defaults), nav_version(&custom));
         assert_eq!(nav_version(&defaults), nav_version(&config("version = 1")));
-        assert!(nav_version(&defaults).starts_with("15."));
+        assert!(nav_version(&defaults).starts_with("16."));
     }
 }

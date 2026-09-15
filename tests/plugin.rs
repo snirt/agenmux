@@ -35,7 +35,7 @@ impl TestTmux {
             "120",
             "-y",
             "40",
-            "exec sleep 60",
+            "exec sleep 3600",
         ]);
         server
     }
@@ -646,6 +646,7 @@ fn stale_click_origin_is_a_noop() {
 fn setup_preserves_root_bindings_and_installs_plugin_tables() {
     let tmux = TestTmux::new("setup");
     let bin = env!("CARGO_BIN_EXE_agenmux");
+    app_file(&tmux, "[tmux_management]\nenabled=true");
     tmux.assert_tmux(&[
         "bind-key",
         "-T",
@@ -707,6 +708,28 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
         "{normal}"
     );
     assert!(normal.contains(" key \'sequence-67\'"), "{normal}");
+    assert!(normal.contains(" key \'sequence-72\'"), "{normal}");
+    let delete_prefix = normal
+        .lines()
+        .find(|line| line.contains(" key \'sequence-64\'"))
+        .unwrap();
+    assert!(
+        delete_prefix.contains("switch-client -T agenmux-sequence"),
+        "{delete_prefix}"
+    );
+    assert!(!delete_prefix.contains("run-shell -b"), "{delete_prefix}");
+    let sequence = tmux.text(&["list-keys", "-T", "agenmux-sequence"]);
+    for code in ["63", "64", "67", "73"] {
+        assert!(
+            sequence.contains(&format!("key \'sequence-{code}\'")),
+            "missing {code}: {sequence}"
+        );
+    }
+    assert!(
+        tmux.binding("agenmux-sequence", "Any")
+            .contains("key 'escape'"),
+        "{sequence}"
+    );
     assert!(normal.contains(" key \'last\'"), "{normal}");
     let search_action = normal
         .lines()
@@ -740,7 +763,7 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
     assert!(!text_action.contains("run-shell -b"), "{text_action}");
     let nav_version = tmux.text(&["show-option", "-gqv", "@agenmux-nav-version"]);
     assert!(
-        nav_version.starts_with("15.") && nav_version.len() == 19,
+        nav_version.starts_with("16.") && nav_version.len() == 19,
         "{nav_version}"
     );
     let status = tmux.tmux(&["show-option", "-gqv", "status-right"]);
@@ -1445,6 +1468,672 @@ fn daemon_theme_is_a_startup_snapshot_without_global_color_mutation() {
         assert!(before.contains("agenmux"));
         assert_success(tmux.bin(&["key", "close"]), "close themed daemon");
     }
+}
+
+#[test]
+fn tmux_management_creates_and_deletes_stable_targets() {
+    let tmux = TestTmux::new("tmux-management");
+    app_file(
+        &tmux,
+        "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false\n[tmux_management]\nenabled=true\nconfirm_delete=true",
+    );
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agenmux-bin",
+        env!("CARGO_BIN_EXE_agenmux"),
+    ]);
+    let mut viewer = tmux.attach();
+    tmux.wait_for(Duration::from_secs(2), || {
+        !tmux
+            .text(&["list-clients", "-F", "#{client_name}"])
+            .is_empty()
+    });
+    let client = tmux.text(&["list-clients", "-F", "#{client_name}"]);
+    let initial = tmux.text(&["display-message", "-p", "-c", &client, "#{pane_id}"]);
+    let cwd = tmux.tmp.join("selected-cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    tmux.assert_tmux(&[
+        "respawn-pane",
+        "-k",
+        "-t",
+        &initial,
+        "-c",
+        &cwd.to_string_lossy(),
+        "exec sleep 300",
+    ]);
+    assert_success(
+        tmux.bin(&["toggle", "split", &client]),
+        "start management daemon",
+    );
+    let sidebar = tmux.text(&[
+        "list-panes",
+        "-a",
+        "-f",
+        "#{==:#{pane_title},agenmux}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    tmux.wait_for(Duration::from_secs(4), || {
+        std::fs::read_to_string(tmux.tmp.join("agenmux-rows"))
+            .unwrap_or_default()
+            .lines()
+            .any(|line| line.starts_with(&format!("{initial}\t")))
+    });
+    let send_sequence = |sequence: &str| {
+        for byte in sequence.bytes() {
+            assert_success(
+                tmux.bin(&["key", &format!("sequence-{byte:02X}"), &client]),
+                sequence,
+            );
+            thread::sleep(Duration::from_millis(80));
+        }
+    };
+    let send_text = |text: &str| {
+        for byte in text.bytes() {
+            assert_success(tmux.bin(&["key", &format!("text-{byte:02X}")]), text);
+            thread::sleep(Duration::from_millis(80));
+        }
+    };
+    let selected = || {
+        std::fs::read_to_string(tmux.tmp.join("agenmux-rows"))
+            .unwrap_or_default()
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split('\t');
+                let pane = fields.next()?;
+                let _index = fields.next()?;
+                (fields.next() == Some("1")).then(|| pane.to_string())
+            })
+            .unwrap_or_default()
+    };
+
+    // Mutations never hand the client off: it stays on a sidebar pane, in the
+    // plugin key table, so the next key keeps navigating agenmux.
+    let assert_on_sidebar = || {
+        tmux.wait_for(Duration::from_secs(10), || {
+            tmux.text(&[
+                "display-message",
+                "-p",
+                "-c",
+                &client,
+                "#{pane_title}\t#{client_key_table}",
+            ]) == "agenmux\tagenmux"
+        });
+    };
+    let created_pane = |window_name: &str| {
+        tmux.text(&[
+            "list-panes",
+            "-a",
+            "-f",
+            &format!(
+                "#{{&&:#{{==:#{{window_name}},{window_name}}},#{{!=:#{{pane_title}},agenmux}}}}"
+            ),
+            "-F",
+            "#{pane_id}",
+        ])
+    };
+    // Prompts render on the daemon's next pass; a loaded runner has needed
+    // several seconds. Name the needle and show the frame on failure.
+    let sidebar_shows = |needle: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut frame = String::new();
+        while Instant::now() < deadline {
+            frame = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
+            if frame.contains(needle) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        panic!(
+            "sidebar never showed {needle:?}: {frame:?}\n{}",
+            tmux.diagnostics()
+        );
+    };
+    send_sequence("cc");
+    sidebar_shows("\u{eb7f} ▏");
+    for _ in 0..2 {
+        assert_success(
+            tmux.bin(&["key", "sequence-63", "missing-client"]),
+            "second client create sequence",
+        );
+    }
+    assert_eq!(
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]),
+        "agenmux-search",
+        "stray client sequence must preserve the owner's create prompt"
+    );
+    assert_success(tmux.bin(&["key", "escape"]), "cancel owned create");
+    tmux.wait_for(Duration::from_secs(2), || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]) == "agenmux"
+    });
+
+    let original_window_name =
+        tmux.text(&["display-message", "-p", "-t", &initial, "#{window_name}"]);
+    let original_session_name =
+        tmux.text(&["display-message", "-p", "-t", &initial, "#{session_name}"]);
+
+    // r renames the record under the cursor in place: a collapsed window row
+    // is the window, a pane inside a split window is the pane, a session row
+    // is the session.
+    send_sequence("r");
+    sidebar_shows(&format!("{original_window_name}▏"));
+    send_text("x");
+    sidebar_shows(&format!("{original_window_name}x▏"));
+    assert_success(
+        tmux.bin(&["key", "backspace"]),
+        "delete appended name character",
+    );
+    sidebar_shows(&format!("{original_window_name}▏"));
+    send_text("-renamed");
+    assert_success(tmux.bin(&["key", "enter"]), "rename window");
+    let renamed_window = format!("{original_window_name}-renamed");
+    tmux.wait_for(Duration::from_secs(4), || {
+        tmux.text(&["display-message", "-p", "-t", &initial, "#{window_name}"]) == renamed_window
+    });
+
+    let sibling = tmux.text(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &initial,
+        "exec sleep 60",
+    ]);
+    // A short, known pane title so the preloaded edit is fully visible in the
+    // narrow sidebar (a long title clips to its tail near the cursor).
+    tmux.assert_tmux(&["select-pane", "-t", &initial, "-T", "edit"]);
+    tmux.assert_tmux(&["select-pane", "-t", &initial]);
+    tmux.wait_for(Duration::from_secs(4), || selected() == initial);
+    send_sequence("r");
+    sidebar_shows("edit▏");
+    send_text("-renamed");
+    assert_success(tmux.bin(&["key", "enter"]), "rename pane");
+    let renamed_pane = "edit-renamed".to_string();
+    tmux.wait_for(Duration::from_secs(4), || {
+        tmux.text(&["display-message", "-p", "-t", &initial, "#{pane_title}"]) == renamed_pane
+    });
+    tmux.assert_tmux(&["kill-pane", "-t", &sibling]);
+    tmux.wait_for(Duration::from_secs(4), || selected() == initial);
+    let _ = &original_session_name; // session-scope rename is covered by unit tests
+
+    let windows = tmux
+        .text(&["list-windows", "-a", "-F", "#{window_id}"])
+        .lines()
+        .count();
+    send_sequence("cc");
+    sidebar_shows("\u{eb7f} ▏");
+    send_text("w");
+    sidebar_shows("\u{eb7f} w▏");
+    assert_success(tmux.bin(&["key", "enter"]), "accept window name");
+    tmux.wait_for(Duration::from_secs(4), || {
+        tmux.text(&["list-windows", "-a", "-F", "#{window_id}"])
+            .lines()
+            .count()
+            == windows + 1
+    });
+    tmux.wait_for(Duration::from_secs(4), || {
+        tmux.text(&["display-message", "-p", "-c", &client, "#{window_name}"]) == "w"
+    });
+    assert_on_sidebar();
+    let window_pane = created_pane("w");
+    assert!(window_pane.starts_with('%'), "{window_pane:?}");
+    assert_eq!(
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-t",
+            &window_pane,
+            "#{pane_current_path}"
+        ]),
+        cwd.canonicalize().unwrap().to_string_lossy()
+    );
+    tmux.wait_for(Duration::from_secs(4), || selected() == window_pane);
+
+    let sessions = tmux
+        .text(&["list-sessions", "-F", "#{session_id}"])
+        .lines()
+        .count();
+    send_sequence("cs");
+    send_text("s");
+    assert_success(tmux.bin(&["key", "enter"]), "accept session name");
+    tmux.wait_for(Duration::from_secs(4), || {
+        tmux.text(&["list-sessions", "-F", "#{session_id}"])
+            .lines()
+            .count()
+            == sessions + 1
+    });
+    tmux.wait_for(Duration::from_secs(4), || {
+        tmux.text(&["display-message", "-p", "-c", &client, "#{session_name}"]) == "s"
+    });
+    assert_on_sidebar();
+    let session_pane = tmux.text(&[
+        "list-panes",
+        "-a",
+        "-f",
+        "#{&&:#{==:#{session_name},s},#{!=:#{pane_title},agenmux}}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    assert!(session_pane.starts_with('%'), "{session_pane:?}");
+    tmux.wait_for(Duration::from_secs(4), || selected() == session_pane);
+    let guarded_session = tmux.text(&[
+        "display-message",
+        "-p",
+        "-t",
+        &session_pane,
+        "#{session_id}",
+    ]);
+    send_sequence("dd");
+    assert_success(
+        tmux.bin(&["key", "text-79", &client]),
+        "confirm guarded last-window delete",
+    );
+    tmux.wait_for(Duration::from_secs(10), || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]) == "agenmux"
+    });
+    assert!(
+        tmux.text(&["list-sessions", "-F", "#{session_id}"])
+            .lines()
+            .any(|session| session == guarded_session),
+        "window deletion must not implicitly destroy its session"
+    );
+    let marked_sidebar = tmux.text(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &session_pane,
+        "exec sleep 60",
+    ]);
+    tmux.assert_tmux(&["set-option", "-p", "-t", &marked_sidebar, "@agenmux", "1"]);
+    tmux.assert_tmux(&[
+        "select-pane",
+        "-t",
+        &marked_sidebar,
+        "-T",
+        "sidebar-fixture",
+    ]);
+    send_sequence("dd");
+    assert_success(
+        tmux.bin(&["key", "text-79", &client]),
+        "confirm guarded last-pane delete",
+    );
+    tmux.wait_for(Duration::from_secs(10), || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]) == "agenmux"
+    });
+    assert!(
+        tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
+            .lines()
+            .any(|pane| pane == session_pane),
+        "pane deletion must not implicitly destroy its session"
+    );
+    tmux.wait_for(Duration::from_secs(4), || selected() == session_pane);
+    // The session row and its only pane share a pane id in the row map; the
+    // session row is the first line with it. A scan's focus follower can
+    // undo an `up` that lands mid-scan, so retry until the row map agrees.
+    let session_row_selected = || {
+        std::fs::read_to_string(tmux.tmp.join("agenmux-rows"))
+            .unwrap_or_default()
+            .lines()
+            .find(|line| line.starts_with(&format!("{session_pane}\t")))
+            .is_some_and(|line| line.ends_with("\t1"))
+    };
+    for _ in 0..5 {
+        assert_success(tmux.bin(&["key", "up", &client]), "move to session row");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline && !session_row_selected() {
+            thread::sleep(Duration::from_millis(50));
+        }
+        if session_row_selected() {
+            break;
+        }
+    }
+    assert!(
+        session_row_selected(),
+        "cursor never reached the session row"
+    );
+    send_sequence("dd");
+    // dd on a session row must confirm the whole session, inline.
+    // Only sidebars in the client's session are repainted: read the one
+    // the client sits on.
+    let confirm_pane = tmux.text(&["display-message", "-p", "-c", &client, "#{pane_id}"]);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut session_prompt = String::new();
+    while Instant::now() < deadline {
+        session_prompt = tmux.text(&["capture-pane", "-p", "-t", &confirm_pane]);
+        if session_prompt.contains("delete session? y/N") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        session_prompt.contains("delete session? y/N"),
+        "dd on a session row must confirm the whole session: {session_prompt:?}"
+    );
+    assert_success(
+        tmux.bin(&["key", "text-79", &client]),
+        "confirm session delete",
+    );
+    tmux.wait_for(Duration::from_secs(4), || {
+        tmux.text(&["list-sessions", "-F", "#{session_id}"])
+            .lines()
+            .count()
+            == sessions
+    });
+    assert_on_sidebar();
+
+    tmux.wait_for(Duration::from_secs(4), || selected() == window_pane);
+    send_sequence("dd");
+    assert_success(
+        tmux.bin(&["key", "text-79", &client]),
+        "confirm window delete",
+    );
+    tmux.wait_for(Duration::from_secs(4), || {
+        tmux.text(&["list-windows", "-a", "-F", "#{window_id}"])
+            .lines()
+            .count()
+            == windows
+    });
+    assert_on_sidebar();
+
+    let extra = tmux.text(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &initial,
+        "exec sleep 60",
+    ]);
+    tmux.assert_tmux(&["select-pane", "-t", &extra]);
+    tmux.wait_for(Duration::from_secs(4), || selected() == extra);
+    send_sequence("dd");
+    assert_success(
+        tmux.bin(&["key", "text-79", "missing-client"]),
+        "ignore non-owner confirmation",
+    );
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
+            .lines()
+            .any(|pane| pane == extra),
+        "non-owner y must not confirm deletion"
+    );
+    assert_eq!(
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]),
+        "agenmux-search",
+        "non-owner input must leave the owner's confirmation active"
+    );
+    assert_success(
+        tmux.bin(&["key", "sequence-67", "missing-client"]),
+        "ignore non-owner sequence during confirmation",
+    );
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]),
+        "agenmux-search",
+        "non-owner sequence must leave confirmation active"
+    );
+    assert_success(
+        tmux.bin(&["key", "text-59", &client]),
+        "reject uppercase delete",
+    );
+    tmux.wait_for(Duration::from_secs(10), || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]) == "agenmux"
+    });
+    assert!(
+        tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
+            .lines()
+            .any(|pane| pane == extra),
+        "uppercase Y must cancel deletion"
+    );
+    tmux.assert_tmux(&["select-pane", "-t", &extra]);
+    tmux.wait_for(Duration::from_secs(10), || selected() == extra);
+    send_sequence("dd");
+    assert_success(tmux.bin(&["key", "enter", &client]), "cancel pane delete");
+    tmux.wait_for(Duration::from_secs(10), || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{client_key_table}",
+        ]) == "agenmux"
+    });
+    assert!(
+        tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
+            .lines()
+            .any(|pane| pane == extra),
+        "Enter must safely cancel deletion"
+    );
+    tmux.assert_tmux(&["select-pane", "-t", &extra]);
+    tmux.wait_for(Duration::from_secs(10), || selected() == extra);
+    send_sequence("dd");
+    assert_success(
+        tmux.bin(&["key", "text-79", &client]),
+        "confirm pane delete",
+    );
+    tmux.wait_for(Duration::from_secs(10), || {
+        !tmux
+            .text(&["list-panes", "-a", "-F", "#{pane_id}"])
+            .lines()
+            .any(|pane| pane == extra)
+    });
+    assert_on_sidebar();
+
+    let stale = tmux.text(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &initial,
+        "exec sleep 60",
+    ]);
+    tmux.assert_tmux(&["select-pane", "-t", &stale]);
+    tmux.wait_for(Duration::from_secs(4), || selected() == stale);
+    send_sequence("dd");
+    tmux.assert_tmux(&["kill-pane", "-t", &stale]);
+    assert_success(
+        tmux.bin(&["key", "text-79", &client]),
+        "confirm stale pane delete",
+    );
+    tmux.wait_for(Duration::from_secs(4), || selected() == initial);
+    assert!(
+        tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
+            .lines()
+            .any(|pane| pane == initial),
+        "stale target must not fall back to the active pane"
+    );
+
+    let immediate = tmux.text(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &initial,
+        "exec sleep 60",
+    ]);
+    tmux.assert_tmux(&["select-pane", "-t", &immediate]);
+    tmux.wait_for(Duration::from_secs(4), || selected() == immediate);
+    app_file(
+        &tmux,
+        "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false\n[tmux_management]\nenabled=true\nconfirm_delete=false",
+    );
+    assert_success(tmux.bin(&["config", "reload"]), "disable confirmation");
+    thread::sleep(Duration::from_millis(2200));
+    send_sequence("dd");
+    tmux.wait_for(Duration::from_secs(4), || {
+        !tmux
+            .text(&["list-panes", "-a", "-F", "#{pane_id}"])
+            .lines()
+            .any(|pane| pane == immediate)
+    });
+    assert_on_sidebar();
+    tmux.wait_for(Duration::from_secs(4), || selected() == initial);
+
+    let protected = tmux.text(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &initial,
+        "exec sleep 60",
+    ]);
+    tmux.assert_tmux(&["select-pane", "-t", &protected]);
+    tmux.wait_for(Duration::from_secs(4), || selected() == protected);
+    app_file(
+        &tmux,
+        "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false\n[tmux_management]\nenabled=true\nconfirm_delete=true",
+    );
+    assert_success(tmux.bin(&["config", "reload"]), "enable confirmation");
+    thread::sleep(Duration::from_millis(2200));
+    send_sequence("dd");
+    app_file(
+        &tmux,
+        "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false\n[tmux_management]\nenabled=false",
+    );
+    assert_success(
+        tmux.bin(&["config", "reload"]),
+        "disable management during confirmation",
+    );
+    tmux.wait_for(Duration::from_secs(4), || {
+        !tmux
+            .text(&["capture-pane", "-p", "-t", &sidebar])
+            .contains("? y/N")
+    });
+    assert_success(
+        tmux.bin(&["key", "text-79"]),
+        "ignore confirmation after disable",
+    );
+    assert!(
+        tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
+            .lines()
+            .any(|pane| pane == protected),
+        "management disable must cancel an open mutation"
+    );
+
+    app_file(
+        &tmux,
+        "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false\n[tmux_management]\nenabled=true\nconfirm_delete=true",
+    );
+    assert_success(tmux.bin(&["config", "reload"]), "re-enable management");
+    thread::sleep(Duration::from_millis(2200));
+    send_sequence("d");
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        tmux.text(&["capture-pane", "-p", "-t", &sidebar])
+            .contains("d delete selected"),
+        "delete prefix should be pending before override"
+    );
+    app_file(
+        &tmux,
+        "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false\n[tmux_management]\nenabled=true\nconfirm_delete=true\n[keys.normal]\ndown=['d']",
+    );
+    assert_success(tmux.bin(&["config", "reload"]), "override pending prefix");
+    tmux.wait_for(Duration::from_secs(4), || {
+        !tmux
+            .text(&["capture-pane", "-p", "-t", &sidebar])
+            .contains("delete selected")
+    });
+    assert_success(
+        tmux.bin(&["key", "sequence-64", &client]),
+        "ignore continuation after prefix override",
+    );
+    assert!(
+        tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
+            .lines()
+            .any(|pane| pane == protected),
+        "a live prefix override must clear the pending sequence"
+    );
+    app_file(
+        &tmux,
+        "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false\n[tmux_management]\nenabled=true\nconfirm_delete=true",
+    );
+    assert_success(tmux.bin(&["config", "reload"]), "remove prefix override");
+    thread::sleep(Duration::from_millis(2200));
+    send_sequence("d");
+    thread::sleep(Duration::from_millis(150));
+    let pending = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
+    assert!(pending.contains("d delete selected"), "{pending:?}");
+    app_file(
+        &tmux,
+        "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false\n[tmux_management]\nenabled=false",
+    );
+    assert_success(tmux.bin(&["config", "reload"]), "disable management");
+    tmux.wait_for(Duration::from_secs(4), || {
+        !tmux
+            .text(&["capture-pane", "-p", "-t", &sidebar])
+            .contains("delete selected")
+    });
+    assert_success(
+        tmux.bin(&["key", "sequence-64", &client]),
+        "ignored disabled delete continuation",
+    );
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        tmux.text(&["list-panes", "-a", "-F", "#{pane_id}"])
+            .lines()
+            .any(|pane| pane == initial),
+        "disabled management must not mutate"
+    );
+
+    assert_success(tmux.bin(&["key", "close"]), "close management daemon");
+    let _ = viewer.kill();
+    let _ = viewer.wait();
 }
 
 #[test]
@@ -2189,8 +2878,12 @@ fn startup_populates_the_focused_sidebar_before_fanning_out() {
         .env("AGENMUX_DIR", &plugin_dir)
         .spawn()
         .unwrap();
-    // Generous: a loaded CI runner takes seconds to reach the second split.
-    tmux.wait_for(Duration::from_secs(10), || blocked.exists());
+    let block_deadline = Instant::now() + Duration::from_secs(10);
+    while !blocked.exists() && Instant::now() < block_deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let blocked_in_time = blocked.exists();
+    let block_timeout_diagnostics = (!blocked_in_time).then(|| tmux.diagnostics());
     let sidebar_windows = tmux.text(&[
         "list-panes",
         "-a",
@@ -2213,6 +2906,11 @@ fn startup_populates_the_focused_sidebar_before_fanning_out() {
     }
     std::fs::write(&release, "").unwrap();
     let output = child.wait_with_output().unwrap();
+    if let Some(diagnostics) = block_timeout_diagnostics {
+        let _ = viewer.kill();
+        let _ = viewer.wait();
+        panic!("second startup split timed out under parallel suite load\n{diagnostics}");
+    }
     let first_sidebar_was_focused = sidebar_windows == focused_window;
 
     assert_success(output, "start focused sidebar");
@@ -2382,7 +3080,7 @@ fn toggle_reinstalls_key_tables_after_a_keymap_change() {
             .is_empty()
     });
     let first = tmux.text(&["show-option", "-gqv", "@agenmux-nav-version"]);
-    assert!(first.starts_with("15."), "{first}");
+    assert!(first.starts_with("16."), "{first}");
     assert!(tmux.binding("agenmux", "n").contains("key 'down'"));
     assert!(tmux.binding("agenmux", "j").is_empty());
 

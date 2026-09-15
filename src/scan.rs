@@ -530,6 +530,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_borrows_for_generic_args)]
     fn successful_unchanged_screen_is_reused_until_dirty_or_expired() {
         let now = Instant::now();
         let captures = Cell::new(0);

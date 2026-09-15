@@ -106,8 +106,11 @@ session keeps all its agents visible as context.
 
 Set `display.show_all_panes = true` in the application configuration to turn the
 sidebar into a complete tmux navigator. The default is `false`, which preserves
-the agent-only list. All-pane mode renders sessions, windows, and panes in tmux
-order. A split window gets an accent-colored ` name` header and nested pane rows. A
+the agent-only list. Press `.` in the sidebar to toggle between the two live;
+that view toggle is not written to config, so a reload restores the configured
+default. All-pane mode renders sessions, windows, and panes in tmux
+order. A pane in a split window shows its pane title when set, otherwise its
+running command; a single-pane window shows its window name. A split window gets an accent-colored ` name` header and nested pane rows. A
 single ordinary-pane window collapses into a selectable muted ` name` row; a single-agent
 window retains its compact agent row. Pane rows and agent description rows are selectable;
 session and split-window headers provide context. `Enter` and repeated clicks can jump to
@@ -283,6 +286,42 @@ each chord to a fixed internal action, never to a command from the file.
 `agenmux config reload` reinstalls the tables and updates the hints of running
 views; the next toggle does the same for the tables on its own.
 
+Tmux mutations are opt-in. With management enabled, the built-ins are `cc`
+(create a window in the selected pane's session), `cs` (create a session), `dd`
+(delete the selected record), and `r` (rename). `gg` remains available regardless
+of this setting. With management on, session rows and multi-pane window rows
+become selectable, so the cursor can stand on any record; `dd` deletes that
+record with everything under it: a session row kills the session, a window row
+(or a window's only pane) kills the window, a pane inside a split window kills
+just that pane. `r` renames that same record in place: its name turns into an
+edit field preloaded with the current name; empty Enter or Escape cancels. `cc`
+and `cs` add a placeholder row to the tree (a window under the selected session,
+or a new session at the end) where you type the optional name; Enter creates it
+(blank for tmux's default), Escape drops the row. New windows inherit the
+selected pane's working directory and show in the invoking client while input
+stays in the sidebar. Every mutation leaves the client on the sidebar pane, in the
+sidebar key table. Mutation prompts accept input only from that invoking client.
+The delete confirmation is inline: the hint row shows the record's name and
+stable tmux ID and cancels on Enter, `n`, Escape, or any input other than
+lowercase `y`. Window and pane deletes refuse to implicitly destroy a session;
+delete the session row so attached clients can be moved safely first. Set
+`confirm_delete = false` only if immediate deletion is intentional.
+
+```toml
+[tmux_management]
+enabled = false       # required for every create/delete sequence
+confirm_delete = true
+
+[keys]
+sequence_timeout_ms = 1000 # positive; applies live to gg/cc/cs/dd
+```
+
+Disabled mutation sequences are not installed, shown in continuation hints, or
+listed in `?` help, and direct legacy key packets cannot bypass the gate. Reloading
+a disabled setting also clears pending mutation prefixes. Every operation captures and
+revalidates tmux pane/window/session IDs before mutation; a stale target reports an
+error and refreshes instead of falling back to another resource. Pane splitting is
+not part of tmux management.
 Precedence per field: explicit CLI mode > present canonical `@agenmux-*`
 option > present legacy `@agents-mon-*` option > file > defaults. Every supplied
 layer is validated, even when shadowed. Legacy behavioral options are **not**

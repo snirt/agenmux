@@ -69,6 +69,7 @@ pub struct FileConfig {
     pub display: Option<DisplayConfig>,
     pub behavior: Option<BehaviorConfig>,
     pub theme: Option<ThemeConfig>,
+    pub tmux_management: Option<TmuxManagementConfig>,
     pub keys: Option<KeyConfig>,
 }
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -103,6 +104,13 @@ pub struct BehaviorConfig {
     pub notifications: Option<bool>,
     pub hide_windows: Option<String>,
 }
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TmuxManagementConfig {
+    pub enabled: Option<bool>,
+    pub confirm_delete: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ThemeConfig {
@@ -575,6 +583,7 @@ impl<'de> Deserialize<'de> for KeyChord {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct KeyConfig {
+    pub sequence_timeout_ms: Option<u64>,
     pub normal: Option<BTreeMap<Action, Vec<KeyChord>>>,
     pub search: Option<BTreeMap<Action, Vec<KeyChord>>>,
 }
@@ -701,6 +710,7 @@ pub fn parse(source: &str) -> Result<FileConfig, ConfigError> {
     // must be tables, never arrays that happen to have the right field order.
     for field in [
         "display",
+        "tmux_management",
         "behavior",
         "theme",
         "theme.colors",
@@ -755,6 +765,17 @@ fn validate(config: &FileConfig) -> Result<(), ConfigError> {
         }
     }
     let k = config.keys.as_ref();
+    if config
+        .keys
+        .as_ref()
+        .and_then(|keys| keys.sequence_timeout_ms)
+        == Some(0)
+    {
+        return Err(ConfigError::invalid(
+            "keys.sequence_timeout_ms",
+            "must be a positive integer",
+        ));
+    }
     resolved_keys(KeyMode::Normal, k.and_then(|k| k.normal.as_ref()))?;
     resolved_keys(KeyMode::Search, k.and_then(|k| k.search.as_ref()))?;
     Ok(())
@@ -763,6 +784,9 @@ fn validate(config: &FileConfig) -> Result<(), ConfigError> {
 /// Fully resolved behavior. Theme/input application belongs to later tasks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppConfig {
+    pub sequence_timeout_ms: u64,
+    pub tmux_management_enabled: bool,
+    pub tmux_management_confirm_delete: bool,
     pub mode: DisplayMode,
     pub show_all_panes: bool,
     pub sidebar_width: u16,
@@ -860,6 +884,9 @@ pub fn resolve_cli(
 ) -> Result<AppConfig, ConfigError> {
     validate(file)?;
     let mut result = AppConfig {
+        sequence_timeout_ms: 1000,
+        tmux_management_enabled: false,
+        tmux_management_confirm_delete: true,
         mode: DisplayMode::Split,
         show_all_panes: false,
         sidebar_width: 30,
@@ -884,6 +911,9 @@ pub fn resolve_cli(
             ("display.popup_height", "default".into()),
             ("behavior.notifications", "default".into()),
             ("behavior.hide_windows", "default".into()),
+            ("tmux_management.enabled", "default".into()),
+            ("tmux_management.confirm_delete", "default".into()),
+            ("keys.sequence_timeout_ms", "default".into()),
         ]),
     };
     fn apply(r: &mut AppConfig, f: &FileConfig, source: &str) {
@@ -908,6 +938,25 @@ pub fn resolve_cli(
                 r.hide_windows = Some(glob.clone());
                 r.sources.insert("behavior.hide_windows", source.to_owned());
             }
+        }
+        if let Some(management) = &f.tmux_management {
+            set!(
+                tmux_management_enabled,
+                management.enabled,
+                "tmux_management.enabled"
+            );
+            set!(
+                tmux_management_confirm_delete,
+                management.confirm_delete,
+                "tmux_management.confirm_delete"
+            );
+        }
+        if let Some(k) = &f.keys {
+            set!(
+                sequence_timeout_ms,
+                k.sequence_timeout_ms,
+                "keys.sequence_timeout_ms"
+            );
         }
     }
     apply(&mut result, file, "file");
@@ -1280,11 +1329,18 @@ tmux option still wins over the file.
   notifications   true | false                        (true)
   hide_windows    glob for the prefix+w picker        (unset: picker untouched)
 
+[tmux_management]
+  enabled         true | false                        (false)
+  confirm_delete  true | false                        (true)
+
 [theme]
   base            dark | light | terminal             (dark)
 
 [theme.colors]    "default", 0..=255, or "#RRGGBB"; the base fills the rest
 {}
+
+[keys]
+  sequence_timeout_ms  positive integer milliseconds             (1000)
 
 [keys.normal]     {}
 [keys.search]     {}
@@ -1361,6 +1417,14 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
                 .map_or("(unset)".to_string(), escaped),
         ),
         (
+            "tmux_management.enabled".into(),
+            config.tmux_management_enabled.to_string(),
+        ),
+        (
+            "tmux_management.confirm_delete".into(),
+            config.tmux_management_confirm_delete.to_string(),
+        ),
+        (
             "theme.base".into(),
             match config.theme.base.unwrap_or(ThemeBase::Dark) {
                 ThemeBase::Dark => "dark".into(),
@@ -1372,6 +1436,10 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
     for (role, ink) in Palette::resolve(&config.theme).roles() {
         out.push((format!("theme.colors.{role}"), ink.describe()));
     }
+    out.push((
+        "keys.sequence_timeout_ms".into(),
+        config.sequence_timeout_ms.to_string(),
+    ));
     for (action, list) in &config.normal {
         out.push((
             format!("keys.normal.{action:?}").to_lowercase(),
@@ -1883,6 +1951,28 @@ mod tests {
         let empty = parse("").unwrap();
         let default = resolve(&empty, &BTreeMap::new()).unwrap();
         assert!(!default.show_all_panes);
+        assert_eq!(default.sequence_timeout_ms, 1000);
+        assert!(!default.tmux_management_enabled);
+        assert!(default.tmux_management_confirm_delete);
+        let management =
+            parse("[tmux_management]\nenabled = true\nconfirm_delete = false").unwrap();
+        let management = resolve(&management, &BTreeMap::new()).unwrap();
+        assert!(management.tmux_management_enabled);
+        assert!(!management.tmux_management_confirm_delete);
+        let effective = rows(&default);
+        for (name, value) in [
+            ("tmux_management.enabled", "false"),
+            ("tmux_management.confirm_delete", "true"),
+            ("keys.sequence_timeout_ms", "1000"),
+        ] {
+            let row = effective.iter().find(|row| row.name == name).unwrap();
+            assert_eq!(row.value, value);
+            assert_eq!(row.source, "default");
+        }
+        let timeout = parse("[keys]\nsequence_timeout_ms = 250").unwrap();
+        let timeout = resolve(&timeout, &BTreeMap::new()).unwrap();
+        assert_eq!(timeout.sequence_timeout_ms, 250);
+        assert_eq!(timeout.sources["keys.sequence_timeout_ms"], "file");
         let enabled = parse("[display]\nshow_all_panes = true").unwrap();
         let enabled = resolve(&enabled, &BTreeMap::new()).unwrap();
         assert!(enabled.show_all_panes);
@@ -2025,6 +2115,9 @@ popup_height = "auto"
 [behavior]
 notifications = true
 hide_windows = "agents*"
+[tmux_management]
+enabled = false
+confirm_delete = true
 [theme]
 base = "light"
 [theme.colors]
@@ -2033,6 +2126,8 @@ header_fg = "#202020"
 working_bg = "#fff0cc"
 working_bg_unfocused = "#f7f2e5"
 working_fg = "#775500"
+[keys]
+sequence_timeout_ms = 1000
 [keys.normal]
 down = ["j", "Down"]
 up = ["k", "Up"]
@@ -2071,6 +2166,10 @@ clear = ["C-u"]
             "display = ['split', 30, 40, 'auto']",
             "behavior = [true, 300, 'agents*']",
             "theme = ['dark', {}]",
+            "tmux_management = [false, true]",
+            "[tmux_management]\nenabled = 'yes'",
+            "[tmux_management]\nconfirm_delete = 1",
+            "[tmux_management]\ncommand = true",
             "keys = [{}, {}, {}]",
             "version = 2",
             "version = -1",
@@ -2112,18 +2211,15 @@ clear = ["C-u"]
                 assert!(parse(&format!("[display]\n{field} = {value}")).is_ok());
             }
         }
-        for value in ["'off'", "0", "60000"] {}
-        for value in [
-            "'auto'",
-            "'0'",
-            "-1",
-            "60001",
-            "1.5",
-            "nan",
-            "inf",
-            "true",
-            "4294967296",
-        ] {}
+        for value in ["0", "-1", "1.5", "true", "'1000'"] {
+            assert!(
+                parse(&format!("[keys]\nsequence_timeout_ms = {value}")).is_err(),
+                "accepted sequence timeout {value}"
+            );
+        }
+        for value in [1, 1000, 60_000] {
+            assert!(parse(&format!("[keys]\nsequence_timeout_ms = {value}")).is_ok());
+        }
         assert!(parse("[display]\nmode = 'popup'\npopup_height = 'off'").is_err());
     }
 

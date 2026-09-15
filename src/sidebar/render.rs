@@ -2,7 +2,7 @@ use crate::app_config::{Action, Keymap, Palette};
 use crate::input::term_size;
 use std::io::Write;
 
-use super::overlay::current_tag;
+use super::overlay::{current_tag, Overlay};
 use super::ui::{bar, TopBar};
 use super::{Sidebar, VisiblePane, E};
 
@@ -35,6 +35,38 @@ pub(super) fn cursor_mark(
 
 /// Clip generated SGR/CSI frames without splitting an escape or wrapping a
 /// logical click row. Layout elsewhere uses the same character-cell metric.
+/// Visible-width clip of one styled line, padded to exactly `width` cells.
+/// Escape sequences pass through; a truncated line ends in `…`.
+pub(super) fn clip_width(line: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut shown = 0;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            out.push(c);
+            if chars.peek() == Some(&'[') {
+                out.push(chars.next().unwrap());
+                for parameter in chars.by_ref() {
+                    out.push(parameter);
+                    if ('@'..='~').contains(&parameter) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if shown + 1 >= width && chars.peek().is_some_and(|next| *next != '\x1b') {
+            out.push('…');
+            shown += 1;
+            break;
+        }
+        out.push(c);
+        shown += 1;
+    }
+    out.push_str(&" ".repeat(width.saturating_sub(shown)));
+    out
+}
+
 pub(super) fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
     if cols == 0 || cap == 0 {
         return format!("{E}[H{E}[0m{E}[J");
@@ -225,6 +257,7 @@ impl Sidebar {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn inventory_lines(
         &self,
         cols: usize,
@@ -232,28 +265,6 @@ impl Sidebar {
         accent: &str,
         muted: &str,
     ) -> (Vec<(String, String, usize, bool)>, usize, usize) {
-        let mut groups: Vec<(usize, Vec<(usize, Vec<(usize, usize)>)>)> = Vec::new();
-        for (ordinal, visible) in self.visible.iter().copied().enumerate() {
-            let VisiblePane::Inventory(pane_i) = visible else {
-                continue;
-            };
-            let pane = &self.panes[pane_i];
-            let new_session = groups
-                .last()
-                .is_none_or(|(i, _)| self.panes[*i].session_id != pane.session_id);
-            if new_session {
-                groups.push((pane_i, Vec::new()));
-            }
-            let windows = &mut groups.last_mut().unwrap().1;
-            let new_window = windows
-                .last()
-                .is_none_or(|(i, _)| self.panes[*i].window_id != pane.window_id);
-            if new_window {
-                windows.push((pane_i, Vec::new()));
-            }
-            windows.last_mut().unwrap().1.push((ordinal, pane_i));
-        }
-
         let mut counts = std::collections::HashMap::new();
         for pane in &self.panes {
             *counts
@@ -263,101 +274,264 @@ impl Sidebar {
         let window_icon = self.palette.done_fg.fg("");
         let mut lines = Vec::new();
         let (mut sel_top, mut sel_bot) = (0usize, 0usize);
-        for (session_i, windows) in &groups {
-            let session = &self.panes[*session_i];
-            let name: String = session.session_name.chars().take(cols).collect();
-            lines.push((format!("{accent}{name}{E}[0m{E}[K\n"), "-".into(), 0, false));
-            for (window_i, panes) in windows {
-                let window = &self.panes[*window_i];
-                let expanded = counts[&(window.session_id.as_str(), window.window_id.as_str())] > 1;
-                if expanded {
+        // With management on, Session/Window rows are selectable entries of
+        // `visible`; otherwise the same headers are drawn from the pane rows.
+        let selectable_headers = self
+            .visible
+            .iter()
+            .any(|row| matches!(row, VisiblePane::Session(_)));
+        let (mut session_id, mut window_id) = ("", "");
+        // Rename edits the record's own name field; create grows the tree by
+        // one placeholder row whose name the user is typing.
+        let typed = |name: &str| -> String { name.chars().filter(|c| !c.is_control()).collect() };
+        let renaming = match &self.overlay {
+            Some(Overlay::Rename { name, .. }) => Some(typed(name)),
+            _ => None,
+        };
+        let creating = match &self.overlay {
+            Some(Overlay::Create { target, name }) => Some((target, typed(name))),
+            _ => None,
+        };
+        let cursor = if creating.is_some() { None } else { cursor };
+        let mut session_end = None;
+        let header_mark = |selected: bool| {
+            if selected {
+                format!("{muted}❯{E}[0m ")
+            } else {
+                "  ".into()
+            }
+        };
+        let width_of = |row: &str| {
+            let mut chars = row.chars();
+            let mut width = 0;
+            while let Some(c) = chars.next() {
+                if c == '\x1b' && chars.next() == Some('[') {
+                    for parameter in chars.by_ref() {
+                        if ('@'..='~').contains(&parameter) {
+                            break;
+                        }
+                    }
+                } else {
+                    width += 1;
+                }
+            }
+            width
+        };
+        for (ordinal, visible) in self.visible.iter().copied().enumerate() {
+            let selected = Some(ordinal) == cursor;
+            let (pane_i, header) = match visible {
+                VisiblePane::Agent(_) => continue,
+                VisiblePane::Session(i) => {
+                    let pane = &self.panes[i];
+                    session_id = &pane.session_id;
+                    window_id = "";
+                    let name: String = match renaming.as_deref().filter(|_| selected) {
+                        Some(edit) => format!("{edit}▏"),
+                        None => pane.session_name.chars().take(cols).collect(),
+                    };
+                    (i, format!("{}{accent}{name}{E}[0m", header_mark(selected)))
+                }
+                VisiblePane::Window(i) => {
+                    let pane = &self.panes[i];
+                    window_id = &pane.window_id;
+                    let name = match renaming.as_deref().filter(|_| selected) {
+                        Some(edit) => format!("{edit}▏"),
+                        None => pane.window_name.clone(),
+                    };
+                    (
+                        i,
+                        format!("  {}{accent}\u{eb7f} {name}{E}[0m", header_mark(selected)),
+                    )
+                }
+                VisiblePane::Inventory(i) => (i, String::new()),
+            };
+            let pane = &self.panes[pane_i];
+            if !header.is_empty() {
+                let row_bg = if selected {
+                    self.palette.pane_bg.bg()
+                } else {
+                    String::new()
+                };
+                if selected {
+                    sel_top = lines.len();
+                }
+                lines.push((
+                    format!("{}{E}[K\n", bar(&header, &row_bg, cols, width_of(&header))),
+                    pane.pane.clone(),
+                    ordinal + 1,
+                    selected,
+                ));
+                if selected {
+                    sel_bot = lines.len() - 1;
+                }
+                if creating
+                    .as_ref()
+                    .is_some_and(|(target, _)| target.session_id == pane.session_id)
+                {
+                    session_end = Some(lines.len());
+                }
+                continue;
+            }
+            let expanded = counts[&(pane.session_id.as_str(), pane.window_id.as_str())] > 1;
+            if !selectable_headers {
+                if pane.session_id != session_id {
+                    session_id = &pane.session_id;
+                    window_id = "";
+                    let name: String = pane.session_name.chars().take(cols).collect();
+                    lines.push((format!("{accent}{name}{E}[0m{E}[K\n"), "-".into(), 0, false));
+                }
+                if expanded && pane.window_id != window_id {
+                    window_id = &pane.window_id;
                     lines.push((
-                        format!("   {accent} {}{E}[0m{E}[K\n", window.window_name),
+                        format!("   {accent}\u{eb7f} {}{E}[0m{E}[K\n", pane.window_name),
                         "-".into(),
                         0,
                         false,
                     ));
                 }
-                for (ordinal, pane_i) in panes {
-                    let pane = &self.panes[*pane_i];
-                    let selected = Some(*ordinal) == cursor;
-                    if selected {
-                        sel_top = lines.len();
-                    }
-                    let agent = self.visible_agent_row(VisiblePane::Inventory(*pane_i));
-                    let state = agent.map_or("idle", |row| row.state.as_str());
-                    let mark = if agent.is_some() {
-                        cursor_mark(&self.palette, selected, self.plugin_selected, state)
-                    } else if selected {
-                        format!("{muted}❯{E}[0m ")
-                    } else {
-                        "  ".into()
-                    };
-                    let prefix = if expanded { "  " } else { "" };
-                    let detail = if let Some(row) = agent {
-                        format!(
-                            "{} {E}[1m{}{E}[0m {muted}{}{E}[0m",
-                            self.dot(state),
-                            row.agent,
-                            pane.command
-                        )
-                    } else if expanded {
-                        format!("{window_icon}▢{E}[0m {muted}{}{E}[0m", pane.command)
-                    } else {
-                        format!("{window_icon}{E}[0m {muted}{}{E}[0m", window.window_name)
-                    };
-                    let row = format!(" {mark}{prefix}{detail}");
-                    let row_bg = match (agent, selected) {
-                        (Some(_), true) => self.palette.state_bg(state, self.plugin_selected),
-                        (None, true) => self.palette.pane_bg.bg(),
-                        _ => String::new(),
-                    };
-                    let mut chars = row.chars();
-                    let mut width = 0;
-                    while let Some(c) = chars.next() {
-                        if c == '\x1b' && chars.next() == Some('[') {
-                            for parameter in chars.by_ref() {
-                                if ('@'..='~').contains(&parameter) {
-                                    break;
-                                }
-                            }
-                        } else {
-                            width += 1;
-                        }
-                    }
-                    lines.push((
-                        format!("{}{E}[K\n", bar(&row, &row_bg, cols, width)),
-                        pane.pane.clone(),
-                        ordinal + 1,
-                        selected,
-                    ));
-                    if let Some(row) = agent.filter(|row| !row.title.is_empty()) {
-                        let title_prefix = if expanded { "       " } else { "     " };
-                        let title: String = row
-                            .title
-                            .chars()
-                            .take(cols.saturating_sub(title_prefix.chars().count()))
-                            .collect();
-                        let width = title_prefix.chars().count() + title.chars().count();
-                        let line = format!("{title_prefix}{muted}{title}{E}[0m");
-                        lines.push((
-                            format!("{}{E}[K\n", bar(&line, &row_bg, cols, width)),
-                            pane.pane.clone(),
-                            ordinal + 1,
-                            selected,
-                        ));
-                    }
-                    if selected {
-                        sel_bot = lines.len() - 1;
-                    }
-                }
             }
+            if selected {
+                sel_top = lines.len();
+            }
+            let agent = self.visible_agent_row(VisiblePane::Inventory(pane_i));
+            let state = agent.map_or("idle", |row| row.state.as_str());
+            let mark = if agent.is_some() {
+                cursor_mark(&self.palette, selected, self.plugin_selected, state)
+            } else {
+                header_mark(selected)
+            };
+            // Selectable headers reserve cursor-mark columns: sessions at 0,
+            // windows at 2, panes under a split window at 4. Plain headers
+            // keep the flat layout.
+            let base = if selectable_headers { "  " } else { " " };
+            let prefix = if expanded { "  " } else { "" };
+            // The editable field sits where the record's name is shown.
+            let edit = renaming.as_deref().filter(|_| selected);
+            // Everything on the row before the editable name, so the edit field
+            // can be clipped to keep its cursor on screen in a narrow pane.
+            let lead = if let Some(row) = agent {
+                format!(
+                    "{base}{mark}{prefix}{} {E}[1m{}{E}[0m ",
+                    self.dot(state),
+                    row.agent
+                )
+            } else if expanded {
+                format!("{base}{mark}{prefix}{window_icon}▢{E}[0m ")
+            } else {
+                format!("{base}{mark}{prefix}{window_icon}\u{eb7f}{E}[0m ")
+            };
+            // Agent rows show the working directory for session context, like
+            // the agent-only view; a collapsed single-pane window shows its
+            // window name (renamed by `r`); an expanded pane shows its title
+            // when set, else the command.
+            let name = if let Some(row) = agent {
+                &row.cwd
+            } else if !expanded {
+                &pane.window_name
+            } else if !pane.pane_title.is_empty() {
+                &pane.pane_title
+            } else {
+                &pane.command
+            };
+            let field = match edit {
+                Some(edit) => {
+                    // Show the tail: a long name keeps its cursor visible.
+                    let room = cols.saturating_sub(width_of(&lead) + 1).max(1);
+                    let shown: String = if edit.chars().count() > room {
+                        let tail: String = edit
+                            .chars()
+                            .rev()
+                            .take(room - 1)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        format!("…{tail}")
+                    } else {
+                        edit.to_string()
+                    };
+                    format!("{accent}{shown}▏{E}[0m")
+                }
+                None => format!("{muted}{name}{E}[0m"),
+            };
+            let row = format!("{lead}{field}");
+            let row_bg = match (agent, selected) {
+                (Some(_), true) => self.palette.state_bg(state, self.plugin_selected),
+                (None, true) => self.palette.pane_bg.bg(),
+                _ => String::new(),
+            };
+            lines.push((
+                format!("{}{E}[K\n", bar(&row, &row_bg, cols, width_of(&row))),
+                pane.pane.clone(),
+                ordinal + 1,
+                selected,
+            ));
+            if let Some(row) = agent.filter(|row| !row.title.is_empty()) {
+                let title_prefix = match (selectable_headers, expanded) {
+                    (true, true) => "        ",
+                    (true, false) => "      ",
+                    (false, true) => "       ",
+                    (false, false) => "     ",
+                };
+                let title: String = row
+                    .title
+                    .chars()
+                    .take(cols.saturating_sub(title_prefix.chars().count()))
+                    .collect();
+                let width = title_prefix.chars().count() + title.chars().count();
+                let line = format!("{title_prefix}{muted}{title}{E}[0m");
+                lines.push((
+                    format!("{}{E}[K\n", bar(&line, &row_bg, cols, width)),
+                    pane.pane.clone(),
+                    ordinal + 1,
+                    selected,
+                ));
+            }
+            if selected {
+                sel_bot = lines.len() - 1;
+            }
+            if creating
+                .as_ref()
+                .is_some_and(|(target, _)| target.session_id == pane.session_id)
+            {
+                session_end = Some(lines.len());
+            }
+        }
+        if let Some((target, name)) = creating {
+            let (row, at) = match target.action {
+                crate::input::SequenceAction::CreateSession => (
+                    format!("{}{accent}{name}▏{E}[0m", header_mark(true)),
+                    lines.len(),
+                ),
+                _ => (
+                    format!("  {}{accent}\u{eb7f} {name}▏{E}[0m", header_mark(true)),
+                    session_end.unwrap_or(lines.len()),
+                ),
+            };
+            let bg = self.palette.pane_bg.bg();
+            lines.insert(
+                at,
+                (
+                    format!("{}{E}[K\n", bar(&row, &bg, cols, width_of(&row))),
+                    "-".into(),
+                    0,
+                    false,
+                ),
+            );
+            sel_top = at;
+            sel_bot = at;
         }
         (lines, sel_top, sel_bot)
     }
 
     pub(super) fn render(&mut self, force: bool) {
-        if self.overlay.is_some() {
+        // Mutation prompts stay inline: the list keeps rendering and the
+        // prompt shares the cursor row.
+        if self
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| !overlay.renders_inline())
+        {
             self.render_overlay(force);
             return;
         }
@@ -413,7 +587,40 @@ impl Sidebar {
             .collect();
         let title_len = title.chars().count();
         let nav = self.nav_label(true, false);
-        let hint = if self.search_focused {
+        let sequence_hint = join(
+            &self
+                .key_sequence
+                .continuations(self.settings.settings.tmux_management_enabled)
+                .into_iter()
+                .map(|(key, label)| format!("{key} {label}"))
+                .collect::<Vec<_>>(),
+        );
+        // The tree draws create and rename in place; only agent-only mode and
+        // the delete confirmation use the cursor-row prompt.
+        let inline = self
+            .overlay
+            .as_ref()
+            .filter(|overlay| {
+                !self.settings.settings.show_all_panes || matches!(overlay, Overlay::Confirm(_))
+            })
+            .and_then(Overlay::inline_prompt);
+        let inline_hint = match &self.overlay {
+            Some(Overlay::Confirm(_)) => Some("y delete · any other key cancels".to_string()),
+            Some(Overlay::Create { .. }) => Some(join(&[
+                self.hint(&self.search_keys, Action::Accept, "create"),
+                self.hint(&self.search_keys, Action::Cancel, "cancel"),
+            ])),
+            Some(Overlay::Rename { .. }) => Some(join(&[
+                self.hint(&self.search_keys, Action::Accept, "rename"),
+                self.hint(&self.search_keys, Action::Cancel, "cancel"),
+            ])),
+            _ => None,
+        };
+        let hint = if let Some(inline_hint) = inline_hint {
+            inline_hint
+        } else if !sequence_hint.is_empty() {
+            sequence_hint
+        } else if self.search_focused {
             join(&[
                 self.hint(&self.search_keys, Action::Accept, "nav"),
                 self.hint(&self.search_keys, Action::Clear, "clear"),
@@ -543,8 +750,59 @@ impl Sidebar {
                     }
                 }
             }
-            // cursor's session header gives context — drag it into view
-            if self.follow_selection && cursor.is_some() {
+            // A mutation prompt shares the cursor row: the record keeps its
+            // shape on the left, the prompt takes the right half.
+            if let Some((prompt, error)) =
+                inline.filter(|_| cursor.is_some() && sel_top < lines.len())
+            {
+                // Right half by default; a long prompt (a typed name) pushes
+                // the record left and keeps its own tail, where typing happens.
+                let mut prompt: String = prompt;
+                let max_prompt = cols.saturating_sub(4);
+                if prompt.chars().count() > max_prompt {
+                    let tail: String = prompt
+                        .chars()
+                        .rev()
+                        .take(max_prompt.saturating_sub(1))
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    prompt = format!("…{tail}");
+                }
+                let half = (cols / 2).min(cols.saturating_sub(prompt.chars().count() + 1));
+                let text = lines[sel_top].0.trim_end_matches('\n');
+                let text = text.strip_suffix(&format!("{E}[K")).unwrap_or(text);
+                // bar() padded the row to the full width; drop that fill so the
+                // clip sees the record, not trailing spaces.
+                let text = text.strip_suffix(&format!("{E}[0m")).unwrap_or(text);
+                let text = text.trim_end_matches(' ');
+                let left = clip_width(text, half);
+                let style = if error {
+                    self.palette.error_fg.fg("1")
+                } else {
+                    self.palette.accent_fg.fg("1")
+                };
+                let merged = format!("{left}{E}[0m{style}{prompt}{E}[0m");
+                let bg = match self.visible.get(self.sel.wrapping_sub(1)) {
+                    Some(&row) if self.visible_agent_row(row).is_some() => self
+                        .palette
+                        .state_bg(self.visible_state(row), self.plugin_selected),
+                    _ => self.palette.pane_bg.bg(),
+                };
+                lines[sel_top].0 = format!(
+                    "{}{E}[K\n",
+                    bar(&merged, &bg, cols, half + prompt.chars().count())
+                );
+            }
+            // cursor's session header gives context — drag it into view. An
+            // inline prompt row (create placeholder, rename, confirm) is the
+            // cursor for this purpose even when the list cursor is hidden.
+            let prompt_row = self
+                .overlay
+                .as_ref()
+                .is_some_and(|overlay| overlay.renders_inline());
+            if self.follow_selection && (cursor.is_some() || prompt_row) {
                 if sel_top > 0 && lines[sel_top - 1].1 == "-" {
                     sel_top -= 1;
                 }
@@ -606,6 +864,7 @@ impl Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_config::KeyChord;
     use crate::pane_writers::PaneWriters;
     use crate::scan::{PaneMeta, PaneRow};
     use crate::tmux::Tmux;
@@ -614,7 +873,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::super::filter::StateFilter;
-    use super::super::{new_sidebar, Daemon, Overlay};
+    use super::super::{new_sidebar, Daemon, MutationTarget, Overlay};
+    use crate::input::SequenceAction;
 
     fn row(pane: &str) -> PaneRow {
         PaneRow {
@@ -627,6 +887,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn pane(
         session_id: &str,
         session_name: &str,
@@ -793,6 +1054,8 @@ mod tests {
         }
         let false_frames = frames.clone();
         sb.settings.settings.show_all_panes = true;
+        sb.config_show_all = true; // keep the toggle's config baseline in sync
+        sb.adopted_show_all_panes = true;
         sb.rows = vec![PaneRow {
             pane: "%22".into(),
             loc: "work:2.2".into(),
@@ -870,8 +1133,8 @@ mod tests {
         let after_status = record.chars().skip(1).collect::<String>();
         assert_eq!(
             after_status.trim_end(),
-            " claude node",
-            "agent rows order status, agent name, then pane command"
+            " claude repo",
+            "agent rows order status, agent name, then working directory"
         );
         assert!(
             selected_agent.contains(&format!(
@@ -940,6 +1203,113 @@ mod tests {
             selected_agent_rows, 2,
             "agent row and description share click target"
         );
+
+        // In-place rename: with management on, session and window rows are
+        // selectable, and the record under the cursor turns into an edit field
+        // preloaded at its own name position.
+        sb.settings.settings.tmux_management_enabled = true;
+        sb.rebuild_visible(false);
+        let rename =
+            |sb: &mut Sidebar, action, session_id: &str, window_id: &str, pane_id: &str| {
+                sb.overlay = Some(Overlay::Rename {
+                    target: MutationTarget {
+                        action,
+                        pane_id: pane_id.into(),
+                        window_id: window_id.into(),
+                        session_id: session_id.into(),
+                        cwd: String::new(),
+                        client: String::new(),
+                    },
+                    name: "EDITING".into(),
+                });
+            };
+        // Session row (first visible) becomes "EDITING▏".
+        sb.select_index(1);
+        rename(&mut sb, SequenceAction::RenameSession, "$1", "@1", "%11");
+        sb.render(true);
+        let session_line = sb
+            .last_frame
+            .lines()
+            .find(|line| ansi.replace_all(line, "").contains("EDITING"))
+            .expect("session rename shows the edit field in place");
+        assert_eq!(
+            ansi.replace_all(session_line, "").trim_end(),
+            "❯ EDITING▏",
+            "session rename replaces the session name at its own position"
+        );
+        // A pane inside the expanded window edits at its command position.
+        let node_row = sb
+            .visible
+            .iter()
+            .position(|row| matches!(row, VisiblePane::Inventory(i) if sb.panes[*i].pane == "%22"))
+            .unwrap();
+        sb.select_index(node_row + 1);
+        rename(&mut sb, SequenceAction::RenamePane, "$1", "@2", "%22");
+        sb.render(true);
+        assert!(
+            sb.last_frame
+                .lines()
+                .any(|line| ansi.replace_all(line, "").contains("claude EDITING▏")),
+            "pane rename edits at the command position, keeping agent name: {}",
+            sb.last_frame
+        );
+        sb.overlay = None;
+        sb.settings.settings.tmux_management_enabled = false;
+        sb.rebuild_visible(false);
+
+        // A pane in a split window shows its title when set, so a rename is
+        // visible; the single-pane window keeps its window name.
+        sb.panes[1].pane_title = "renamed-pane".into();
+        sb.rebuild_visible(false);
+        sb.render(true);
+        let npm_row = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("renamed-pane"))
+            .expect("split-window pane shows its title");
+        assert!(
+            !npm_row.contains("npm"),
+            "the titled pane replaces its command, not both: {npm_row}"
+        );
+        sb.panes[1].pane_title.clear();
+
+        // The "." toggle flips the live view between agents and the full tree.
+        assert!(sb.settings.settings.show_all_panes);
+        sb.toggle_all_panes();
+        assert!(!sb.settings.settings.show_all_panes);
+        sb.render(true);
+        assert!(
+            !sb.last_frame.contains("editor"),
+            "agent-only view drops ordinary panes: {}",
+            sb.last_frame
+        );
+        sb.toggle_all_panes();
+        assert!(sb.settings.settings.show_all_panes);
+        // Toggle off, then simulate a config refresh (which re-resolves the
+        // unchanged config value into settings) — the live toggle must survive.
+        sb.toggle_all_panes();
+        assert!(!sb.settings.settings.show_all_panes);
+        sb.settings.settings.show_all_panes = sb.config_show_all; // refresh restores config
+        sb.sync_panes_view();
+        assert!(
+            !sb.settings.settings.show_all_panes,
+            "a config refresh must not revert the live . toggle"
+        );
+        // Editing the config value itself (differs from the tracked baseline)
+        // clears the override and wins.
+        let edited = !sb.config_show_all;
+        sb.settings.settings.show_all_panes = edited;
+        sb.sync_panes_view();
+        assert!(
+            sb.settings.settings.show_all_panes == edited && sb.panes_override.is_none(),
+            "an edited config value overrides the live toggle"
+        );
+        sb.settings.settings.show_all_panes = true;
+        sb.config_show_all = true;
+        sb.panes_override = None;
+        sb.adopted_show_all_panes = true;
+        sb.rebuild_visible(false);
+
         sb.select_index(3);
         sb.render(true);
         frames.push_str(&format!(
@@ -1035,10 +1405,12 @@ mod tests {
         ));
 
         let fixture = std::fs::read_to_string("tests/fixtures/sidebar/dark.frames").unwrap();
-        assert!(
-            fixture.starts_with(&false_frames),
-            "false-mode fixture prefix changed"
-        );
+        if std::env::var_os("AGENMUX_UPDATE_FIXTURES").is_none() {
+            assert!(
+                fixture.starts_with(&false_frames),
+                "false-mode fixture prefix changed"
+            );
+        }
         if std::env::var_os("AGENMUX_UPDATE_FIXTURES").is_some() {
             std::fs::write("tests/fixtures/sidebar/dark.frames", &frames).unwrap();
         }
@@ -1168,6 +1540,54 @@ mod tests {
         // An unbound action leaves no row behind rather than a stale default.
         assert!(!help.contains("close sidebar"), "{help}");
         assert!(help.contains("jump to agent"), "{help}");
+        assert!(!help.contains("cc"), "{help}");
+        sb.settings.settings.tmux_management_enabled = true;
+        sb.last_frame.clear();
+        sb.render(true);
+        let help = sb.last_frame.clone();
+        for entry in ["gg", "cc", "cs", "dd"] {
+            assert!(help.contains(entry), "missing {entry}: {help}");
+        }
+        sb.normal_keys
+            .get_mut(&Action::Down)
+            .unwrap()
+            .push(KeyChord::Printable(b'c'));
+        sb.last_frame.clear();
+        sb.render(true);
+        let overridden_help = sb.last_frame.clone();
+        assert!(!overridden_help.contains("cc"), "{overridden_help}");
+        assert!(!overridden_help.contains("cs"), "{overridden_help}");
+        sb.normal_keys.get_mut(&Action::Down).unwrap().pop();
+        sb.overlay = None;
+        sb.key_sequence
+            .push('c', None, Instant::now(), Duration::from_secs(1), true);
+        sb.render(true);
+        assert!(
+            sb.last_frame.contains("c create window"),
+            "{}",
+            sb.last_frame
+        );
+        assert!(
+            sb.last_frame.contains("s create session"),
+            "{}",
+            sb.last_frame
+        );
+        sb.overlay = Some(Overlay::Create {
+            target: MutationTarget {
+                action: SequenceAction::CreateWindow,
+                pane_id: "%7".into(),
+                window_id: "@4".into(),
+                session_id: "$2".into(),
+                cwd: "/tmp/work".into(),
+                client: "client-a".into(),
+            },
+            name: "dev".into(),
+        });
+        sb.render(true);
+        assert!(sb.last_frame.contains("dev▏"), "{}", sb.last_frame);
+        sb.overlay = None;
+        sb.key_sequence.clear();
+        sb.overlay = Some(Overlay::Help);
         sb.settings.settings.show_all_panes = true;
         sb.render(true);
         assert!(sb.last_frame.contains("jump to pane"), "{}", sb.last_frame);
@@ -1403,6 +1823,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::option_env_unwrap)]
     fn app_title_identifies_dev_and_release_builds() {
         let expected = if cfg!(debug_assertions) {
             let timestamp = option_env!("AGENMUX_BUILD_TIMESTAMP").expect("debug timestamp");

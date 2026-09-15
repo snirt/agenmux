@@ -2,6 +2,21 @@
 # End-to-end regression for the preserved sidebar's native client key table.
 # The first invocation omits a client to verify newest-real-client discovery.
 set -euo pipefail
+# On failure, show what the daemon saw: CI runners have no other trace.
+diagnose() {
+  echo "--- panes"
+  tmux -S "$sock" list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_id} #{pane_title}' 2>&1 || true
+  echo "--- daemon log tail"
+  tail -n 40 "$XDG_STATE_HOME/agenmux/daemon.log" 2>/dev/null || true
+  echo "--- daemon processes"
+  pgrep -fl "agenmux daemon" 2>/dev/null || true
+  echo "--- config file"
+  cat "$XDG_CONFIG_HOME/agenmux/config.toml" 2>/dev/null || true
+  echo "--- daemon trace: keys, sends, reloads, exits"
+  grep -E '# key|# send key|@agenmux-reload [0-9]|trace start|event loop|# mutation' \
+    "$tmp/daemon-trace.log" 2>/dev/null | tail -n 80 || true
+}
+trap 'echo "FAIL navigation-key-table: command failed at line $LINENO"; diagnose' ERR
 
 # grep -q exits at the first match, and pipefail turns the writer's EPIPE into a failure
 has() { [[ $1 == *"$2"* ]]; }
@@ -65,6 +80,10 @@ tmux -S "$sock" set-option -g @agenmux-bin "$BIN"
 tmux -S "$sock" set-option -g @agenmux-width 30
 tmux -S "$sock" set-option -g prefix M-a
 tmux -S "$sock" set-option -g mouse on
+# tmux 3.5 defaults escape-time to 10ms; the FIFO relay then splits arrow
+# sequences (ESC [ B) into a lone Escape, so dropdown arrows misfire. A small
+# but non-trivial time coalesces them; the wait loops tolerate the ESC delay.
+tmux -S "$sock" set-option -g escape-time 250
 # The sidebar must behave like a regular pane for the user's root-table
 # bindings. This deliberately differs from tmux's defaults so the test proves
 # the configured command is inherited rather than hard-coded by the plugin.
@@ -115,7 +134,10 @@ done
 
 server_pid="$(tmux -S "$sock" display-message -p '#{pid}')"
 # No client argument exercises native newest-real-client discovery.
+# Key bindings run the engine through tmux: hand them the trace file too.
+tmux -S "$sock" set-environment -g AGENMUX_DEBUG "$tmp/daemon-trace.log"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
+  AGENMUX_DEBUG="$tmp/daemon-trace.log" \
   "$BIN" toggle split
 
 # Native toggle invokes setup, which must preserve the
@@ -123,13 +145,15 @@ env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
 normal_keys="$(tmux -S "$sock" list-keys -T agenmux)"
 search_keys="$(tmux -S "$sock" list-keys -T agenmux-search)"
 settings_keys="$(tmux -S "$sock" list-keys -T agenmux-settings-edit)"
-has_re "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" '^15\.[0-9a-f]{16}$' &&
+sequence_keys="$(tmux -S "$sock" list-keys -T agenmux-sequence)"
+has_re "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" '^16\.[0-9a-f]{16}$' &&
   has "$normal_keys" 'C-l' &&
   has "$normal_keys" " key 'sequence-67'" &&
   has "$normal_keys" " key 'last'" &&
   has "$normal_keys" " key 'search'" &&
   has "$normal_keys" " key 'settings'" &&
   has "$settings_keys" " key 'text-6A'" &&
+  has "$sequence_keys" " key 'sequence-67'" &&
   has "$search_keys" 'text-6A' || {
   echo "FAIL navigation-key-table: native setup contract missing"
   exit 1
@@ -152,6 +176,89 @@ done
   echo "FAIL navigation-key-table: sidebar did not render a selection"
   exit 1
 }
+
+printf '[tmux_management]\nenabled = true\n[keys.normal]\nup = ["K"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
+  "$BIN" config reload >/dev/null
+sleep 2.2
+normal_keys="$(tmux -S "$sock" list-keys -T agenmux)"
+sequence_keys="$(tmux -S "$sock" list-keys -T agenmux-sequence)"
+has "$normal_keys" " key 'sequence-64'" &&
+  has "$normal_keys" " key 'sequence-72'" &&
+  has "$normal_keys" 'switch-client -T agenmux-sequence' &&
+  has "$sequence_keys" " key 'sequence-64'" || {
+  echo "FAIL navigation-key-table: management sequence tables missing after reload"
+  exit 1
+}
+rename_window="$(tmux -S "$sock" display-message -p -t "$sidebar" '#{window_name}')"
+printf 'r' >&9
+rename_input=''
+for _ in $(seq 1 40); do
+  rename_input="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+  has "$rename_input" "${rename_window}▏" && break
+  sleep 0.05
+done
+has "$rename_input" "${rename_window}▏" || {
+  echo "FAIL navigation-key-table: r did not open the in-place rename"
+  exit 1
+}
+printf 'x\177' >&9
+rename_input=''
+for _ in $(seq 1 40); do
+  rename_input="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+  has "$rename_input" "${rename_window}▏" && break
+  sleep 0.05
+done
+has "$rename_input" "${rename_window}▏" || {
+  echo "FAIL navigation-key-table: inline rename Backspace did not restore current name"
+  exit 1
+}
+printf '\033' >&9
+sleep 1
+printf 'g' >&9
+sleep 0.1
+printf 'G' >&9
+sleep 1
+invalid_sequence_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+invalid_sequence_table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
+[ "$invalid_sequence_table" = agenmux ] &&
+  ! has "$invalid_sequence_frame" 'returned 2' || {
+  echo "FAIL navigation-key-table: invalid continuation leaked an error"
+  exit 1
+}
+# Exercise the real attached client's key tables: `dd` must reach the daemon
+# and open the inline confirmation without deleting anything.
+windows_before="$(tmux -S "$sock" list-windows -a -F '#{window_id}' | wc -l | tr -d ' ')"
+printf 'dd' >&9
+delete_prompt=''
+for _ in $(seq 1 40); do
+  delete_prompt="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+  has_re "$delete_prompt" 'delete (window|pane)\? y/N' && break
+  sleep 0.05
+done
+has_re "$delete_prompt" 'delete (window|pane)\? y/N' || {
+  echo "FAIL navigation-key-table: dd did not open inline deletion confirmation"
+  exit 1
+}
+printf '\033' >&9
+# A lone Escape sits in tmux for escape-time (500ms before tmux 3.5); wait for
+# the cancel to land before touching the key tables again.
+for _ in $(seq 1 40); do
+  if [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ] &&
+    ! has_re "$(tmux -S "$sock" capture-pane -p -t "$sidebar")" 'delete (window|pane)\? y/N'; then
+    break
+  fi
+  sleep 0.05
+done
+windows_after="$(tmux -S "$sock" list-windows -a -F '#{window_id}' | wc -l | tr -d ' ')"
+[ "$windows_after" = "$windows_before" ] || {
+  echo "FAIL navigation-key-table: cancelling dd deleted a window"
+  exit 1
+}
+printf '[keys.normal]\nup = ["K"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
+env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
+  "$BIN" config reload >/dev/null
+sleep 0.1
 
 table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
 initial_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -965,28 +1072,34 @@ for _ in $(seq 1 40); do
   [ -n "$selected_target" ] && [ "$selected_target" != "$ordinary_target" ] && break
   sleep 0.05
 done
-ordinary_row="$(awk -v target="$ordinary_target" '$1 == target { print NR; exit }' \
-  "$tmp/agenmux-rows")"
 sidebar_left="$(tmux -S "$sock" display-message -p -t "$sidebar" '#{pane_left}')"
 sidebar_top="$(tmux -S "$sock" display-message -p -t "$sidebar" '#{pane_top}')"
 mouse_x=$((sidebar_left + 1))
-mouse_y=$((sidebar_top + ordinary_row + 1))
-tmux -S "$sock" switch-client -c "$client" -t "$work"
-tmux -S "$sock" switch-client -c "$client" -T root
-printf '\033[<0;%d;%dM' "$mouse_x" "$mouse_y" >&9
-for _ in $(seq 1 40); do
-  ordinary_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
-  ordinary_table="$(tmux -S "$sock" display-message -p -c "$client" \
-    '#{client_key_table}')"
-  selected_target="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
-  if [ "$ordinary_focus" = "$sidebar" ] && [ "$ordinary_table" = agenmux ] &&
-    [ "$selected_target" = "$ordinary_target" ]; then
-    ordinary_first_click=1
-    break
-  fi
-  sleep 0.05
+# The row map is rewritten on the daemon's schedule; a click aimed with a map
+# that a scan then shifted lands one row off. Re-aim and retry a few times.
+for _ in 1 2 3; do
+  ordinary_row="$(awk -v target="$ordinary_target" '$1 == target { print NR; exit }' \
+    "$tmp/agenmux-rows")"
+  mouse_y=$((sidebar_top + ordinary_row + 1))
+  tmux -S "$sock" switch-client -c "$client" -t "$work"
+  tmux -S "$sock" switch-client -c "$client" -T root
+  printf '\033[<0;%d;%dM' "$mouse_x" "$mouse_y" >&9
+  for _ in $(seq 1 40); do
+    ordinary_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
+    ordinary_table="$(tmux -S "$sock" display-message -p -c "$client" \
+      '#{client_key_table}')"
+    selected_target="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
+    if [ "$ordinary_focus" = "$sidebar" ] && [ "$ordinary_table" = agenmux ] &&
+      [ "$selected_target" = "$ordinary_target" ]; then
+      ordinary_first_click=1
+      break
+    fi
+    sleep 0.05
+  done
+  printf '\033[<0;%d;%dm' "$mouse_x" "$mouse_y" >&9
+  [ "$ordinary_first_click" -eq 1 ] && break
+  sleep 0.6
 done
-printf '\033[<0;%d;%dm' "$mouse_x" "$mouse_y" >&9
 # Keep these as two clicks rather than tmux's DoubleClick1Pane event.
 sleep 0.6
 ordinary_row="$(awk -v target="$ordinary_target" '$1 == target { print NR; exit }' \
@@ -1145,7 +1258,9 @@ for _ in $(seq 1 20); do
 done
 settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
 has "$settings_frame" '❯ split' && has "$settings_frame" '  popup' && settings_dropdown=1
-printf '\033[B\033' >&9
+# "j" moves the dropdown via the keymap; ESC alone still cancels. Arrow
+# sequences (ESC [ B) race the escape-time on macOS and are covered elsewhere.
+printf 'j\033' >&9
 for _ in $(seq 1 20); do
   if ! grep -q '^mode = ' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
     [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
@@ -1159,8 +1274,10 @@ for _ in $(seq 1 20); do
   [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux-settings-edit ] && break
   sleep 0.05
 done
-printf '\033[B\r' >&9
-for _ in $(seq 1 40); do
+printf 'j\r' >&9
+# Saving reinstalls the key tables through config reload; slow runners have
+# taken several seconds for that.
+for _ in $(seq 1 200); do
   if grep -q '^mode = "popup"' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
     [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
     settings_saved=1
@@ -1183,8 +1300,8 @@ for _ in $(seq 1 20); do
   [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux-settings-edit ] && break
   sleep 0.05
 done
-printf '\033[A\r' >&9
-for _ in $(seq 1 40); do
+printf 'K\r' >&9
+for _ in $(seq 1 200); do
   if grep -q '^mode = "split"' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
     [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
     break
@@ -1278,17 +1395,23 @@ for _ in $(seq 1 40); do
   [ "$(tmux -S "$sock" display-message -p -c "$client" '#{popup_active}')" = 1 ] && break
   sleep 0.05
 done
-printf 's\rj\r' >&9
-for _ in $(seq 1 40); do
-  if grep -q '^mode = "popup"' "$XDG_CONFIG_HOME/agenmux/config.toml"; then
+# Edit a text field: the display.mode dropdown opens on the popup's live
+# effective value, so a relative move there is not deterministic. Rows are
+# mode, show_all_panes, sidebar_width; two j presses reach the width.
+printf 's' >&9
+printf 'jj\r\177\17733\r' >&9
+# A popup save reinstalls the key tables through config reload; a slow runner
+# has taken over five seconds for that, so wait well past it.
+for _ in $(seq 1 200); do
+  if grep -q '^sidebar_width = 33' "$XDG_CONFIG_HOME/agenmux/config.toml"; then
     settings_popup=1
     break
   fi
   sleep 0.05
 done
-printf '\r\033[A\r' >&9
-for _ in $(seq 1 40); do
-  grep -q '^mode = "split"' "$XDG_CONFIG_HOME/agenmux/config.toml" && break
+printf '\r\177\17730\r' >&9
+for _ in $(seq 1 200); do
+  grep -q '^sidebar_width = 30' "$XDG_CONFIG_HOME/agenmux/config.toml" && break
   sleep 0.05
 done
 printf '\033q' >&9
@@ -1368,5 +1491,6 @@ else
   echo "edge-nav: long=$edge_long_list_works slow=$slow_gg_expires search=$search_edges_work state=$state_edges_work"
   echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$blocked_filter_works/$blocked_targets/$blocked_frame/$blocked_hint/$working_filter_works/$working_targets/$working_frame/$idle_filter_works/$idle_targets/$idle_frame/$all_filter_works/$all_targets/$all_frame] reload=[$reload_hint_follows/$reload_hint] ordinary=[$ordinary_keyboard_jump/$ordinary_first_click/$ordinary_mouse_jump/$ordinary_restored_false target=$ordinary_target focus=$ordinary_focus table=$ordinary_table] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
   echo "settings: open=$settings_open search=$settings_search backspace=$settings_backspace applied=$settings_search_applied navigation=$settings_search_navigation dropdown=$settings_dropdown cancelled=$settings_cancelled saved=$settings_saved responsive=$settings_responsive returned=$settings_returned popup=$settings_popup"
+  diagnose
   exit 1
 fi

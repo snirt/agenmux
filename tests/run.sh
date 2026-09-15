@@ -8,9 +8,15 @@ export XDG_CONFIG_HOME="$config_home"
 export XDG_STATE_HOME="$config_home/state"
 trap 'rm -rf "$config_home"' EXIT
 
-BIN="${AGENMUX_BIN:-$DIR/target/release/agenmux}"
-if [ ! -x "$BIN" ]; then
+if [ -z "${AGENMUX_BIN:-}" ]; then
+  BIN="$DIR/target/release/agenmux"
   PATH="$HOME/.cargo/bin:$PATH" cargo build --release --manifest-path "$DIR/Cargo.toml" || exit 1
+else
+  BIN="$AGENMUX_BIN"
+  [ -x "$BIN" ] || {
+    echo "FAIL configured AGENMUX_BIN is not executable"
+    exit 1
+  }
 fi
 
 if "$DIR/tests/no-stale-runtime-refs.sh"; then
@@ -188,8 +194,8 @@ SH
         printf 'engine build failed\n' >>"$tmp/expected-diagnostic"
       fi
       case "$eligibility" in
-        0 | 3) ;;
-        *) printf 'agenmux: notification helper sync skipped (eligibility status %s); run agenmux config check --effective; if unsupported, rebuild the engine and retry installation.\n' "$eligibility" >>"$tmp/expected-diagnostic" ;;
+      0 | 3) ;;
+      *) printf 'agenmux: notification helper sync skipped (eligibility status %s); run agenmux config check --effective; if unsupported, rebuild the engine and retry installation.\n' "$eligibility" >>"$tmp/expected-diagnostic" ;;
       esac
       eligibility_rc=0
       ELIGIBILITY_STATUS="$eligibility" ELIGIBILITY_NOISE="$eligibility_noise" \
@@ -422,13 +428,20 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null; then
   for hook in after-select-window client-session-changed session-window-changed; do
     tmux -L "$socket" set-hook -g "${hook}[42]" 'display-message stale-agenmux-hook'
   done
-  tmux -L "$socket" set-option -g @agenmux-bin "$BIN"
+  # A configured path is version-verified without relying on ignored installer
+  # state beside target/release; BIN itself was built above when no override exists.
+  cp "$BIN" "$tmp/agenmux"
+  chmod +x "$tmp/agenmux"
+  tmux -L "$socket" set-option -g @agenmux-bin "$tmp/agenmux"
   tmux -L "$socket" run-shell "bash '$DIR/agenmux.tmux'"
   stale="$(tmux -L "$socket" show-hooks -g 2>/dev/null | grep -F '[42]' || true)"
-  if [ -z "$stale" ]; then
+  setup_version="$(tmux -L "$socket" show-option -gqv @agenmux-nav-version)"
+  configured_bin="$(tmux -L "$socket" show-option -gqv @agenmux-bin)"
+  if [ -z "$stale" ] && [ -n "$setup_version" ] &&
+    [ "$configured_bin" = "$tmp/agenmux" ]; then
     echo "ok   entrypoint-removes-legacy-follow-hooks"
   else
-    echo "FAIL entrypoint-removes-legacy-follow-hooks: $stale"
+    echo "FAIL entrypoint-removes-legacy-follow-hooks: hooks=[$stale] setup=[$setup_version] bin=[$configured_bin]"
     fail=1
   fi
   tmux -L "$socket" kill-server 2>/dev/null || true

@@ -233,6 +233,7 @@ impl Sidebar {
         let _ = self.tmux.sync();
         let refreshed = self.settings.refresh(&mut self.tmux);
         self.adopt_reload(refreshed);
+        self.sync_panes_view();
         let width_changed = refreshed.width_changed;
         let out = self
             .tmux

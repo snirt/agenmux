@@ -123,23 +123,70 @@ fn filtered_indices(
         .collect()
 }
 
+impl VisiblePane {
+    pub(super) fn is_pane(self) -> bool {
+        matches!(self, VisiblePane::Agent(_) | VisiblePane::Inventory(_))
+    }
+}
+
+/// Session and window rows appear only with tmux management on; they are
+/// the cursor targets `dd` deletes as a whole.
+fn with_record_rows(panes: &[PaneMeta], indices: Vec<usize>) -> Vec<VisiblePane> {
+    let mut out = Vec::with_capacity(indices.len() * 2);
+    let (mut session, mut window) = ("", "");
+    for i in indices {
+        let pane = &panes[i];
+        if pane.session_id != session {
+            session = &pane.session_id;
+            window = "";
+            out.push(VisiblePane::Session(i));
+        }
+        if pane.window_id != window {
+            window = &pane.window_id;
+            let expanded = panes
+                .iter()
+                .filter(|p| p.window_id == pane.window_id)
+                .count()
+                > 1;
+            if expanded {
+                out.push(VisiblePane::Window(i));
+            }
+        }
+        out.push(VisiblePane::Inventory(i));
+    }
+    out
+}
+
 impl Sidebar {
     pub(super) fn visible_pane_id(&self, pane: VisiblePane) -> &str {
         match pane {
             VisiblePane::Agent(i) => &self.rows[i].pane,
-            VisiblePane::Inventory(i) => &self.panes[i].pane,
+            VisiblePane::Inventory(i) | VisiblePane::Session(i) | VisiblePane::Window(i) => {
+                &self.panes[i].pane
+            }
         }
     }
 
     pub(super) fn visible_occurrence(&self, pane: VisiblePane) -> Option<PaneOccurrence> {
-        let VisiblePane::Inventory(i) = pane else {
-            return None;
+        let (i, window, pane_id) = match pane {
+            VisiblePane::Agent(_) => return None,
+            VisiblePane::Session(i) => (i, false, false),
+            VisiblePane::Window(i) => (i, true, false),
+            VisiblePane::Inventory(i) => (i, true, true),
         };
         let pane = &self.panes[i];
         Some(PaneOccurrence {
             session_id: pane.session_id.clone(),
-            window_id: pane.window_id.clone(),
-            pane: pane.pane.clone(),
+            window_id: if window {
+                pane.window_id.clone()
+            } else {
+                String::new()
+            },
+            pane: if pane_id {
+                pane.pane.clone()
+            } else {
+                String::new()
+            },
         })
     }
 
@@ -147,6 +194,7 @@ impl Sidebar {
         let i = match pane {
             VisiblePane::Agent(i) => Some(i),
             VisiblePane::Inventory(i) => self.panes[i].agent_index,
+            VisiblePane::Session(_) | VisiblePane::Window(_) => None,
         }?;
         self.rows.get(i)
     }
@@ -157,7 +205,8 @@ impl Sidebar {
     }
 
     pub(super) fn active_visible_index(&self) -> Option<usize> {
-        let matches = |pane: VisiblePane| self.visible_pane_id(pane) == self.active;
+        let matches =
+            |pane: VisiblePane| pane.is_pane() && self.visible_pane_id(pane) == self.active;
         self.visible
             .iter()
             .position(|&pane| {
@@ -221,7 +270,7 @@ impl Sidebar {
         let physical = || {
             self.visible
                 .iter()
-                .position(|&pane| self.visible_pane_id(pane) == self.sel_pane)
+                .position(|&pane| pane.is_pane() && self.visible_pane_id(pane) == self.sel_pane)
         };
         match exact.or_else(physical) {
             Some(i) => {
@@ -236,11 +285,15 @@ impl Sidebar {
     }
 
     pub(super) fn rebuild_visible(&mut self, select_first: bool) {
+        let before = self.visible.len();
         self.visible = if self.settings.settings.show_all_panes {
-            inventory_filtered_indices(&self.panes, &self.rows, &self.query, self.state_filter)
-                .into_iter()
-                .map(VisiblePane::Inventory)
-                .collect()
+            let indices =
+                inventory_filtered_indices(&self.panes, &self.rows, &self.query, self.state_filter);
+            if self.settings.settings.tmux_management_enabled {
+                with_record_rows(&self.panes, indices)
+            } else {
+                indices.into_iter().map(VisiblePane::Inventory).collect()
+            }
         } else {
             filtered_indices(&self.rows, &self.query, self.state_filter)
                 .into_iter()
@@ -258,6 +311,11 @@ impl Sidebar {
         if self.visible.is_empty() {
             self.sel_pane.clear();
             self.sel_occurrence = None;
+        }
+        // A record appeared or vanished: the viewport clamp can otherwise
+        // leave the cursor off screen, so follow it on the next render.
+        if self.visible.len() != before {
+            self.follow_selection = true;
         }
     }
 
@@ -279,6 +337,23 @@ impl Sidebar {
         self.state_filter = None;
         self.search_focused = false;
         self.rebuild_visible(false);
+    }
+
+    /// Live view toggle between the agent list and the full tmux tree. Not
+    /// written to config; a reload restores the configured default.
+    pub(super) fn toggle_all_panes(&mut self) {
+        // Flip the shown value directly and remember it as the override; the
+        // next refresh re-applies it over the re-resolved config via
+        // sync_panes_view, so a reload cannot revert it.
+        let effective = !self.adopted_show_all_panes;
+        self.panes_override = Some(effective);
+        self.settings.settings.show_all_panes = effective;
+        self.adopted_show_all_panes = effective;
+        self.rebuild_visible(false);
+        if let Some(index) = self.active_visible_index() {
+            self.select_index(index + 1);
+        }
+        self.last_frame.clear();
     }
 
     pub(super) fn search_key(&mut self, key: Key) {
@@ -309,10 +384,12 @@ impl Sidebar {
             Key::WheelUp => self.scroll_viewport(-1),
             Key::WheelDown => self.scroll_viewport(1),
             Key::AllStates => self.clear_filter(),
+            Key::TogglePanes => self.toggle_all_panes(),
             Key::First
             | Key::Last
             | Key::Select(_)
-            | Key::Sequence(_)
+            | Key::Sequence(_, _)
+            | Key::Owned(_, _)
             | Key::Search
             | Key::CycleState
             | Key::Help
@@ -358,6 +435,7 @@ mod tests {
         assert_eq!(filtered_indices(&rows, "api", None), vec![0, 1]);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn inventory_pane(
         session_id: &str,
         session_name: &str,
