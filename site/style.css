@@ -109,12 +109,19 @@ h2.glance { animation: title-glow 1.1s ease-out; }
 
 .tagline {
   color: var(--fg);
-  font-size: clamp(1.1rem, 3vw, 1.5rem);
-  font-weight: 400;
-  margin: 0 auto 1.2rem;
-  max-width: 40rem;
+  font-size: clamp(2rem, 5vw, 3rem);
+  font-weight: 600;
+  line-height: 1.2;
+  margin: 0 auto 1rem;
+  max-width: 24ch;
 }
-.tagline .c-red, .tagline .c-yellow, .tagline .c-green { font-weight: 600; }
+.hero-copy {
+  font-size: clamp(1rem, 2vw, 1.15rem);
+  line-height: 1.6;
+  margin: 0 auto 1rem;
+  max-width: 65ch;
+}
+.hero-copy .c-red, .hero-copy .c-yellow, .hero-copy .c-green { font-weight: 600; }
 
 .badges {
   display: flex;
@@ -308,7 +315,8 @@ h2.glance { animation: title-glow 1.1s ease-out; }
 }
 
 .sidebar .bar {
-  color: var(--t-green);
+  color: var(--t-fg);
+  background: var(--bar-bg);
   font-weight: 700;
   padding: 0 0.6rem;
 }
@@ -317,6 +325,9 @@ h2.glance { animation: title-glow 1.1s ease-out; }
 .sidebar .hint {
   color: var(--t-dim);
   padding: 0.05rem 0.6rem;
+  white-space: nowrap;      /* the real hint row is clipped to the pane, never wrapped */
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sidebar .session {
@@ -352,7 +363,6 @@ h2.glance { animation: title-glow 1.1s ease-out; }
    its fixed dark row colors even on a light terminal, so the selected entry
    flips to light-on-dark, matching the real screenshot. */
 .entry.selected { color: #e8e8e8; }
-.entry.selected .cursor { color: #e8e8e8; }
 .entry.selected .rest, .entry.selected .title { color: #a8a8a8; }
 .entry.selected[data-state="blocked"] { background: var(--blocked-sel); }
 .entry.selected[data-state="working"] { background: var(--working-sel); }
@@ -368,6 +378,30 @@ h2.glance { animation: title-glow 1.1s ease-out; }
 .entry.selected[data-state="working"] .glyph { color: #e8c15a; }
 
 @keyframes blink { 50% { opacity: 0; } }
+
+/* all-pane tree, per inventory_lines(): `   ▣ win` headers in the session
+   color, `     ▢ cmd` pane rows and `   ▣ win` collapsed windows in the done
+   color with a muted name; agents inside a split window indent 2ch. */
+.prow { white-space: nowrap; overflow: hidden; }
+.prow[hidden] { display: none !important; }
+.prow.win {
+  color: var(--t-blue);
+  font-weight: 700;
+  padding: 0.05rem 0.6rem 0.05rem calc(0.6rem + 3ch);
+}
+.prow.pane, .prow.leaf { display: flex; gap: 0.55ch; padding: 0.05rem 0.6rem; }
+.prow.leaf { padding-left: calc(0.6rem + 3ch); }
+.prow .glyph { color: var(--t-green); flex: none; }
+.prow.pane .glyph { margin-left: 2ch; }
+.prow .rest { color: var(--t-dim); overflow: hidden; text-overflow: ellipsis; }
+.prow .cursor { color: var(--t-dim); visibility: hidden; width: 1ch; flex: none; font-weight: 700; }
+.prow.pane.selected { background: var(--bar-bg); }
+.prow.pane.selected .cursor { visibility: visible; }
+.sidebar.tree .entry.exp .glyph { margin-left: 2ch; }
+.sidebar.tree .entry.exp .title { padding-left: calc(0.6rem + 6.1ch); }
+/* `dd` confirm shares the cursor row: record left, prompt on the right half */
+.prow .prompt { color: var(--t-blue); font-weight: 700; margin-left: auto; padding-left: 1ch; }
+.prow .prompt[hidden] { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   .glyph { animation: none !important; }
@@ -472,6 +506,7 @@ pre {
   background: #161616;
   border: 1px solid var(--rule);
   border-radius: 4px;
+  min-height: 3.5rem;
   padding: 0.7rem 3.2rem 0.7rem 0.9rem;
   overflow-x: auto;
   font-size: 0.88rem;
@@ -498,10 +533,54 @@ pre .copy {
   border-radius: 3px;
   font: inherit;
   font-size: 0.8rem;
+  min-height: 2.75rem;
+  min-width: 2.75rem;
   padding: 0.05rem 0.6ch;
   cursor: pointer;
 }
 pre .copy:hover { color: var(--fg); }
+pre .copy:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+
+.install-picker { border: 0; margin: 0; min-width: 0; padding: 0; }
+.install-choice { position: absolute; opacity: 0; pointer-events: none; }
+.install-tabs .trait-tab {
+  align-items: center;
+  display: inline-flex;
+  min-height: 2.75rem;
+  padding: 0 0.6rem;
+}
+#install-installer:checked ~ .install-tabs label[for="install-installer"],
+#install-manual:checked ~ .install-tabs label[for="install-manual"] {
+  color: var(--green);
+  text-shadow: 0 0 8px rgba(108, 181, 108, 0.7);
+}
+#install-installer:focus-visible ~ .install-tabs label[for="install-installer"],
+#install-manual:focus-visible ~ .install-tabs label[for="install-manual"] {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+#install-installer:checked ~ .install-panel-manual,
+#install-manual:checked ~ .install-panel-installer { display: none; }
+.install-panel p { margin-top: 0.6rem; }
+
+.features {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+.features > div {
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 1rem 1.2rem;
+  background: #121212;
+}
+.features p { margin: 0.5rem 0 0; color: var(--fg); line-height: 1.6; }
+.feat-head { color: var(--green); font-weight: 600; font-size: 1.1rem; }
+.feat-head::before { content: "▸ "; color: var(--faint); }
+@media (max-width: 560px) {
+  .features { grid-template-columns: 1fr; }
+}
 
 /* use-it cheat sheet, like the sidebar's own `?` help */
 .keys-table {
