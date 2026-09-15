@@ -109,12 +109,19 @@ h2.glance { animation: title-glow 1.1s ease-out; }
 
 .tagline {
   color: var(--fg);
-  font-size: clamp(1.1rem, 3vw, 1.5rem);
-  font-weight: 400;
-  margin: 0 auto 1.2rem;
-  max-width: 40rem;
+  font-size: clamp(2rem, 5vw, 3rem);
+  font-weight: 600;
+  line-height: 1.2;
+  margin: 0 auto 1rem;
+  max-width: 24ch;
 }
-.tagline .c-red, .tagline .c-yellow, .tagline .c-green { font-weight: 600; }
+.hero-copy {
+  font-size: clamp(1rem, 2vw, 1.15rem);
+  line-height: 1.6;
+  margin: 0 auto 1rem;
+  max-width: 65ch;
+}
+.hero-copy .c-red, .hero-copy .c-yellow, .hero-copy .c-green { font-weight: 600; }
 
 .badges {
   display: flex;
