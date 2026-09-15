@@ -12,8 +12,9 @@ diagnose() {
   pgrep -fl "agenmux daemon" 2>/dev/null || true
   echo "--- config file"
   cat "$XDG_CONFIG_HOME/agenmux/config.toml" 2>/dev/null || true
-  echo "--- daemon trace tail"
-  tail -n 60 "$tmp/daemon-trace.log" 2>/dev/null || true
+  echo "--- daemon trace: keys, sends, reloads, exits"
+  grep -E '# key|# send key|@agenmux-reload [0-9]|trace start|event loop|# mutation' \
+    "$tmp/daemon-trace.log" 2>/dev/null | tail -n 80 || true
 }
 trap 'echo "FAIL navigation-key-table: command failed at line $LINENO"; diagnose' ERR
 
@@ -1274,7 +1275,9 @@ for _ in $(seq 1 20); do
   sleep 0.05
 done
 printf 'j\r' >&9
-for _ in $(seq 1 40); do
+# Saving reinstalls the key tables through config reload; slow runners have
+# taken several seconds for that.
+for _ in $(seq 1 200); do
   if grep -q '^mode = "popup"' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
     [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
     settings_saved=1
@@ -1298,7 +1301,7 @@ for _ in $(seq 1 20); do
   sleep 0.05
 done
 printf 'K\r' >&9
-for _ in $(seq 1 40); do
+for _ in $(seq 1 200); do
   if grep -q '^mode = "split"' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
     [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
     break
@@ -1402,7 +1405,7 @@ for _ in $(seq 1 200); do
   fi
   sleep 0.05
 done
-printf '\rZ\r' >&9
+printf '\r\033[A\r' >&9
 for _ in $(seq 1 200); do
   grep -q '^mode = "split"' "$XDG_CONFIG_HOME/agenmux/config.toml" && break
   sleep 0.05
