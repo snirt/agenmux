@@ -7,20 +7,20 @@
       name="google-site-verification"
       content="OnIVypIV57HTxa0Z1PIkRBDGppc45tJ0cpldN3qgCH0"
     />
-    <title>agenmux — tmux plugin for monitoring AI coding agents</title>
+    <title>agenmux — monitor AI coding agents and manage tmux from one sidebar</title>
     <meta
       name="description"
-      content="agenmux (formerly tmux-agents-mon) is a tmux plugin for monitoring Claude Code, Codex, OpenCode, Pi, and other AI coding agents."
+      content="agenmux (formerly tmux-agents-mon) is a tmux plugin that monitors Claude Code, Codex, OpenCode, Pi, and other AI coding agents — and doubles as a tmux navigator and manager: every session, window and pane in one sidebar."
     />
     <link rel="canonical" href="https://snirt.github.io/agenmux/" />
     <meta property="og:type" content="website" />
     <meta
       property="og:title"
-      content="agenmux — tmux plugin for monitoring AI coding agents"
+      content="agenmux — monitor AI coding agents and manage tmux from one sidebar"
     />
     <meta
       property="og:description"
-      content="agenmux (formerly tmux-agents-mon) is a tmux plugin for monitoring Claude Code, Codex, OpenCode, Pi, and other AI coding agents."
+      content="agenmux (formerly tmux-agents-mon) is a tmux plugin that monitors Claude Code, Codex, OpenCode, Pi, and other AI coding agents — and doubles as a tmux navigator and manager: every session, window and pane in one sidebar."
     />
     <meta property="og:url" content="https://snirt.github.io/agenmux/" />
     <meta
@@ -38,6 +38,7 @@
       /></a>
       <a href="#demo-section">demo</a>
       <a href="#how">how</a>
+      <a href="#features">features</a>
       <a href="#install">install</a>
       <a href="#use">use</a>
       <a href="#release">release</a>
@@ -81,9 +82,14 @@
       </div>
 
       <div class="demo-tabs" id="demo-section" role="tablist">
-        <button class="demo-tab active" data-demo="0">monitor</button>
-        <button class="demo-tab" data-demo="1">states</button>
-        <button class="demo-tab" data-demo="2">search</button>
+        <button class="demo-tab active" role="tab" aria-selected="true">
+          monitor
+        </button>
+        <button class="demo-tab" role="tab" aria-selected="false">states</button>
+        <button class="demo-tab" role="tab" aria-selected="false">search</button>
+        <button class="demo-tab" role="tab" aria-selected="false">
+          navigate
+        </button>
       </div>
       <div class="demo-stage">
         <div
@@ -110,18 +116,25 @@
             <div class="sidebar" id="demo">
               <div class="pane-title">⤳ 1 agenmux</div>
               <div class="bar">
-                agents<span class="bar-filter" id="bar-filter"></span>
+                <span id="bar-title">agenmux v0.4.0</span
+                ><span class="bar-filter" id="bar-filter"></span>
               </div>
               <div class="hint" id="hint" hidden>
                 ↵ nav · ^u clear · esc clear
               </div>
               <div class="session">webapp</div>
-              <div class="entry selected" data-state="working">
+              <div class="prow win" hidden>▣ vim</div>
+              <div class="prow pane" data-cmd="nvim" hidden>
+                <span class="cursor">❯</span><span class="glyph">▢</span
+                ><span class="rest">nvim</span
+                ><span class="prompt" hidden></span>
+              </div>
+              <div class="entry selected exp" data-state="working">
                 <div class="agent">
                   <span class="cursor">❯</span
                   ><span class="glyph spinner">⠹</span>
                   <span class="name">claude</span
-                  ><span class="rest">1.2 ~/code/api</span>
+                  ><span class="rest">1.2 api</span>
                 </div>
                 <div class="title">fix flaky pane test</div>
               </div>
@@ -129,15 +142,24 @@
                 <div class="agent">
                   <span class="cursor">❯</span><span class="glyph">⣿</span>
                   <span class="name">codex</span
-                  ><span class="rest">2.1 ~/code/web</span>
+                  ><span class="rest">2.1 web</span>
                 </div>
               </div>
+              <div class="prow leaf" hidden>
+                <span class="glyph">▣</span><span class="rest">nu</span>
+              </div>
               <div class="session">oss</div>
-              <div class="entry" data-state="blocked">
+              <div class="prow win" hidden>▣ mon</div>
+              <div class="prow pane" data-cmd="nu" hidden>
+                <span class="cursor">❯</span><span class="glyph">▢</span
+                ><span class="rest">nu</span
+                ><span class="prompt" hidden></span>
+              </div>
+              <div class="entry exp" data-state="blocked">
                 <div class="agent">
                   <span class="cursor">❯</span><span class="glyph">⣿</span>
                   <span class="name">opencode</span
-                  ><span class="rest">1.2 ~/oss/mon</span>
+                  ><span class="rest">1.2 mon</span>
                 </div>
                 <div class="title">allow shell command?</div>
               </div>
@@ -146,9 +168,12 @@
                   <span class="cursor">❯</span
                   ><span class="glyph spinner">⣤</span>
                   <span class="name">pi</span
-                  ><span class="rest">3.2 ~/oss/pi</span>
+                  ><span class="rest">3.2 pi</span>
                 </div>
                 <div class="title">refactor detector</div>
+              </div>
+              <div class="prow leaf" hidden>
+                <span class="glyph">▣</span><span class="rest">git</span>
               </div>
             </div>
             <div class="pane-wrap">
@@ -212,9 +237,9 @@
         <div class="trait">
           <span class="trait-head">rust engine</span>
           <p>
-            A single daemon on one persistent tmux control-mode connection.
-            Prebuilt, verified binaries download automatically; Linux builds are
-            statically linked.
+            A single daemon uses one persistent tmux control-mode connection.
+            Prebuilt, verified binaries download automatically; Linux builds
+            are statically linked.
           </p>
         </div>
         <div class="trait">
@@ -227,22 +252,86 @@
         </div>
       </div>
 
+      <h2 id="features">what's new</h2>
+      <div class="features">
+        <div>
+          <span class="feat-head">whole-tmux navigator</span>
+          <p>
+            Press <kbd>.</kbd> (or set <code>display.show_all_panes</code>) and
+            the sidebar lists every session, window and pane in tmux order —
+            jump to any of them, not just agents.
+          </p>
+        </div>
+        <div>
+          <span class="feat-head">settings, in the sidebar</span>
+          <p>
+            <kbd>s</kbd> opens a Settings view that adapts to narrow panes.
+            Edits are validated, saved atomically and picked up live — a typo
+            never takes a running sidebar down.
+          </p>
+        </div>
+        <div>
+          <span class="feat-head">opt-in tmux management</span>
+          <p>
+            Enable <code>tmux_management</code> to create (<kbd>cc</kbd>/<kbd
+              >cs</kbd
+            >), rename (<kbd>r</kbd>) and delete (<kbd>dd</kbd>) sessions,
+            windows and panes from the sidebar. By default, deletes confirm
+            inline and never destroy a session implicitly.
+          </p>
+        </div>
+        <div>
+          <span class="feat-head">event-driven scanning</span>
+          <p>
+            Pane activity triggers fast updates through one persistent tmux
+            connection, with periodic reconciliation for background sessions.
+          </p>
+        </div>
+      </div>
+      <pre><code>[display]
+show_all_panes = true      # or press `.` to toggle live
+
+[tmux_management]
+enabled = true             # create/rename/delete from the sidebar
+confirm_delete = true</code></pre>
+
       <h2 id="install">install</h2>
-      <pre><code>curl -fsSL https://snirt.github.io/agenmux/install.sh | sh</code></pre>
-      <p>
-        Clones the plugin, asks for the launcher keys, shows the tmux.conf
-        lines it wants and adds them once you confirm, reloads tmux. Run it
-        again to update.
-      </p>
-      <p>Or with <a href="https://github.com/tmux-plugins/tpm">TPM</a>:</p>
-      <pre><code>set -g @plugin 'snirt/agenmux'</code></pre>
-      <p>
-        Press <kbd>prefix + I</kbd>. That's it: the plugin downloads and
-        verifies the Rust engine for your platform in the background.
-      </p>
-      <p>Or manually:</p>
-      <pre><code>git clone https://github.com/snirt/agenmux ~/.tmux/plugins/agenmux
-echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</code></pre>
+      <fieldset class="install-picker" aria-label="Installation method">
+        <input
+          class="install-choice"
+          type="radio"
+          name="install-method"
+          id="install-installer"
+          checked
+        />
+        <input
+          class="install-choice"
+          type="radio"
+          name="install-method"
+          id="install-manual"
+        />
+        <div class="traits-tabs install-tabs">
+          <label class="trait-tab" for="install-installer">installer</label>
+          <label class="trait-tab" for="install-manual">manual</label>
+        </div>
+        <div class="install-panel install-panel-installer">
+          <pre><code>curl -fsSL https://snirt.github.io/agenmux/install.sh | sh</code></pre>
+          <p>
+            Recommended. Clones or updates agenmux, asks for the launcher keys,
+            updates your tmux config after confirmation, and reloads tmux.
+          </p>
+        </div>
+        <div class="install-panel install-panel-manual">
+          <pre><code>git clone https://github.com/snirt/agenmux ~/.tmux/plugins/agenmux
+echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf
+tmux source-file ~/.tmux.conf</code></pre>
+          <p>
+            Using <a href="https://github.com/tmux-plugins/tpm">TPM</a>? Add
+            <code>set -g @plugin 'snirt/agenmux'</code> before TPM initializes,
+            then press <kbd>prefix + I</kbd>.
+          </p>
+        </div>
+      </fieldset>
       <p class="muted">
         Requirements: tmux and bash. <code>curl</code> and
         <code>tar</code> enable the automatic native download; without them,
@@ -275,6 +364,19 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
         <div>
           <span class="k"><kbd>f</kbd></span
           ><span>state filter</span>
+        </div>
+        <div>
+          <span class="k"><kbd>.</kbd></span
+          ><span>all panes / agents only</span>
+        </div>
+        <div>
+          <span class="k"><kbd>s</kbd></span
+          ><span>settings</span>
+        </div>
+        <div>
+          <span class="k"
+            ><kbd>cc</kbd> <kbd>cs</kbd> <kbd>dd</kbd> <kbd>r</kbd></span
+          ><span>manage tmux <span class="dim">(opt-in)</span></span>
         </div>
         <div>
           <span class="k"><kbd>u</kbd></span
@@ -328,6 +430,11 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
         }, 120);
       }
 
+      // Header = app_title(): the baked release tag keeps it current after
+      // scripts/site-release.py rewrites #version.
+      document.getElementById("bar-title").textContent =
+        "agenmux " + document.getElementById("version").textContent;
+
       // The main pane mirrors the selected agent; `typed` is the answer being
       // typed into a blocked prompt.
       function paneLines(agent, state, typed) {
@@ -358,6 +465,13 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
             return [["yellow", "  ⠹ rewriting scan.rs"]];
           case "pi/done":
             return [["green", "  ✓ refactor complete"], ...wait];
+          case "nvim/pane":
+            return [
+              ["", "  fn pane_lifecycle() {"],
+              ["dim", "  -- INSERT --"],
+            ];
+          case "nu/pane":
+            return [["dim", "  ~/oss/mon〉▌"]];
           default:
             return wait;
         }
@@ -367,11 +481,14 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
       let typed = "";
       function renderPane() {
         const pane = document.getElementById("pane");
-        const state = rows[sel].dataset.state;
-        document.getElementById("pane-title").textContent =
-          "⤳ 2 ✳ " + AGENTS[sel];
+        // an ordinary pane row under the cursor mirrors its command instead
+        const cmd = paneSel && paneSel.dataset.cmd;
+        const state = cmd ? "pane" : rows[sel].dataset.state;
+        document.getElementById("pane-title").textContent = cmd
+          ? "⤳ 2 " + cmd
+          : "⤳ 2 ✳ " + AGENTS[sel];
         pane.textContent = "";
-        paneLines(AGENTS[sel], state, typed).forEach(([cls, text]) => {
+        paneLines(cmd || AGENTS[sel], state, typed).forEach(([cls, text]) => {
           const line = document.createElement("div");
           if (cls) line.className = "l-" + cls;
           // animate ⠹ in pane lines with the shared spinner interval
@@ -463,6 +580,7 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
       function select(i, quiet) {
         if (!quiet) showKey(i > sel ? "j" : "k", i > sel ? "↓" : "↑");
         rows[sel].classList.remove("selected");
+        if (paneSel) selectPane(null);
         sel = i;
         typed = "";
         rows[sel].classList.add("selected");
@@ -499,9 +617,14 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
       // Live search: header shows /query with match counts, list filters,
       // hint line appears — like the real `/` mode.
       const sessionHeads = document.querySelectorAll("#demo .session");
+      function setHint(text) {
+        const hint = document.getElementById("hint");
+        hint.hidden = !text;
+        hint.textContent = text || "";
+      }
       function applyFilter(q) {
         const bar = document.getElementById("bar-filter");
-        document.getElementById("hint").hidden = !q && q !== "";
+        setHint(q || q === "" ? "↵ nav · ^u clear · esc clear" : "");
         let visible = 0;
         rows.forEach((r, i) => {
           const m = !q || AGENTS[i].includes(q);
@@ -515,7 +638,40 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
           q === null
             ? ""
             : " /" + q + (q ? " " + visible + "/" + rows.length : "");
-        if (q === null) document.getElementById("hint").hidden = true;
+      }
+
+      // All-pane mode, drawn like inventory_lines(): window headers and
+      // ordinary `▢ command` rows appear between the agent rows, agents in a
+      // split window indent under their window. `dd` shares the cursor row
+      // with the confirm prompt, exactly like the real inline overlay.
+      const prows = document.querySelectorAll("#demo .prow");
+      const paneRows = document.querySelectorAll("#demo .prow.pane");
+      let paneSel = null;
+      function allPanes(on) {
+        document.getElementById("demo").classList.toggle("tree", on);
+        prows.forEach((r) => (r.hidden = !on));
+        if (!on && paneSel) selectPane(null);
+      }
+      function selectPane(el) {
+        if (paneSel) {
+          paneSel.classList.remove("selected");
+          confirmDelete(false);
+        }
+        paneSel = el;
+        if (el) {
+          rows[sel].classList.remove("selected");
+          el.classList.add("selected");
+        } else {
+          rows[sel].classList.add("selected");
+        }
+        renderPane();
+      }
+      function confirmDelete(on) {
+        if (!paneSel) return;
+        const prompt = paneSel.querySelector(".prompt");
+        prompt.hidden = !on;
+        prompt.textContent = on ? "delete pane? y/N" : "";
+        setHint(on ? "y delete · any other key cancels" : "");
       }
       function typeSearch(query, done) {
         let k = 0;
@@ -589,6 +745,54 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
             ],
           ],
         },
+        {
+          caption:
+            "press . and the sidebar becomes a full tmux navigator — every session, window, pane. management is opt-in and asks before deleting",
+          steps: [
+            [
+              1400,
+              () => {
+                showKey(".");
+                allPanes(true);
+              },
+            ],
+            [
+              1600,
+              () => {
+                showKey("k", "↑");
+                selectPane(paneRows[0]);
+              },
+            ],
+            [
+              1500,
+              () => {
+                showKey("d");
+                setHint("d delete");
+              },
+            ],
+            [
+              900,
+              () => {
+                showKey("d");
+                confirmDelete(true);
+              },
+            ],
+            [
+              2800,
+              () => {
+                showKey("n");
+                confirmDelete(false);
+              },
+            ],
+            [
+              1800,
+              () => {
+                showKey(".");
+                allPanes(false);
+              },
+            ],
+          ],
+        },
       ];
       let demo = 0,
         step = 0,
@@ -596,6 +800,7 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
         gen = 0;
       function resetDemo() {
         gen++;
+        allPanes(false);
         applyFilter(null);
         setState(0, "working", "fix flaky pane test");
         setState(1, "idle");
@@ -606,9 +811,10 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
       function applyDemo(i) {
         demo = i;
         step = 0;
-        document
-          .querySelectorAll(".demo-tab")
-          .forEach((t, k) => t.classList.toggle("active", k === i));
+        document.querySelectorAll(".demo-tab").forEach((t, k) => {
+          t.classList.toggle("active", k === i);
+          t.setAttribute("aria-selected", k === i);
+        });
         document.getElementById("demo-caption").textContent = DEMOS[i].caption;
         document.querySelector(".term").hidden = !!DEMOS[i].legend;
         document.querySelector(".hero .states").hidden = !DEMOS[i].legend;
@@ -824,6 +1030,7 @@ echo "run-shell ~/.tmux/plugins/agenmux/agenmux.tmux" &gt;&gt; ~/.tmux.conf</cod
         const btn = document.createElement("button");
         btn.className = "copy";
         btn.textContent = "copy";
+        btn.setAttribute("aria-live", "polite");
         btn.addEventListener("click", () => {
           navigator.clipboard.writeText(code.textContent).then(() => {
             btn.textContent = "copied";

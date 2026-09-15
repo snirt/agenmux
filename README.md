@@ -25,7 +25,7 @@ hooks to install, nothing runs inside your agents.
 
 ## Demo
 
-<https://github.com/user-attachments/assets/b141a2db-b0f2-4775-bc9c-2aac70075187>
+Try the interactive demo on the [agenmux website](https://snirt.github.io/agenmux/).
 
 ## Quick start
 
