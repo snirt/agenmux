@@ -281,6 +281,19 @@ impl Sidebar {
             .iter()
             .any(|row| matches!(row, VisiblePane::Session(_)));
         let (mut session_id, mut window_id) = ("", "");
+        // Rename edits the record's own name field; create grows the tree by
+        // one placeholder row whose name the user is typing.
+        let typed = |name: &str| -> String { name.chars().filter(|c| !c.is_control()).collect() };
+        let renaming = match &self.overlay {
+            Some(Overlay::Rename { name, .. }) => Some(typed(name)),
+            _ => None,
+        };
+        let creating = match &self.overlay {
+            Some(Overlay::Create { target, name }) => Some((target, typed(name))),
+            _ => None,
+        };
+        let cursor = if creating.is_some() { None } else { cursor };
+        let mut session_end = None;
         let header_mark = |selected: bool| {
             if selected {
                 format!("{muted}❯{E}[0m ")
@@ -312,19 +325,22 @@ impl Sidebar {
                     let pane = &self.panes[i];
                     session_id = &pane.session_id;
                     window_id = "";
-                    let name: String = pane.session_name.chars().take(cols).collect();
+                    let name: String = match renaming.as_deref().filter(|_| selected) {
+                        Some(edit) => format!("{edit}▏"),
+                        None => pane.session_name.chars().take(cols).collect(),
+                    };
                     (i, format!("{}{accent}{name}{E}[0m", header_mark(selected)))
                 }
                 VisiblePane::Window(i) => {
                     let pane = &self.panes[i];
                     window_id = &pane.window_id;
+                    let name = match renaming.as_deref().filter(|_| selected) {
+                        Some(edit) => format!("{edit}▏"),
+                        None => pane.window_name.clone(),
+                    };
                     (
                         i,
-                        format!(
-                            "  {}{accent}\u{eb7f} {}{E}[0m",
-                            header_mark(selected),
-                            pane.window_name
-                        ),
+                        format!("  {}{accent}\u{eb7f} {name}{E}[0m", header_mark(selected)),
                     )
                 }
                 VisiblePane::Inventory(i) => (i, String::new()),
@@ -347,6 +363,12 @@ impl Sidebar {
                 ));
                 if selected {
                     sel_bot = lines.len() - 1;
+                }
+                if creating
+                    .as_ref()
+                    .is_some_and(|(target, _)| target.session_id == pane.session_id)
+                {
+                    session_end = Some(lines.len());
                 }
                 continue;
             }
@@ -382,22 +404,54 @@ impl Sidebar {
             // under a split window at 4. Plain headers keep the flat layout.
             let base = if selectable_headers { "  " } else { " " };
             let prefix = if expanded { "  " } else { "" };
-            let detail = if let Some(row) = agent {
+            // The editable field sits where the record's name is shown.
+            let edit = renaming.as_deref().filter(|_| selected);
+            // Everything on the row before the editable name, so the edit field
+            // can be clipped to keep its cursor on screen in a narrow pane.
+            let lead = if let Some(row) = agent {
                 format!(
-                    "{} {E}[1m{}{E}[0m {muted}{}{E}[0m",
+                    "{base}{mark}{prefix}{} {E}[1m{}{E}[0m ",
                     self.dot(state),
-                    row.agent,
-                    pane.command
+                    row.agent
                 )
             } else if expanded {
-                format!("{window_icon}▢{E}[0m {muted}{}{E}[0m", pane.command)
+                format!("{base}{mark}{prefix}{window_icon}▢{E}[0m ")
             } else {
-                format!(
-                    "{window_icon}\u{eb7f}{E}[0m {muted}{}{E}[0m",
-                    pane.window_name
-                )
+                format!("{base}{mark}{prefix}{window_icon}\u{eb7f}{E}[0m ")
             };
-            let row = format!("{base}{mark}{prefix}{detail}");
+            // A collapsed single-pane window shows its window name (renamed by
+            // `r`); an expanded pane shows its title when set, else the command.
+            let name = if agent.is_some() {
+                &pane.command
+            } else if !expanded {
+                &pane.window_name
+            } else if !pane.pane_title.is_empty() {
+                &pane.pane_title
+            } else {
+                &pane.command
+            };
+            let field = match edit {
+                Some(edit) => {
+                    // Show the tail: a long name keeps its cursor visible.
+                    let room = cols.saturating_sub(width_of(&lead) + 1).max(1);
+                    let shown: String = if edit.chars().count() > room {
+                        let tail: String = edit
+                            .chars()
+                            .rev()
+                            .take(room - 1)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        format!("…{tail}")
+                    } else {
+                        edit.to_string()
+                    };
+                    format!("{accent}{shown}▏{E}[0m")
+                }
+                None => format!("{muted}{name}{E}[0m"),
+            };
+            let row = format!("{lead}{field}");
             let row_bg = match (agent, selected) {
                 (Some(_), true) => self.palette.state_bg(state, self.plugin_selected),
                 (None, true) => self.palette.pane_bg.bg(),
@@ -433,6 +487,36 @@ impl Sidebar {
             if selected {
                 sel_bot = lines.len() - 1;
             }
+            if creating
+                .as_ref()
+                .is_some_and(|(target, _)| target.session_id == pane.session_id)
+            {
+                session_end = Some(lines.len());
+            }
+        }
+        if let Some((target, name)) = creating {
+            let (row, at) = match target.action {
+                crate::input::SequenceAction::CreateSession => (
+                    format!("{}{accent}{name}▏{E}[0m", header_mark(true)),
+                    lines.len(),
+                ),
+                _ => (
+                    format!("  {}{accent}\u{eb7f} {name}▏{E}[0m", header_mark(true)),
+                    session_end.unwrap_or(lines.len()),
+                ),
+            };
+            let bg = self.palette.pane_bg.bg();
+            lines.insert(
+                at,
+                (
+                    format!("{}{E}[K\n", bar(&row, &bg, cols, width_of(&row))),
+                    "-".into(),
+                    0,
+                    false,
+                ),
+            );
+            sel_top = at;
+            sel_bot = at;
         }
         (lines, sel_top, sel_bot)
     }
@@ -443,7 +527,7 @@ impl Sidebar {
         if self
             .overlay
             .as_ref()
-            .is_some_and(|overlay| overlay.inline_prompt().is_none())
+            .is_some_and(|overlay| !overlay.renders_inline())
         {
             self.render_overlay(force);
             return;
@@ -508,12 +592,17 @@ impl Sidebar {
                 .map(|(key, label)| format!("{key} {label}"))
                 .collect::<Vec<_>>(),
         );
-        let inline = self.overlay.as_ref().and_then(Overlay::inline_prompt);
+        // The tree draws create and rename in place; only agent-only mode and
+        // the delete confirmation use the cursor-row prompt.
+        let inline = self
+            .overlay
+            .as_ref()
+            .filter(|overlay| {
+                !self.settings.settings.show_all_panes || matches!(overlay, Overlay::Confirm(_))
+            })
+            .and_then(Overlay::inline_prompt);
         let inline_hint = match &self.overlay {
             Some(Overlay::Confirm(_)) => Some("y delete · any other key cancels".to_string()),
-            Some(Overlay::RenameScope(_)) => {
-                Some("p pane · w window · s session · esc cancel".into())
-            }
             Some(Overlay::Create { .. }) => Some(join(&[
                 self.hint(&self.search_keys, Action::Accept, "create"),
                 self.hint(&self.search_keys, Action::Cancel, "cancel"),
@@ -1103,6 +1192,90 @@ mod tests {
             selected_agent_rows, 2,
             "agent row and description share click target"
         );
+
+        // In-place rename: with management on, session and window rows are
+        // selectable, and the record under the cursor turns into an edit field
+        // preloaded at its own name position.
+        sb.settings.settings.tmux_management_enabled = true;
+        sb.rebuild_visible(false);
+        let rename =
+            |sb: &mut Sidebar, action, session_id: &str, window_id: &str, pane_id: &str| {
+                sb.overlay = Some(Overlay::Rename {
+                    target: MutationTarget {
+                        action,
+                        pane_id: pane_id.into(),
+                        window_id: window_id.into(),
+                        session_id: session_id.into(),
+                        cwd: String::new(),
+                        client: String::new(),
+                    },
+                    name: "EDITING".into(),
+                });
+            };
+        // Session row (first visible) becomes "EDITING▏".
+        sb.select_index(1);
+        rename(&mut sb, SequenceAction::RenameSession, "$1", "@1", "%11");
+        sb.render(true);
+        let session_line = sb
+            .last_frame
+            .lines()
+            .find(|line| ansi.replace_all(line, "").contains("EDITING"))
+            .expect("session rename shows the edit field in place");
+        assert_eq!(
+            ansi.replace_all(session_line, "").trim_end(),
+            "❯ EDITING▏",
+            "session rename replaces the session name at its own position"
+        );
+        // A pane inside the expanded window edits at its command position.
+        let node_row = sb
+            .visible
+            .iter()
+            .position(|row| matches!(row, VisiblePane::Inventory(i) if sb.panes[*i].pane == "%22"))
+            .unwrap();
+        sb.select_index(node_row + 1);
+        rename(&mut sb, SequenceAction::RenamePane, "$1", "@2", "%22");
+        sb.render(true);
+        assert!(
+            sb.last_frame
+                .lines()
+                .any(|line| ansi.replace_all(line, "").contains("claude EDITING▏")),
+            "pane rename edits at the command position, keeping agent name: {}",
+            sb.last_frame
+        );
+        sb.overlay = None;
+        sb.settings.settings.tmux_management_enabled = false;
+        sb.rebuild_visible(false);
+
+        // A pane in a split window shows its title when set, so a rename is
+        // visible; the single-pane window keeps its window name.
+        sb.panes[1].pane_title = "renamed-pane".into();
+        sb.rebuild_visible(false);
+        sb.render(true);
+        let npm_row = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("renamed-pane"))
+            .expect("split-window pane shows its title");
+        assert!(
+            !npm_row.contains("npm"),
+            "the titled pane replaces its command, not both: {npm_row}"
+        );
+        sb.panes[1].pane_title.clear();
+
+        // The "." toggle flips the live view between agents and the full tree.
+        assert!(sb.settings.settings.show_all_panes);
+        sb.toggle_all_panes();
+        assert!(!sb.settings.settings.show_all_panes);
+        sb.render(true);
+        assert!(
+            !sb.last_frame.contains("editor"),
+            "agent-only view drops ordinary panes: {}",
+            sb.last_frame
+        );
+        sb.toggle_all_panes();
+        assert!(sb.settings.settings.show_all_panes);
+        sb.rebuild_visible(false);
+
         sb.select_index(3);
         sb.render(true);
         frames.push_str(&format!(
@@ -1377,11 +1550,7 @@ mod tests {
             name: "dev".into(),
         });
         sb.render(true);
-        assert!(
-            sb.last_frame.contains("new window: dev▏"),
-            "{}",
-            sb.last_frame
-        );
+        assert!(sb.last_frame.contains("dev▏"), "{}", sb.last_frame);
         sb.overlay = None;
         sb.key_sequence.clear();
         sb.overlay = Some(Overlay::Help);

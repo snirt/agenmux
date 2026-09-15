@@ -1580,7 +1580,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         });
     };
     send_sequence("cc");
-    sidebar_shows("new window: ▏");
+    sidebar_shows("\u{eb7f} ▏");
     for _ in 0..2 {
         assert_success(
             tmux.bin(&["key", "sequence-63", "missing-client"]),
@@ -1611,32 +1611,21 @@ fn tmux_management_creates_and_deletes_stable_targets() {
 
     let original_window_name =
         tmux.text(&["display-message", "-p", "-t", &initial, "#{window_name}"]);
-    let original_pane_title =
-        tmux.text(&["display-message", "-p", "-t", &initial, "#{pane_title}"]);
     let original_session_name =
         tmux.text(&["display-message", "-p", "-t", &initial, "#{session_name}"]);
 
+    // r renames the record under the cursor in place: a collapsed window row
+    // is the window, a pane inside a split window is the pane, a session row
+    // is the session.
     send_sequence("r");
-    sidebar_shows("rename: p/w/s");
-    sidebar_shows("p pane");
-    send_text("w");
-    thread::sleep(Duration::from_millis(150));
-    let rename_prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
-    assert!(
-        rename_prompt.contains(&format!("name: {original_window_name}")),
-        "{rename_prompt:?}"
-    );
+    sidebar_shows(&format!("{original_window_name}▏"));
     send_text("x");
+    sidebar_shows(&format!("{original_window_name}x▏"));
     assert_success(
         tmux.bin(&["key", "backspace"]),
         "delete appended name character",
     );
-    thread::sleep(Duration::from_millis(150));
-    let rename_prompt = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
-    assert!(
-        rename_prompt.contains(&format!("name: {original_window_name}")),
-        "{rename_prompt:?}"
-    );
+    sidebar_shows(&format!("{original_window_name}▏"));
     send_text("-renamed");
     assert_success(tmux.bin(&["key", "enter"]), "rename window");
     let renamed_window = format!("{original_window_name}-renamed");
@@ -1644,33 +1633,41 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         tmux.text(&["display-message", "-p", "-t", &initial, "#{window_name}"]) == renamed_window
     });
 
+    let sibling = tmux.text(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &initial,
+        "exec sleep 60",
+    ]);
+    // A short, known pane title so the preloaded edit is fully visible in the
+    // narrow sidebar (a long title clips to its tail near the cursor).
+    tmux.assert_tmux(&["select-pane", "-t", &initial, "-T", "edit"]);
+    tmux.assert_tmux(&["select-pane", "-t", &initial]);
+    tmux.wait_for(Duration::from_secs(4), || selected() == initial);
     send_sequence("r");
-    send_text("p");
+    sidebar_shows("edit▏");
     send_text("-renamed");
     assert_success(tmux.bin(&["key", "enter"]), "rename pane");
-    let renamed_pane = format!("{original_pane_title}-renamed");
+    let renamed_pane = "edit-renamed".to_string();
     tmux.wait_for(Duration::from_secs(4), || {
         tmux.text(&["display-message", "-p", "-t", &initial, "#{pane_title}"]) == renamed_pane
     });
-
-    send_sequence("r");
-    send_text("s");
-    sidebar_shows(&format!("name: {original_session_name}"));
-    send_text("-renamed");
-    assert_success(tmux.bin(&["key", "enter"]), "rename session");
-    let renamed_session = format!("{original_session_name}-renamed");
-    tmux.wait_for(Duration::from_secs(4), || {
-        tmux.text(&["display-message", "-p", "-t", &initial, "#{session_name}"]) == renamed_session
-    });
+    tmux.assert_tmux(&["kill-pane", "-t", &sibling]);
+    tmux.wait_for(Duration::from_secs(4), || selected() == initial);
+    let _ = &original_session_name; // session-scope rename is covered by unit tests
 
     let windows = tmux
         .text(&["list-windows", "-a", "-F", "#{window_id}"])
         .lines()
         .count();
     send_sequence("cc");
-    sidebar_shows("new window: ▏");
+    sidebar_shows("\u{eb7f} ▏");
     send_text("w");
-    sidebar_shows("new window: w▏");
+    sidebar_shows("\u{eb7f} w▏");
     assert_success(tmux.bin(&["key", "enter"]), "accept window name");
     tmux.wait_for(Duration::from_secs(4), || {
         tmux.text(&["list-windows", "-a", "-F", "#{window_id}"])

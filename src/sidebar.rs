@@ -163,7 +163,6 @@ fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMod
 fn mutation_owner(overlay: &Overlay) -> Option<&str> {
     match overlay {
         Overlay::Create { target, .. }
-        | Overlay::RenameScope(target)
         | Overlay::Rename { target, .. }
         | Overlay::Confirm(target) => Some(target.client.as_str()),
         Overlay::Help | Overlay::Versions { .. } | Overlay::Settings(_) => None,
@@ -567,12 +566,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                     || editing_settings
                     || matches!(
                         sb.overlay,
-                        Some(
-                            Overlay::Create { .. }
-                                | Overlay::RenameScope(_)
-                                | Overlay::Rename { .. }
-                                | Overlay::Confirm(_)
-                        )
+                        Some(Overlay::Create { .. } | Overlay::Rename { .. } | Overlay::Confirm(_))
                     );
                 let mode = if text_input {
                     KeyMode::Search
@@ -717,6 +711,7 @@ impl Sidebar {
             Key::Search => self.focus_search(),
             Key::CycleState => self.cycle_state_filter(),
             Key::AllStates => self.clear_filter(),
+            Key::TogglePanes => self.toggle_all_panes(),
             Key::Quit => {
                 if self.daemon.is_none() {
                     // Popup/tty mode owns stdin, so q/Ctrl-C/Ctrl-D closes it.
@@ -772,25 +767,27 @@ impl Sidebar {
             self.mutation_error(&client, "selected pane no longer exists");
             return DispatchResult::Continue;
         };
-        // dd deletes whatever record the cursor is on; a collapsed window row
-        // is its only pane, so it deletes the window.
+        // dd and r act on whatever record the cursor is on; a collapsed
+        // window row is its only pane, so it means the window.
+        let split_window = self
+            .panes
+            .iter()
+            .filter(|other| other.window_id == pane.window_id)
+            .count()
+            > 1;
         let action = match (action, selected) {
             (SequenceAction::Delete, Some(VisiblePane::Session(_))) => {
                 SequenceAction::DeleteSession
             }
             (SequenceAction::Delete, Some(VisiblePane::Window(_))) => SequenceAction::DeleteWindow,
-            (SequenceAction::Delete, _) => {
-                let siblings = self
-                    .panes
-                    .iter()
-                    .filter(|other| other.window_id == pane.window_id)
-                    .count();
-                if siblings > 1 {
-                    SequenceAction::DeletePane
-                } else {
-                    SequenceAction::DeleteWindow
-                }
+            (SequenceAction::Delete, _) if split_window => SequenceAction::DeletePane,
+            (SequenceAction::Delete, _) => SequenceAction::DeleteWindow,
+            (SequenceAction::Rename, Some(VisiblePane::Session(_))) => {
+                SequenceAction::RenameSession
             }
+            (SequenceAction::Rename, Some(VisiblePane::Window(_))) => SequenceAction::RenameWindow,
+            (SequenceAction::Rename, _) if split_window => SequenceAction::RenamePane,
+            (SequenceAction::Rename, _) => SequenceAction::RenameWindow,
             (action, _) => action,
         };
         trace!(
@@ -816,9 +813,11 @@ impl Sidebar {
                 });
                 DispatchResult::Continue
             }
-            SequenceAction::Rename => {
+            SequenceAction::RenamePane
+            | SequenceAction::RenameWindow
+            | SequenceAction::RenameSession => {
                 self.enter_mutation_input(&target.client);
-                self.overlay = Some(Overlay::RenameScope(target));
+                self.open_rename_input(target, action);
                 DispatchResult::Continue
             }
             SequenceAction::DeletePane
@@ -832,11 +831,9 @@ impl Sidebar {
                     self.execute_mutation(&target, "")
                 }
             }
-            SequenceAction::First
-            | SequenceAction::Delete
-            | SequenceAction::RenamePane
-            | SequenceAction::RenameWindow
-            | SequenceAction::RenameSession => DispatchResult::Continue,
+            SequenceAction::First | SequenceAction::Delete | SequenceAction::Rename => {
+                DispatchResult::Continue
+            }
         }
     }
 
@@ -1022,6 +1019,13 @@ impl Sidebar {
                 if name.is_empty() {
                     return DispatchResult::Continue;
                 }
+                let _ = crate::tmux::command_status(&[
+                    "set-window-option",
+                    "-t",
+                    &target.window_id,
+                    "automatic-rename",
+                    "off",
+                ]);
                 crate::tmux::command(&["rename-window", "-t", &target.window_id, name])
             }
             SequenceAction::RenameSession => {
@@ -1152,7 +1156,6 @@ impl Sidebar {
             let mutation_client = match self.overlay.as_ref() {
                 Some(
                     Overlay::Create { target, .. }
-                    | Overlay::RenameScope(target)
                     | Overlay::Rename { target, .. }
                     | Overlay::Confirm(target),
                 ) => Some(target.client.clone()),

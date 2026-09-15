@@ -19,7 +19,6 @@ pub(super) enum Overlay {
         target: MutationTarget,
         name: String,
     },
-    RenameScope(MutationTarget),
     Rename {
         target: MutationTarget,
         name: String,
@@ -93,7 +92,16 @@ fn settings_mouse_key(settings: &mut Settings, key: Key, total: usize) -> Key {
 
 impl Overlay {
     /// Text a mutation prompt shows on the cursor row, with whether it is a
-    /// destructive confirmation. None for full-screen overlays.
+    /// Mutation prompts draw inside the list frame; the rest own the screen.
+    pub(super) fn renders_inline(&self) -> bool {
+        matches!(
+            self,
+            Overlay::Confirm(_) | Overlay::Create { .. } | Overlay::Rename { .. }
+        )
+    }
+
+    /// Text a prompt shows on the cursor row when the tree cannot draw it in
+    /// place (agent-only mode), with whether it is a destructive confirmation.
     pub(super) fn inline_prompt(&self) -> Option<(String, bool)> {
         let typed = |name: &str| -> String { name.chars().filter(|c| !c.is_control()).collect() };
         Some(match self {
@@ -112,7 +120,6 @@ impl Overlay {
                 };
                 (format!("new {kind}: {}▏", typed(name)), false)
             }
-            Overlay::RenameScope(_) => ("rename: p/w/s".into(), false),
             Overlay::Rename { target, name } => {
                 let kind = match target.action {
                     SequenceAction::RenamePane => "pane",
@@ -649,6 +656,9 @@ impl Sidebar {
                 ] {
                     keys.push((self.labels(&self.normal_keys, action, false), what));
                 }
+                if action_for(&self.normal_keys, KeyChord::Printable(b'.')).is_none() {
+                    keys.push((".".into(), "show all panes / agents".into()));
+                }
                 for binding in available_sequences(self.settings.settings.tmux_management_enabled) {
                     let prefix = binding.sequence.as_bytes()[0];
                     if action_for(&self.normal_keys, KeyChord::Printable(prefix)).is_none() {
@@ -725,13 +735,9 @@ impl Sidebar {
                 text
             }
             // Mutation prompts render inline in the list frame.
-            Some(
-                Overlay::Create { .. }
-                | Overlay::RenameScope(_)
-                | Overlay::Rename { .. }
-                | Overlay::Confirm(_),
-            )
-            | None => return,
+            Some(Overlay::Create { .. } | Overlay::Rename { .. } | Overlay::Confirm(_)) | None => {
+                return
+            }
         };
         let header_bg = top_bar.background();
         let text = if header_bg.is_empty() {
@@ -761,7 +767,7 @@ impl Sidebar {
         self.emit(text, &click_rows, force);
     }
 
-    fn open_rename_input(&mut self, mut target: MutationTarget, action: SequenceAction) {
+    pub(super) fn open_rename_input(&mut self, mut target: MutationTarget, action: SequenceAction) {
         target.action = action;
         let (id, format) = match action {
             SequenceAction::RenamePane => (target.pane_id.as_str(), "#{pane_title}"),
@@ -836,21 +842,6 @@ impl Sidebar {
                     self.restore_mutation_input(&target.client);
                 }
                 _ => self.overlay = Some(Overlay::Create { target, name }),
-            },
-            Overlay::RenameScope(target) => match key {
-                Key::Text(scope) if scope.eq_ignore_ascii_case("p") => {
-                    self.open_rename_input(target, SequenceAction::RenamePane);
-                }
-                Key::Text(scope) if scope.eq_ignore_ascii_case("w") => {
-                    self.open_rename_input(target, SequenceAction::RenameWindow);
-                }
-                Key::Text(scope) if scope.eq_ignore_ascii_case("s") => {
-                    self.open_rename_input(target, SequenceAction::RenameSession);
-                }
-                Key::AllStates | Key::ClearSearch | Key::Quit | Key::Close => {
-                    self.restore_mutation_input(&target.client);
-                }
-                _ => self.overlay = Some(Overlay::RenameScope(target)),
             },
             Overlay::Rename { target, mut name } => match key {
                 Key::Text(text) => {

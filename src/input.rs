@@ -118,6 +118,7 @@ pub(crate) enum Key {
     ClearSearch,
     CycleState,
     AllStates,
+    TogglePanes,
     Text(String),
     Other,
 }
@@ -386,6 +387,7 @@ fn decode_protocol_payload(first: u8, mut next: impl FnMut() -> Option<u8>, keys
             .and_then(|chord| action_key(keys, chord))
             .unwrap_or(match first {
                 b'G' => Key::Last,
+                b'.' => Key::TogglePanes,
                 byte if BUILTIN_SEQUENCES
                     .iter()
                     .any(|binding| binding.sequence.as_bytes()[0] == byte) =>
@@ -593,6 +595,7 @@ fn send_key_inner(name: &str, client: Option<&str>) -> i32 {
             "help" => b"?".to_vec(),
             "versions" => b"u".to_vec(),
             "settings" => b"s".to_vec(),
+            "toggle-panes" => b".".to_vec(),
             _ => return 2,
         }
     };

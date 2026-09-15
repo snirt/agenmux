@@ -183,26 +183,26 @@ has "$normal_keys" " key 'sequence-64'" &&
   echo "FAIL navigation-key-table: management sequence tables missing after reload"
   exit 1
 }
-printf 'r' >&9
-rename_scope=''
-for _ in $(seq 1 40); do
-  rename_scope="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
-  has "$rename_scope" 'rename:' && break
-  sleep 0.05
-done
-has "$rename_scope" 'rename:' || {
-  echo "FAIL navigation-key-table: r did not open rename scope chooser"
-  exit 1
-}
 rename_window="$(tmux -S "$sock" display-message -p -t "$sidebar" '#{window_name}')"
-printf 'wx\177' >&9
+printf 'r' >&9
 rename_input=''
 for _ in $(seq 1 40); do
   rename_input="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
-  has "$rename_input" "name: ${rename_window}▏" && break
+  has "$rename_input" "${rename_window}▏" && break
   sleep 0.05
 done
-has "$rename_input" "name: ${rename_window}▏" || {
+has "$rename_input" "${rename_window}▏" || {
+  echo "FAIL navigation-key-table: r did not open the in-place rename"
+  exit 1
+}
+printf 'x\177' >&9
+rename_input=''
+for _ in $(seq 1 40); do
+  rename_input="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+  has "$rename_input" "${rename_window}▏" && break
+  sleep 0.05
+done
+has "$rename_input" "${rename_window}▏" || {
   echo "FAIL navigation-key-table: inline rename Backspace did not restore current name"
   exit 1
 }

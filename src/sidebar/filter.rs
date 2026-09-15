@@ -333,6 +333,19 @@ impl Sidebar {
         self.rebuild_visible(false);
     }
 
+    /// Live view toggle between the agent list and the full tmux tree. Not
+    /// written to config; a reload restores the configured default.
+    pub(super) fn toggle_all_panes(&mut self) {
+        let show = !self.settings.settings.show_all_panes;
+        self.settings.settings.show_all_panes = show;
+        self.adopted_show_all_panes = show;
+        self.rebuild_visible(false);
+        if let Some(index) = self.active_visible_index() {
+            self.select_index(index + 1);
+        }
+        self.last_frame.clear();
+    }
+
     pub(super) fn search_key(&mut self, key: Key) {
         match key {
             Key::Quit | Key::Close => self.clear_filter(),
@@ -361,6 +374,7 @@ impl Sidebar {
             Key::WheelUp => self.scroll_viewport(-1),
             Key::WheelDown => self.scroll_viewport(1),
             Key::AllStates => self.clear_filter(),
+            Key::TogglePanes => self.toggle_all_panes(),
             Key::First
             | Key::Last
             | Key::Select(_)

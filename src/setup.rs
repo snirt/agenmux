@@ -488,6 +488,15 @@ fn key_bindings(config: &crate::app_config::AppConfig) -> Vec<(&'static str, Str
         "G".into(),
         key_command("last", NORMAL_TABLE, true),
     ));
+    // Live toggle between the agent list and the full tmux tree, unless the
+    // user has claimed "." for a configured action.
+    if crate::app_config::action_for(&config.normal, KeyChord::Printable(b'.')).is_none() {
+        out.push((
+            NORMAL_TABLE,
+            ".".into(),
+            key_command("toggle-panes", NORMAL_TABLE, true),
+        ));
+    }
     let mut prefixes = Vec::new();
     let mut continuations = Vec::new();
     for binding in crate::input::available_sequences(config.tmux_management_enabled) {
