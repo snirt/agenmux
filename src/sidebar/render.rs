@@ -329,7 +329,7 @@ impl Sidebar {
                         Some(edit) => format!("{edit}▏"),
                         None => pane.session_name.chars().take(cols).collect(),
                     };
-                    (i, format!("{accent}{name}{E}[0m"))
+                    (i, format!("{}{accent}{name}{E}[0m", header_mark(selected)))
                 }
                 VisiblePane::Window(i) => {
                     let pane = &self.panes[i];
@@ -338,7 +338,10 @@ impl Sidebar {
                         Some(edit) => format!("{edit}▏"),
                         None => pane.window_name.clone(),
                     };
-                    (i, format!("   {accent}\u{eb7f} {name}{E}[0m"))
+                    (
+                        i,
+                        format!("  {}{accent}\u{eb7f} {name}{E}[0m", header_mark(selected)),
+                    )
                 }
                 VisiblePane::Inventory(i) => (i, String::new()),
             };
@@ -397,9 +400,10 @@ impl Sidebar {
             } else {
                 header_mark(selected)
             };
-            // Session and window rows keep the plain layout (session at column
-            // 0, window at 3); selection shows as row background, not a mark.
-            let base = " ";
+            // Selectable headers reserve cursor-mark columns: sessions at 0,
+            // windows at 2, panes under a split window at 4. Plain headers
+            // keep the flat layout.
+            let base = if selectable_headers { "  " } else { " " };
             let prefix = if expanded { "  " } else { "" };
             // The editable field sits where the record's name is shown.
             let edit = renaming.as_deref().filter(|_| selected);
@@ -463,7 +467,12 @@ impl Sidebar {
                 selected,
             ));
             if let Some(row) = agent.filter(|row| !row.title.is_empty()) {
-                let title_prefix = if expanded { "       " } else { "     " };
+                let title_prefix = match (selectable_headers, expanded) {
+                    (true, true) => "        ",
+                    (true, false) => "      ",
+                    (false, true) => "       ",
+                    (false, false) => "     ",
+                };
                 let title: String = row
                     .title
                     .chars()
@@ -490,11 +499,12 @@ impl Sidebar {
         }
         if let Some((target, name)) = creating {
             let (row, at) = match target.action {
-                crate::input::SequenceAction::CreateSession => {
-                    (format!("{accent}{name}▏{E}[0m"), lines.len())
-                }
+                crate::input::SequenceAction::CreateSession => (
+                    format!("{}{accent}{name}▏{E}[0m", header_mark(true)),
+                    lines.len(),
+                ),
                 _ => (
-                    format!("   {accent}\u{eb7f} {name}▏{E}[0m"),
+                    format!("  {}{accent}\u{eb7f} {name}▏{E}[0m", header_mark(true)),
                     session_end.unwrap_or(lines.len()),
                 ),
             };
@@ -1224,7 +1234,7 @@ mod tests {
             .expect("session rename shows the edit field in place");
         assert_eq!(
             ansi.replace_all(session_line, "").trim_end(),
-            "EDITING▏",
+            "❯ EDITING▏",
             "session rename replaces the session name at its own position"
         );
         // A pane inside the expanded window edits at its command position.
