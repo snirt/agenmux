@@ -1786,8 +1786,30 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         "pane deletion must not implicitly destroy its session"
     );
     tmux.wait_for(Duration::from_secs(4), || selected() == session_pane);
-    assert_success(tmux.bin(&["key", "up", &client]), "move to session row");
-    thread::sleep(Duration::from_millis(150));
+    // The session row and its only pane share a pane id in the row map; the
+    // session row is the first line with it. A scan's focus follower can
+    // undo an `up` that lands mid-scan, so retry until the row map agrees.
+    let session_row_selected = || {
+        std::fs::read_to_string(tmux.tmp.join("agenmux-rows"))
+            .unwrap_or_default()
+            .lines()
+            .find(|line| line.starts_with(&format!("{session_pane}\t")))
+            .is_some_and(|line| line.ends_with("\t1"))
+    };
+    for _ in 0..5 {
+        assert_success(tmux.bin(&["key", "up", &client]), "move to session row");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline && !session_row_selected() {
+            thread::sleep(Duration::from_millis(50));
+        }
+        if session_row_selected() {
+            break;
+        }
+    }
+    assert!(
+        session_row_selected(),
+        "cursor never reached the session row"
+    );
     send_sequence("dd");
     // dd on a session row must confirm the whole session, inline.
     // Only sidebars in the client's session are repainted: read the one
