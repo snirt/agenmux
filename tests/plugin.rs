@@ -1573,11 +1573,22 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             "#{pane_id}",
         ])
     };
+    // Prompts render on the daemon's next pass; a loaded runner has needed
+    // several seconds. Name the needle and show the frame on failure.
     let sidebar_shows = |needle: &str| {
-        tmux.wait_for(Duration::from_secs(4), || {
-            tmux.text(&["capture-pane", "-p", "-t", &sidebar])
-                .contains(needle)
-        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut frame = String::new();
+        while Instant::now() < deadline {
+            frame = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
+            if frame.contains(needle) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        panic!(
+            "sidebar never showed {needle:?}: {frame:?}\n{}",
+            tmux.diagnostics()
+        );
     };
     send_sequence("cc");
     sidebar_shows("\u{eb7f} ▏");
