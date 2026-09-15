@@ -7,8 +7,13 @@ fail=0
 home="$(mktemp -d)"
 trap 'rm -rf "$home"' EXIT
 # an empty socket dir means "no tmux server", so the reload branch is skipped
-export HOME="$home" TMUX_TMPDIR="$home" AGENMUX_REPO="$DIR"
+export HOME="$home" TMUX_TMPDIR="$home" AGENMUX_REPO="$home/src"
 unset TMUX XDG_CONFIG_HOME
+# CI checks the PR out detached; a clone of that has no branch to pull, so the
+# installer clones from a copy that sits on one
+git init -q "$home/src"
+git -C "$home/src" fetch -q "$DIR" HEAD
+git -C "$home/src" checkout -q -b main FETCH_HEAD
 
 check() {
   if [ "$2" = "$3" ]; then
