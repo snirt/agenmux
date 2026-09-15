@@ -77,6 +77,10 @@ tmux -S "$sock" set-option -g @agenmux-bin "$BIN"
 tmux -S "$sock" set-option -g @agenmux-width 30
 tmux -S "$sock" set-option -g prefix M-a
 tmux -S "$sock" set-option -g mouse on
+# tmux 3.5 defaults escape-time to 10ms; the FIFO relay then splits arrow
+# sequences (ESC [ B) into a lone Escape, so dropdown arrows misfire. A small
+# but non-trivial time coalesces them; the wait loops tolerate the ESC delay.
+tmux -S "$sock" set-option -g escape-time 250
 # The sidebar must behave like a regular pane for the user's root-table
 # bindings. This deliberately differs from tmux's defaults so the test proves
 # the configured command is inherited rather than hard-coded by the plugin.
