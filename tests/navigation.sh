@@ -1255,7 +1255,9 @@ for _ in $(seq 1 20); do
 done
 settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
 has "$settings_frame" '❯ split' && has "$settings_frame" '  popup' && settings_dropdown=1
-printf '\033[B\033' >&9
+# "j" moves the dropdown via the keymap; ESC alone still cancels. Arrow
+# sequences (ESC [ B) race the escape-time on macOS and are covered elsewhere.
+printf 'j\033' >&9
 for _ in $(seq 1 20); do
   if ! grep -q '^mode = ' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
     [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
@@ -1269,7 +1271,7 @@ for _ in $(seq 1 20); do
   [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux-settings-edit ] && break
   sleep 0.05
 done
-printf '\033[B\r' >&9
+printf 'j\r' >&9
 for _ in $(seq 1 40); do
   if grep -q '^mode = "popup"' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
     [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
@@ -1293,7 +1295,7 @@ for _ in $(seq 1 20); do
   [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux-settings-edit ] && break
   sleep 0.05
 done
-printf '\033[A\r' >&9
+printf 'K\r' >&9
 for _ in $(seq 1 40); do
   if grep -q '^mode = "split"' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
     [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
