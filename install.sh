@@ -1,10 +1,11 @@
 #!/bin/sh
 # One-line installer:  curl -fsSL https://snirt.github.io/agenmux/install.sh | sh
 # Clones (or fast-forwards) the plugin, shows the tmux.conf lines it wants to
-# add and asks before writing it, then reloads a running tmux so
+# add (launcher keys, then the plugin line) and asks before writing, then
+# reloads a running tmux so
 # agenmux.tmux fetches the verified engine. Re-run to update. Override paths
 # with AGENMUX_DIR and AGENMUX_TMUX_CONF. Without a terminal (CI, containers)
-# the question takes its default: yes.
+# every question takes its default: keys A and a, write yes.
 set -eu
 
 DIR="${AGENMUX_DIR:-$HOME/.tmux/plugins/agenmux}"
@@ -18,6 +19,8 @@ if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
 else
   bold="" dim="" green="" red="" reset=""
 fi
+# decided once here: inside $(...) stdout is a pipe, so the prompts cannot test it
+if [ -t 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then interactive=1; else interactive=""; fi
 tilde() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
 ok() { printf '  %s✓%s %-10s %s\n' "$green" "$reset" "$1" "$2"; }
 skip() { printf '  %s-%s %-10s %s\n' "$dim" "$reset" "$1" "$2"; }
@@ -29,7 +32,7 @@ die() {
 # the answer comes from the terminal; no terminal on stdout means nobody is
 # watching, so take the default.
 ask() {
-  [ -t 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ] || {
+  [ -n "$interactive" ] || {
     [ "$2" = y ]
     return
   }
@@ -37,6 +40,21 @@ ask() {
   printf '  %s %s%s%s ' "$1" "$dim" "$hint" "$reset" >/dev/tty
   read -r answer </dev/tty || answer=""
   case "${answer:-$2}" in y | Y | yes | YES) return 0 ;; *) return 1 ;; esac
+}
+# ask_key PROMPT DEFAULT: one tmux key name; empty or no terminal keeps DEFAULT
+ask_key() {
+  [ -n "$interactive" ] || {
+    printf '%s' "$2"
+    return
+  }
+  while :; do
+    printf '  %s %s[%s]%s ' "$1" "$dim" "$2" "$reset" >/dev/tty
+    read -r answer </dev/tty || answer=""
+    case "${answer:-$2}" in
+    *[\ \'\"]*) printf '  one key name, no spaces or quotes (e.g. A, C-g, F5)\n' >/dev/tty ;;
+    *) printf '%s' "${answer:-$2}"; return ;;
+    esac
+  done
 }
 
 # site/logo.png rendered as braille (48 columns): green agen, faded mu, >< chevrons
@@ -103,30 +121,41 @@ else
   else
     tpm_user="" plugin="run-shell \"$(tilde "$DIR")/agenmux.tmux\""
   fi
-  printf '\n  Line for %s%s%s:\n\n      %s\n\n' "$bold" "$(tilde "$CONF")" "$reset" "$plugin"
-  if ask "Add it to $(tilde "$CONF")?" y; then
+  printf '\n  Launcher keys, pressed after the tmux prefix:\n'
+  sidebar_key="$(ask_key "Sidebar toggle" A)"
+  popup_key="$(ask_key "Popup toggle" a)"
+  [ "$sidebar_key" != "$popup_key" ] || die "sidebar and popup need different keys"
+  # options must precede the plugin line; the plugin reads them when it loads
+  block="set -g @agenmux-key '$sidebar_key'
+set -g @agenmux-popup-key '$popup_key'
+$plugin"
+  printf '\n  Lines for %s%s%s:\n\n' "$bold" "$(tilde "$CONF")" "$reset"
+  printf '%s\n' "$block" | sed 's/^/      /'
+  printf '\n'
+  if ask "Add them to $(tilde "$CONF")?" y; then
     if [ -n "$tpm_user" ]; then
       # ENVIRON, not -v: BSD awk rejects newlines in -v values
-      plugin="$plugin" awk '/tpm\/tpm/ && !done { print ENVIRON["plugin"]; done = 1 } { print }' \
+      block="$block" awk '/tpm\/tpm/ && !done { print ENVIRON["block"]; done = 1 } { print }' \
         "$CONF" >"$CONF.agenmux.tmp" && mv "$CONF.agenmux.tmp" "$CONF" || die "could not edit $(tilde "$CONF")"
     else
-      printf '%s\n' "$plugin" >>"$CONF"
+      printf '%s\n' "$block" >>"$CONF"
     fi
     ok tmux.conf "updated $(tilde "$CONF")"
   else
-    skip tmux.conf "left untouched; to add it later:"
-    printf '\n      echo %s >> %s\n\n' "$(printf "'%s'" "$plugin")" "$(tilde "$CONF")"
+    skip tmux.conf "left untouched; add the lines above yourself, options before the plugin line"
+    printf '\n'
     exit 0
   fi
 fi
 
 if tmux list-sessions >/dev/null 2>&1; then
   tmux source-file "$CONF" || die "tmux rejected $(tilde "$CONF"); fix the error above and run: tmux source-file $(tilde "$CONF")"
-  ok tmux "reloaded; the engine downloads now, the first prefix + A waits for it"
+  ok tmux "reloaded; the engine downloads now, the first toggle waits for it"
 else
   ok tmux "not running; the engine downloads on first start"
 fi
 
-printf '\n  Next: inside tmux press %sprefix + A%s for the sidebar, %sprefix + e%s for a popup.\n' "$bold" "$reset" "$bold" "$reset"
+printf '\n  Next: inside tmux press %sprefix + %s%s for the sidebar, %sprefix + %s%s for a popup.\n' \
+  "$bold" "${sidebar_key:-A}" "$reset" "$bold" "${popup_key:-e}" "$reset"
 printf '  %sStatus-bar summary, keys, width, notifications: https://github.com/snirt/agenmux#usage%s\n' "$dim" "$reset"
 printf '  %sApp config and agent overrides live in %s/%s\n\n' "$dim" "$(tilde "$CFG")" "$reset"
