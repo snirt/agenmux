@@ -419,10 +419,12 @@ impl Sidebar {
             } else {
                 format!("{base}{mark}{prefix}{window_icon}\u{eb7f}{E}[0m ")
             };
-            // A collapsed single-pane window shows its window name (renamed by
-            // `r`); an expanded pane shows its title when set, else the command.
-            let name = if agent.is_some() {
-                &pane.command
+            // Agent rows show the working directory for session context, like
+            // the agent-only view; a collapsed single-pane window shows its
+            // window name (renamed by `r`); an expanded pane shows its title
+            // when set, else the command.
+            let name = if let Some(row) = agent {
+                &row.cwd
             } else if !expanded {
                 &pane.window_name
             } else if !pane.pane_title.is_empty() {
@@ -1124,8 +1126,8 @@ mod tests {
         let after_status = record.chars().skip(1).collect::<String>();
         assert_eq!(
             after_status.trim_end(),
-            " claude node",
-            "agent rows order status, agent name, then pane command"
+            " claude repo",
+            "agent rows order status, agent name, then working directory"
         );
         assert!(
             selected_agent.contains(&format!(
