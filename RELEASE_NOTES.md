@@ -1,28 +1,52 @@
-# agenmux v0.4.0
+# agenmux v0.5.0
 
 ## What's changed
 
-### Application configuration
+### Tmux management
 
-- Added optional XDG configuration for display, behavior, themes, and key bindings ([#61](https://github.com/snirt/agenmux/pull/61)).
-- Added dark, light, and terminal themes with per-color overrides across split and popup views.
-- Added strict validation, effective-value reporting, and live `config reload` without reopening sidebars.
+- Added opt-in tmux management from the sidebar: `cc` creates a window, `cs` creates a session, `dd` deletes the selected record, and `r` renames it in place ([#82](https://github.com/snirt/agenmux/pull/82)).
+- Session and multi-pane window rows become selectable with management on, mutation prompts render inline on the cursor row, and every operation revalidates tmux IDs before acting.
 
-### Navigation
+### Sidebar
 
-- Added `gg` / `G` shortcuts to select the first or last visible agent ([#60](https://github.com/snirt/agenmux/pull/60)).
-- Improved mouse navigation with click-to-select, second-click-to-open, independent wheel scrolling, and a scrollbar ([#59](https://github.com/snirt/agenmux/pull/59)).
+- Added an optional all-panes mode that renders the complete tmux session, window, and pane hierarchy alongside agents, toggled live with `.` ([#70](https://github.com/snirt/agenmux/pull/70), [#82](https://github.com/snirt/agenmux/pull/82)).
+- Added an in-app Settings view (`s`) with search, dropdowns, mouse support, and persistence to the configuration file ([#84](https://github.com/snirt/agenmux/pull/84)).
+- Inherited header colors from tmux and reused the shared top bar across sidebar views ([#84](https://github.com/snirt/agenmux/pull/84)).
+- Made the cursor follow window switches immediately and kept held `j`/`k` responsive under scans ([#87](https://github.com/snirt/agenmux/pull/87)).
+- Restored the sidebar width after a neighbouring pane is killed ([#88](https://github.com/snirt/agenmux/pull/88)).
+- Kept the sidebar scrollbar continuous on full-width rows ([#66](https://github.com/snirt/agenmux/pull/66)).
+
+### Installation
+
+- Added a one-line installer that clones or updates the plugin, writes the tmux.conf line after confirmation, and reloads tmux ([#92](https://github.com/snirt/agenmux/pull/92)):
+
+  ```sh
+  curl -fsSL https://snirt.github.io/agenmux/install.sh | sh
+  ```
+
+- Reduced the release binary size with a size-optimized profile ([#67](https://github.com/snirt/agenmux/pull/67)).
+
+### Detection
+
+- Read the Claude Code 2.1 activity line as working, covering the `✳` glyph and hook progress in the detail, so panes no longer flip to idle mid-task ([#93](https://github.com/snirt/agenmux/pull/93)).
+
+### Performance and diagnostics
+
+- Triggered bounded scans from pane output instead of polling, reducing redundant pane captures ([#77](https://github.com/snirt/agenmux/pull/77)).
+- Cut the sidebar click helper from seven tmux forks to four ([#87](https://github.com/snirt/agenmux/pull/87)).
+- Kept daemon stderr in `$XDG_STATE_HOME/agenmux/daemon.log` with one rotated generation, and extended the opt-in `@agenmux-debug` trace with timestamps, scan numbers, and state changes ([#86](https://github.com/snirt/agenmux/pull/86)).
 
 ### Fixes
 
-- Preserved normal tmux mouse behavior when clicking outside agent rows and over sidebar overlays ([#50](https://github.com/snirt/agenmux/pull/50)).
-- Recovered cleanly when a previously selected development binary no longer exists ([#52](https://github.com/snirt/agenmux/pull/52)).
-- Updated Pi detection for current working indicators and interactive question prompts ([#53](https://github.com/snirt/agenmux/pull/53), [#56](https://github.com/snirt/agenmux/pull/56)).
-- Prevented idle macOS notifications from causing sustained broker and `usernotificationd` CPU usage ([#62](https://github.com/snirt/agenmux/pull/62)).
+- Loaded the focused view during sidebar startup ([#71](https://github.com/snirt/agenmux/pull/71)).
+- Kept the daemon alive when a pane capture file cannot be read ([#79](https://github.com/snirt/agenmux/pull/79)).
+- Fixed a pane-add lock race on macOS and stopped the daemon cleanly on teardown ([#89](https://github.com/snirt/agenmux/pull/89)).
 
 ### Maintenance
 
-- Improved navigation test synchronization and isolated test tmux servers ([#57](https://github.com/snirt/agenmux/pull/57)).
+- Refactored the sidebar into focused input, filtering, rendering, overlay, and daemon components ([#68](https://github.com/snirt/agenmux/pull/68)).
+- Cached cargo output in CI, cancelled superseded PR runs, and stabilised the flaky plugin tests ([#79](https://github.com/snirt/agenmux/pull/79), [#89](https://github.com/snirt/agenmux/pull/89)).
+- Baked the latest release into the landing page at deploy time ([#78](https://github.com/snirt/agenmux/pull/78)).
 
 ### Assets
 
@@ -32,4 +56,4 @@
 - macOS aarch64
 - SHA-256 checksums
 
-**Full changelog:** <https://github.com/snirt/agenmux/compare/v0.3.1...v0.4.0>
+**Full changelog:** <https://github.com/snirt/agenmux/compare/v0.4.0...v0.5.0>
