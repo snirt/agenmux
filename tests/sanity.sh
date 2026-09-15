@@ -281,13 +281,12 @@ active_socket=""
 
 # The one-line installer against a live server: it must write the conf line,
 # create the config root, and its reload must run agenmux.tmux (the launcher
-# binding is the proof). Cloned from a branch because this checkout may be
-# detached, and with HOME under $root so nothing touches the runner's dotfiles.
+# binding is the proof). HOME sits under $root so nothing touches the runner's
+# dotfiles.
 install_socket="agenmux-sanity-install-$$"
 active_socket="$install_socket"
-git init -q "$root/src"
-git -C "$root/src" fetch -q "$DIR" HEAD
-git -C "$root/src" checkout -q -b main FETCH_HEAD
+. "$DIR/tests/helpers/install-fixture.sh"
+install_fixture "$DIR" "$root/src"
 tmux -L "$install_socket" -f /dev/null new-session -d -s install -x 100 -y 30
 install_path="$(tmux -L "$install_socket" display-message -p '#{socket_path}')"
 install_pid="$(tmux -L "$install_socket" display-message -p '#{pid}')"
