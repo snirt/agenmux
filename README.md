@@ -29,7 +29,18 @@ hooks to install, nothing runs inside your agents.
 
 ## Quick start
 
-Install with [TPM](https://github.com/tmux-plugins/tpm):
+```sh
+curl -fsSL https://snirt.github.io/agenmux/install.sh | sh
+```
+
+The script clones the plugin to `~/.tmux/plugins/agenmux`, creates
+`~/.config/agenmux/agents/`, asks for the launcher keys (default `prefix + A`
+sidebar, `prefix + a` popup), shows the lines it wants in your tmux.conf (a
+`@plugin` entry if you use TPM, `run-shell` otherwise), writes them once you
+confirm, and reloads tmux. Run it again to update; an existing agenmux entry
+is left alone.
+
+Or install with [TPM](https://github.com/tmux-plugins/tpm) directly:
 
 ```tmux
 set -g @plugin 'snirt/agenmux'

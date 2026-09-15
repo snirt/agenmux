@@ -279,6 +279,67 @@ printf 'ok   clean checkout first activation installs and opens native split\n'
 tmux -L "$bootstrap_socket" kill-server
 active_socket=""
 
+# The one-line installer against a live server: it must write the conf line,
+# create the config root, and its reload must run agenmux.tmux (the launcher
+# binding is the proof). HOME sits under $root so nothing touches the runner's
+# dotfiles.
+install_socket="agenmux-sanity-install-$$"
+active_socket="$install_socket"
+. "$DIR/tests/helpers/install-fixture.sh"
+install_fixture "$DIR" "$root/src"
+tmux -L "$install_socket" -f /dev/null new-session -d -s install -x 100 -y 30
+install_path="$(tmux -L "$install_socket" display-message -p '#{socket_path}')"
+install_pid="$(tmux -L "$install_socket" display-message -p '#{pid}')"
+install_out="$(TMUX="$install_path,$install_pid,0" AGENMUX_REPO="$root/src" \
+  sh "$DIR/install.sh" 2>&1)" || {
+  printf 'FAIL installer: %s\n' "$install_out" >&2
+  exit 1
+}
+has_line "$(cat "$HOME/.tmux.conf")" 'run-shell "~/.tmux/plugins/agenmux/agenmux.tmux"'
+[ -d "$XDG_CONFIG_HOME/agenmux/agents" ]
+has "$(tmux -L "$install_socket" list-keys -T prefix)" '/agenmux.tmux'
+has "$install_out" 'reloaded'
+tmux -L "$install_socket" kill-server
+active_socket=""
+rm -rf "$HOME/.tmux" "$HOME/.tmux.conf"
+printf 'ok   one-line installer wrote conf, config root, and reloaded a live server\n'
+
+# The same installer on a terminal: prompts read /dev/tty, so drive them with
+# expect. First decline, so the conf stays empty and the second run asks again;
+# then reject a key with a space, pick custom keys, accept. No server on this
+# socket dir, so the reload branch is skipped.
+wizard() { # answers...
+  TMUX_TMPDIR="$root/no-server" AGENMUX_REPO="$root/src" expect -c "
+    set timeout 30
+    log_user 0
+    spawn sh $DIR/install.sh
+    $1
+    expect eof
+    lassign [wait] pid spawnid os_error exit_code
+    exit \$exit_code
+  "
+}
+mkdir -p "$root/no-server"
+wizard '
+    expect "Sidebar toggle" { send "\r" }
+    expect "Popup toggle" { send "\r" }
+    expect "Add them to" { send "n\r" }
+'
+[ ! -s "$HOME/.tmux.conf" ]
+wizard '
+    expect "Sidebar toggle" { send "C g\r" }
+    expect "one key name" {}
+    expect "Sidebar toggle" { send "C-g\r" }
+    expect "Popup toggle" { send "F5\r" }
+    expect "Add them to" { send "y\r" }
+'
+has_line "$(cat "$HOME/.tmux.conf")" "set -g @agenmux-key 'C-g'"
+has_line "$(cat "$HOME/.tmux.conf")" "set -g @agenmux-popup-key 'F5'"
+has_line "$(cat "$HOME/.tmux.conf")" 'run-shell "~/.tmux/plugins/agenmux/agenmux.tmux"'
+[ "$(wc -l <"$HOME/.tmux.conf")" -eq 3 ]
+rm -rf "$HOME/.tmux" "$HOME/.tmux.conf"
+printf 'ok   installer prompts: decline leaves conf empty, custom keys written once\n'
+
 phase=$SECONDS
 bash "$plugin/scripts/install-bin.sh"
 download_seconds=$((SECONDS - phase))
