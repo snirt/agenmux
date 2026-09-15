@@ -869,6 +869,7 @@ impl Sidebar {
                 self.restore_mutation_input(&target.client);
             }
         }
+        self.follow_selection = true;
         self.last_frame.clear();
         super::DispatchResult::Continue
     }

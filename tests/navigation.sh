@@ -10,6 +10,8 @@ diagnose() {
   tail -n 40 "$XDG_STATE_HOME/agenmux/daemon.log" 2>/dev/null || true
   echo "--- daemon processes"
   pgrep -fl "agenmux daemon" 2>/dev/null || true
+  echo "--- config file"
+  cat "$XDG_CONFIG_HOME/agenmux/config.toml" 2>/dev/null || true
   echo "--- daemon trace tail"
   tail -n 60 "$tmp/daemon-trace.log" 2>/dev/null || true
 }

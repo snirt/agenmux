@@ -285,6 +285,7 @@ impl Sidebar {
     }
 
     pub(super) fn rebuild_visible(&mut self, select_first: bool) {
+        let before = self.visible.len();
         self.visible = if self.settings.settings.show_all_panes {
             let indices =
                 inventory_filtered_indices(&self.panes, &self.rows, &self.query, self.state_filter);
@@ -310,6 +311,11 @@ impl Sidebar {
         if self.visible.is_empty() {
             self.sel_pane.clear();
             self.sel_occurrence = None;
+        }
+        // A record appeared or vanished: the viewport clamp can otherwise
+        // leave the cursor off screen, so follow it on the next render.
+        if self.visible.len() != before {
+            self.follow_selection = true;
         }
     }
 

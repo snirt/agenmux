@@ -846,8 +846,9 @@ impl Sidebar {
         }
     }
 
-    fn enter_mutation_input(&self, client: &str) {
+    fn enter_mutation_input(&mut self, client: &str) {
         trace!("mutation input on for {client}");
+        self.follow_selection = true;
         if self.daemon.is_some() {
             let _ = crate::tmux::command_status(&[
                 "switch-client",
