@@ -1,0 +1,11 @@
+⏺ Rerunning the failed job and waiting for the result · 22s
+  ⎿  $ bash -c 'cd /home/user/project && gh run rerun 123 --failed && gh run watch 123 --exit-status' (22s)
+     (ctrl+b ctrl+b (twice) to run in background)
+
+✳ Boogieing… (16m 1s · ↓ 6.7k tokens)
+                                                                                    ✘ Auto-update failed · Run claude doctor
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   project feature-branch  Fable 5.1 20%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent

@@ -1,0 +1,9 @@
+⏺ Restarting sampler compatible with bash 3
+  ⎿  $ bash -c 'cat log.txt'
+
+· Composing… (running UserPromptSubmit hooks… 2/3 · 2m 7s · ↓ 8.3k tokens)
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   project feature-branch  Fable 5.1 8%
+  ⏵⏵ bypass permissions on · PR #1 · 1 monitor · ← 1 agent
