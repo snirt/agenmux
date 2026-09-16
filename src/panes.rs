@@ -108,7 +108,7 @@ pub(crate) fn lifecycle_lock() -> io::Result<ServerLock> {
     if !numeric(server) || !numeric(started) {
         return Err(io::Error::other("invalid lifecycle lock identity"));
     }
-    ServerLock::acquire(server, started, "lifecycle", Duration::from_secs(10))
+    ServerLock::acquire(server, started, "lifecycle", Duration::from_secs(30))
 }
 
 #[allow(dead_code)] // native toggle consumes this in the next migration task
