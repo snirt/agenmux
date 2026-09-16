@@ -3,6 +3,7 @@ use std::{env, process::Command};
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-env-changed=AGENMUX_DEV_BUILD_ID");
     println!("cargo:rerun-if-changed=src");
 
     if env::var("PROFILE").as_deref() != Ok("debug") {

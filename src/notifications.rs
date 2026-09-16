@@ -152,10 +152,16 @@ fn shell_quote(value: &str) -> String {
 fn most_recent_client(rows: &str) -> Option<String> {
     rows.lines()
         .filter_map(|line| {
-            let mut fields = line.splitn(3, '\t');
+            let separator = if line.contains('|') { '|' } else { '\t' };
+            let mut fields = line.splitn(3, separator);
             let activity = fields.next()?.parse::<u64>().ok()?;
-            let name = fields.next()?;
-            let flags = fields.next()?;
+            let first = fields.next()?;
+            let second = fields.next()?;
+            let (name, flags) = if separator == '|' {
+                (second, first)
+            } else {
+                (first, second)
+            };
             (!flags.split(',').any(|flag| flag == "control-mode"))
                 .then(|| (activity, name.to_string()))
         })
@@ -262,7 +268,7 @@ pub fn open_pane(socket: &str, pane: &str, bundle: &str) -> i32 {
         .args([
             "list-clients",
             "-F",
-            "#{client_activity}\t#{client_name}\t#{client_flags}",
+            "#{client_activity}|#{client_flags}|#{client_name}",
         ])
         .output()
     else {

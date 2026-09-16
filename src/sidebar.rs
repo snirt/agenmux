@@ -446,6 +446,53 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     0
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NavigationTarget {
+    Selection,
+    Viewport,
+}
+
+#[derive(Clone, Copy)]
+struct NavigationRun {
+    target: NavigationTarget,
+    direction: i64,
+    delta: i64,
+}
+
+impl NavigationRun {
+    fn queue(pending: &mut Option<Self>, target: NavigationTarget, direction: i64) -> Option<Self> {
+        if let Some(run) = pending {
+            if run.target == target && run.direction == direction {
+                run.delta = run.delta.saturating_add(direction);
+                return None;
+            }
+        }
+        pending.replace(Self {
+            target,
+            direction,
+            delta: direction,
+        })
+    }
+
+    fn apply(self, sidebar: &mut Sidebar) {
+        match self.target {
+            NavigationTarget::Selection => sidebar.move_sel(self.delta),
+            NavigationTarget::Viewport => sidebar.scroll_viewport(self.delta),
+        }
+    }
+}
+
+fn navigation_key(key: &Key) -> Option<(NavigationTarget, i64)> {
+    match key {
+        Key::Owned(key, _) => navigation_key(key),
+        Key::Up => Some((NavigationTarget::Selection, -1)),
+        Key::Down => Some((NavigationTarget::Selection, 1)),
+        Key::WheelUp => Some((NavigationTarget::Viewport, -1)),
+        Key::WheelDown => Some((NavigationTarget::Viewport, 1)),
+        _ => None,
+    }
+}
+
 /// Returns true when the loop ended because another daemon took ownership.
 fn event_loop(sb: &mut Sidebar) -> bool {
     let key_fd = sb.daemon.as_ref().map_or(0, |d| d.keys_fd);
@@ -566,9 +613,9 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             }
         }
         if key_ready {
-            // Drain every queued key before one render: each frame goes to
-            // every sidebar pane of the session, too costly per repeat step.
-            let mut drained = 0;
+            // Coalesce a held key or wheel burst into one state update per frame.
+            let frame_deadline = Instant::now() + Duration::from_millis(16);
+            let mut navigation = None;
             loop {
                 let editing_settings = sb.settings_editing();
                 let text_input = sb.search_focused
@@ -597,21 +644,37 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                     read_key(key_fd, keys)
                 };
                 trace!("key {key:?}");
-                match sb.dispatch_key(key) {
-                    DispatchResult::Continue => {}
-                    DispatchResult::Break => {
-                        trace!("event loop exit: key requested teardown");
-                        return false;
+                let navigation_step = if !editing_settings && sb.overlay.is_none() {
+                    navigation_key(&key)
+                } else {
+                    None
+                };
+                if let Some((target, direction)) = navigation_step {
+                    if let Some(run) = NavigationRun::queue(&mut navigation, target, direction) {
+                        run.apply(sb);
                     }
-                    DispatchResult::QuietExit => {
-                        trace!("event loop exit: replaced, leaving panes");
-                        return true;
+                } else {
+                    if let Some(run) = navigation.take() {
+                        run.apply(sb);
+                    }
+                    match sb.dispatch_key(key) {
+                        DispatchResult::Continue => {}
+                        DispatchResult::Break => {
+                            trace!("event loop exit: key requested teardown");
+                            return false;
+                        }
+                        DispatchResult::QuietExit => {
+                            trace!("event loop exit: replaced, leaving panes");
+                            return true;
+                        }
                     }
                 }
-                drained += 1;
-                if drained >= 64 || !key_pending(key_fd) {
+                if !key_pending(key_fd) || Instant::now() >= frame_deadline {
                     break;
                 }
+            }
+            if let Some(run) = navigation {
+                run.apply(sb);
             }
             if std::mem::take(&mut sb.refresh_requested) {
                 scans.request_immediate();
@@ -891,9 +954,9 @@ impl Sidebar {
             | SequenceAction::CreateSession
             | SequenceAction::Rename => (
                 target.pane_id.as_str(),
-                "#{pane_id}\t#{window_id}\t#{session_id}",
+                "#{pane_id}|#{window_id}|#{session_id}",
                 format!(
-                    "{}\t{}\t{}",
+                    "{}|{}|{}",
                     target.pane_id, target.window_id, target.session_id
                 ),
             ),
@@ -927,9 +990,9 @@ impl Sidebar {
             "-p",
             "-t",
             pane,
-            "#{session_id}\t#{window_id}\t#{pane_id}",
+            "#{session_id}|#{window_id}|#{pane_id}",
         ])?;
-        let mut fields = location.trim().split('\t');
+        let mut fields = location.trim().split('|');
         let (Some(session), Some(window), Some(actual_pane)) =
             (fields.next(), fields.next(), fields.next())
         else {
@@ -944,27 +1007,43 @@ impl Sidebar {
         }
         crate::tmux::command_status(&["switch-client", "-c", client, "-t", session])?;
         crate::tmux::command_status(&["select-window", "-t", window])?;
-        self.focus_sidebar(client);
+        self.focus_sidebar(client, Some(window));
         Ok(())
     }
 
     /// Put the client on the sidebar pane of its current window and back in
     /// the plugin key table. A window this sidebar just created gets its pane
     /// from the background pane-add hook, so wait briefly for it to appear.
-    fn focus_sidebar(&self, client: &str) {
+    fn focus_sidebar(&self, client: &str, expected_window: Option<&str>) {
         if self.daemon.is_none() {
             return; // the popup already owns the client's input
         }
         let deadline = Instant::now() + Duration::from_millis(1500);
-        let location = format!("#{{window_id}}\t#{{?{},1,0}}", crate::panes::IS_SIDEBAR);
+        let location = format!("#{{window_id}}|#{{?{},1,0}}", crate::panes::IS_SIDEBAR);
+        let client_filter = format!("#{{==:#{{client_name}},{client}}}");
+        let mut reached_expected = expected_window.is_none();
         loop {
             let Ok(location) =
-                crate::tmux::command(&["display-message", "-p", "-c", client, &location])
+                crate::tmux::command(&["list-clients", "-f", &client_filter, "-F", &location])
             else {
                 break;
             };
-            let (window, on_sidebar) = location.trim().split_once('\t').unwrap_or(("", "0"));
-            if on_sidebar == "1" {
+            let (window, on_sidebar) = location.trim().split_once('|').unwrap_or(("", "0"));
+            // Creation names the exact destination. Wait for tmux to publish the
+            // completed switch; only treat a later move away as user intent.
+            if let Some(expected) = expected_window {
+                if window == expected {
+                    reached_expected = true;
+                } else if reached_expected {
+                    break;
+                } else if Instant::now() >= deadline {
+                    break;
+                } else {
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+            }
+            if expected_window.is_none() && on_sidebar == "1" {
                 break; // already there: never fight a newer focus change
             }
             let sidebar = crate::tmux::command(&[
@@ -979,7 +1058,7 @@ impl Sidebar {
             .ok()
             .and_then(|panes| panes.lines().next().map(str::to_string));
             if let Some(pane) = sidebar {
-                let _ = crate::tmux::command_status(&["select-pane", "-t", &pane]);
+                let _ = crate::tmux::command_status(&["switch-client", "-c", client, "-t", &pane]);
                 break;
             }
             if Instant::now() >= deadline {
@@ -1091,9 +1170,9 @@ impl Sidebar {
                         )
                     })?;
                 let clients =
-                    crate::tmux::command(&["list-clients", "-F", "#{client_name}\t#{session_id}"])?;
+                    crate::tmux::command(&["list-clients", "-F", "#{client_name}|#{session_id}"])?;
                 for line in clients.lines() {
-                    let Some((client, session)) = line.split_once('\t') else {
+                    let Some((client, session)) = line.split_once('|') else {
                         continue;
                     };
                     if session == target.session_id {
@@ -1143,7 +1222,7 @@ impl Sidebar {
             // back on the sidebar instead of whatever pane it fell onto.
             SequenceAction::DeletePane
             | SequenceAction::DeleteWindow
-            | SequenceAction::DeleteSession => self.focus_sidebar(&target.client),
+            | SequenceAction::DeleteSession => self.focus_sidebar(&target.client, None),
             _ => {}
         }
         DispatchResult::Continue
@@ -1233,6 +1312,8 @@ impl Sidebar {
                 periodic,
                 covered_session: covered_session.as_deref(),
                 now: Instant::now(),
+                // the startup scan passes full=true with nothing to yield to
+                key_fd: (!changes.full).then(|| self.daemon.as_ref().map_or(0, |d| d.keys_fd)),
             },
         )?;
         let scan::ScanSnapshot {
@@ -1251,11 +1332,15 @@ impl Sidebar {
             "scheduled"
         };
         trace!(
-            "scan {}ms reason={reason} captured={} reused={}",
+            "scan {}ms reason={reason} captured={} reused={} deferred={}",
             t0.elapsed().as_millis(),
             stats.captured,
-            stats.reused
+            stats.reused,
+            stats.deferred.len()
         );
+        // Yielded panes rejoin the dirty set: has_relevant_output then books
+        // the next output scan under its usual 500ms throttle.
+        self.tmux.defer_output(stats.deferred);
         let _ = std::fs::write(&self.cache_file, scan::to_tsv(&scanned));
         let mut focus = self.client_focus().unwrap_or_default();
         // A popup owns the terminal's input even though tmux still reports the
@@ -1337,7 +1422,7 @@ impl Sidebar {
             .is_some_and(|value| value.trim() == "on");
         let out = self
             .tmux
-            .run("list-clients -F '#{client_activity}\t#{client_name}\t#{session_id}\t#{pane_id}\t#{pane_title}\t#{client_flags}'")
+            .run("list-clients -F '#{client_activity}|#{client_name}|#{session_id}|#{pane_id}|#{pane_title}|#{client_flags}'")
             .ok()?;
         Some(crate::focus::parse_clients(&out, focus_events))
     }
@@ -1418,6 +1503,22 @@ impl Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_runs_coalesce_only_same_target_and_direction() {
+        let mut pending = None;
+        assert!(NavigationRun::queue(&mut pending, NavigationTarget::Selection, 1).is_none());
+        assert!(NavigationRun::queue(&mut pending, NavigationTarget::Selection, 1).is_none());
+        let forward = NavigationRun::queue(&mut pending, NavigationTarget::Selection, -1).unwrap();
+        assert_eq!(forward.delta, 2);
+        let reverse = NavigationRun::queue(&mut pending, NavigationTarget::Viewport, 1).unwrap();
+        assert_eq!(reverse.delta, -1);
+        assert_eq!(pending.unwrap().delta, 1);
+        assert_eq!(
+            navigation_key(&Key::Owned(Box::new(Key::Down), "client".into())),
+            Some((NavigationTarget::Selection, 1))
+        );
+    }
 
     #[test]
     fn tmux_style_colors_drive_default_header_contrast() {

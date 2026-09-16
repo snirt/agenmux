@@ -981,6 +981,7 @@ mod tests {
             seen_mirror: false,
             empty_ticks: 0,
             client: String::new(),
+            generation: String::new(),
             started: Instant::now(),
             win_sizes: HashMap::new(),
             attached: String::new(),

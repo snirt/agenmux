@@ -67,10 +67,16 @@ fn main() {
         ["pane-add", window] => panes::pane_add(Some(window)),
         ["pane-orphan"] => panes::pane_orphan(),
         ["pane-pin"] => panes::pane_pin(),
-        ["teardown"] => {
-            panes::stop_daemon();
-            panes::teardown()
-        }
+        ["teardown"] => match panes::lifecycle_lock() {
+            Ok(_lock) => {
+                panes::stop_daemon();
+                panes::teardown()
+            }
+            Err(error) => {
+                eprintln!("agenmux: cannot acquire lifecycle lock: {error}");
+                1
+            }
+        },
         ["setup"] => setup::run(&plugin_dir()),
         ["toggle"] => toggle::run(&plugin_dir(), None, None),
         ["toggle", mode] => toggle::run(&plugin_dir(), Some(mode), None),

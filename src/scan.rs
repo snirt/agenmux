@@ -72,6 +72,12 @@ impl ScreenCache {
         );
         Ok((screen, false))
     }
+
+    /// Last screen of `pane` regardless of key or age: what a yielded scan
+    /// shows until the deferred capture lands.
+    fn stale(&self, pane: &str) -> Option<String> {
+        self.panes.get(pane).map(|cached| cached.screen.clone())
+    }
 }
 
 pub struct ScanPolicy<'a> {
@@ -80,12 +86,28 @@ pub struct ScanPolicy<'a> {
     pub periodic: bool,
     pub covered_session: Option<&'a str>,
     pub now: Instant,
+    /// Key fd to watch between captures: a waiting key stops the capture
+    /// loop, and every remaining pane keeps its last screen (`deferred`).
+    /// None = capture everything (CLI snapshots, the startup scan).
+    pub key_fd: Option<libc::c_int>,
 }
 
 #[derive(Default)]
 pub struct ScanStats {
     pub captured: usize,
     pub reused: usize,
+    /// Panes whose capture yielded to a key; hand them back as dirty so the
+    /// next output scan refreshes them.
+    pub deferred: std::collections::HashSet<String>,
+}
+
+/// Keep the last screen instead of capturing: a key is waiting and the pane
+/// has one. A pane with no screen yet is captured anyway — leaving it out
+/// would drop its row for a tick.
+/// ponytail: a held key defers every capture; states go stale until release,
+/// same as the pre-scan key gate already does.
+fn defer_capture(key_waiting: bool, has_screen: bool) -> bool {
+    key_waiting && has_screen
 }
 
 fn force_capture(policy: &ScanPolicy<'_>, pane: &str, session: &str) -> bool {
@@ -132,7 +154,9 @@ struct ParsedPane {
     height: usize,
 }
 
-const LIST_FMT: &str = "list-panes -a -F '#{session_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_width}\t#{pane_height}\t#{pane_title}\t#{@agenmux}'";
+// tmux 3.7 can render tabs and non-ASCII format separators as underscores; keep
+// machine-readable tmux formats on a printable ASCII delimiter.
+const LIST_FMT: &str = "list-panes -a -F '#{session_id}|#{session_name}|#{window_id}|#{window_index}|#{window_name}|#{pane_id}|#{pane_index}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_title}|#{@agenmux}'";
 
 fn valid_tmux_id(value: &str, prefix: char) -> bool {
     value
@@ -143,13 +167,14 @@ fn valid_tmux_id(value: &str, prefix: char) -> bool {
 fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
     rows.lines()
         .filter_map(|line| {
-            let fields = line.splitn(13, '\t').collect::<Vec<_>>();
+            let separator = if line.contains('|') { '|' } else { '\t' };
+            let fields = line.splitn(13, separator).collect::<Vec<_>>();
             let [session_id, session_name, window_id, window_index, window_name, pane, pane_index, pid, command, path, width, height, title_and_marked] =
                 fields.as_slice()
             else {
                 return None;
             };
-            let (pane_title, marked) = title_and_marked.rsplit_once('\t')?;
+            let (pane_title, marked) = title_and_marked.rsplit_once(separator)?;
             if !valid_tmux_id(session_id, '$')
                 || !valid_tmux_id(window_id, '@')
                 || !valid_tmux_id(pane, '%')
@@ -211,6 +236,7 @@ pub fn scan(
             periodic: true,
             covered_session: None,
             now: Instant::now(),
+            key_fd: None,
         },
     )
     .map(|(snapshot, _)| snapshot)
@@ -275,23 +301,30 @@ pub fn scan_cached(
                 path: path.to_string(),
             };
             let force = force_capture(&policy, pane, &meta.session_id);
-            // pane content must never travel over the control pipe: a pane
-            // displaying literal "%end <t> <num>" text (logs, this plugin's own
-            // docs...) would terminate the response block early and desync every
-            // later command. Route it through a buffer + file instead.
-            let (screen, reused) = screens.get_or_capture(key, force, policy.now, || {
-                tmux.run(&format!("capture-pane -b '{buf}' -t '{pane}'"))?;
-                used_buffer = true;
-                tmux.run(&format!("save-buffer -b '{buf}' '{}'", cap.display()))?;
-                // only pipe failures are Io: the daemon exits on Io as a desync
-                std::fs::read(&cap)
-                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                    .map_err(|e| {
-                        let message = format!("capture file {}: {e}", cap.display());
-                        trace!("{message}");
-                        TmuxError::Error(message)
-                    })
-            })?;
+            let key_waiting = policy.key_fd.is_some_and(crate::input::key_pending);
+            let stale = screens.stale(pane);
+            let (screen, reused) = if defer_capture(key_waiting, stale.is_some()) {
+                stats.deferred.insert(pane.to_string());
+                (stale.unwrap_or_default(), true)
+            } else {
+                // pane content must never travel over the control pipe: a pane
+                // displaying literal "%end <t> <num>" text (logs, this plugin's
+                // own docs...) would terminate the response block early and
+                // desync every later command. Route it through a buffer + file.
+                screens.get_or_capture(key, force, policy.now, || {
+                    tmux.run(&format!("capture-pane -b '{buf}' -t '{pane}'"))?;
+                    used_buffer = true;
+                    tmux.run(&format!("save-buffer -b '{buf}' '{}'", cap.display()))?;
+                    // only pipe failures are Io: the daemon exits on Io as a desync
+                    std::fs::read(&cap)
+                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                        .map_err(|e| {
+                            let message = format!("capture file {}: {e}", cap.display());
+                            trace!("{message}");
+                            TmuxError::Error(message)
+                        })
+                })?
+            };
             if reused {
                 stats.reused += 1;
             } else {
@@ -349,7 +382,12 @@ pub fn scan_cached(
             });
             panes.push(meta);
         }
-        trace!("snapshot panes={} agents={}", panes.len(), agents.len());
+        trace!(
+            "snapshot panes={} agents={} deferred={}",
+            panes.len(),
+            agents.len(),
+            stats.deferred.len()
+        );
         Ok(ScanSnapshot { panes, agents })
     })();
     if used_buffer {
@@ -613,6 +651,7 @@ mod tests {
             periodic,
             covered_session,
             now: Instant::now(),
+            key_fd: None,
         };
         assert!(!force_capture(&policy(false, true, Some("$1")), "%1", "$1"));
         assert!(force_capture(&policy(false, false, Some("$1")), "%2", "$1"));
@@ -624,6 +663,20 @@ mod tests {
         ));
         assert!(force_capture(&policy(true, false, Some("$1")), "%1", "$1"));
         assert!(force_capture(&policy(false, false, None), "%1", "$1"));
+    }
+
+    #[test]
+    fn a_waiting_key_defers_only_panes_that_have_a_screen() {
+        assert!(!defer_capture(false, true));
+        assert!(!defer_capture(true, false)); // never drop a row for a tick
+        assert!(defer_capture(true, true));
+        let mut cache = ScreenCache::default();
+        assert_eq!(cache.stale("%1"), None);
+        cache
+            .get_or_capture(screen_key(), false, Instant::now(), || Ok("old".into()))
+            .unwrap_or_else(|error| panic!("{error}"));
+        // expired and re-keyed: still the screen a yielded scan shows
+        assert_eq!(cache.stale("%1").as_deref(), Some("old"));
     }
 
     #[test]

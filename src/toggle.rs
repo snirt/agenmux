@@ -154,23 +154,49 @@ fn cli_mode(config: &crate::app_config::AppConfig) -> Option<&'static str> {
 }
 
 fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::AppConfig) -> i32 {
+    let _lifecycle = match panes::lifecycle_lock() {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("agenmux: cannot acquire lifecycle lock: {error}");
+            return 1;
+        }
+    };
     let window = client.as_deref().and_then(client_window);
-    let mut reuse = option("@agenmux-on") == "1" && control_alive();
+    let mut reuse = option("@agenmux-on") == "1"
+        && !option("@agenmux-generation").is_empty()
+        && control_alive();
     if reuse {
         if panes::pane_add_config(window.as_deref(), config) != 0 {
             return 1;
         }
-        // A close can remove its panes just before publishing @agenmux-on=off.
-        // Let that short teardown finish instead of attaching to its dying daemon.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while window
+            .as_deref()
+            .is_some_and(|window| !window_sidebar_ready(window))
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         reuse = option("@agenmux-on") == "1"
+            && !option("@agenmux-generation").is_empty()
             && control_alive()
-            && window.as_deref().is_none_or(window_has_sidebar);
+            && window.as_deref().is_none_or(window_sidebar_ready);
     }
     if !reuse {
         panes::stop_daemon();
         panes::teardown();
-        if tmux::command_status(&["set-option", "-g", "@agenmux-on", "1"]).is_err() {
+        let generation = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        if tmux::command_status(&["set-option", "-g", "@agenmux-generation", &generation]).is_err()
+            || tmux::command_status(&["set-option", "-g", "@agenmux-on", "1"]).is_err()
+        {
+            panes::clear_ownership(Some(&generation));
             return 1;
         }
         let bin = binary(plugin_dir);
@@ -183,19 +209,12 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
             .filter(|path| !path.exists())
             .collect::<Vec<_>>();
         let result = (|| {
-            let mut windows = tmux::lines(&["list-windows", "-a", "-F", "#{window_id}"])
-                .map_err(|_| "cannot enumerate startup windows")?;
-            if let Some(focused) = window.as_deref() {
-                if let Some(index) = windows.iter().position(|candidate| candidate == focused) {
-                    let focused = windows.remove(index);
-                    windows.insert(0, focused);
-                }
-            }
             let mut command = Command::new(&bin);
             command
                 .arg("daemon")
                 .env("AGENMUX_DIR", plugin_dir)
                 .env("AGENMUX_STARTUP_ACK", "1")
+                .env("AGENMUX_GENERATION", &generation)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(daemon_log());
@@ -221,13 +240,10 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
                     .spawn()
                     .map_err(|_| "cannot launch daemon; check executable")?,
             );
-            // Record only panes made by this activation, not arbitrary panes
-            // that appear while the daemon is starting. The focused window goes
-            // first so its sidebar can render while the remaining panes fan out.
-            for window in windows {
-                if panes::pane_add_record(Some(&window), config, &mut created) != 0 {
-                    return Err("cannot create startup pane");
-                }
+            // Startup is synchronous only for the requested window. Hooks add
+            // processless sidebars lazily as real clients visit other windows.
+            if panes::pane_add_record(window.as_deref(), config, &mut created) != 0 {
+                return Err("cannot create startup pane");
             }
             await_daemon(child.as_mut().unwrap())?;
             if setup::run_config(plugin_dir, config) != 0 {
@@ -260,12 +276,8 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
                             .is_err();
                 }
             }
-            for name in [
-                "@agenmux-on",
-                "@agenmux-control-client",
-                "@agenmux-runtime-dir",
-            ] {
-                cleanup_failed |= tmux::command_status(&["set-option", "-gu", name]).is_err();
+            if option("@agenmux-generation") == generation {
+                cleanup_failed |= panes::clear_ownership(Some(&generation)) != 0;
             }
             if child.is_some() {
                 for path in new_files.into_iter().chain([runtime.join("agenmux-keys")]) {
@@ -300,7 +312,7 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
     0
 }
 
-fn window_has_sidebar(window: &str) -> bool {
+fn window_sidebar_ready(window: &str) -> bool {
     tmux::lines(&[
         "list-panes",
         "-t",
@@ -310,7 +322,12 @@ fn window_has_sidebar(window: &str) -> bool {
         "-F",
         "#{pane_id}",
     ])
-    .is_ok_and(|panes| !panes.is_empty())
+    .is_ok_and(|panes| {
+        panes.into_iter().any(|pane| {
+            tmux::command(&["capture-pane", "-p", "-t", &pane])
+                .is_ok_and(|frame| !frame.trim().is_empty())
+        })
+    })
 }
 
 fn client_window(client: &str) -> Option<String> {

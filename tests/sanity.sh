@@ -10,10 +10,6 @@ has_re() { [[ $1 =~ $2 ]]; }
 has_line() { [[ $'\n'"$1"$'\n' == *$'\n'"$2"$'\n'* ]]; }
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-if [ "${AGENMUX_SANITY_NIX:-}" != 1 ]; then
-  exec nix-shell "$DIR/tests/sanity.nix" \
-    --run "AGENMUX_SANITY_NIX=1 bash '$DIR/tests/sanity.sh'"
-fi
 
 root="$(mktemp -d "${TMPDIR:-/tmp}/agenmux-sanity.XXXXXX")"
 plugin="$root/plugin"
@@ -46,12 +42,23 @@ rustc "$DIR/tests/helpers/fake-agent.rs" -o "$root/bin/codex"
 
 run_tmux_case() {
   local name="$1" bin="$2" socket
-  local socket_path server_pid tmux_env rows status sidebar frame i
+  local socket_path server_pid tmux_env rows status sidebar frame i viewer_pid client runtime
+  runtime="$root/runtime-$name"
+  mkdir -p "$runtime"
   socket="agenmux-sanity-$name-$$"
   active_socket="$socket"
 
   tmux -L "$socket" -f /dev/null new-session -d -s sanity -x 100 -y 30 \
     -c "$plugin" "$root/bin/codex"
+  expect -c "log_user 0; set timeout -1; spawn tmux -L $socket attach-session -t sanity; expect eof" \
+    >"$root/$name-client.log" 2>&1 &
+  viewer_pid=$!
+  for _ in $(seq 1 30); do
+    [ -n "$(tmux -L "$socket" list-clients -F '#{client_name}' 2>/dev/null)" ] && break
+    sleep 0.1
+  done
+  client="$(tmux -L "$socket" list-clients -F '#{client_name}' | head -n 1)"
+  [ -n "$client" ]
   tmux -L "$socket" set-option -p allow-rename off
   tmux -L "$socket" select-pane -T 'Action Required'
   tmux -L "$socket" set-option -g @agenmux-bin "$bin"
@@ -68,7 +75,7 @@ run_tmux_case() {
   rows=""
   i=0
   while [ "$i" -lt 50 ]; do
-    rows="$(TMUX="$tmux_env" "$bin" list)"
+    rows="$(TMPDIR="$runtime" TMUX="$tmux_env" "$bin" list)"
     case "$rows" in *$'\tcodex\tblocked\t'*) break ;; esac
     sleep 0.1
     i=$((i + 1))
@@ -82,19 +89,19 @@ run_tmux_case() {
     ;;
   esac
 
-  status="$(TMUX="$tmux_env" "$bin" status)"
+  status="$(TMPDIR="$runtime" TMUX="$tmux_env" "$bin" status)"
   [ "$status" = '#[fg=red]⣿#[default]1' ] || {
     printf 'FAIL %s: unexpected status: %s\n' "$name" "$status" >&2
     return 1
   }
 
-  TMUX="$tmux_env" AGENMUX_DIR="$plugin" "$bin" toggle split
+  TMPDIR="$runtime" TMUX="$tmux_env" AGENMUX_DIR="$plugin" "$bin" toggle split "$client"
   frame=""
   i=0
   while [ "$i" -lt 50 ]; do
     # mirror mode marks panes by title (no @agenmux-sidebar option)
-    sidebar="$(tmux -L "$socket" list-panes -a -F '#{pane_id}	#{pane_title}' |
-      awk -F'\t' '$2 == "agenmux" { print $1; exit }')"
+    sidebar="$(tmux -L "$socket" list-panes -a -F '#{pane_id}|#{pane_title}' |
+      awk -F'|' '$2 == "agenmux" { print $1; exit }')"
     if [ -n "$sidebar" ]; then
       frame="$(tmux -L "$socket" capture-pane -p -t "$sidebar" 2>/dev/null || true)"
       has "$frame" codex && break
@@ -104,10 +111,15 @@ run_tmux_case() {
   done
   has "$frame" codex || {
     printf 'FAIL %s: sidebar did not render Codex\n%s\n' "$name" "$frame" >&2
+    tmux -L "$socket" list-clients -F '#{client_name} #{client_flags} #{pane_id} #{window_id}' >&2 || true
+    tmux -L "$socket" list-panes -a -F '#{pane_id} #{window_id} #{pane_width} #{pane_height} #{pane_title} #{pane_current_command}' >&2 || true
+    tmux -L "$socket" show-options -g | grep '^@agenmux-' >&2 || true
+    find "$runtime" -maxdepth 1 -type f -exec ls -l {} \; >&2 || true
     return 1
   }
 
   tmux -L "$socket" kill-server
+  wait "$viewer_pid" 2>/dev/null || true
   active_socket=""
   printf 'ok   %s binary in real tmux\n' "$name"
 }
@@ -248,6 +260,8 @@ run_immediate_popup_bootstrap bad-checksum
 # open the requested split in the same action. Verified, Cargo, and bad-checksum
 # popup bootstrap paths are covered above.
 bootstrap_socket="agenmux-sanity-bootstrap-$$"
+bootstrap_runtime="$root/runtime-bootstrap"
+mkdir -p "$bootstrap_runtime"
 active_socket="$bootstrap_socket"
 # This checkout is ahead of the latest published binary, whose CLI may not yet
 # include native toggle. Force the already-covered Cargo fallback so this case
@@ -258,13 +272,28 @@ printf '#!/usr/bin/env bash\nexit 1\n' >"$root/bootstrap-bin/git"
 chmod +x "$root/bootstrap-bin/curl" "$root/bootstrap-bin/git"
 PATH="$root/bootstrap-bin:$PATH" tmux -L "$bootstrap_socket" -f /dev/null \
   new-session -d -s bootstrap -x 100 -y 30 -c "$plugin" "$root/bin/codex"
+expect -c "log_user 0; set timeout -1; spawn tmux -L $bootstrap_socket attach-session -t bootstrap; expect eof" \
+  >"$root/bootstrap-client.log" 2>&1 &
+bootstrap_viewer=$!
+for _ in $(seq 1 30); do
+  [ -n "$(tmux -L "$bootstrap_socket" list-clients -F '#{client_name}' 2>/dev/null)" ] && break
+  sleep 0.1
+done
+bootstrap_client="$(tmux -L "$bootstrap_socket" list-clients -F '#{client_name}' | head -n 1)"
+[ -n "$bootstrap_client" ]
 tmux -L "$bootstrap_socket" set-environment -g PATH "$root/bootstrap-bin:$PATH"
 tmux -L "$bootstrap_socket" set-option -g status-right '#{agenmux}'
 tmux -L "$bootstrap_socket" run-shell "bash '$plugin/agenmux.tmux'"
 bootstrap_path="$(tmux -L "$bootstrap_socket" display-message -p '#{socket_path}')"
 bootstrap_pid="$(tmux -L "$bootstrap_socket" display-message -p '#{pid}')"
-env PATH="$root/bootstrap-bin:$PATH" TMPDIR="$TMPDIR" \
-  TMUX="$bootstrap_path,$bootstrap_pid,0" bash "$plugin/agenmux.tmux" activate '' ''
+if ! env PATH="$root/bootstrap-bin:$PATH" TMPDIR="$bootstrap_runtime" AGENMUX_DEBUG="$root/bootstrap-debug" \
+  TMUX="$bootstrap_path,$bootstrap_pid,0" bash "$plugin/agenmux.tmux" activate '' "$bootstrap_client"; then
+  cat "$HOME/.local/state/agenmux/daemon.log" >&2 2>/dev/null || true
+  cat "$root/bootstrap-debug" >&2 2>/dev/null || true
+  tmux -L "$bootstrap_socket" list-clients -F '#{client_name} #{client_flags} #{pane_id}' >&2 || true
+  tmux -L "$bootstrap_socket" list-panes -a -F '#{pane_id} #{pane_title} #{@agenmux}' >&2 || true
+  exit 1
+fi
 for _ in $(seq 1 80); do
   has_line "$(tmux -L "$bootstrap_socket" list-panes -a -F '#{pane_title}')" agenmux && break
   sleep 0.1
@@ -277,6 +306,7 @@ tmux -L "$bootstrap_socket" show-option -gqv status-right |
   grep -Fq '#{q:@agenmux-runtime-bin} status'
 printf 'ok   clean checkout first activation installs and opens native split\n'
 tmux -L "$bootstrap_socket" kill-server
+wait "$bootstrap_viewer" 2>/dev/null || true
 active_socket=""
 
 # The one-line installer against a live server: it must write the conf line,

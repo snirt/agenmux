@@ -1,6 +1,6 @@
 use crate::pane_writers::PaneWriters;
 use crate::panes;
-use crate::tmux::{command_status, Tmux};
+use crate::tmux::{command_status, PendingChanges, Tmux};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -59,6 +59,7 @@ pub(super) struct Daemon {
     pub(super) seen_mirror: bool,    // suicide only arms after the first pane appears
     pub(super) empty_ticks: u32,     // consecutive measurements that found no pane
     pub(super) client: String,       // our control client, as published in the option
+    pub(super) generation: String,   // activation that owns panes, FIFO and options
     pub(super) started: Instant,
     // window id -> (window size, pane count) at the last measure: a mirror
     // whose width changed while both stayed put is a user border-drag. The
@@ -82,6 +83,13 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
             return e.exit_code();
         }
     };
+    let generation = std::env::var("AGENMUX_GENERATION").unwrap_or_default();
+    if !generation.is_empty()
+        && !crate::tmux::command(&["show-option", "-gqv", "@agenmux-generation"])
+            .is_ok_and(|current| current.trim() == generation)
+    {
+        return 1;
+    }
     unsafe {
         libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
@@ -100,10 +108,11 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     if keys_fd < 0 {
         return 1;
     }
-    let tmux = match Tmux::connect_monitoring() {
+    let mut tmux = match Tmux::connect_monitoring() {
         Ok(t) => t,
         Err(_) => return 1,
     };
+    tmux.set_key_sink(keys_fd);
     // "" not TMUX_PANE: toggle.sh launches the daemon from the pane the user
     // pressed the key in, and adopting that pane would hide its agent
     let mut sb = new_sidebar(
@@ -114,23 +123,18 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         String::new(),
         settings,
     );
-    // `display-message '#{client_name}'` can briefly be empty when a busy
-    // server already has a focused terminal client. Match the control client
-    // tmux just spawned by PID instead; that identity is unambiguous.
-    let control_pid = sb.tmux.client_pid().to_string();
-    // unescaped: show-option hands the value back unescaped too
+    // The command runs on this control connection, so it identifies the exact
+    // client even when tmux forks and reports a different OS PID. It can briefly
+    // be empty while a busy server finishes attaching; retry below.
+    // Unescaped: show-option hands the value back unescaped too.
     let mut control_client = String::new();
     for _ in 0..100 {
         let client = sb
             .tmux
-            .run("list-clients -F '#{client_pid}\t#{client_name}'")
+            .run("display-message -p '#{client_name}'")
             .ok()
-            .and_then(|clients| {
-                clients.lines().find_map(|line| {
-                    let (pid, name) = line.split_once('\t')?;
-                    (pid == control_pid && !name.is_empty()).then(|| name.to_string())
-                })
-            });
+            .map(|client| client.trim().to_string())
+            .filter(|client| !client.is_empty());
         if let Some(client) = client {
             let quoted = client.replace('\'', "\\'");
             if sb
@@ -164,6 +168,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         seen_mirror: false,
         empty_ticks: 0,
         client: control_client,
+        generation,
         started: Instant::now(),
         win_sizes: HashMap::new(),
         attached: String::new(),
@@ -179,6 +184,20 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+    let ready = sb.daemon.as_ref().is_some_and(|d| d.seen_mirror)
+        && sb
+            .scan_tick(
+                false,
+                &PendingChanges {
+                    full: true,
+                    ..PendingChanges::default()
+                },
+            )
+            .is_ok();
+    if !ready {
+        sb.quiet_exit();
+        return 1;
     }
     sb.render(true);
     if std::env::var_os("AGENMUX_STARTUP_ACK").is_some() {
@@ -213,7 +232,11 @@ impl Sidebar {
     /// resize-pane ever fights the drag, and the dragged pane itself is
     /// never touched — only the hidden sidebars in other windows move.
     pub(super) fn superseded(&mut self) -> bool {
-        let Some(mine) = self.daemon.as_ref().map(|d| d.client.clone()) else {
+        let Some((client, generation)) = self
+            .daemon
+            .as_ref()
+            .map(|d| (d.client.clone(), d.generation.clone()))
+        else {
             return false;
         };
         // Ownership decides whether we abandon every pane without teardown.
@@ -221,8 +244,16 @@ impl Sidebar {
         if self.tmux.sync().is_err() {
             return false;
         }
+        if !generation.is_empty()
+            && self
+                .tmux
+                .run("show-option -gqv @agenmux-generation")
+                .is_ok_and(|current| superseded(&generation, &current))
+        {
+            return true;
+        }
         match self.tmux.run("show-option -gqv @agenmux-control-client") {
-            Ok(current) => superseded(&mine, &current),
+            Ok(current) => superseded(&client, &current),
             Err(_) => false, // a broken pipe is not a takeover; the loop exits elsewhere
         }
     }
@@ -237,12 +268,12 @@ impl Sidebar {
         let width_changed = refreshed.width_changed;
         let out = self
             .tmux
-            .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}\t#{window_id}\t#{pane_width}\t#{pane_height}\t#{window_width} #{window_height}\t#{window_panes}\t#{window_active}\t#{session_id}'")
+            .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}|#{window_id}|#{pane_width}|#{pane_height}|#{window_width} #{window_height}|#{window_panes}|#{window_active}|#{session_id}'")
             .unwrap_or_default();
         let mut w = usize::MAX;
         let mut ms: Vec<M> = Vec::new();
         for l in out.lines() {
-            let f: Vec<&str> = l.split('\t').collect();
+            let f: Vec<&str> = l.split('|').collect();
             let [pane, win, pw, ph, ws, wp, act, sess] = f.as_slice() else {
                 continue;
             };
@@ -404,22 +435,18 @@ impl Sidebar {
             let _ = command_status(&args);
             w = ms.iter().map(|m| m.w).min().unwrap_or(w);
         }
-        let visible_sessions = self.visible_sessions();
-        let visible_panes = if visible_sessions.is_empty() {
+        let visible_windows = self.visible_windows();
+        let visible_panes = if visible_windows.is_empty() {
             // Detached startup and integration tests have no real client yet.
-            // Keep one session warm; the first real client notification
-            // immediately replaces this fallback with the visible set.
+            // Keep one active pane warm until a real client appears.
             ms.iter()
                 .filter(|m| m.active)
                 .take(1)
                 .map(|m| m.pane.clone())
                 .collect::<Vec<_>>()
         } else {
-            // Every window of a viewed session, not just the active one: a
-            // window switch shows the target pane's last frame instantly, and
-            // only a pane that was being fed has a current one.
             ms.iter()
-                .filter(|m| visible_sessions.contains(&m.sess))
+                .filter(|m| visible_windows.contains(&m.win))
                 .map(|m| m.pane.clone())
                 .collect::<Vec<_>>()
         };
@@ -437,34 +464,30 @@ impl Sidebar {
         true
     }
 
-    /// Sessions a real (non control-mode) client is looking at.
-    fn visible_sessions(&mut self) -> HashSet<String> {
+    /// Windows a real (non control-mode) client is looking at.
+    fn visible_windows(&mut self) -> HashSet<String> {
         self.tmux
-            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{session_id}'")
+            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{window_id}'")
             .unwrap_or_default()
             .lines()
             .map(String::from)
             .collect()
     }
 
-    /// Focus moved: point the writers at the sidebar panes of the sessions now
-    /// on screen. Sizing and the drag probe stay periodic in mirror_tick (see
-    /// event_loop), but writer targets cannot wait for it: a session switch
-    /// lands on panes that show whatever frame they last received until a
-    /// writer reaches them.
+    /// Focus moved: write only to sidebar panes in windows real clients view.
     pub(super) fn refocus_writers(&mut self) {
-        let sessions = self.visible_sessions();
-        if sessions.is_empty() {
+        let windows = self.visible_windows();
+        if windows.is_empty() {
             return; // no real client: leave mirror_tick's warm-one fallback alone
         }
         let out = self
             .tmux
-            .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}\t#{session_id}'")
+            .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}|#{window_id}'")
             .unwrap_or_default();
         let panes: Vec<String> = out
             .lines()
-            .filter_map(|l| l.split_once('\t'))
-            .filter(|(_, sess)| sessions.contains(*sess))
+            .filter_map(|line| line.split_once('|'))
+            .filter(|(_, window)| windows.contains(*window))
             .map(|(pane, _)| pane.to_string())
             .collect();
         if self.daemon.as_mut().unwrap().writers.reconcile(panes) {
@@ -487,15 +510,36 @@ impl Sidebar {
     }
 
     pub(super) fn teardown(&mut self) {
+        let Some((generation, client)) = self
+            .daemon
+            .as_ref()
+            .map(|d| (d.generation.clone(), d.client.clone()))
+        else {
+            return;
+        };
+        let owns = if generation.is_empty() {
+            self.tmux
+                .run("show-option -gqv @agenmux-control-client")
+                .is_ok_and(|current| current.trim() == client)
+        } else {
+            self.tmux
+                .run("show-option -gqv @agenmux-generation")
+                .is_ok_and(|current| current.trim() == generation)
+        };
+        if !owns {
+            self.quiet_exit();
+            return;
+        }
         if let Some(d) = &mut self.daemon {
             d.writers.clear();
         }
-        let _ = panes::teardown();
+        let _ = panes::teardown_panes();
         if let Some(d) = &self.daemon {
             let _ = std::fs::remove_file(&d.keys_path);
             unsafe { libc::close(d.keys_fd) };
         }
         let _ = std::fs::remove_file(&self.rows_file);
+        let _ = panes::clear_ownership((!generation.is_empty()).then_some(generation.as_str()));
     }
 }
 

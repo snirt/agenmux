@@ -11,7 +11,7 @@ pub(crate) const SEQUENCE_TABLE: &str = "agenmux-sequence";
 const NAV_LAYOUT: &str = "16";
 // These are trusted runtime identities, not application-file settings. q
 // quotes them for the shell only when tmux executes the installed command.
-const ENGINE: &str = "AGENMUX_DIR=#{q:@agenmux-plugin-dir} #{q:@agenmux-runtime-bin}";
+const ENGINE: &str = "AGENMUX_DIR=#{q:@agenmux-plugin-dir} AGENMUX_RUNTIME_DIR=#{q:@agenmux-runtime-dir} #{q:@agenmux-runtime-bin}";
 
 fn key_arg(key: &str) -> &str {
     if key == ";" {
@@ -349,12 +349,11 @@ fn setup(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> Result<(),
 /// root, which would leave the sidebar unresponsive until the user clicked it.
 /// Put every client still focused on a sidebar pane back in the normal table.
 pub fn reclaim_client_tables() {
-    let Ok(clients) = tmux::command(&["list-clients", "-F", "#{client_name}\t#{pane_title}"])
-    else {
+    let Ok(clients) = tmux::command(&["list-clients", "-F", "#{client_name}|#{pane_title}"]) else {
         return;
     };
     for line in clients.lines() {
-        if let Some((client, "agenmux")) = line.split_once('\t') {
+        if let Some((client, "agenmux")) = line.split_once('|') {
             let _ = tmux::command_status(&["switch-client", "-c", client, "-T", NORMAL_TABLE]);
         }
     }
@@ -462,13 +461,27 @@ fn bind(table: &str, key: &str, command: &str) -> Result<(), TmuxError> {
     tmux::command_status(&["bind-key", "-T", table, key, command])
 }
 
+/// Navigation keys skip `run-shell`: tmux spawns the user's shell per job
+/// (nushell takes ~90ms here) and runs the synchronous ones back to back, so
+/// a held key kept queueing presses that replayed after release. A named
+/// buffer set and deleted in the binding costs no process; the daemon's
+/// control pipe sees `%paste-buffer-changed agenmux.<key>` at once.
+pub(crate) const BUFFER_KEYS: [&str; 4] = ["up", "down", "wheel-up", "wheel-down"];
+
+fn buffer_key_command(action: &str) -> String {
+    format!("set-buffer -b agenmux.{action} x; delete-buffer -b agenmux.{action}")
+}
+
 fn key_command(action: &str, next: &str, background: bool) -> String {
+    if BUFFER_KEYS.contains(&action) {
+        return format!("switch-client -T '{next}'; {}", buffer_key_command(action));
+    }
     format!(
-        "run-shell {}\"{} key '{}' #{{q:client_name}}\"; switch-client -T '{}'",
+        "switch-client -T '{}'; run-shell {}\"{} key '{}' #{{q:client_name}}\"",
+        next,
         if background { "-b " } else { "" },
         ENGINE,
-        action,
-        next
+        action
     )
 }
 
@@ -491,7 +504,7 @@ fn key_bindings(config: &crate::app_config::AppConfig) -> Vec<(&'static str, Str
     out.push((
         NORMAL_TABLE,
         "G".into(),
-        key_command("last", NORMAL_TABLE, true),
+        key_command("last", NORMAL_TABLE, false),
     ));
     // Live toggle between the agent list and the full tmux tree, unless the
     // user has claimed "." for a configured action.
@@ -552,13 +565,13 @@ fn key_bindings(config: &crate::app_config::AppConfig) -> Vec<(&'static str, Str
     ));
     for (action, chords) in &config.normal {
         let (name, next, background) = match action {
-            Down => ("down", NORMAL_TABLE, true),
-            Up => ("up", NORMAL_TABLE, true),
+            Down => ("down", NORMAL_TABLE, false),
+            Up => ("up", NORMAL_TABLE, false),
             Help => ("help", NORMAL_TABLE, true),
             Versions => ("versions", NORMAL_TABLE, true),
             Settings => ("settings", NORMAL_TABLE, true),
             Jump => ("enter", "root", true),
-            Close => ("close", "root", true),
+            Close => ("close", "root", false),
             Search => ("search", SEARCH_TABLE, false),
             Filter => ("filter", NORMAL_TABLE, false),
             Reset => ("all", NORMAL_TABLE, false),
@@ -659,18 +672,18 @@ pub fn nav_version(config: &crate::app_config::AppConfig) -> String {
 }
 
 fn install_wheel_keys(_bin: &str) -> Result<(), TmuxError> {
-    let bin = ENGINE;
     for table in [NORMAL_TABLE, SEARCH_TABLE] {
-        for (key, direction, native) in [
+        for (key, action, native) in [
             (
                 "WheelUpPane",
-                "up",
-                "if -Ft= \\\"#{||:#{pane_in_mode},#{mouse_any_flag}}\\\" \\\"send-keys -M\\\" \\\"copy-mode -e; send-keys -M\\\"",
+                "wheel-up",
+                r##"if -Ft= \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"copy-mode -e; send-keys -M\""##,
             ),
-            ("WheelDownPane", "down", "send-keys -M"),
+            ("WheelDownPane", "wheel-down", "send-keys -M"),
         ] {
+            let plugin = buffer_key_command(action);
             let command = format!(
-                "if-shell -F '#{{==:#{{pane_title}},agenmux}}' \"run-shell -b \\\"{bin} wheel '#{{pane_id}}' {direction}\\\" ; switch-client -T {table}\" \"{native}\""
+                r#"if-shell -F '#{{==:#{{pane_title}},agenmux}}' "{plugin}; switch-client -T {table}" "{native}""#
             );
             bind(table, key, &command)?;
         }
@@ -693,12 +706,12 @@ fn install_mouse(_bin: &str) -> Result<(), TmuxError> {
         ),
         (
             "WheelUpPane",
-            format!("run-shell -b \\\"{bin} wheel '#{{pane_id}}' up\\\""),
-            "if -Ft= \\\"#{||:#{pane_in_mode},#{mouse_any_flag}}\\\" \\\"send-keys -M\\\" \\\"copy-mode -e; send-keys -M\\\"".to_string(),
+            buffer_key_command("wheel-up"),
+            r##"if -Ft= \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"copy-mode -e; send-keys -M\""##.to_string(),
         ),
         (
             "WheelDownPane",
-            format!("run-shell -b \\\"{bin} wheel '#{{pane_id}}' down\\\""),
+            buffer_key_command("wheel-down"),
             "send-keys -M".to_string(),
         ),
     ] {
@@ -775,7 +788,7 @@ mod tests {
         );
         assert_eq!(
             find(NORMAL_TABLE, "j"),
-            Some(key_command("down", NORMAL_TABLE, true).as_str())
+            Some(key_command("down", NORMAL_TABLE, false).as_str())
         );
         assert_eq!(
             find(NORMAL_TABLE, "Enter"),
@@ -846,7 +859,8 @@ mod tests {
             .filter(|(table, key, _)| *table == NORMAL_TABLE && key == "c")
             .collect();
         assert_eq!(c_commands.len(), 1);
-        assert!(c_commands[0].2.contains("key 'down'"));
+        assert!(c_commands[0].2.contains("set-buffer -b agenmux.down"));
+        assert!(!c_commands[0].2.contains("run-shell"));
 
         let custom = config(
             "[keys.normal]\ndown = ['n', 'C-k']\nclose = []\nsettings = []\n[keys.search]\ncancel = ['C-g']\nclear = ['Tab']\n",
@@ -859,11 +873,11 @@ mod tests {
         };
         assert_eq!(
             find(NORMAL_TABLE, "n"),
-            Some(key_command("down", NORMAL_TABLE, true).as_str())
+            Some(key_command("down", NORMAL_TABLE, false).as_str())
         );
         assert_eq!(
             find(NORMAL_TABLE, "C-k"),
-            Some(key_command("down", NORMAL_TABLE, true).as_str())
+            Some(key_command("down", NORMAL_TABLE, false).as_str())
         );
         assert_eq!(find(NORMAL_TABLE, "j"), None);
         assert_eq!(find(NORMAL_TABLE, "q"), None);

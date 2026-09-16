@@ -21,7 +21,7 @@ else
 fi
 # decided once here: inside $(...) stdout is a pipe, so the prompts cannot test it
 if [ -t 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then interactive=1; else interactive=""; fi
-tilde() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
+tilde() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac }
 ok() { printf '  %s✓%s %-10s %s\n' "$green" "$reset" "$1" "$2"; }
 skip() { printf '  %s-%s %-10s %s\n' "$dim" "$reset" "$1" "$2"; }
 die() {
@@ -52,7 +52,10 @@ ask_key() {
     read -r answer </dev/tty || answer=""
     case "${answer:-$2}" in
     *[\ \'\"]*) printf '  one key name, no spaces or quotes (e.g. A, C-g, F5)\n' >/dev/tty ;;
-    *) printf '%s' "${answer:-$2}"; return ;;
+    *)
+      printf '%s' "${answer:-$2}"
+      return
+      ;;
     esac
   done
 }
@@ -64,6 +67,10 @@ printf '%s ⢸⡇  ⢸⣷⠰⣿   ⣿ ⣿⠶⠶⠶⠿ ⣿  ⢸⡇⣿⡇ %s⢸⡇
 printf '%s ⠈⠻⠶⠶⠿⠟ ⠙⠷⠶⠾⠃ ⠘⠷⠶⠶⠃ ⠿  ⠸⠇⠿⠃ %s⠸⠇ ⠸⠇ ⠻⠶⠶⠟ %s⠰⠟⠁ %s ⠙⠷%s\n' "$green" "$dim" "$green" "$dim" "$reset"
 printf '%s        ⠿⣤⣤⣴⠟%s\n' "$green" "$reset"
 printf '\n  %s⣿ tmux sidebar for AI coding agents%s\n\n' "$dim" "$reset"
+if [ -n "$interactive" ]; then
+  printf '  %sFont check:%s ⣿  ⠹    ▢\n' "$bold" "$reset"
+  printf '  If  is a box or blank, configure a Nerd Font in your terminal.\n\n'
+fi
 
 for cmd in git tmux bash; do
   command -v "$cmd" >/dev/null 2>&1 || die "$cmd is required"

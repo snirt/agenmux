@@ -72,11 +72,14 @@ fn settings_mouse_key(settings: &mut Settings, key: Key, total: usize) -> Key {
         ..
     }) = &mut settings.edit
     {
-        return target
+        return if target
             .checked_sub(SETTINGS_MOUSE_OPTION)
             .is_some_and(|option| select.select(option))
-            .then_some(Key::Jump)
-            .unwrap_or(Key::Other);
+        {
+            Key::Jump
+        } else {
+            Key::Other
+        };
     }
     if settings.edit.is_none() && !settings.confirm && target < total {
         if target == settings.sel {
@@ -536,7 +539,7 @@ fn render_settings(
         targets.push(Some(index));
         if index == settings.sel {
             if let Some(select) = select {
-                for (option_index, option) in select.render().into_iter().enumerate() {
+                for (option_index, option) in select.render().enumerate() {
                     out.push_str(&option);
                     out.push('\n');
                     targets.push(Some(SETTINGS_MOUSE_OPTION + option_index));
@@ -920,10 +923,10 @@ impl Sidebar {
         }
         let clients = self
             .tmux
-            .run("list-clients -F '#{client_name}\t#{pane_title}'")
+            .run("list-clients -F '#{client_name}|#{pane_title}'")
             .unwrap_or_default();
         for line in clients.lines() {
-            let Some((client, title)) = line.split_once('\t') else {
+            let Some((client, title)) = line.split_once('|') else {
                 continue;
             };
             if title == "agenmux" {
@@ -999,10 +1002,10 @@ impl Sidebar {
         if width_changed && self.daemon.is_some() {
             let panes = self
                 .tmux
-                .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}\t#{window_width}'")
+                .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}|#{window_width}'")
                 .unwrap_or_default();
             for line in panes.lines() {
-                let Some((pane, window_width)) = line.split_once('\t') else {
+                let Some((pane, window_width)) = line.split_once('|') else {
                     continue;
                 };
                 let width = window_width

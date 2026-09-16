@@ -270,7 +270,7 @@ fn public_pane_lock_recovers_bounds_contention_and_rolls_back() {
     let (owner, marker) = pause_pane_add(&server, "@0", "contended-owner");
     let began = Instant::now();
     let error = pane_lock_run(&server, &["pane-add", "plugin:0"], 1);
-    assert!(error.contains("pane lock acquisition timed out"), "{error}");
+    assert!(error.contains("lock acquisition timed out"), "{error}");
     assert!((Duration::from_millis(1800)..Duration::from_secs(8)).contains(&began.elapsed()));
     assert_eq!(pane_lock_sidebar_count(&server, "@0"), 0);
     // A held @0 lock must not serialize other windows or another server's @0.
@@ -294,26 +294,27 @@ fn public_pane_lock_recovers_bounds_contention_and_rolls_back() {
     owner.finish(0);
     pane_lock_clear(&server);
 
-    // Startup creates @0 then times out on @1. It must roll back only its
-    // own split, restore layout, and clear activation/daemon options.
+    // A focused-window startup times out while creating its first pane. It must
+    // restore that layout and clear activation/daemon options.
     server.assert_tmux(&[
         "set-option",
         "-g",
         "@agenmux-bin",
         env!("CARGO_BIN_EXE_agenmux"),
     ]);
+    server.assert_tmux(&["select-window", "-t", &other]);
     let (owner, _) = pause_pane_add(&server, &other, "rollback-owner");
-    let layout = server.text(&["display-message", "-p", "-t", "@0", "#{window_layout}"]);
+    let layout = server.text(&["display-message", "-p", "-t", &other, "#{window_layout}"]);
     let error = pane_lock_run(&server, &["toggle", "split"], 1);
     assert!(
-        error.contains("pane lock acquisition timed out")
+        error.contains("lock acquisition timed out")
             && error.contains("cannot create startup pane"),
         "{error}"
     );
     assert_eq!(pane_lock_sidebar_count(&server, "@0"), 0);
     assert_eq!(pane_lock_sidebar_count(&server, &other), 0);
     assert_eq!(
-        server.text(&["display-message", "-p", "-t", "@0", "#{window_layout}"]),
+        server.text(&["display-message", "-p", "-t", &other, "#{window_layout}"]),
         layout
     );
     for option in [
@@ -357,7 +358,7 @@ fn public_pane_lock_recovers_bounds_contention_and_rolls_back() {
     }
     assert_eq!(pane_lock_sidebar_count(&server, "@0"), 1);
     let error = pane_lock_run(&server, &["pane-add", "@999999999"], 1);
-    assert!(error.contains("cannot resolve pane lock identity"));
+    assert!(error.contains("invalid pane lock identity"), "{error}");
 
     let paths = [
         pane_lock_path(&server, "@0"),
