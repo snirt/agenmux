@@ -452,6 +452,27 @@ fn wheel_cli_uses_reserved_packets() {
 }
 
 #[test]
+fn close_key_marks_split_off_before_fifo_delivery() {
+    let tmux = TestTmux::new("close-packet");
+    let fifo = tmux.tmp.join("agenmux-keys");
+    let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+    let mut fifo = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(fifo)
+        .unwrap();
+    tmux.assert_tmux(&["set-option", "-g", "@agenmux-on", "1"]);
+
+    assert_success(tmux.bin(&["key", "close"]), "close key");
+
+    assert_eq!(tmux.text(&["show-option", "-gqv", "@agenmux-on"]), "");
+    let mut packet = [0];
+    fifo.read_exact(&mut packet).unwrap();
+    assert_eq!(packet, [b'Q']);
+}
+
+#[test]
 fn newest_non_control_client_wins() {
     let tmux = TestTmux::new("newest-client");
     let mut first_process = tmux.attach();

@@ -539,6 +539,11 @@ pub(crate) fn read_search_key(fd: libc::c_int, keys: &Keymap) -> Key {
 /// reader. Each invocation is intentionally short-lived; the daemon remains
 /// the only persistent agenmux process.
 pub fn send_key(name: &str, client: Option<&str>) -> i32 {
+    // Publish close before FIFO delivery. A launcher pressed immediately after q
+    // must restart instead of reusing the daemon that is about to tear down.
+    if name == "close" && client.is_none_or(|client| !client.is_empty() && client.len() <= 255) {
+        let _ = tmux::command_status(&["set-option", "-gu", "@agenmux-on"]);
+    }
     let status = send_key_inner(name, client);
     trace!("send key {name} for {client:?} -> {status}");
     status
