@@ -1,4 +1,5 @@
 /target
+/target-*
 
 # Local agent sessions may contain prompts, paths, and credentials.
 /.pi/
