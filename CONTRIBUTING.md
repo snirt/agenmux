@@ -61,17 +61,24 @@ config format.
 ## Releasing
 
 `Cargo.toml` is the only source of truth for the project version. Update its
-`[package].version`, then let Cargo refresh the generated lockfile:
+`[package].version`, let Cargo refresh the generated lockfile, and write the
+release notes:
 
 ```sh
 cargo check
-scripts/version.sh tag
+scripts/version.sh tag   # the tag CI will create, e.g. v0.5.0
 ```
 
-Commit both manifest and lockfile changes, then create and push the tag printed
-by `scripts/version.sh tag`. GitHub Actions rejects a release tag that does not
-match the manifest and publishes only after the version, sanity, and platform
-build jobs pass.
+Commit the manifest, lockfile, and `RELEASE_NOTES.md` changes and merge them to
+`master` like any other change. Once the version, sanity, and platform build
+jobs pass on `master`, CI tags that commit with the manifest version and
+publishes the release from the same run. `RELEASE_NOTES.md` must differ from
+the previous release's, or the tag job fails and nothing is published. A
+`master` push whose version is already tagged does nothing.
+
+Pushing the tag yourself still works (`make release` does this): CI rejects a
+tag that does not match the manifest, and the automatic tag job skips a
+version that is already tagged.
 
 ## Reporting bugs
 

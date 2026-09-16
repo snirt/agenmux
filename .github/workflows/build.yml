@@ -137,14 +137,76 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  release:
-    name: Publish ${{ github.ref_name }}
-    if: startsWith(github.ref, 'refs/tags/v')
+  # A green master whose Cargo.toml names a version with no tag yet is a
+  # release: tag it here so a merged bump PR publishes without a manual push.
+  # The workflow's own token never fires the `push: tags` trigger below, so the
+  # release job also runs in this same run when this job created the tag.
+  tag:
+    name: Tag release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs: [version, sanity, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      created: ${{ steps.tag.outputs.created }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Tag master with the manifest version
+        id: tag
+        run: |
+          tag="$(./scripts/version.sh tag)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists; nothing to publish"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # a bump must ship notes: refuse notes identical to the previous release's
+          prev="$(git ls-remote --tags --refs origin 'v*' | awk -F/ '{ print $NF }' | sort -V | tail -1)"
+          if [ -n "$prev" ]; then
+            git fetch -q --depth=1 origin "refs/tags/$prev:refs/tags/$prev"
+            if git diff --quiet "$prev" HEAD -- RELEASE_NOTES.md; then
+              echo "::error::RELEASE_NOTES.md is unchanged since $prev; update it before releasing $tag"
+              exit 1
+            fi
+          fi
+          [ -s RELEASE_NOTES.md ] || {
+            echo "::error::RELEASE_NOTES.md is empty; write it before releasing $tag"
+            exit 1
+          }
+          git tag "$tag" "$GITHUB_SHA"
+          if git push origin "refs/tags/$tag"; then
+            echo "created $tag at $GITHUB_SHA"
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            # a concurrent master run won the race; its run publishes
+            echo "$tag was created by another run; nothing to publish"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+          else
+            exit 1
+          fi
+
+  release:
+    name: Publish ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || needs.tag.outputs.tag }}
+    # a pushed tag (tag job skipped), or a master run whose tag job just made one
+    if: >-
+      ${{ !cancelled() &&
+          needs.version.result == 'success' &&
+          needs.sanity.result == 'success' &&
+          needs.build.result == 'success' &&
+          (startsWith(github.ref, 'refs/tags/v') || needs.tag.outputs.created == 'true') }}
+    needs: [version, sanity, build, tag]
     runs-on: ubuntu-latest
     permissions:
       actions: write # dispatch pages.yml below
       contents: write
+    env:
+      TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || needs.tag.outputs.tag }}
 
     steps:
       - name: Download build artifacts
@@ -171,13 +233,13 @@ jobs:
           # draft until every asset is up: /releases/latest (what the sidebar's
           # update notice keys on) must never name a release whose binaries
           # are still uploading
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$TAG" \
             dist/*.tar.gz dist/SHA256SUMS \
             --draft \
             --verify-tag \
             --notes-file RELEASE_NOTES.md \
-            --title "agenmux $GITHUB_REF_NAME"
-          gh release edit "$GITHUB_REF_NAME" --draft=false
+            --title "agenmux $TAG"
+          gh release edit "$TAG" --draft=false
 
       - name: Redeploy the site with the new release
         env:
