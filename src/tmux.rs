@@ -20,6 +20,10 @@ pub struct PendingChanges {
 struct Notifications {
     pending: PendingChanges,
     attached_session: Option<String>,
+    /// Daemon key FIFO (O_RDWR): buffer-delivered navigation keys land here
+    /// the moment their notification is read, even mid-scan, so the
+    /// key-pending checks see them like any other key. None in popup mode.
+    key_sink: Option<libc::c_int>,
 }
 
 impl Notifications {
@@ -42,6 +46,17 @@ impl Notifications {
         }
         if line.starts_with("%client-session-changed ") {
             self.pending.focus = true;
+            return true;
+        }
+        if let Some(action) = line
+            .strip_prefix("%paste-buffer-changed agenmux.")
+            .map(str::trim)
+        {
+            if let (Some(fd), Some(bytes)) = (self.key_sink, crate::input::buffer_key_bytes(action))
+            {
+                // best effort: a full FIFO drops the press, same as the CLI sender
+                unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+            }
             return true;
         }
         if line.starts_with("%window-pane-changed")
@@ -115,11 +130,15 @@ pub fn command(args: &[&str]) -> Result<String, TmuxError> {
 /// own temp dir as @agenmux-runtime-dir so key/click/wheel senders find it even
 /// when tmux spawns them with a different TMPDIR than the daemon inherited.
 pub fn runtime_dir() -> PathBuf {
-    command(&["show-option", "-gqv", "@agenmux-runtime-dir"])
-        .ok()
-        .map(|dir| dir.trim_end().to_string())
-        .filter(|dir| !dir.is_empty())
+    std::env::var_os("AGENMUX_RUNTIME_DIR")
         .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .or_else(|| {
+            command(&["show-option", "-gqv", "@agenmux-runtime-dir"])
+                .ok()
+                .map(|dir| PathBuf::from(dir.trim_end()))
+                .filter(|dir| dir.is_absolute())
+        })
         .unwrap_or_else(std::env::temp_dir)
 }
 
@@ -203,6 +222,11 @@ impl Tmux {
         Ok(t)
     }
 
+    /// Route buffer-delivered navigation keys into the daemon's key FIFO.
+    pub fn set_key_sink(&mut self, fd: libc::c_int) {
+        self.notifications.key_sink = Some(fd);
+    }
+
     pub fn attached_session(&self) -> Option<&str> {
         self.notifications.attached_session.as_deref()
     }
@@ -255,11 +279,6 @@ impl Tmux {
     /// (or a stale block) are queued.
     pub fn fd(&self) -> libc::c_int {
         self.rdr.get_ref().as_raw_fd()
-    }
-
-    /// PID tmux publishes as `#{client_pid}` for this control client.
-    pub fn client_pid(&self) -> u32 {
-        self.child.id()
     }
 
     /// Data already sitting in the BufReader — poll on fd() alone would miss it.
@@ -602,6 +621,28 @@ mod tests {
         assert_eq!(notifications.attached_session.as_deref(), Some("$1"));
         assert!(notifications.pending.focus);
         assert!(!notifications.pending.full);
+    }
+
+    #[test]
+    fn buffer_key_notifications_write_the_key_fifo() {
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let mut notifications = Notifications::default();
+        // no sink (popup mode): consumed, nothing written
+        assert!(notifications.observe("%paste-buffer-changed agenmux.down"));
+        notifications.key_sink = Some(fds[1]);
+        assert!(notifications.observe("%paste-buffer-changed agenmux.down"));
+        assert!(notifications.observe("%paste-buffer-changed agenmux.wheel-up"));
+        assert!(notifications.observe("%paste-buffer-changed agenmux.bogus"));
+        assert!(notifications.observe("%paste-buffer-deleted agenmux.down"));
+        assert!(notifications.observe("%paste-buffer-changed user-buffer"));
+        let mut buf = [0u8; 16];
+        let n = unsafe { libc::read(fds[0], buf.as_mut_ptr().cast(), buf.len()) };
+        assert_eq!(&buf[..n as usize], b"\x1b[B\x01");
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
     }
 
     #[test]

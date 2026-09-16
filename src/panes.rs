@@ -12,12 +12,12 @@ pub const IS_SIDEBAR: &str = "#{||:#{==:#{pane_title},agenmux},#{==:#{@agenmux},
 // waiters. The kernel instead releases this lock on close/SIGKILL. File uses
 // CLOEXEC (including tmux children); do not unlink it, even after unlocking:
 // a waiter may already have opened the inode.
-struct PaneLock {
+pub(crate) struct ServerLock {
     _file: File,
 }
 
-impl PaneLock {
-    fn acquire(server: &str, started: &str, window: &str) -> io::Result<Self> {
+impl ServerLock {
+    fn acquire(server: &str, started: &str, scope: &str, wait: Duration) -> io::Result<Self> {
         let uid = unsafe { libc::geteuid() };
         // /tmp is system-owned, unlike caller-specific TMPDIR/HOME/runtime
         // options. All callers of one server must open the same inode.
@@ -35,7 +35,7 @@ impl PaneLock {
         if metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
             return Err(io::Error::other("unsafe pane lock directory"));
         }
-        let name = std::ffi::CString::new(format!("{server}-{started}-{window}.lock"))?;
+        let name = std::ffi::CString::new(format!("{server}-{started}-{scope}.lock"))?;
         // Open relative to the validated directory descriptor, not its path.
         // NONBLOCK prevents a substituted FIFO from blocking before validation.
         // macOS returns a spurious ENOENT to the losers of a concurrent
@@ -74,7 +74,7 @@ impl PaneLock {
         {
             return Err(io::Error::other("unsafe pane lock file"));
         }
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + wait;
         loop {
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                 return Ok(Self { _file: file });
@@ -89,7 +89,7 @@ impl PaneLock {
             if Instant::now() >= deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "pane lock acquisition timed out",
+                    "agenmux lock acquisition timed out",
                 ));
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -97,9 +97,23 @@ impl PaneLock {
     }
 }
 
+pub(crate) fn lifecycle_lock() -> io::Result<ServerLock> {
+    let identity = tmux::command(&["display-message", "-p", "#{pid}|#{start_time}"])
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let fields = identity.trim().split('|').collect::<Vec<_>>();
+    let numeric = |value: &str| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit());
+    let [server, started] = fields.as_slice() else {
+        return Err(io::Error::other("cannot resolve lifecycle lock identity"));
+    };
+    if !numeric(server) || !numeric(started) {
+        return Err(io::Error::other("invalid lifecycle lock identity"));
+    }
+    ServerLock::acquire(server, started, "lifecycle", Duration::from_secs(10))
+}
+
 #[allow(dead_code)] // native toggle consumes this in the next migration task
 pub fn newest_real_client(format: &str) -> Result<Option<String>, TmuxError> {
-    let output_format = format!("#{{client_activity}}\t{format}");
+    let output_format = format!("#{{client_activity}}|{format}");
     let rows = tmux::lines(&[
         "list-clients",
         "-f",
@@ -113,7 +127,7 @@ pub fn newest_real_client(format: &str) -> Result<Option<String>, TmuxError> {
 fn newest_value(rows: &[String]) -> Option<String> {
     rows.iter()
         .filter_map(|row| {
-            let (activity, value) = row.split_once('\t')?;
+            let (activity, value) = row.split_once('|')?;
             Some((activity.parse::<u64>().ok()?, value.to_string()))
         })
         .max_by_key(|(activity, _)| *activity)
@@ -131,11 +145,11 @@ fn kill_ghosts(win: &str, width: &str) {
         "-t",
         win,
         "-F",
-        "#{pane_id}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{window_height}\t#{window_panes}\t#{pane_pid}\t#{pane_current_command}\t#{pane_title}",
+        "#{pane_id}|#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}|#{window_height}|#{window_panes}|#{pane_pid}|#{pane_current_command}|#{pane_title}",
     ])
     .unwrap_or_default();
     for row in panes {
-        let mut fields = row.split('\t');
+        let mut fields = row.split('|');
         let (
             Some(pane),
             Some("0"),
@@ -219,9 +233,9 @@ pub(crate) fn pane_add_record(
     if let Some(window) = window {
         args.extend(["-t", window]);
     }
-    args.push("#{pid}\t#{start_time}\t#{window_id}");
+    args.push("#{pid}|#{start_time}|#{window_id}");
     let identity = tmux::command(&args).unwrap_or_default();
-    let fields = identity.trim().split('\t').collect::<Vec<_>>();
+    let fields = identity.trim().split('|').collect::<Vec<_>>();
     let numeric = |value: &str| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit());
     let [server, started, win] = fields.as_slice() else {
         eprintln!("agenmux: cannot resolve pane lock identity");
@@ -238,7 +252,7 @@ pub(crate) fn pane_add_record(
         return 0;
     }
 
-    let _lock = match PaneLock::acquire(server, started, &win) {
+    let _lock = match ServerLock::acquire(server, started, &win, Duration::from_secs(3)) {
         Ok(lock) => lock,
         Err(error) => {
             eprintln!("agenmux: cannot acquire pane-add lock for {win}: {error}");
@@ -346,11 +360,11 @@ pub fn pane_orphan() -> i32 {
         "list-windows",
         "-a",
         "-F",
-        "#{window_id}\t#{window_panes}\t#{session_id}",
+        "#{window_id}|#{window_panes}|#{session_id}",
     ])
     .unwrap_or_default();
     for row in windows {
-        let mut fields = row.split('\t');
+        let mut fields = row.split('|');
         let (Some(win), Some("1"), Some(session)) = (fields.next(), fields.next(), fields.next())
         else {
             continue;
@@ -374,18 +388,18 @@ pub fn pane_orphan() -> i32 {
             "-t",
             session,
             "-F",
-            "#{window_id}\t#{window_last_flag}",
+            "#{window_id}|#{window_last_flag}",
         ])
         .unwrap_or_default();
         let target = candidates
             .iter()
             .find_map(|row| {
-                let (candidate, last) = row.split_once('\t')?;
+                let (candidate, last) = row.split_once('|')?;
                 (candidate != win && last == "1").then(|| candidate.to_string())
             })
             .or_else(|| {
                 candidates.iter().find_map(|row| {
-                    let candidate = row.split_once('\t').map_or(row.as_str(), |(id, _)| id);
+                    let candidate = row.split_once('|').map_or(row.as_str(), |(id, _)| id);
                     (candidate != win).then(|| candidate.to_string())
                 })
             });
@@ -473,7 +487,7 @@ pub fn stop_daemon() {
     }
 }
 
-pub fn teardown() -> i32 {
+pub(crate) fn teardown_panes() -> i32 {
     let sidebar_filter = ["#{||:", IS_SIDEBAR, ",#{==:#{pane_title},agents-mon}}"].concat();
     let panes = tmux::lines(&[
         "list-panes",
@@ -481,11 +495,11 @@ pub fn teardown() -> i32 {
         "-f",
         &sidebar_filter,
         "-F",
-        "#{pane_id}\t#{window_id}",
+        "#{pane_id}|#{window_id}",
     ])
     .unwrap_or_default();
     for row in panes {
-        let Some((pane, window)) = row.split_once('\t') else {
+        let Some((pane, window)) = row.split_once('|') else {
             continue;
         };
         let _ = tmux::command_status(&["kill-pane", "-t", pane]);
@@ -505,12 +519,33 @@ pub fn teardown() -> i32 {
             let _ = tmux::command_status(&["set-option", "-gu", option]);
         }
     }
-    let _ = tmux::command_status(&["set-option", "-gu", "@agenmux-on"]);
-    let _ = tmux::command_status(&["set-option", "-gu", "@agenmux-control-client"]);
-    let _ = tmux::command_status(&["set-option", "-gu", "@agenmux-runtime-dir"]);
-    let _ = tmux::command_status(&["set-option", "-gu", "@agents-mon-on"]);
-    let _ = tmux::command_status(&["set-option", "-gu", "@agents-mon-control-client"]);
     0
+}
+
+pub(crate) fn clear_ownership(generation: Option<&str>) -> i32 {
+    if let Some(generation) = generation {
+        let current =
+            tmux::command(&["show-option", "-gqv", "@agenmux-generation"]).unwrap_or_default();
+        if current.trim() != generation {
+            return 0;
+        }
+    }
+    for name in [
+        "@agenmux-on",
+        "@agenmux-control-client",
+        "@agenmux-runtime-dir",
+        "@agenmux-generation",
+        "@agents-mon-on",
+        "@agents-mon-control-client",
+    ] {
+        let _ = tmux::command_status(&["set-option", "-gu", name]);
+    }
+    0
+}
+
+pub fn teardown() -> i32 {
+    teardown_panes();
+    clear_ownership(None)
 }
 
 #[cfg(test)]
@@ -520,9 +555,9 @@ mod tests {
     #[test]
     fn newest_client_ignores_invalid_rows_and_keeps_the_format_value() {
         let rows = vec![
-            "10\tfirst".to_string(),
-            "bad\tignored".to_string(),
-            "20\tsecond value".to_string(),
+            "10|first".to_string(),
+            "bad|ignored".to_string(),
+            "20|second value".to_string(),
         ];
         assert_eq!(newest_value(&rows).as_deref(), Some("second value"));
     }

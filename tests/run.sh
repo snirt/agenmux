@@ -458,11 +458,11 @@ if [ "$fail" -eq 0 ]; then
 printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
 case "$*" in
   "show-option -gqv @agenmux-on") printf '1\n' ;;
-  "list-windows -a -F "*window_panes*) printf '@sb\t1\ts1\n' ;;
+  "list-windows -a -F "*window_panes*) printf '@sb|1|s1\n' ;;
   "list-panes -t @sb -f "*" -F #{pane_id}") printf '%%1\n' ;;
   "list-clients "*"-F #{client_name}") printf 'c1\n' ;;
   "display-message -p -c c1 #{window_id}") printf '@other\n' ;;
-  "list-windows -t s1 -F "*window_last_flag*) printf '@sb\t0\n@last\t1\n' ;;
+  "list-windows -t s1 -F "*window_last_flag*) printf '@sb|0\n@last|1\n' ;;
   "list-windows -t s1 -F #{window_id}") printf '@sb\n@last\n' ;;
 esac
 exit 0
@@ -486,11 +486,11 @@ if [ "$fail" -eq 0 ]; then
 printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
 case "$*" in
   "show-option -gqv @agenmux-on") printf '1\n' ;;
-  "list-windows -a -F "*window_panes*) printf '@sb\t1\ts1\n' ;;
+  "list-windows -a -F "*window_panes*) printf '@sb|1|s1\n' ;;
   "list-panes -t @sb -f "*" -F #{pane_id}") printf '%%1\n' ;;
   "list-clients "*"-F #{client_name}") printf 'c1\n' ;;
   "display-message -p -c c1 #{window_id}") printf '@sb\n' ;;
-  "list-windows -t s1 -F "*window_last_flag*) printf '@sb\t0\n@last\t1\n' ;;
+  "list-windows -t s1 -F "*window_last_flag*) printf '@sb|0\n@last|1\n' ;;
   "list-windows -t s1 -F #{window_id}") printf '@sb\n@last\n' ;;
 esac
 exit 0
@@ -564,7 +564,7 @@ case "$*" in
     count="$(grep -c '^display-popup' "$TMUX_STUB_LOG")"
     case "$count" in 0) printf '41\n' ;; 1) printf '45\n' ;; *) printf 'invalid\n' ;; esac
     ;;
-  "list-clients -f "*) printf '20\tnewest-client\n' ;;
+  "list-clients -f "*) printf '20|newest-client\n' ;;
   display-popup*)
     count="$(grep -c '^display-popup' "$TMUX_STUB_LOG")"
     [ "$count" -gt 2 ] || printf '%%42\n' >"$TMPDIR/agenmux-pin.jump"
@@ -667,9 +667,9 @@ if [ "$fail" -eq 0 ]; then
   rm -rf "$tmp"
 fi
 if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
-  # mirror mode end to end: toggle puts a mirror pane in every window, window
-  # switches change NO layout (the whole point — no reflow bump), new windows
-  # get a mirror via hook, and q tears everything down.
+  # mirror mode end to end: startup creates only the focused mirror, the first
+  # visit adds each hidden window lazily, later switches cause no layout bump,
+  # new windows get a mirror via hook, and q tears everything down.
   # NOTE: must pin @agenmux-bin to $BIN — on CI the build lives at the
   # musl target path, and target/release/ holds the DOWNLOADED old release
   # (auto-install test side effect) which lacks the mirror/daemon commands.
@@ -707,6 +707,12 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   [ -n "$control" ] &&
     $T list-clients -F '#{client_name}' | grep -Fxq "$control" &&
     control_ok=1
+  # Warm the hidden window once; its lazy split is the only expected reflow.
+  $T last-window -t t
+  for _ in $(seq 1 40); do
+    [ "$($T list-panes -a -F '#{pane_title}' | grep -cx agenmux)" -eq 2 ] && break
+    sleep 0.05
+  done
   before="$($T list-windows -t t -F '#{window_id} #{window_layout}')"
   $T last-window -t t
   $T last-window -t t
@@ -714,7 +720,12 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   after="$($T list-windows -t t -F '#{window_id} #{window_layout}')"
   live_sidebar="$($T list-panes -t t: -F '#{pane_id}	#{pane_title}' |
     awk -F'\t' '$2 == "agenmux" { print $1; exit }')"
-  live_frame="$($T capture-pane -p -t "$live_sidebar")"
+  live_frame=""
+  for _ in $(seq 1 40); do
+    live_frame="$($T capture-pane -p -t "$live_sidebar")"
+    printf '%s\n' "$live_frame" | grep -Fq agents && break
+    sleep 0.1
+  done
   $T new-window -t t: "sh -c 'sleep 1; exec \"$tmp/claude\"'"
   sleep 3
   neww="$($T display-message -p -t t: '#{window_id}')"
@@ -766,7 +777,7 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key close
   sleep 2
   left="$($T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agenmux)"
-  if [ "$mirrors" -eq 2 ] && [ "$processless" -eq 2 ] && [ "$focus_kept" -eq 1 ] &&
+  if [ "$mirrors" -eq 1 ] && [ "$processless" -eq 1 ] && [ "$focus_kept" -eq 1 ] &&
     [ "$keys_ok" -eq 1 ] && [ "$control_ok" -eq 1 ] && [ "$stayed" -gt 0 ] &&
     printf '%s\n' "$live_frame" | grep -Fq agents &&
     [ "$before" = "$after" ] && [ "$new_ok" -eq 1 ] &&
@@ -822,7 +833,7 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key j
   sleep 1
   list_moved="$($T capture-pane -p -t "$mir")"
-  if [ "$opened" -eq 2 ] && [ "$help_alive" -eq 2 ] && [ "$vers_alive" -eq 2 ] &&
+  if [ "$opened" -eq 1 ] && [ "$help_alive" -eq 1 ] && [ "$vers_alive" -eq 1 ] &&
     printf '%s\n' "$help_frame" | grep -Fq 'press any key to return' &&
     printf '%s\n' "$vers_frame" | grep -Eq 'no releases found|↵ switch' &&
     printf '%s\n' "$list_before" | grep -Fq codex &&

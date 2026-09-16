@@ -539,11 +539,35 @@ pub(crate) fn read_search_key(fd: libc::c_int, keys: &Keymap) -> Key {
 /// reader. Each invocation is intentionally short-lived; the daemon remains
 /// the only persistent agenmux process.
 pub fn send_key(name: &str, client: Option<&str>) -> i32 {
-    // Publish close before FIFO delivery. A launcher pressed immediately after q
-    // must restart instead of reusing the daemon that is about to tear down.
-    if name == "close" && client.is_none_or(|client| !client.is_empty() && client.len() <= 255) {
+    let valid_close =
+        name == "close" && client.is_none_or(|client| !client.is_empty() && client.len() <= 255);
+    let _lifecycle = if valid_close {
+        let lock = match crate::panes::lifecycle_lock() {
+            Ok(lock) => lock,
+            Err(error) => {
+                eprintln!("agenmux: cannot acquire lifecycle lock: {error}");
+                return 1;
+            }
+        };
+        let inactive = [
+            "@agenmux-on",
+            "@agenmux-control-client",
+            "@agenmux-runtime-dir",
+            "@agenmux-generation",
+        ]
+        .into_iter()
+        .all(|name| {
+            tmux::command(&["show-option", "-gqv", name]).is_ok_and(|value| value.trim().is_empty())
+        });
+        if inactive {
+            return 0;
+        }
+        // Preserve b35f644: publish close before FIFO delivery.
         let _ = tmux::command_status(&["set-option", "-gu", "@agenmux-on"]);
-    }
+        Some(lock)
+    } else {
+        None
+    };
     let status = send_key_inner(name, client);
     trace!("send key {name} for {client:?} -> {status}");
     status
@@ -618,6 +642,17 @@ fn send_key_inner(name: &str, client: Option<&str>) -> i32 {
         return 2;
     }
     send_bytes(&bytes)
+}
+
+/// FIFO bytes for a key the binding delivered through a tmux buffer name.
+pub(crate) fn buffer_key_bytes(action: &str) -> Option<&'static [u8]> {
+    Some(match action {
+        "up" => b"\x1b[A",
+        "down" => b"\x1b[B",
+        "wheel-up" => &[0x01],
+        "wheel-down" => &[0x02],
+        _ => return None,
+    })
 }
 
 fn send_bytes(bytes: &[u8]) -> i32 {
@@ -739,11 +774,14 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
 }
 
 pub fn wheel(pane: &str, direction: Direction) -> i32 {
-    let panes = match tmux::lines(&["list-panes", "-a", "-F", "#{pane_id}"]) {
-        Ok(panes) => panes,
-        Err(_) => return 0,
-    };
-    if !panes.iter().any(|id| id == pane) {
+    let resolved = tmux::command(&[
+        "display-message",
+        "-p",
+        "-t",
+        pane,
+        "#{pane_id}|#{pane_title}",
+    ]);
+    if !resolved.is_ok_and(|value| value.trim() == format!("{pane}|agenmux")) {
         return 0;
     }
     send_key(

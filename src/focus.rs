@@ -35,7 +35,8 @@ impl ClientFocus {
 pub fn parse_clients(rows: &str, focus_events: bool) -> ClientFocus {
     let mut parsed = Vec::new();
     for line in rows.lines() {
-        let mut fields = line.splitn(6, '\t');
+        let separator = if line.contains('|') { '|' } else { '\t' };
+        let mut fields = line.splitn(6, separator);
         let (Some(activity), Some(client), Some(session), Some(pane), Some(title), Some(flags)) = (
             fields.next(),
             fields.next(),

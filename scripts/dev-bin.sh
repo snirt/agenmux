@@ -11,7 +11,8 @@ ACTION="${1:-}"
 
 case "$ACTION" in
 use)
-  cargo build --manifest-path "$DIR/Cargo.toml" || exit 1
+  AGENMUX_DEV_BUILD_ID="$$-$(date +%s)" \
+    cargo build --manifest-path "$DIR/Cargo.toml" || exit 1
   next="$DEBUG"
   ;;
 stop) next="$RELEASE" ;;

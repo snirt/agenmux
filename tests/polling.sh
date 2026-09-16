@@ -5,8 +5,14 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${AGENMUX_BIN:-$DIR/target/release/agenmux}"
-[ -x "$BIN" ] || { echo "SKIP polling: release binary missing"; exit 0; }
-command -v tmux >/dev/null || { echo "SKIP polling: tmux missing"; exit 0; }
+[ -x "$BIN" ] || {
+  echo "SKIP polling: release binary missing"
+  exit 0
+}
+command -v tmux >/dev/null || {
+  echo "SKIP polling: tmux missing"
+  exit 0
+}
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/agenmux-polling.XXXXXX")"
 sock="$tmp/tmux.sock"
@@ -56,10 +62,12 @@ primary="$(tmux -S "$sock" display-message -p -t primary: '#{pane_id}')"
 tmux -S "$sock" select-pane -t "$primary" -T constant-title
 server_pid="$(tmux -S "$sock" display-message -p '#{pid}')"
 
-# Launch as a tmux job so the daemon outlives this harness's command runner.
-tmux -S "$sock" run-shell -b \
-  "env TMPDIR='$tmp' XDG_CONFIG_HOME='$XDG_CONFIG_HOME' XDG_STATE_HOME='$XDG_STATE_HOME' TMUX='$sock,$server_pid,0' AGENMUX_DIR='$DIR' AGENMUX_DEBUG='$debug' '$BIN' daemon"
-
+# Start through the public lifecycle so startup creates and measures the focused
+# processless sidebar before acknowledging the first live scan.
+tmux -S "$sock" set-option -g @agenmux-bin "$BIN"
+env TMPDIR="$tmp" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" XDG_STATE_HOME="$XDG_STATE_HOME" \
+  TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" AGENMUX_DEBUG="$debug" \
+  "$BIN" toggle split
 state_count() {
   awk -F '\t' -v state="$1" '$4 == state { n++ } END { print n + 0 }' "$cache" 2>/dev/null || printf '0\n'
 }
@@ -131,8 +139,14 @@ for _ in $(seq 1 25); do
   [ "$stream_scans" -ge 2 ] && break
   sleep .1
 done
-[ "$(state_count working)" = 1 ] || { echo "FAIL polling: continuous output"; exit 1; }
-[ "$stream_scans" -ge 2 ] || { echo "FAIL polling: busy output postponed scans"; exit 1; }
+[ "$(state_count working)" = 1 ] || {
+  echo "FAIL polling: continuous output"
+  exit 1
+}
+[ "$stream_scans" -ge 2 ] || {
+  echo "FAIL polling: busy output postponed scans"
+  exit 1
+}
 # Stop immediately after a periodic boundary so the final redraw has ample
 # room to prove it was captured by the output deadline, not the fallback.
 periodic_checkpoint="$(debug_lines)"
@@ -156,7 +170,10 @@ wait_count working 1 background-working-fallback
 # Switching the monitoring client invalidates coverage. Resize then removal
 # exercise metadata refresh and stale cache pruning.
 control="$(tmux -S "$sock" show-option -gqv @agenmux-control-client)"
-[ -n "$control" ] || { echo "FAIL polling: daemon did not publish client"; exit 1; }
+[ -n "$control" ] || {
+  echo "FAIL polling: daemon did not publish client"
+  exit 1
+}
 tmux -S "$sock" switch-client -c "$control" -t background
 sleep .7
 # A single pane always fills its window and cannot be resized. Keep a plain
@@ -168,7 +185,10 @@ resize_width=$((old_width > 20 ? old_width - 5 : old_width + 5))
 resize_checkpoint="$(debug_lines)"
 tmux -S "$sock" resize-pane -t "$background" -x "$resize_width"
 new_width="$(tmux -S "$sock" display-message -p -t "$background" '#{pane_width}')"
-[ "$new_width" != "$old_width" ] || { echo "FAIL polling: pane did not resize"; exit 1; }
+[ "$new_width" != "$old_width" ] || {
+  echo "FAIL polling: pane did not resize"
+  exit 1
+}
 wait_debug_since "$resize_checkpoint" "capture-pane .* -t '$background'" \
   resize-pane-specific-capture
 # Keep the attached session alive while removing the monitored pane; destroying
