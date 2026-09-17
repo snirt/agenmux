@@ -4,33 +4,8 @@ use std::collections::HashSet;
 
 use super::{PaneOccurrence, Sidebar, VisiblePane};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum StateFilter {
-    Blocked,
-    Working,
-    Idle,
-    Done,
-}
-
-impl StateFilter {
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            StateFilter::Blocked => "blocked",
-            StateFilter::Working => "working",
-            StateFilter::Idle => "idle",
-            StateFilter::Done => "done",
-        }
-    }
-
-    fn cycle(current: Option<Self>) -> Option<Self> {
-        match current {
-            None => Some(Self::Blocked),
-            Some(Self::Blocked) => Some(Self::Working),
-            Some(Self::Working) => Some(Self::Idle),
-            Some(Self::Idle) => Some(Self::Done),
-            Some(Self::Done) => None,
-        }
-    }
+fn needs_attention(row: &PaneRow) -> bool {
+    matches!(row.state.as_str(), "done" | "working" | "blocked")
 }
 
 fn row_filter_text(row: &PaneRow) -> String {
@@ -41,23 +16,23 @@ fn row_filter_text(row: &PaneRow) -> String {
     .to_lowercase()
 }
 
-/// Filter projection: status matching is exact and separate from text search.
+/// User attention matching is exact and separate from text search.
 /// Matching a session keeps its whole agent subtree as context;
 /// matching an agent keeps that session's header through normal rendering.
 fn inventory_filtered_indices(
     panes: &[PaneMeta],
     rows: &[PaneRow],
     query: &str,
-    state_filter: Option<StateFilter>,
+    attention_filter: bool,
 ) -> Vec<usize> {
-    if let Some(filter) = state_filter {
+    if attention_filter {
         return panes
             .iter()
             .enumerate()
             .filter(|(_, pane)| {
                 pane.agent_index
                     .and_then(|i| rows.get(i))
-                    .is_some_and(|row| row.state == filter.label())
+                    .is_some_and(needs_attention)
             })
             .map(|(i, _)| i)
             .collect();
@@ -89,16 +64,12 @@ fn inventory_filtered_indices(
         .collect()
 }
 
-fn filtered_indices(
-    rows: &[PaneRow],
-    query: &str,
-    state_filter: Option<StateFilter>,
-) -> Vec<usize> {
-    if let Some(filter) = state_filter {
+fn filtered_indices(rows: &[PaneRow], query: &str, attention_filter: bool) -> Vec<usize> {
+    if attention_filter {
         return rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| row.state == filter.label())
+            .filter(|(_, row)| needs_attention(row))
             .map(|(i, _)| i)
             .collect();
     }
@@ -287,15 +258,19 @@ impl Sidebar {
     pub(super) fn rebuild_visible(&mut self, select_first: bool) {
         let before = self.visible.len();
         self.visible = if self.settings.settings.show_all_panes {
-            let indices =
-                inventory_filtered_indices(&self.panes, &self.rows, &self.query, self.state_filter);
+            let indices = inventory_filtered_indices(
+                &self.panes,
+                &self.rows,
+                &self.query,
+                self.attention_filter,
+            );
             if self.settings.settings.tmux_management_enabled {
                 with_record_rows(&self.panes, indices)
             } else {
                 indices.into_iter().map(VisiblePane::Inventory).collect()
             }
         } else {
-            filtered_indices(&self.rows, &self.query, self.state_filter)
+            filtered_indices(&self.rows, &self.query, self.attention_filter)
                 .into_iter()
                 .map(VisiblePane::Agent)
                 .collect()
@@ -320,21 +295,21 @@ impl Sidebar {
     }
 
     pub(super) fn focus_search(&mut self) {
-        self.state_filter = None;
+        self.attention_filter = false;
         self.search_focused = true;
         self.rebuild_visible(false);
     }
 
-    pub(super) fn cycle_state_filter(&mut self) {
+    pub(super) fn toggle_attention_filter(&mut self) {
         self.query.clear();
-        self.state_filter = StateFilter::cycle(self.state_filter);
+        self.attention_filter = !self.attention_filter;
         self.search_focused = false;
         self.rebuild_visible(true);
     }
 
     pub(super) fn clear_filter(&mut self) {
         self.query.clear();
-        self.state_filter = None;
+        self.attention_filter = false;
         self.search_focused = false;
         self.rebuild_visible(false);
     }
@@ -365,17 +340,17 @@ impl Sidebar {
             Key::Down => self.move_sel(1),
             Key::Up => self.move_sel(-1),
             Key::Backspace => {
-                self.state_filter = None;
+                self.attention_filter = false;
                 self.query.pop();
                 self.rebuild_visible(true);
             }
             Key::ClearSearch => {
                 self.query.clear();
-                self.state_filter = None;
+                self.attention_filter = false;
                 self.rebuild_visible(false);
             }
             Key::Text(text) => {
-                self.state_filter = None;
+                self.attention_filter = false;
                 let room = 256usize.saturating_sub(self.query.chars().count());
                 self.query
                     .extend(text.chars().filter(|c| !c.is_control()).take(room));
@@ -391,7 +366,7 @@ impl Sidebar {
             | Key::Sequence(_, _)
             | Key::Owned(_, _)
             | Key::Search
-            | Key::CycleState
+            | Key::ToggleAttention
             | Key::Help
             | Key::Versions
             | Key::Settings
@@ -420,9 +395,9 @@ mod tests {
     fn text_search_matches_visible_fields_case_insensitively() {
         let rows = [filter_row("%1", "work:1.0", "idle", "Fix Login Race")];
         for query in ["CODEX", "work:1", "AUTH", "login", "idle"] {
-            assert_eq!(filtered_indices(&rows, query, None), vec![0], "{query}");
+            assert_eq!(filtered_indices(&rows, query, false), vec![0], "{query}");
         }
-        assert!(filtered_indices(&rows, "payments", None).is_empty());
+        assert!(filtered_indices(&rows, "payments", false).is_empty());
     }
 
     #[test]
@@ -432,7 +407,7 @@ mod tests {
             filter_row("%2", "api:2.0", "working", "also unrelated"),
             filter_row("%3", "web:1.0", "idle", "unrelated"),
         ];
-        assert_eq!(filtered_indices(&rows, "api", None), vec![0, 1]);
+        assert_eq!(filtered_indices(&rows, "api", false), vec![0, 1]);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -578,11 +553,11 @@ mod tests {
     fn inventory_session_name_or_id_query_returns_only_matching_occurrence_descendants() {
         let (panes, rows) = inventory();
         assert_eq!(
-            inventory_filtered_indices(&panes, &rows, "team", None),
+            inventory_filtered_indices(&panes, &rows, "team", false),
             vec![0, 1, 2, 3]
         );
         assert_eq!(
-            inventory_filtered_indices(&panes, &rows, "$1", None),
+            inventory_filtered_indices(&panes, &rows, "$1", false),
             vec![0, 1, 2]
         );
     }
@@ -591,11 +566,11 @@ mod tests {
     fn inventory_window_name_query_returns_full_matching_window_subtrees() {
         let (panes, rows) = inventory();
         assert_eq!(
-            inventory_filtered_indices(&panes, &rows, "same", None),
+            inventory_filtered_indices(&panes, &rows, "same", false),
             vec![0, 1, 3, 5]
         );
         assert_eq!(
-            inventory_filtered_indices(&panes, &rows, "@3", None),
+            inventory_filtered_indices(&panes, &rows, "@3", false),
             vec![3]
         );
     }
@@ -604,7 +579,7 @@ mod tests {
     fn inventory_window_index_query_respects_session_occurrences() {
         let (panes, rows) = inventory();
         assert_eq!(
-            inventory_filtered_indices(&panes, &rows, "42", None),
+            inventory_filtered_indices(&panes, &rows, "42", false),
             vec![5]
         );
     }
@@ -620,7 +595,7 @@ mod tests {
             ("/workspace/tools", vec![2]),
         ] {
             assert_eq!(
-                inventory_filtered_indices(&panes, &rows, query, None),
+                inventory_filtered_indices(&panes, &rows, query, false),
                 expected,
                 "{query}"
             );
@@ -638,7 +613,7 @@ mod tests {
             ("alpha:2.1", vec![3]),
         ] {
             assert_eq!(
-                inventory_filtered_indices(&panes, &rows, query, None),
+                inventory_filtered_indices(&panes, &rows, query, false),
                 expected,
                 "{query}"
             );
@@ -649,76 +624,36 @@ mod tests {
     fn inventory_matching_is_case_insensitive() {
         let (panes, rows) = inventory();
         assert_eq!(
-            inventory_filtered_indices(&panes, &rows, "fIx LoGiN", None),
+            inventory_filtered_indices(&panes, &rows, "fIx LoGiN", false),
             vec![1, 5]
         );
     }
 
     #[test]
-    fn inventory_status_filter_is_exact_and_ignores_query_and_non_agent_metadata() {
-        let (panes, rows) = inventory();
-        for (filter, expected) in [
-            (StateFilter::Blocked, vec![1, 5]),
-            (StateFilter::Working, vec![3]),
-            (StateFilter::Idle, vec![4]),
-        ] {
-            assert_eq!(
-                inventory_filtered_indices(&panes, &rows, "alpha", Some(filter)),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn ordinary_working_metadata_never_matches_working_status() {
+    fn inventory_attention_filter_ignores_query_and_non_agent_metadata() {
         let (panes, rows) = inventory();
         assert!(panes[0].command.contains("working"));
         assert!(panes[2].pane_title.contains("working"));
         assert_eq!(
-            inventory_filtered_indices(&panes, &rows, "", Some(StateFilter::Working)),
-            vec![3]
+            inventory_filtered_indices(&panes, &rows, "ignored", true),
+            vec![1, 3, 5]
         );
     }
 
     #[test]
     fn inventory_absent_query_returns_no_panes_for_rendering() {
         let (panes, rows) = inventory();
-        assert!(inventory_filtered_indices(&panes, &rows, "absent", None).is_empty());
+        assert!(inventory_filtered_indices(&panes, &rows, "absent", false).is_empty());
     }
 
     #[test]
-    fn state_filter_cycles_in_display_order() {
-        let mut filter = None;
-        for expected in [
-            Some(StateFilter::Blocked),
-            Some(StateFilter::Working),
-            Some(StateFilter::Idle),
-            Some(StateFilter::Done),
-            None,
-        ] {
-            filter = StateFilter::cycle(filter);
-            assert_eq!(filter, expected);
-        }
-    }
-
-    #[test]
-    fn state_filters_are_exact_and_separate_from_text() {
+    fn attention_filter_includes_done_working_and_blocked_but_not_idle() {
         let rows = [
             filter_row("%1", "s:1.0", "blocked", "working notes"),
             filter_row("%2", "s:2.0", "working", "blocked notes"),
             filter_row("%3", "s:3.0", "done", "done"),
+            filter_row("%4", "s:4.0", "idle", "idle"),
         ];
-        assert_eq!(
-            filtered_indices(&rows, "ignored", Some(StateFilter::Blocked)),
-            vec![0]
-        );
-        assert_eq!(
-            filtered_indices(&rows, "", Some(StateFilter::Working)),
-            vec![1]
-        );
-        assert_eq!(
-            filtered_indices(&rows, "", Some(StateFilter::Done)),
-            vec![2]
-        );
+        assert_eq!(filtered_indices(&rows, "ignored", true), vec![0, 1, 2]);
     }
 }

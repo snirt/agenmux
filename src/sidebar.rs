@@ -92,7 +92,6 @@ mod daemon;
 pub use daemon::run_daemon;
 use daemon::Daemon;
 mod filter;
-use filter::StateFilter;
 mod overlay;
 mod render;
 mod ui;
@@ -192,7 +191,7 @@ pub struct Sidebar {
     panes: Vec<PaneMeta>, // latest complete sidebar-excluded inventory
     visible: Vec<VisiblePane>, // selectable panes; headers never enter this projection
     query: String,
-    state_filter: Option<StateFilter>,
+    attention_filter: bool,
     search_focused: bool,
     key_sequence: KeySequence,
     refresh_requested: bool,
@@ -363,7 +362,7 @@ fn new_sidebar(
         panes: Vec::new(),
         visible: Vec::new(),
         query: String::new(),
-        state_filter: None,
+        attention_filter: false,
         search_focused: false,
         key_sequence: KeySequence::default(),
         refresh_requested: false,
@@ -781,7 +780,7 @@ impl Sidebar {
             Key::Versions => self.versions(),
             Key::Settings => self.settings(),
             Key::Search => self.focus_search(),
-            Key::CycleState => self.cycle_state_filter(),
+            Key::ToggleAttention => self.toggle_attention_filter(),
             Key::AllStates => self.clear_filter(),
             Key::TogglePanes => self.toggle_all_panes(),
             Key::Quit => {

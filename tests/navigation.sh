@@ -266,7 +266,7 @@ initial_focus="$(tmux -S "$sock" display-message -p -c "$client" \
 initial_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
 inactive_hint_hidden=0
 if [ -n "$initial_hint" ] &&
-  ! has_re "$initial_hint" 'esc clear|f status|/ search'; then
+  ! has_re "$initial_hint" 'esc clear|f attention|/ search'; then
   inactive_hint_hidden=1
 fi
 
@@ -999,78 +999,32 @@ for _ in $(seq 1 20); do
   sleep 0.05
 done
 
-# `f` replaces text search and selects the next exact status. It is synchronous
-# so fast presses cannot reorder; j/k still navigate the projected result list.
+# `f` replaces text search and toggles the User attention projection. It is
+# synchronous so fast presses cannot reorder; j/k still navigate results.
 printf 'f' >&9
-blocked_filter_works=0
+attention_filter_works=0
 for _ in $(seq 1 20); do
-  blocked_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
+  attention_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
     "$tmp/agenmux-rows")"
-  blocked_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
-  blocked_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
-  if [ "$blocked_targets" -eq 0 ] &&
-    has "$blocked_frame" '[blocked]' &&
-    has "$blocked_hint" 'f status' &&
-    has "$blocked_hint" 'j/K'; then
-    blocked_filter_works=1
-    break
-  fi
-  sleep 0.05
-done
-printf 'f' >&9
-working_filter_works=0
-for _ in $(seq 1 20); do
-  working_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
-    "$tmp/agenmux-rows")"
-  working_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
-  if [ "$working_targets" -eq 0 ] &&
-    has "$working_frame" '[working]'; then
-    working_filter_works=1
+  attention_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
+  attention_hint="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '2p')"
+  if [ "$attention_targets" -eq 0 ] &&
+    has "$attention_frame" '[attention]' &&
+    has "$attention_hint" 'f attention' &&
+    has "$attention_hint" 'j/K'; then
+    attention_filter_works=1
     break
   fi
   sleep 0.05
 done
 printf 'f' >&9
-idle_filter_works=0
-for _ in $(seq 1 20); do
-  idle_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
-    "$tmp/agenmux-rows")"
-  idle_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
-  if [ "$idle_targets" -eq 2 ] &&
-    has "$idle_frame" '[idle]'; then
-    idle_filter_works=1
-    break
-  fi
-  sleep 0.05
-done
-state_first="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
-  sed -n '/❯/p' | head -n 1)"
-printf 'G' >&9
-state_edges_work=0
-for _ in $(seq 1 20); do
-  state_last="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
-    sed -n '/❯/p' | head -n 1)"
-  [ -n "$state_last" ] && [ "$state_last" != "$state_first" ] && break
-  sleep 0.05
-done
-printf 'gg' >&9
-for _ in $(seq 1 20); do
-  state_restored="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
-    sed -n '/❯/p' | head -n 1)"
-  if [ -n "$state_first" ] && [ "$state_restored" = "$state_first" ]; then
-    state_edges_work=1
-    break
-  fi
-  sleep 0.05
-done
-printf '\033' >&9
 all_filter_works=0
 for _ in $(seq 1 20); do
   all_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
     "$tmp/agenmux-rows")"
   all_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | head -n 1)"
   if [ "$all_targets" -eq 2 ] &&
-    ! has_re "$all_frame" '/navigation:1|\[(blocked|working|idle|done)\]'; then
+    ! has_re "$all_frame" '/navigation:1|\[attention\]'; then
     all_filter_works=1
     break
   fi
@@ -1246,7 +1200,7 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 
-# Escape clears filters without closing. Reopen, create a blocked projection,
+# Escape clears filters without closing. Reopen, enable User attention,
 # reset it with a literal escape byte, then close explicitly with q.
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" toggle split "$client"
@@ -1414,7 +1368,7 @@ done
 printf 'f' >&9
 for _ in $(seq 1 20); do
   escape_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar" | head -n 1)"
-  has "$escape_frame" '[blocked]' && break
+  has "$escape_frame" '[attention]' && break
   sleep 0.05
 done
 printf '\033' >&9
@@ -1426,7 +1380,7 @@ for _ in $(seq 1 20); do
     '#{pane_title}')"
   escape_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar" | head -n 1)"
   if [ "$escape_table" = agenmux ] && [ "$escape_focus" = agenmux ] &&
-    ! has_re "$escape_frame" '\[(blocked|working|idle|done)\]'; then
+    ! has "$escape_frame" '[attention]'; then
     escape_reset=1
     break
   fi
@@ -1562,9 +1516,7 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   [ "$fourth" != "$third" ] && [ "$search_works" -eq 1 ] &&
   [ "$search_accept_works" -eq 1 ] && [ "$search_jk_works" -eq 1 ] &&
   [ "$search_edges_work" -eq 1 ] &&
-  [ "$search_blur_works" -eq 1 ] && [ "$blocked_filter_works" -eq 1 ] &&
-  [ "$working_filter_works" -eq 1 ] && [ "$idle_filter_works" -eq 1 ] &&
-  [ "$state_edges_work" -eq 1 ] &&
+  [ "$search_blur_works" -eq 1 ] && [ "$attention_filter_works" -eq 1 ] &&
   [ "$all_filter_works" -eq 1 ] && [ "$reload_hint_follows" -eq 1 ] &&
   [ "$ordinary_keyboard_jump" -eq 1 ] && [ "$ordinary_first_click" -eq 1 ] &&
   [ "$ordinary_mouse_jump" -eq 1 ] && [ "$ordinary_restored_false" -eq 1 ] &&
@@ -1582,9 +1534,9 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   [ "$notification_stale_noop" -eq 1 ]; then
   echo "ok   attached-client-jk-navigation"
 else
-  echo "edge-nav: long=$edge_long_list_works slow=$slow_gg_expires search=$search_edges_work state=$state_edges_work"
+  echo "edge-nav: long=$edge_long_list_works slow=$slow_gg_expires search=$search_edges_work"
   echo "sustained-input: keys=$sustained_navigation_works [$held_start->$held_mid->$held_boundary/$held_stable->$held_up_mid->$held_reset/$held_reset_stable] wheel=$wheel_burst_works [$wheel_burst_top->$wheel_burst_mid->$wheel_burst_reset/$wheel_burst_stable selected=$wheel_burst_selected/$wheel_burst_selected_after]"
-  echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$blocked_filter_works/$blocked_targets/$blocked_frame/$blocked_hint/$working_filter_works/$working_targets/$working_frame/$idle_filter_works/$idle_targets/$idle_frame/$all_filter_works/$all_targets/$all_frame] reload=[$reload_hint_follows/$reload_hint] ordinary=[$ordinary_keyboard_jump/$ordinary_first_click/$ordinary_mouse_jump/$ordinary_restored_false target=$ordinary_target focus=$ordinary_focus table=$ordinary_table] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
+  echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$attention_filter_works/$attention_targets/$attention_frame/$attention_hint/$all_filter_works/$all_targets/$all_frame] reload=[$reload_hint_follows/$reload_hint] ordinary=[$ordinary_keyboard_jump/$ordinary_first_click/$ordinary_mouse_jump/$ordinary_restored_false target=$ordinary_target focus=$ordinary_focus table=$ordinary_table] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
   echo "settings: open=$settings_open search=$settings_search backspace=$settings_backspace applied=$settings_search_applied navigation=$settings_search_navigation dropdown=$settings_dropdown cancelled=$settings_cancelled saved=$settings_saved responsive=$settings_responsive returned=$settings_returned popup=$settings_popup"
   diagnose
   exit 1

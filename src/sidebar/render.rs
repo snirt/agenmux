@@ -559,14 +559,14 @@ impl Sidebar {
             }
             None => (String::new(), 0, String::new()),
         };
-        let filtering = self.state_filter.is_some() || !self.query.trim().is_empty();
-        let mut filter = match self.state_filter {
-            Some(state) => format!(" [{}]", state.label()),
-            None if self.search_focused || !self.query.is_empty() => {
-                let query: String = self.query.chars().filter(|c| !c.is_control()).collect();
-                format!(" /{query}")
-            }
-            None => String::new(),
+        let filtering = self.attention_filter || !self.query.trim().is_empty();
+        let mut filter = if self.attention_filter {
+            " [attention]".to_string()
+        } else if self.search_focused || !self.query.is_empty() {
+            let query: String = self.query.chars().filter(|c| !c.is_control()).collect();
+            format!(" /{query}")
+        } else {
+            String::new()
         };
         if filtering {
             let total = if self.settings.settings.show_all_panes {
@@ -626,9 +626,9 @@ impl Sidebar {
                 self.hint(&self.search_keys, Action::Clear, "clear"),
                 self.hint(&self.search_keys, Action::Cancel, "clear"),
             ])
-        } else if self.state_filter.is_some() {
+        } else if self.attention_filter {
             join(&[
-                self.hint(&self.normal_keys, Action::Filter, "status"),
+                self.hint(&self.normal_keys, Action::Filter, "attention"),
                 nav,
                 self.hint(&self.normal_keys, Action::Reset, "clear"),
             ])
@@ -872,7 +872,6 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use super::super::filter::StateFilter;
     use super::super::{new_sidebar, Daemon, MutationTarget, Overlay};
     use crate::input::SequenceAction;
 
@@ -1020,7 +1019,7 @@ mod tests {
         }
         for mode in 0..7 {
             sb.query.clear();
-            sb.state_filter = None;
+            sb.attention_filter = false;
             sb.search_focused = false;
             sb.overlay = None;
             sb.update = None;
@@ -1029,7 +1028,7 @@ mod tests {
                     sb.query = "repo".into();
                     sb.search_focused = true;
                 }
-                1 => sb.state_filter = Some(StateFilter::Working),
+                1 => sb.attention_filter = true,
                 2 => sb.update = Some("v9.9.9".into()),
                 3 => sb.overlay = Some(Overlay::Help),
                 4 => {
@@ -1072,7 +1071,7 @@ mod tests {
             pane("$2", "personal", "@3", 3, "shell", "%31", 1, "zsh", None),
         ];
         sb.query.clear();
-        sb.state_filter = None;
+        sb.attention_filter = false;
         sb.search_focused = false;
         sb.overlay = None;
         sb.update = None;
@@ -1323,16 +1322,16 @@ mod tests {
                 .escape_default()
         ));
 
-        for (label, query, state_filter) in [
-            ("session query", "work", None),
-            ("window query", "server", None),
-            ("pane query", "%21", None),
-            ("agent query", "claude", None),
-            ("status filter", "ignored", Some(StateFilter::Working)),
-            ("absent query", "absent", None),
+        for (label, query, attention_filter) in [
+            ("session query", "work", false),
+            ("window query", "server", false),
+            ("pane query", "%21", false),
+            ("agent query", "claude", false),
+            ("attention filter", "ignored", true),
+            ("absent query", "absent", false),
         ] {
             sb.query = query.into();
-            sb.state_filter = state_filter;
+            sb.attention_filter = attention_filter;
             sb.rebuild_visible(false);
             sb.render(true);
             if label == "pane query" {
@@ -1358,7 +1357,7 @@ mod tests {
             ));
         }
         sb.query.clear();
-        sb.state_filter = None;
+        sb.attention_filter = false;
         sb.rebuild_visible(false);
 
         sb.panes.push(pane(
@@ -1453,7 +1452,7 @@ mod tests {
             sb.plugin_selected = true;
             sb.tick = 0;
             sb.query.clear();
-            sb.state_filter = None;
+            sb.attention_filter = false;
             sb.search_focused = false;
             sb.update = Some("v9.9.9".into());
             sb.overlay = None;
@@ -1595,13 +1594,13 @@ mod tests {
         sb.settings.settings.show_all_panes = false;
 
         sb.overlay = None;
-        sb.state_filter = Some(StateFilter::Working);
+        sb.attention_filter = true;
         sb.rebuild_visible(false);
         sb.render(true);
         let footer = sb.last_frame.clone();
         assert!(footer.contains("n/e"), "{footer}");
         assert!(!footer.contains("j/k"), "{footer}");
-        sb.state_filter = None;
+        sb.attention_filter = false;
     }
 
     fn themed_frames(sb: &mut Sidebar) {
@@ -1640,7 +1639,7 @@ mod tests {
                         sb.tick = tick;
                         for mode in 0..10 {
                             sb.query.clear();
-                            sb.state_filter = None;
+                            sb.attention_filter = false;
                             sb.search_focused = false;
                             sb.overlay = None;
                             sb.update = None;
@@ -1651,12 +1650,7 @@ mod tests {
                                 }
                                 2 => sb.query = "repo".into(),
                                 3 => {
-                                    sb.state_filter = Some(match state {
-                                        "blocked" => StateFilter::Blocked,
-                                        "working" => StateFilter::Working,
-                                        "done" => StateFilter::Done,
-                                        _ => StateFilter::Idle,
-                                    })
+                                    sb.attention_filter = true;
                                 }
                                 4 => sb.update = Some("v9.9.9".into()),
                                 5 => sb.overlay = Some(Overlay::Help),

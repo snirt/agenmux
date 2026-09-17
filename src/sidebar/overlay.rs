@@ -650,7 +650,7 @@ impl Sidebar {
                 for (action, what) in [
                     (Action::Jump, jump.to_string()),
                     (Action::Search, format!("live search{accept}")),
-                    (Action::Filter, "select next state filter".into()),
+                    (Action::Filter, "toggle user attention filter".into()),
                     (Action::Reset, "clear filters / show all".into()),
                     (Action::Versions, "update / switch version".into()),
                     (Action::Settings, "application settings".into()),
