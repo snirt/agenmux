@@ -41,6 +41,21 @@ AGENMUX_DIR="$home/.tmux/plugins/agenmux" AGENMUX_TMUX_CONF="$home/dev.conf" \
 check skip-update "$(git -C "$home/.tmux/plugins/agenmux" rev-parse HEAD)" "$installed_before"
 check forced-wizard "$(grep -c 'agenmux.tmux' "$home/dev.conf")" 1
 
+# Docker mounts linked worktrees as a .git file whose host path is unavailable
+# in the container. With updates disabled, the installer should use the files
+# in the mount rather than trying to clone over it.
+git -C "$home/src" worktree add -q --detach "$home/worktree" HEAD
+printf 'gitdir: /unavailable/.git/worktrees/worktree\n' >"$home/worktree/.git"
+: >"$home/worktree.conf"
+if AGENMUX_DIR="$home/worktree" AGENMUX_TMUX_CONF="$home/worktree.conf" \
+  AGENMUX_SKIP_UPDATE=1 AGENMUX_FORCE_WIZARD=1 sh "$DIR/install.sh" >/dev/null; then
+  worktree_install=ok
+else
+  worktree_install=failed
+fi
+check worktree-reuse "$worktree_install" ok
+check worktree-conf "$(grep -c agenmux "$home/worktree.conf")" 3
+
 # TPM present: @plugin above the tpm run line, still only once
 mkdir -p "$home/.tmux/plugins/tpm"
 printf 'set -g mouse on\nrun "~/.tmux/plugins/tpm/tpm"\n' >"$home/.tmux.conf"

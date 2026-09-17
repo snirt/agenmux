@@ -188,6 +188,43 @@ pub(crate) fn available_sequences(
         .filter(move |binding| management_enabled || !binding.mutation)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SequenceDispatch {
+    Builtin(SequenceAction),
+    QuickLauncher(String),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SequenceBinding {
+    pub sequence: String,
+    pub action: SequenceDispatch,
+    pub label: String,
+}
+
+pub(crate) fn sequence_bindings(config: &crate::app_config::AppConfig) -> Vec<SequenceBinding> {
+    let mut bindings: Vec<_> = available_sequences(config.tmux_management_enabled)
+        .map(|binding| SequenceBinding {
+            sequence: binding.sequence.into(),
+            action: SequenceDispatch::Builtin(binding.action),
+            label: binding.label.into(),
+        })
+        .collect();
+    if config.tmux_management_enabled {
+        bindings.extend(
+            config
+                .quick_launchers
+                .iter()
+                .filter(|launcher| launcher.enabled)
+                .map(|launcher| SequenceBinding {
+                    sequence: launcher.sequence.clone(),
+                    action: SequenceDispatch::QuickLauncher(launcher.id.clone()),
+                    label: launcher.label.clone(),
+                }),
+        );
+    }
+    bindings
+}
+
 #[derive(Default)]
 pub(crate) struct KeySequence {
     pending: String,
@@ -197,7 +234,7 @@ pub(crate) struct KeySequence {
 
 pub(crate) enum SequenceResult {
     Pending,
-    Match(SequenceAction, Option<String>),
+    Match(SequenceDispatch, Option<String>),
     Miss,
 }
 
@@ -208,7 +245,7 @@ impl KeySequence {
         client: Option<String>,
         now: Instant,
         timeout: Duration,
-        management_enabled: bool,
+        config: &crate::app_config::AppConfig,
     ) -> SequenceResult {
         if !self.pending.is_empty()
             && self.client.is_some()
@@ -223,14 +260,17 @@ impl KeySequence {
         if client.is_some() {
             self.client = client;
         }
-        if let Some(binding) =
-            available_sequences(management_enabled).find(|binding| binding.sequence == self.pending)
+        let bindings = sequence_bindings(config);
+        if let Some(binding) = bindings
+            .iter()
+            .find(|binding| binding.sequence == self.pending)
         {
-            let action = binding.action;
+            let action = binding.action.clone();
             let client = self.client.take();
             self.clear();
             SequenceResult::Match(action, client)
-        } else if available_sequences(management_enabled)
+        } else if bindings
+            .iter()
             .any(|binding| binding.sequence.starts_with(&self.pending))
         {
             SequenceResult::Pending
@@ -240,18 +280,22 @@ impl KeySequence {
         }
     }
 
-    pub(crate) fn continuations(&self, management_enabled: bool) -> Vec<(char, &'static str)> {
+    pub(crate) fn continuations(
+        &self,
+        config: &crate::app_config::AppConfig,
+    ) -> Vec<(char, String)> {
         if self.pending.is_empty() {
             return Vec::new();
         }
-        available_sequences(management_enabled)
+        sequence_bindings(config)
+            .iter()
             .filter_map(|binding| {
                 binding
                     .sequence
                     .strip_prefix(&self.pending)?
                     .chars()
                     .next()
-                    .map(|key| (key, binding.label))
+                    .map(|key| (key, binding.label.clone()))
             })
             .collect()
     }
@@ -374,7 +418,12 @@ pub(crate) fn settings_keys() -> &'static Keymap {
     })
 }
 
-fn decode_protocol_payload(first: u8, mut next: impl FnMut() -> Option<u8>, keys: &Keymap) -> Key {
+fn decode_protocol_payload(
+    first: u8,
+    mut next: impl FnMut() -> Option<u8>,
+    keys: &Keymap,
+    config: &crate::app_config::AppConfig,
+) -> Key {
     match first {
         0x01 => Key::WheelUp,
         0x02 => Key::WheelDown,
@@ -388,7 +437,7 @@ fn decode_protocol_payload(first: u8, mut next: impl FnMut() -> Option<u8>, keys
             .unwrap_or(match first {
                 b'G' => Key::Last,
                 b'.' => Key::TogglePanes,
-                byte if BUILTIN_SEQUENCES
+                byte if sequence_bindings(config)
                     .iter()
                     .any(|binding| binding.sequence.as_bytes()[0] == byte) =>
                 {
@@ -400,7 +449,24 @@ fn decode_protocol_payload(first: u8, mut next: impl FnMut() -> Option<u8>, keys
     }
 }
 
+#[cfg(test)]
 pub(crate) fn read_key(fd: libc::c_int, keys: &Keymap) -> Key {
+    static DEFAULTS: std::sync::OnceLock<crate::app_config::AppConfig> = std::sync::OnceLock::new();
+    let config = DEFAULTS.get_or_init(|| {
+        crate::app_config::resolve(
+            &crate::app_config::FileConfig::default(),
+            &Default::default(),
+        )
+        .unwrap()
+    });
+    read_key_with_config(fd, keys, config)
+}
+
+pub(crate) fn read_key_with_config(
+    fd: libc::c_int,
+    keys: &Keymap,
+    config: &crate::app_config::AppConfig,
+) -> Key {
     let Some(b) = read_byte(fd) else {
         return Key::Quit;
     }; // EOF: explicit close
@@ -483,14 +549,15 @@ pub(crate) fn read_key(fd: libc::c_int, keys: &Keymap) -> Key {
                 client.push(byte);
             }
             let mut payload = payload.into_iter();
-            let key = decode_protocol_payload(payload.next().unwrap(), || payload.next(), keys);
+            let key =
+                decode_protocol_payload(payload.next().unwrap(), || payload.next(), keys, config);
             return String::from_utf8(client)
                 .map(|client| Key::Owned(Box::new(key), client))
                 .unwrap_or(Key::Other);
         }
         _ => {}
     }
-    decode_protocol_payload(b, next, keys)
+    decode_protocol_payload(b, next, keys, config)
 }
 
 /// Popup/tty search owns printable input. Daemon search receives printable
@@ -797,6 +864,16 @@ pub fn wheel(pane: &str, direction: Direction) -> i32 {
 mod tests {
     use super::*;
 
+    fn config(management_enabled: bool) -> crate::app_config::AppConfig {
+        let source = if management_enabled {
+            "[tmux_management]\nenabled = true"
+        } else {
+            ""
+        };
+        let file = crate::app_config::parse(source).unwrap();
+        crate::app_config::resolve(&file, &Default::default()).unwrap()
+    }
+
     #[test]
     fn arrows_work_in_both_cursor_key_modes() {
         // the regression: only CSI was decoded, so arrows did nothing in panes
@@ -870,6 +947,23 @@ mod tests {
         assert!(matches!(read_search_key(fds[0], &custom.search), Key::Text(s) if s == "é"));
         feed(b"n");
         assert!(matches!(read_search_key(fds[0], &custom.search), Key::Text(s) if s == "n"));
+        let enabled = config(true);
+        let disabled = config(false);
+        feed(b"e");
+        assert!(matches!(
+            read_key_with_config(fds[0], &enabled.normal, &enabled),
+            Key::Sequence('e', None)
+        ));
+        feed(b"o");
+        assert!(matches!(
+            read_key_with_config(fds[0], &enabled.normal, &enabled),
+            Key::Sequence('o', None)
+        ));
+        feed(b"e");
+        assert!(matches!(
+            read_key_with_config(fds[0], &disabled.normal, &disabled),
+            Key::Other
+        ));
         unsafe {
             libc::close(fds[0]);
             libc::close(fds[1]);
@@ -881,14 +975,19 @@ mod tests {
         let start = Instant::now();
         let timeout = Duration::from_millis(1000);
         let mut sequence = KeySequence::default();
+        let enabled = config(true);
+        let disabled = config(false);
 
         assert!(matches!(
-            sequence.push('c', Some("client-a".into()), start, timeout, true),
+            sequence.push('c', Some("client-a".into()), start, timeout, &enabled),
             SequenceResult::Pending
         ));
         assert_eq!(
-            sequence.continuations(true),
-            vec![('c', "create window"), ('s', "create session")]
+            sequence.continuations(&enabled),
+            vec![
+                ('c', "create window".into()),
+                ('s', "create session".into())
+            ]
         );
         assert!(matches!(
             sequence.push(
@@ -896,36 +995,42 @@ mod tests {
                 Some("client-a".into()),
                 start + Duration::from_millis(10),
                 timeout,
-                true
+                &enabled
             ),
-            SequenceResult::Match(SequenceAction::CreateWindow, Some(client)) if client == "client-a"
+            SequenceResult::Match(
+                SequenceDispatch::Builtin(SequenceAction::CreateWindow),
+                Some(client)
+            ) if client == "client-a"
         ));
 
         assert!(matches!(
-            sequence.push('r', Some("client-a".into()), start, timeout, true),
-            SequenceResult::Match(SequenceAction::Rename, Some(client)) if client == "client-a"
+            sequence.push('r', Some("client-a".into()), start, timeout, &enabled),
+            SequenceResult::Match(
+                SequenceDispatch::Builtin(SequenceAction::Rename),
+                Some(client)
+            ) if client == "client-a"
         ));
         assert!(matches!(
-            sequence.push('r', None, start, timeout, false),
+            sequence.push('r', None, start, timeout, &disabled),
             SequenceResult::Miss
         ));
 
         assert!(matches!(
-            sequence.push('d', None, start, timeout, false),
+            sequence.push('d', None, start, timeout, &disabled),
             SequenceResult::Miss
         ));
         assert!(matches!(
-            sequence.push('g', None, start, timeout, false),
+            sequence.push('g', None, start, timeout, &disabled),
             SequenceResult::Pending
         ));
         assert_eq!(
-            sequence.continuations(false),
-            vec![('g', "first visible pane")]
+            sequence.continuations(&disabled),
+            vec![('g', "first visible pane".into())]
         );
         assert!(sequence.expire(start + timeout + Duration::from_millis(1), timeout));
-        assert!(sequence.continuations(true).is_empty());
+        assert!(sequence.continuations(&enabled).is_empty());
         assert!(matches!(
-            sequence.push('g', None, start + timeout, timeout, false),
+            sequence.push('g', None, start + timeout, timeout, &disabled),
             SequenceResult::Pending
         ));
     }
@@ -935,23 +1040,99 @@ mod tests {
         let start = Instant::now();
         let timeout = Duration::from_secs(1);
         let mut sequence = KeySequence::default();
+        let enabled = config(true);
 
         assert!(matches!(
-            sequence.push('c', Some("client-a".into()), start, timeout, true),
+            sequence.push('c', Some("client-a".into()), start, timeout, &enabled),
             SequenceResult::Pending
         ));
         assert!(matches!(
-            sequence.push('s', Some("client-b".into()), start, timeout, true),
+            sequence.push('s', Some("client-b".into()), start, timeout, &enabled),
             SequenceResult::Miss
         ));
         assert!(matches!(
-            sequence.push('c', Some("client-b".into()), start, timeout, true),
+            sequence.push('c', Some("client-b".into()), start, timeout, &enabled),
             SequenceResult::Pending
         ));
         assert!(matches!(
-            sequence.push('c', Some("client-b".into()), start, timeout, true),
-            SequenceResult::Match(SequenceAction::CreateWindow, Some(client))
+            sequence.push('c', Some("client-b".into()), start, timeout, &enabled),
+            SequenceResult::Match(
+                SequenceDispatch::Builtin(SequenceAction::CreateWindow),
+                Some(client)
+            )
                 if client == "client-b"
+        ));
+    }
+
+    #[test]
+    fn quick_launcher_sequences_dispatch_only_when_management_is_enabled() {
+        let source = r#"
+[tmux_management]
+enabled = true
+
+[quick_launchers.terminal]
+sequence = "zt"
+label = "terminal"
+command = "fish"
+"#;
+        let file = crate::app_config::parse(source).unwrap();
+        let enabled = crate::app_config::resolve(&file, &Default::default()).unwrap();
+        let disabled = crate::app_config::resolve(
+            &crate::app_config::parse(
+                "[quick_launchers.terminal]\nsequence='zt'\nlabel='terminal'\ncommand='fish'",
+            )
+            .unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
+        let start = Instant::now();
+        let timeout = Duration::from_secs(1);
+        let mut sequence = KeySequence::default();
+
+        assert!(matches!(
+            sequence.push('e', None, start, timeout, &enabled),
+            SequenceResult::Match(
+                SequenceDispatch::QuickLauncher(id),
+                None
+            ) if id == "nvim"
+        ));
+        assert!(matches!(
+            sequence.push('o', None, start, timeout, &enabled),
+            SequenceResult::Pending
+        ));
+        assert_eq!(
+            sequence.continuations(&enabled),
+            vec![(('g'), "lazygit".into())]
+        );
+        assert!(matches!(
+            sequence.push('g', None, start, timeout, &enabled),
+            SequenceResult::Match(
+                SequenceDispatch::QuickLauncher(id),
+                None
+            ) if id == "lazygit"
+        ));
+        assert!(matches!(
+            sequence.push('z', None, start, timeout, &enabled),
+            SequenceResult::Pending
+        ));
+        assert_eq!(
+            sequence.continuations(&enabled),
+            vec![(('t'), "terminal".into())]
+        );
+        assert!(matches!(
+            sequence.push('t', None, start, timeout, &enabled),
+            SequenceResult::Match(
+                SequenceDispatch::QuickLauncher(id),
+                None
+            ) if id == "terminal"
+        ));
+        assert!(matches!(
+            sequence.push('e', None, start, timeout, &disabled),
+            SequenceResult::Miss
+        ));
+        assert!(matches!(
+            sequence.push('z', None, start, timeout, &disabled),
+            SequenceResult::Miss
         ));
     }
 

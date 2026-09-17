@@ -83,7 +83,10 @@ tmux() {
 }
 version() { bash "$DIR/scripts/version.sh" tag 2>/dev/null || printf 'unknown'; }
 
-if [ -d "$DIR/.git" ]; then
+# Linked worktrees use a .git file instead of a .git directory. In Docker the
+# file may point outside the mounted checkout, but skip-update users still have
+# all the plugin files they need and must not trigger a clone into that tree.
+if [ -d "$DIR/.git" ] || [ -f "$DIR/.git" ]; then
   before="$(version)"
   if [ "${AGENMUX_SKIP_UPDATE:-}" != 1 ]; then
     git -C "$DIR" pull --ff-only --quiet </dev/null || die "git pull failed in $(tilde "$DIR")"

@@ -216,6 +216,7 @@ version = 1
 [display]
 mode = "split"
 show_all_panes = false
+show_frame = true # whole-pane Agenmux frame
 sidebar_width = 30
 popup_width = 40
 popup_height = "auto"
@@ -335,6 +336,45 @@ a disabled setting also clears pending mutation prefixes. Every operation captur
 revalidates tmux pane/window/session IDs before mutation; a stale target reports an
 error and refreshes instead of falling back to another resource. Pane splitting is
 not part of tmux management.
+
+With tmux management enabled, `e` opens nvim and `og` opens lazygit in a new
+window at the selected pane's working directory. Press `o` to see the optional
+launcher sequences. The new window is focused in the invoking client, and the
+sidebar refreshes to include it. The built-ins can be changed or disabled, and
+custom launchers can be added:
+
+```toml
+[quick_launchers.nvim]
+sequence = "e"
+label = "nvim"
+command = "nvim"
+args = []
+working_directory = "selected" # selected pane cwd; "tmux" uses the session default
+enabled = true
+
+[quick_launchers.lazygit]
+sequence = "og"
+label = "lazygit"
+command = "lazygit"
+args = []
+working_directory = "selected"
+enabled = true
+
+[quick_launchers.terminal]
+sequence = "ot"
+label = "terminal"
+command = "fish"
+args = ["--login"]
+working_directory = "selected"
+enabled = true
+```
+
+Launcher `args` are passed as separate program arguments. With management enabled,
+active launcher sequences must not conflict with each other, built-in navigation
+sequences, `G`, or a configured normal key. Set a built-in's `enabled` to
+`false` to remove it. These settings do not change the separate tmux opener
+options `@agenmux-key` and `@agenmux-popup-key`.
+
 Precedence per field: explicit CLI mode > present canonical `@agenmux-*`
 option > present legacy `@agents-mon-*` option > file > defaults. Every supplied
 layer is validated, even when shadowed. Legacy behavioral options are **not**

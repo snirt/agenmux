@@ -70,6 +70,7 @@ pub struct FileConfig {
     pub behavior: Option<BehaviorConfig>,
     pub theme: Option<ThemeConfig>,
     pub tmux_management: Option<TmuxManagementConfig>,
+    pub quick_launchers: Option<BTreeMap<String, QuickLauncherConfig>>,
     pub keys: Option<KeyConfig>,
 }
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -77,6 +78,7 @@ pub struct FileConfig {
 pub struct DisplayConfig {
     pub mode: Option<DisplayMode>,
     pub show_all_panes: Option<bool>,
+    pub show_frame: Option<bool>,
     pub sidebar_width: Option<u16>,
     pub popup_width: Option<u16>,
     pub popup_height: Option<PopupHeight>,
@@ -143,6 +145,46 @@ macro_rules! string_values {
 string_values!(DisplayMode, "expected split or popup", "split" => Split, "popup" => Popup);
 string_values!(AutoHeight, "expected auto", "auto" => Auto);
 string_values!(ThemeBase, "expected dark, light, or terminal", "dark" => Dark, "light" => Light, "terminal" => Terminal);
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "String")]
+pub enum LauncherWorkingDirectory {
+    Selected,
+    Tmux,
+}
+string_values!(LauncherWorkingDirectory, "expected selected or tmux", "selected" => Selected, "tmux" => Tmux);
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct QuickLauncherConfig {
+    pub sequence: Option<String>,
+    pub label: Option<String>,
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub working_directory: Option<LauncherWorkingDirectory>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickLauncher {
+    pub id: String,
+    pub sequence: String,
+    pub label: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub working_directory: LauncherWorkingDirectory,
+    pub enabled: bool,
+}
+
+const QUICK_LAUNCHER_FIELDS: &[&str] = &[
+    "sequence",
+    "label",
+    "command",
+    "args",
+    "working_directory",
+    "enabled",
+];
+const MAX_QUICK_LAUNCHERS: usize = 32;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
     Default,
@@ -714,6 +756,7 @@ pub fn parse(source: &str) -> Result<FileConfig, ConfigError> {
         "behavior",
         "theme",
         "theme.colors",
+        "quick_launchers",
         "keys",
         "keys.normal",
         "keys.search",
@@ -725,8 +768,261 @@ pub fn parse(source: &str) -> Result<FileConfig, ConfigError> {
             return Err(ConfigError::invalid(field, "must be a TOML table"));
         }
     }
+    if let Some(launchers) = document
+        .get("quick_launchers")
+        .and_then(toml::Value::as_table)
+    {
+        for (id, value) in launchers {
+            if !value.is_table() {
+                return Err(ConfigError::invalid(
+                    &format!("quick_launchers.{id}"),
+                    "must be a TOML table",
+                ));
+            }
+        }
+    }
     validate(&config)?;
     Ok(config)
+}
+
+fn default_quick_launchers() -> BTreeMap<String, QuickLauncher> {
+    BTreeMap::from([
+        (
+            "nvim".into(),
+            QuickLauncher {
+                id: "nvim".into(),
+                sequence: "e".into(),
+                label: "nvim".into(),
+                command: "nvim".into(),
+                args: Vec::new(),
+                working_directory: LauncherWorkingDirectory::Selected,
+                enabled: true,
+            },
+        ),
+        (
+            "lazygit".into(),
+            QuickLauncher {
+                id: "lazygit".into(),
+                sequence: "og".into(),
+                label: "lazygit".into(),
+                command: "lazygit".into(),
+                args: Vec::new(),
+                working_directory: LauncherWorkingDirectory::Selected,
+                enabled: true,
+            },
+        ),
+    ])
+}
+
+fn valid_launcher_id(id: &str) -> bool {
+    (1..=32).contains(&id.len())
+        && id.as_bytes()[0].is_ascii_lowercase()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte))
+}
+
+fn valid_launcher_sequence(sequence: &str) -> bool {
+    (1..=2).contains(&sequence.len()) && sequence.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn valid_launcher_text(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
+fn resolve_quick_launchers(
+    config: Option<&BTreeMap<String, QuickLauncherConfig>>,
+) -> Result<(Vec<QuickLauncher>, BTreeMap<String, String>), ConfigError> {
+    let mut launchers = default_quick_launchers();
+    let mut sources = BTreeMap::new();
+    for launcher in launchers.values() {
+        for field in QUICK_LAUNCHER_FIELDS {
+            sources.insert(
+                format!("quick_launchers.{}.{field}", launcher.id),
+                "default".into(),
+            );
+        }
+    }
+
+    if let Some(config) = config {
+        for (id, entry) in config {
+            let field = format!("quick_launchers.{id}");
+            if !valid_launcher_id(id) {
+                return Err(ConfigError::invalid(
+                    &field,
+                    "ID must be lowercase ASCII letters, digits, hyphens, or underscores",
+                ));
+            }
+            if config.len() > MAX_QUICK_LAUNCHERS {
+                return Err(ConfigError::invalid(
+                    "quick_launchers",
+                    "at most 32 launcher entries are allowed",
+                ));
+            }
+            let builtin = launchers.contains_key(id);
+            for (name, value) in [
+                ("sequence", entry.sequence.as_deref()),
+                ("label", entry.label.as_deref()),
+                ("command", entry.command.as_deref()),
+            ] {
+                if let Some(value) = value {
+                    let valid = match name {
+                        "sequence" => valid_launcher_sequence(value),
+                        "label" => value.is_ascii() && valid_launcher_text(value, 48),
+                        "command" => valid_launcher_text(value, 4096),
+                        _ => unreachable!(),
+                    };
+                    if !valid {
+                        let reason = match name {
+                            "sequence" => "must be one or two ASCII letters or digits",
+                            "label" => "must be 1..=48 printable ASCII characters",
+                            "command" => {
+                                "must be a non-empty executable name without control characters"
+                            }
+                            _ => unreachable!(),
+                        };
+                        return Err(ConfigError::invalid(&format!("{field}.{name}"), reason));
+                    }
+                } else if !builtin {
+                    return Err(ConfigError::invalid(
+                        &format!("{field}.{name}"),
+                        "required for a custom launcher",
+                    ));
+                }
+            }
+            if let Some(args) = &entry.args {
+                let bytes = args.iter().map(String::len).sum::<usize>();
+                if args.len() > 64
+                    || bytes > 8192
+                    || args.iter().any(|arg| arg.chars().any(char::is_control))
+                {
+                    return Err(ConfigError::invalid(
+                        &format!("{field}.args"),
+                        "at most 64 arguments and 8192 bytes; control characters are not allowed",
+                    ));
+                }
+            }
+
+            let launcher = launchers
+                .entry(id.clone())
+                .or_insert_with(|| QuickLauncher {
+                    id: id.clone(),
+                    sequence: entry.sequence.clone().unwrap_or_default(),
+                    label: entry.label.clone().unwrap_or_default(),
+                    command: entry.command.clone().unwrap_or_default(),
+                    args: Vec::new(),
+                    working_directory: LauncherWorkingDirectory::Selected,
+                    enabled: true,
+                });
+            for (name, supplied) in [
+                ("sequence", entry.sequence.is_some()),
+                ("label", entry.label.is_some()),
+                ("command", entry.command.is_some()),
+                ("args", entry.args.is_some()),
+                ("working_directory", entry.working_directory.is_some()),
+                ("enabled", entry.enabled.is_some()),
+            ] {
+                if supplied {
+                    sources.insert(format!("quick_launchers.{id}.{name}"), "file".into());
+                } else if !builtin {
+                    sources.insert(format!("quick_launchers.{id}.{name}"), "default".into());
+                }
+            }
+            if let Some(sequence) = &entry.sequence {
+                launcher.sequence.clone_from(sequence);
+            }
+            if let Some(label) = &entry.label {
+                launcher.label.clone_from(label);
+            }
+            if let Some(command) = &entry.command {
+                launcher.command.clone_from(command);
+            }
+            if let Some(args) = &entry.args {
+                launcher.args.clone_from(args);
+            }
+            if let Some(working_directory) = entry.working_directory {
+                launcher.working_directory = working_directory;
+            }
+            if let Some(enabled) = entry.enabled {
+                launcher.enabled = enabled;
+            }
+        }
+    }
+    if launchers.len() > MAX_QUICK_LAUNCHERS {
+        return Err(ConfigError::invalid(
+            "quick_launchers",
+            "at most 32 launcher entries are allowed",
+        ));
+    }
+    Ok((launchers.into_values().collect(), sources))
+}
+
+fn validate_quick_launcher_conflicts(
+    launchers: &[QuickLauncher],
+    management_enabled: bool,
+    normal: &Keymap,
+) -> Result<(), ConfigError> {
+    if !management_enabled {
+        return Ok(());
+    }
+    let active: Vec<_> = launchers
+        .iter()
+        .filter(|launcher| launcher.enabled)
+        .collect();
+    for launcher in &active {
+        let first = launcher.sequence.as_bytes()[0];
+        if let Some(action) = action_for(normal, KeyChord::Printable(first)) {
+            return Err(ConfigError::invalid(
+                &format!("quick_launchers.{}.sequence", launcher.id),
+                format!(
+                    "sequence '{}' conflicts with keys.normal.{}",
+                    launcher.sequence,
+                    format!("{action:?}").to_lowercase()
+                ),
+            ));
+        }
+        if first == b'G' {
+            return Err(ConfigError::invalid(
+                &format!("quick_launchers.{}.sequence", launcher.id),
+                format!(
+                    "sequence '{}' conflicts with the built-in G action",
+                    launcher.sequence
+                ),
+            ));
+        }
+        for binding in crate::input::available_sequences(true) {
+            if launcher.sequence.starts_with(binding.sequence)
+                || binding.sequence.starts_with(&launcher.sequence)
+            {
+                return Err(ConfigError::invalid(
+                    &format!("quick_launchers.{}.sequence", launcher.id),
+                    format!(
+                        "sequence '{}' conflicts with built-in sequence '{}'",
+                        launcher.sequence, binding.sequence
+                    ),
+                ));
+            }
+        }
+    }
+    for (index, launcher) in active.iter().enumerate() {
+        for other in &active[index + 1..] {
+            if launcher.sequence.starts_with(&other.sequence)
+                || other.sequence.starts_with(&launcher.sequence)
+            {
+                return Err(ConfigError::invalid(
+                    &format!("quick_launchers.{}.sequence", launcher.id),
+                    format!(
+                        "sequence '{}' conflicts with launcher '{}' sequence '{}'",
+                        launcher.sequence, other.id, other.sequence
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate(config: &FileConfig) -> Result<(), ConfigError> {
@@ -778,6 +1074,14 @@ fn validate(config: &FileConfig) -> Result<(), ConfigError> {
     }
     resolved_keys(KeyMode::Normal, k.and_then(|k| k.normal.as_ref()))?;
     resolved_keys(KeyMode::Search, k.and_then(|k| k.search.as_ref()))?;
+    let management_enabled = config
+        .tmux_management
+        .as_ref()
+        .and_then(|management| management.enabled)
+        .unwrap_or(false);
+    let (launchers, _) = resolve_quick_launchers(config.quick_launchers.as_ref())?;
+    let normal = resolved_keys(KeyMode::Normal, k.and_then(|k| k.normal.as_ref()))?;
+    validate_quick_launcher_conflicts(&launchers, management_enabled, &normal)?;
     Ok(())
 }
 
@@ -789,6 +1093,7 @@ pub struct AppConfig {
     pub tmux_management_confirm_delete: bool,
     pub mode: DisplayMode,
     pub show_all_panes: bool,
+    pub show_frame: bool,
     pub sidebar_width: u16,
     pub popup_width: u16,
     pub popup_height: PopupHeight,
@@ -797,9 +1102,10 @@ pub struct AppConfig {
     pub theme: ThemeConfig,
     pub normal: BTreeMap<Action, Vec<KeyChord>>,
     pub search: BTreeMap<Action, Vec<KeyChord>>,
+    pub quick_launchers: Vec<QuickLauncher>,
     /// Field name to the layer that decided it, named precisely enough to
     /// act on: a winning tmux option prints as `tmux @agenmux-width`.
-    pub sources: BTreeMap<&'static str, String>,
+    pub sources: BTreeMap<String, String>,
 }
 
 const OPTIONS: &[&str] = &[
@@ -883,12 +1189,31 @@ pub fn resolve_cli(
     cli: Option<&str>,
 ) -> Result<AppConfig, ConfigError> {
     validate(file)?;
+    let (quick_launchers, mut sources) = resolve_quick_launchers(file.quick_launchers.as_ref())?;
+    sources.extend(
+        [
+            ("display.mode", "default"),
+            ("display.show_all_panes", "default"),
+            ("display.show_frame", "default"),
+            ("display.sidebar_width", "default"),
+            ("display.popup_width", "default"),
+            ("display.popup_height", "default"),
+            ("behavior.notifications", "default"),
+            ("behavior.hide_windows", "default"),
+            ("tmux_management.enabled", "default"),
+            ("tmux_management.confirm_delete", "default"),
+            ("keys.sequence_timeout_ms", "default"),
+        ]
+        .into_iter()
+        .map(|(name, source)| (name.to_string(), source.to_string())),
+    );
     let mut result = AppConfig {
         sequence_timeout_ms: 1000,
         tmux_management_enabled: false,
         tmux_management_confirm_delete: true,
         mode: DisplayMode::Split,
         show_all_panes: false,
+        show_frame: true,
         sidebar_width: 30,
         popup_width: 40,
         popup_height: PopupHeight::Auto(AutoHeight::Auto),
@@ -903,31 +1228,22 @@ pub fn resolve_cli(
             KeyMode::Search,
             file.keys.as_ref().and_then(|k| k.search.as_ref()),
         )?,
-        sources: BTreeMap::from([
-            ("display.mode", "default".into()),
-            ("display.show_all_panes", "default".into()),
-            ("display.sidebar_width", "default".into()),
-            ("display.popup_width", "default".into()),
-            ("display.popup_height", "default".into()),
-            ("behavior.notifications", "default".into()),
-            ("behavior.hide_windows", "default".into()),
-            ("tmux_management.enabled", "default".into()),
-            ("tmux_management.confirm_delete", "default".into()),
-            ("keys.sequence_timeout_ms", "default".into()),
-        ]),
+        quick_launchers,
+        sources,
     };
     fn apply(r: &mut AppConfig, f: &FileConfig, source: &str) {
         macro_rules! set {
             ($field:ident, $value:expr, $name:literal) => {
                 if let Some(v) = $value {
                     r.$field = v;
-                    r.sources.insert($name, source.to_owned());
+                    r.sources.insert($name.into(), source.to_owned());
                 }
             };
         }
         if let Some(d) = &f.display {
             set!(mode, d.mode, "display.mode");
             set!(show_all_panes, d.show_all_panes, "display.show_all_panes");
+            set!(show_frame, d.show_frame, "display.show_frame");
             set!(sidebar_width, d.sidebar_width, "display.sidebar_width");
             set!(popup_width, d.popup_width, "display.popup_width");
             set!(popup_height, d.popup_height, "display.popup_height");
@@ -936,7 +1252,8 @@ pub fn resolve_cli(
             set!(notifications, b.notifications, "behavior.notifications");
             if let Some(glob) = &b.hide_windows {
                 r.hide_windows = Some(glob.clone());
-                r.sources.insert("behavior.hide_windows", source.to_owned());
+                r.sources
+                    .insert("behavior.hide_windows".into(), source.to_owned());
             }
         }
         if let Some(management) = &f.tmux_management {
@@ -961,7 +1278,7 @@ pub fn resolve_cli(
     }
     apply(&mut result, file, "file");
     result.sources.insert(
-        "theme.base",
+        "theme.base".into(),
         if file.theme.as_ref().and_then(|t| t.base).is_some() {
             "file"
         } else {
@@ -970,7 +1287,7 @@ pub fn resolve_cli(
         .into(),
     );
     macro_rules! color_sources {
-        ($($field:ident),*) => { $(result.sources.insert(concat!("theme.colors.", stringify!($field)),
+        ($($field:ident),*) => { $(result.sources.insert(concat!("theme.colors.", stringify!($field)).into(),
             if file.theme.as_ref().and_then(|t| t.colors.as_ref()).and_then(|c| c.$field.as_ref()).is_some() { "file" } else { "theme base" }.into());)* };
     }
     color_sources!(
@@ -1020,9 +1337,10 @@ pub fn resolve_cli(
                 _ => k.search.as_ref(),
             })
             .is_some_and(|keys| keys.contains_key(&action));
-        result
-            .sources
-            .insert(field, if supplied { "file" } else { "default" }.into());
+        result.sources.insert(
+            field.into(),
+            if supplied { "file" } else { "default" }.into(),
+        );
     }
     // Parse every supplied layer, including shadowed legacy values. Presence,
     // never nonemptiness, selects canonical over legacy.
@@ -1054,7 +1372,7 @@ pub fn resolve_cli(
                 ))
             }
         };
-        result.sources.insert("display.mode", "CLI".into());
+        result.sources.insert("display.mode".into(), "CLI".into());
     }
     Ok(result)
 }
@@ -1321,6 +1639,7 @@ tmux option still wins over the file.
 [display]
   mode            split | popup                       (split)
   show_all_panes  true | false                        (false)
+  show_frame      true | false                        (true)
   sidebar_width   1..=10000 cells                     (30)
   popup_width     1..=10000 cells                     (40)
   popup_height    "auto" or 1..=10000 cells           (auto)
@@ -1332,6 +1651,19 @@ tmux option still wins over the file.
 [tmux_management]
   enabled         true | false                        (false)
   confirm_delete  true | false                        (true)
+
+[quick_launchers.<id>]
+  sequence        one or two ASCII letters or digits
+  label           printable help text                  (required for custom IDs)
+  command         executable name or path               (required for custom IDs)
+  args             array of arguments                   ([])
+  working_directory selected | tmux session default    (selected)
+  enabled         true | false                         (true)
+  Defaults: nvim uses e; lazygit uses og. Entries with those IDs override
+  their defaults. Set enabled = false to remove a binding. Custom launchers
+  require sequence, label, and command. All launchers require tmux management.
+  Conflicting active keys are rejected. These are independent of the tmux
+  options that open Agenmux itself (@agenmux-key and @agenmux-popup-key).
 
 [theme]
   base            dark | light | terminal             (dark)
@@ -1392,6 +1724,7 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
             "display.show_all_panes".into(),
             config.show_all_panes.to_string(),
         ),
+        ("display.show_frame".into(), config.show_frame.to_string()),
         (
             "display.sidebar_width".into(),
             config.sidebar_width.to_string(),
@@ -1451,6 +1784,28 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
             format!("keys.search.{action:?}").to_lowercase(),
             chords(list),
         ));
+    }
+    for launcher in &config.quick_launchers {
+        let prefix = format!("quick_launchers.{}", launcher.id);
+        let mut args = toml_edit::Array::new();
+        for arg in &launcher.args {
+            args.push(arg.as_str());
+        }
+        out.extend([
+            (format!("{prefix}.sequence"), launcher.sequence.clone()),
+            (format!("{prefix}.label"), launcher.label.clone()),
+            (format!("{prefix}.command"), launcher.command.clone()),
+            (format!("{prefix}.args"), args.to_string()),
+            (
+                format!("{prefix}.working_directory"),
+                match launcher.working_directory {
+                    LauncherWorkingDirectory::Selected => "selected",
+                    LauncherWorkingDirectory::Tmux => "tmux",
+                }
+                .into(),
+            ),
+            (format!("{prefix}.enabled"), launcher.enabled.to_string()),
+        ]);
     }
     out.into_iter()
         .map(|(name, value)| {
@@ -1626,10 +1981,24 @@ fn remove_document_path(table: &mut dyn toml_edit::TableLike, path: &[&str]) {
 
 /// Update one known application setting while retaining the user's TOML layout.
 pub fn edit_document(source: &str, name: &str, value: Option<&str>) -> Result<String, ConfigError> {
-    parse(source)?;
-    let known = rows(&resolve(&FileConfig::default(), &BTreeMap::new())?)
+    let file = parse(source)?;
+    let known_default = rows(&resolve(&FileConfig::default(), &BTreeMap::new())?)
         .into_iter()
         .any(|row| row.name == name);
+    let launcher_field = name
+        .strip_prefix("quick_launchers.")
+        .and_then(|name| name.split_once('.'))
+        .filter(|(id, field)| {
+            valid_launcher_id(id)
+                && QUICK_LAUNCHER_FIELDS.contains(field)
+                && (matches!(*id, "nvim" | "lazygit")
+                    || file
+                        .quick_launchers
+                        .as_ref()
+                        .is_some_and(|launchers| launchers.contains_key(*id)))
+        })
+        .is_some();
+    let known = known_default || launcher_field;
     if !known {
         return Err(ConfigError::invalid(name, "unknown application setting"));
     }
@@ -1652,7 +2021,7 @@ pub fn revert_document(source: &str) -> Result<String, ConfigError> {
     let mut document = source
         .parse::<toml_edit::DocumentMut>()
         .map_err(|_| document_error("invalid TOML document"))?;
-    for section in ["display", "behavior", "theme", "keys"] {
+    for section in ["display", "behavior", "theme", "keys", "quick_launchers"] {
         document.as_table_mut().remove(section);
     }
     let output = document.to_string();
@@ -1951,6 +2320,7 @@ mod tests {
         let empty = parse("").unwrap();
         let default = resolve(&empty, &BTreeMap::new()).unwrap();
         assert!(!default.show_all_panes);
+        assert!(default.show_frame);
         assert_eq!(default.sequence_timeout_ms, 1000);
         assert!(!default.tmux_management_enabled);
         assert!(default.tmux_management_confirm_delete);
@@ -1977,7 +2347,12 @@ mod tests {
         let enabled = resolve(&enabled, &BTreeMap::new()).unwrap();
         assert!(enabled.show_all_panes);
         assert_eq!(enabled.sources["display.show_all_panes"], "file");
+        let framed = parse("[display]\nshow_frame = false").unwrap();
+        let framed = resolve(&framed, &BTreeMap::new()).unwrap();
+        assert!(!framed.show_frame);
+        assert_eq!(framed.sources["display.show_frame"], "file");
         assert!(parse("[display]\nshow_all_panes = 'true'").is_err());
+        assert!(parse("[display]\nshow_frame = 'false'").is_err());
         assert_eq!((default.sidebar_width, default.popup_width), (30, 40));
         assert_eq!(default.hide_windows, None);
         let file = parse("[display]\nmode='popup'\nsidebar_width=22\npopup_width=24\npopup_height=18\n[behavior]\nnotifications=false\nhide_windows='hidden*'").unwrap();
@@ -1996,7 +2371,9 @@ mod tests {
         assert!(config
             .sources
             .iter()
-            .filter(|(field, _)| **field != "display.show_all_panes")
+            .filter(|(field, _)| {
+                **field != "display.show_all_panes" && **field != "display.show_frame"
+            })
             .filter(|(field, _)| field.starts_with("display.") || field.starts_with("behavior."))
             .all(|(_, source)| source.starts_with("tmux @agenmux-")));
     }
@@ -2439,6 +2816,159 @@ clear = ["C-u"]
             DisplayMode::Popup
         );
         assert!(edit_document(&edited, "display.sidebar_width", Some("0")).is_err());
+        let framed = edit_document(&edited, "display.show_frame", Some("false")).unwrap();
+        assert!(framed.contains("show_frame = false"));
+        assert!(
+            !resolve(&parse(&framed).unwrap(), &Default::default())
+                .unwrap()
+                .show_frame
+        );
+    }
+
+    #[test]
+    fn quick_launchers_resolve_defaults_overrides_custom_entries_and_rows() {
+        let defaults = resolve(&parse("").unwrap(), &BTreeMap::new()).unwrap();
+        let nvim = defaults
+            .quick_launchers
+            .iter()
+            .find(|launcher| launcher.id == "nvim")
+            .unwrap();
+        assert_eq!(nvim.sequence, "e");
+        assert_eq!(nvim.command, "nvim");
+        assert_eq!(nvim.working_directory, LauncherWorkingDirectory::Selected);
+        let lazygit = defaults
+            .quick_launchers
+            .iter()
+            .find(|launcher| launcher.id == "lazygit")
+            .unwrap();
+        assert_eq!(lazygit.sequence, "og");
+
+        let source = r#"
+[tmux_management]
+enabled = true
+
+[quick_launchers.nvim]
+command = "/tmp/tool box/editor"
+args = ["--wait", "a'b"]
+
+[quick_launchers.lazygit]
+enabled = false
+
+[quick_launchers.terminal]
+sequence = "ot"
+label = "terminal"
+command = "fish"
+args = ["--login"]
+working_directory = "tmux"
+"#;
+        let config = resolve(&parse(source).unwrap(), &BTreeMap::new()).unwrap();
+        let nvim = config
+            .quick_launchers
+            .iter()
+            .find(|launcher| launcher.id == "nvim")
+            .unwrap();
+        assert_eq!(nvim.command, "/tmp/tool box/editor");
+        assert_eq!(nvim.args, ["--wait", "a'b"]);
+        assert_eq!(nvim.sequence, "e");
+        assert_eq!(nvim.working_directory, LauncherWorkingDirectory::Selected);
+        assert_eq!(config.sources["quick_launchers.nvim.command"], "file");
+        assert_eq!(config.sources["quick_launchers.nvim.sequence"], "default");
+        let lazygit = config
+            .quick_launchers
+            .iter()
+            .find(|launcher| launcher.id == "lazygit")
+            .unwrap();
+        assert!(!lazygit.enabled);
+        let terminal = config
+            .quick_launchers
+            .iter()
+            .find(|launcher| launcher.id == "terminal")
+            .unwrap();
+        assert_eq!(terminal.working_directory, LauncherWorkingDirectory::Tmux);
+        assert_eq!(terminal.args, ["--login"]);
+
+        let rows = rows(&config);
+        for (name, value, source) in [
+            (
+                "quick_launchers.nvim.command",
+                "/tmp/tool box/editor",
+                "file",
+            ),
+            ("quick_launchers.nvim.sequence", "e", "default"),
+            ("quick_launchers.nvim.args", "[\"--wait\", \"a'b\"]", "file"),
+            ("quick_launchers.lazygit.enabled", "false", "file"),
+            ("quick_launchers.terminal.working_directory", "tmux", "file"),
+        ] {
+            let row = rows.iter().find(|row| row.name == name).unwrap();
+            assert_eq!(row.value, value, "{name}");
+            assert_eq!(row.source, source, "{name}");
+        }
+    }
+
+    #[test]
+    fn quick_launcher_schema_and_active_sequence_conflicts_are_rejected() {
+        for source in [
+            "[quick_launchers.Bad]\nsequence='x'\nlabel='x'\ncommand='x'",
+            "[quick_launchers.custom]\nsequence='x'\nlabel='custom'",
+            "[quick_launchers.custom]\nsequence='xx'\nlabel='custom'\ncommand='x'\nunknown=true",
+            "[quick_launchers.custom]\nsequence='x y'\nlabel='custom'\ncommand='x'",
+            "[quick_launchers.custom]\nsequence='x'\nlabel='custom'\ncommand='x'\nargs=[1]",
+            "[quick_launchers.custom]\nsequence='x'\nlabel='custom'\ncommand='x'\nworking_directory='home'",
+            "[quick_launchers.custom]\nsequence='x'\nlabel=\"bad\\nlabel\"\ncommand='x'",
+        ] {
+            assert!(parse(source).is_err(), "accepted {source}");
+        }
+
+        // Conflicts are checked only when the management gate makes the
+        // sequence active. The same file remains valid while launchers are off.
+        let colliding = "[quick_launchers.nvim]\nsequence='u'\n";
+        assert!(parse(colliding).is_ok());
+        for source in [
+            "[tmux_management]\nenabled=true\n[quick_launchers.nvim]\nsequence='u'",
+            "[tmux_management]\nenabled=true\n[quick_launchers.nvim]\nsequence='G'",
+            "[tmux_management]\nenabled=true\n[quick_launchers.nvim]\nsequence='gg'",
+            "[tmux_management]\nenabled=true\n[quick_launchers.nvim]\nsequence='e'\n[quick_launchers.lazygit]\nsequence='et'",
+            "[tmux_management]\nenabled=true\n[keys.normal]\ndown=['e']",
+        ] {
+            assert!(parse(source).is_err(), "accepted active conflict: {source}");
+        }
+        let disabled = parse(
+            "[tmux_management]\nenabled=true\n[quick_launchers.nvim]\nenabled=false\nsequence='u'",
+        )
+        .unwrap();
+        assert!(resolve(&disabled, &BTreeMap::new()).is_ok());
+    }
+
+    #[test]
+    fn launcher_settings_can_be_edited_and_reverted() {
+        let source = "# retain\nversion = 1\n[quick_launchers.nvim]\ncommand = \"nvim\"\n";
+        let edited = edit_document(
+            source,
+            "quick_launchers.nvim.args",
+            Some("[\"--clean\", \"two words\"]"),
+        )
+        .unwrap();
+        assert!(edited.contains("# retain"));
+        let config = resolve(&parse(&edited).unwrap(), &BTreeMap::new()).unwrap();
+        let nvim = config
+            .quick_launchers
+            .iter()
+            .find(|launcher| launcher.id == "nvim")
+            .unwrap();
+        assert_eq!(nvim.args, ["--clean", "two words"]);
+        assert!(edit_document(&edited, "quick_launchers.nvim.args", Some("[1]")).is_err());
+
+        let reverted = revert_document(&edited).unwrap();
+        assert!(reverted.contains("# retain"));
+        assert!(!reverted.contains("quick_launchers"));
+        assert_eq!(
+            resolve(&parse(&reverted).unwrap(), &BTreeMap::new())
+                .unwrap()
+                .quick_launchers,
+            resolve(&parse("").unwrap(), &BTreeMap::new())
+                .unwrap()
+                .quick_launchers
+        );
     }
 
     #[test]

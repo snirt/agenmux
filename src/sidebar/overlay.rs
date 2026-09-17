@@ -1,5 +1,5 @@
 use crate::app_config::{action_for, Action, KeyChord};
-use crate::input::{available_sequences, term_size, Key, SequenceAction};
+use crate::input::{Key, SequenceAction};
 use crate::release;
 use crate::tmux::{command, command_spawn};
 use std::path::{Path, PathBuf};
@@ -279,6 +279,8 @@ fn setting_group(name: &str) -> &'static str {
         "Behavior"
     } else if name.starts_with("tmux_management.") {
         "Tmux management"
+    } else if name.starts_with("quick_launchers.") {
+        "Quick launchers"
     } else if name == "theme.base" {
         "Theme"
     } else if name.starts_with("theme.colors.") {
@@ -289,18 +291,27 @@ fn setting_group(name: &str) -> &'static str {
 }
 
 fn setting_label(name: &str) -> &str {
-    name.strip_prefix("keys.")
-        .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name))
+    if name == "display.show_frame" {
+        "show frame"
+    } else {
+        name.strip_prefix("keys.")
+            .or_else(|| name.strip_prefix("quick_launchers."))
+            .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name))
+    }
 }
 
 fn is_bool_setting(name: &str) -> bool {
     matches!(
         name,
         "display.show_all_panes"
+            | "display.show_frame"
             | "behavior.notifications"
             | "tmux_management.enabled"
             | "tmux_management.confirm_delete"
-    )
+    ) || name
+        .strip_prefix("quick_launchers.")
+        .and_then(|name| name.split_once('.'))
+        .is_some_and(|(_, field)| field == "enabled")
 }
 
 fn setting_value(name: &str, buffer: &str) -> Result<String, String> {
@@ -316,6 +327,22 @@ fn setting_value(name: &str, buffer: &str) -> Result<String, String> {
             }
         }
         return Ok(toml_edit::Value::Array(array).to_string());
+    }
+    if name.starts_with("quick_launchers.") && name.ends_with(".args") {
+        let document = format!("args = {value}\n")
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| "expected a TOML array of strings".to_string())?;
+        let array = document
+            .get("args")
+            .and_then(toml_edit::Item::as_array)
+            .ok_or_else(|| "expected a TOML array of strings".to_string())?;
+        if array.iter().any(|item| item.as_str().is_none()) {
+            return Err("expected a TOML array of strings".into());
+        }
+        return Ok(toml_edit::Value::Array(array.clone())
+            .to_string()
+            .trim()
+            .to_string());
     }
     if is_bool_setting(name) {
         return match value {
@@ -345,6 +372,9 @@ fn choices(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "display.mode" => Some(&["split", "popup"]),
         "theme.base" => Some(&["dark", "light", "terminal"]),
+        _ if name.starts_with("quick_launchers.") && name.ends_with(".working_directory") => {
+            Some(&["selected", "tmux"])
+        }
         _ if is_bool_setting(name) => Some(&["true", "false"]),
         _ => None,
     }
@@ -621,6 +651,7 @@ impl Sidebar {
 
     pub(super) fn render_overlay(&mut self, force: bool) {
         let title = app_title();
+        let (cols, rows) = self.render_size();
         let top_bar = TopBar::new(&self.palette, self.plugin_selected, self.header_inherited);
         let header = top_bar.foreground("1");
         let muted = self.palette.muted_fg.fg("2");
@@ -662,10 +693,17 @@ impl Sidebar {
                 if action_for(&self.normal_keys, KeyChord::Printable(b'.')).is_none() {
                     keys.push((".".into(), "show all panes / agents".into()));
                 }
-                for binding in available_sequences(self.settings.settings.tmux_management_enabled) {
+                let bindings = crate::input::sequence_bindings(&self.settings.settings);
+                if bindings
+                    .iter()
+                    .any(|binding| binding.sequence.len() == 2 && binding.sequence.starts_with('o'))
+                {
+                    keys.push(("o".into(), "optional launchers".into()));
+                }
+                for binding in bindings {
                     let prefix = binding.sequence.as_bytes()[0];
                     if action_for(&self.normal_keys, KeyChord::Printable(prefix)).is_none() {
-                        keys.push((binding.sequence.into(), binding.label.into()));
+                        keys.push((binding.sequence, binding.label));
                     }
                 }
                 let keys: String = keys
@@ -715,11 +753,6 @@ impl Sidebar {
                 text
             }
             Some(Overlay::Settings(settings)) => {
-                let (cols, rows) = self
-                    .daemon
-                    .as_ref()
-                    .map(|daemon| daemon.size)
-                    .unwrap_or_else(term_size);
                 let (text, targets) = render_settings(
                     settings,
                     &self.settings.settings,
@@ -751,11 +784,6 @@ impl Sidebar {
             let header = header
                 .strip_prefix(&format!("{E}[2J{E}[H"))
                 .unwrap_or(header);
-            let cols = self
-                .daemon
-                .as_ref()
-                .map(|d| d.size.0)
-                .unwrap_or_else(|| term_size().0);
             let width = title.chars().count()
                 + if matches!(self.overlay, Some(Overlay::Help)) {
                     7
@@ -1396,6 +1424,13 @@ mod tests {
         assert!(frame.contains("\u{1b}[7m Display "), "{frame}");
         assert!(frame.contains("sidebar_width"), "{frame}");
 
+        settings.search = Some(TextEdit::new("show_frame".into()));
+        let visible = visible_settings_rows(&settings, &effective);
+        assert_eq!(visible[0].name, "display.show_frame");
+        assert_eq!(setting_group(&visible[0].name), "Display");
+        assert_eq!(setting_label(&visible[0].name), "show frame");
+        assert_eq!(choices(&visible[0].name), Some(&["true", "false"][..]));
+
         settings.search = Some(TextEdit::new("split".into()));
         assert!(visible_settings_rows(&settings, &effective).is_empty());
         let (empty, _) = render_settings(
@@ -1492,6 +1527,46 @@ mod tests {
     }
 
     #[test]
+    fn quick_launcher_settings_keep_command_arguments_structured() {
+        assert_eq!(
+            setting_group("quick_launchers.nvim.command"),
+            "Quick launchers"
+        );
+        assert_eq!(
+            setting_label("quick_launchers.nvim.command"),
+            "nvim.command"
+        );
+        assert!(is_bool_setting("quick_launchers.nvim.enabled"));
+        assert_eq!(
+            choices("quick_launchers.nvim.working_directory"),
+            Some(["selected", "tmux"].as_slice())
+        );
+        assert_eq!(
+            setting_value(
+                "quick_launchers.custom.args",
+                "[\"two words\", \"quote's\"]"
+            )
+            .unwrap(),
+            "[\"two words\", \"quote's\"]"
+        );
+        assert!(setting_value("quick_launchers.custom.args", "[1]").is_err());
+
+        let source = "[quick_launchers.nvim]\nargs = [\"--clean\"]\n";
+        let effective = crate::app_config::resolve(
+            &crate::app_config::parse(source).unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
+        let row = settings_rows(source, &effective)
+            .into_iter()
+            .find(|row| row.name == "quick_launchers.nvim.args")
+            .unwrap();
+        assert_eq!(row.persisted, "[\"--clean\"]");
+        assert_eq!(row.initial, "[\"--clean\"]");
+        assert_eq!(row.source, "file");
+    }
+
+    #[test]
     fn invalid_settings_document_is_read_only() {
         let effective =
             crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
@@ -1561,7 +1636,6 @@ mod tests {
         assert!(frame.contains("mode: split"), "{frame}");
         assert!(frame.contains("❯ split"), "{frame}");
         assert!(frame.contains("  popup"), "{frame}");
-        assert!(frame.contains("sidebar_width"), "{frame}");
         assert!(targets.contains(&Some(SETTINGS_MOUSE_OPTION)));
         assert!(targets.contains(&Some(SETTINGS_MOUSE_OPTION + 1)));
         assert!(matches!(
