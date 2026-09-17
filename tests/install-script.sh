@@ -30,6 +30,17 @@ check fresh-conf "$(cat "$home/.tmux.conf")" \
 check clone "$([ -x "$home/.tmux/plugins/agenmux/agenmux.tmux" ] && echo yes)" yes
 check config-dir "$([ -d "$home/.config/agenmux/agents" ] && echo yes)" yes
 
+# Docker's wizard uses a writable config copy and must not update the mounted checkout.
+printf 'no-update\n' >"$home/src/no-update-marker"
+git -C "$home/src" add no-update-marker
+git -C "$home/src" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m newer
+installed_before="$(git -C "$home/.tmux/plugins/agenmux" rev-parse HEAD)"
+: >"$home/dev.conf"
+AGENMUX_DIR="$home/.tmux/plugins/agenmux" AGENMUX_TMUX_CONF="$home/dev.conf" \
+  AGENMUX_SKIP_UPDATE=1 AGENMUX_FORCE_WIZARD=1 sh "$DIR/install.sh" >/dev/null
+check skip-update "$(git -C "$home/.tmux/plugins/agenmux" rev-parse HEAD)" "$installed_before"
+check forced-wizard "$(grep -c 'agenmux.tmux' "$home/dev.conf")" 1
+
 # TPM present: @plugin above the tpm run line, still only once
 mkdir -p "$home/.tmux/plugins/tpm"
 printf 'set -g mouse on\nrun "~/.tmux/plugins/tpm/tpm"\n' >"$home/.tmux.conf"

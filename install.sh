@@ -85,7 +85,9 @@ version() { bash "$DIR/scripts/version.sh" tag 2>/dev/null || printf 'unknown'; 
 
 if [ -d "$DIR/.git" ]; then
   before="$(version)"
-  git -C "$DIR" pull --ff-only --quiet </dev/null || die "git pull failed in $(tilde "$DIR")"
+  if [ "${AGENMUX_SKIP_UPDATE:-}" != 1 ]; then
+    git -C "$DIR" pull --ff-only --quiet </dev/null || die "git pull failed in $(tilde "$DIR")"
+  fi
   after="$(version)"
   if [ "$before" = "$after" ]; then
     ok plugin "$after already current in $(tilde "$DIR")"
@@ -116,9 +118,9 @@ else
 fi
 [ -f "$CONF" ] || : >"$CONF" || die "cannot create $(tilde "$CONF")"
 
-if grep -q agents-mon "$CONF"; then
+if [ "${AGENMUX_FORCE_WIZARD:-}" != 1 ] && grep -q agents-mon "$CONF"; then
   skip tmux.conf "still loads agents-mon; see README › Upgrading from agents-mon"
-elif grep -q agenmux "$CONF"; then
+elif [ "${AGENMUX_FORCE_WIZARD:-}" != 1 ] && grep -q agenmux "$CONF"; then
   skip tmux.conf "unchanged, already declares agenmux"
 else
   # TPM removes plugins it does not know about on clean, so declare it the TPM

@@ -2,7 +2,7 @@ CONTAINER_ENGINE ?= $(shell command -v docker 2>/dev/null || command -v podman 2
 CONTAINER_IMAGE ?= agenmux-dev
 CONTAINER_TMUX_CONF_ARGS = $(if $(AGENMUX_CONTAINER_TMUX_CONF),--volume "$(abspath $(AGENMUX_CONTAINER_TMUX_CONF)):/tmp/agenmux-tmux.conf:ro" --env AGENMUX_CONTAINER_TMUX_CONF=/tmp/agenmux-tmux.conf)
 
-.PHONY: test build clean dev-use dev-stop bump release install-app container-build container-test container-use container-install container-install-local check-container-engine
+.PHONY: test build clean dev-use dev-docker dev-stop bump release install-app container-build container-test container-use container-install container-install-local check-container-engine
 test:
 	./tests/run.sh
 
@@ -38,6 +38,9 @@ clean:
 
 dev-use:
 	mise exec rust@latest -- ./scripts/dev-bin.sh use
+
+dev-docker:
+	@REF="$(REF)" TMUX_CONFIG="$(TMUX_CONFIG)" ./scripts/dev-bin.sh docker
 
 dev-stop:
 	./scripts/dev-bin.sh stop

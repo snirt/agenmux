@@ -2,6 +2,8 @@
 
 ## What's changed
 
+v0.5.1 includes all changes from v0.5.0.
+
 ### Tmux management
 
 - Added opt-in tmux management from the sidebar: `cc` creates a window, `cs` creates a session, `dd` deletes the selected record, and `r` renames it in place ([#82](https://github.com/snirt/agenmux/pull/82)).

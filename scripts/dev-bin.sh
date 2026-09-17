@@ -9,6 +9,33 @@ RELEASE="$CANONICAL_RELEASE"
 [ -x "$RELEASE" ] || RELEASE="$LEGACY_RELEASE"
 ACTION="${1:-}"
 
+if [ "$ACTION" = docker ]; then
+  ref="${REF:-local}"
+  config="${TMUX_CONFIG:-$HOME/.tmux.conf}"
+  [ -f "$config" ] || { echo "agenmux: tmux config not found: $config" >&2; exit 1; }
+  config_dir="$(cd "$(dirname "$config")" && pwd)"
+  config="$config_dir/$(basename "$config")"
+  docker build -t agenmux-dev -f "$DIR/scripts/Dockerfile.dev" "$DIR/scripts" || exit 1
+  docker_args=(run --rm -it -e TERM=xterm-256color -e COLORTERM=truecolor -e "AGENMUX_REF=$ref" -e TMUX_CONFIG=/root/.tmux.conf -v "$DIR:/workspace" -v "$config:/root/.tmux.conf:ro" -v agenmux-pi-home:/root/.pi/agent -v agenmux-cargo-registry:/root/.cargo/registry -v agenmux-cargo-git:/root/.cargo/git -v agenmux-build-cache:/tmp/agenmux-target -w /workspace)
+  exec docker "${docker_args[@]}" agenmux-dev bash -lc '
+    if [ "$AGENMUX_REF" = local ]; then
+      src=/workspace
+    else
+      git clone --depth 1 --branch "$AGENMUX_REF" https://github.com/snirt/agenmux /tmp/agenmux &&
+      src=/tmp/agenmux
+    fi &&
+    CARGO_TARGET_DIR=/tmp/agenmux-target cargo build --manifest-path "$src/Cargo.toml" &&
+    sed -E "/(agents-mon|agenmux)\.tmux/d; /^[[:space:]]*(set|set-option)[[:space:]].*default-(shell|command)([[:space:]]|$)/d" "$TMUX_CONFIG" >/tmp/tmux.conf &&
+    echo "set -g default-shell /bin/bash" >>/tmp/tmux.conf &&
+    AGENMUX_DIR="$src" AGENMUX_SKIP_UPDATE=1 AGENMUX_FORCE_WIZARD=1 AGENMUX_TMUX_CONF=/tmp/tmux.conf sh /workspace/install.sh &&
+    TMUX_CONFIG=/tmp/tmux.conf &&
+    tmux -f "$TMUX_CONFIG" new-session -d -s agenmux -c /workspace pi &&
+    tmux set-option -g @agenmux-bin /tmp/agenmux-target/debug/agenmux &&
+    tmux run-shell "AGENMUX_DIR=$src /tmp/agenmux-target/debug/agenmux setup" &&
+    exec tmux attach -t agenmux
+  '
+fi
+
 case "$ACTION" in
 use)
   AGENMUX_DEV_BUILD_ID="$$-$(date +%s)" \
@@ -17,7 +44,7 @@ use)
   ;;
 stop) next="$RELEASE" ;;
 *)
-  echo "usage: $0 use|stop" >&2
+  echo "usage: $0 use|docker|stop" >&2
   exit 2
   ;;
 esac
