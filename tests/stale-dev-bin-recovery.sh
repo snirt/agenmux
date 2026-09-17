@@ -77,7 +77,11 @@ case "$*" in
   "show-option -gqv @agenmux-on") printf '1\n' ;;
 esac
 SH
-chmod +x "$tmp/bin/cargo" "$tmp/bin/tmux"
+cat >"$tmp/bin/docker" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >>"$TEST_DOCKER"
+SH
+chmod +x "$tmp/bin/cargo" "$tmp/bin/tmux" "$tmp/bin/docker"
 
 TEST_PLUGIN="$tmp/plugin" TEST_RUNTIME="$tmp/runtime.log" TEST_LOG="$tmp/tmux.log" \
   PATH="$tmp/bin:$PATH" bash "$tmp/plugin/scripts/dev-bin.sh" use >/dev/null
@@ -85,4 +89,37 @@ TEST_PLUGIN="$tmp/plugin" TEST_RUNTIME="$tmp/runtime.log" TEST_LOG="$tmp/tmux.lo
 grep -qx setup "$tmp/runtime.log"
 grep -qx toggle "$tmp/runtime.log"
 grep -Fq "set-option -g @agenmux-bin $tmp/plugin/target/debug/agenmux" "$tmp/tmux.log"
+
+mkdir -p "$tmp/home"
+touch "$tmp/home/.tmux.conf"
+TEST_DOCKER="$tmp/docker-default.log" HOME="$tmp/home" REF=master PATH="$tmp/bin:$PATH" \
+  bash "$tmp/plugin/scripts/dev-bin.sh" docker
+grep -Fxq 'AGENMUX_REF=master' "$tmp/docker-default.log"
+grep -Fxq "$tmp/home/.tmux.conf:/root/.tmux.conf:ro" "$tmp/docker-default.log"
+grep -Fxq 'TMUX_CONFIG=/root/.tmux.conf' "$tmp/docker-default.log"
+grep -Fxq 'build' "$tmp/docker-default.log"
+grep -Fxq 'agenmux-dev' "$tmp/docker-default.log"
+grep -Fq 'agenmux-cargo-registry:/root/.cargo/registry' "$tmp/docker-default.log"
+grep -Fq 'agenmux-cargo-git:/root/.cargo/git' "$tmp/docker-default.log"
+grep -Fq 'agenmux-build-cache:/tmp/agenmux-target' "$tmp/docker-default.log"
+grep -Fq 'agenmux-pi-home:/root/.pi/agent' "$tmp/docker-default.log"
+grep -Fq 'sed -E "/(agents-mon|agenmux)\.tmux/d;' "$tmp/docker-default.log"
+grep -Fq 'default-(shell|command)' "$tmp/docker-default.log"
+grep -Fq 'set -g default-shell /bin/bash' "$tmp/docker-default.log"
+grep -Fq 'AGENMUX_SKIP_UPDATE=1 AGENMUX_FORCE_WIZARD=1 AGENMUX_TMUX_CONF=/tmp/tmux.conf sh /workspace/install.sh' "$tmp/docker-default.log"
+grep -Fq 'git clone --depth 1 --branch "$AGENMUX_REF" https://github.com/snirt/agenmux' "$tmp/docker-default.log"
+grep -Fq 'tmux -f "$TMUX_CONFIG" new-session -d -s agenmux -c /workspace pi' "$tmp/docker-default.log"
+! grep -Fq 'tmux send-keys' "$tmp/docker-default.log"
+! grep -Fq 'agenmux:0.0' "$tmp/docker-default.log"
+
+touch "$tmp/tmux.conf"
+TEST_DOCKER="$tmp/docker-config.log" REF=local TMUX_CONFIG="$tmp/tmux.conf" PATH="$tmp/bin:$PATH" \
+  bash "$tmp/plugin/scripts/dev-bin.sh" docker
+grep -Fxq "AGENMUX_REF=local" "$tmp/docker-config.log"
+grep -Fxq "$tmp/tmux.conf:/root/.tmux.conf:ro" "$tmp/docker-config.log"
+grep -Fxq 'TMUX_CONFIG=/root/.tmux.conf' "$tmp/docker-config.log"
+grep -Fq 'FROM node:24-trixie-slim' "$DIR/scripts/Dockerfile.dev"
+grep -Fq 'apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git ripgrep tmux zsh' "$DIR/scripts/Dockerfile.dev"
+grep -Fq 'npm install -g --ignore-scripts @earendil-works/pi-coding-agent' "$DIR/scripts/Dockerfile.dev"
+echo 'ok   dev-docker-uses-host-tmux-config'
 echo 'ok   stale-dev-switch-binary-recovers'

@@ -1,0 +1,10 @@
+FROM node:24-trixie-slim
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git ripgrep tmux zsh && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | \
+      sh -s -- -y --profile minimal --default-toolchain 1.90.0 && \
+    npm install -g --ignore-scripts @earendil-works/pi-coding-agent

@@ -137,6 +137,7 @@ fn skip_control_string(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn build_click_command(exe: &str, socket: &str, pane: &str, bundle: &str) -> String {
     [exe, "notification-open", socket, pane, bundle]
         .into_iter()
@@ -145,6 +146,7 @@ fn build_click_command(exe: &str, socket: &str, pane: &str, bundle: &str) -> Str
         .join(" ")
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

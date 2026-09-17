@@ -554,18 +554,27 @@ make container-install # run the public website installer in a clean tmux harnes
 make container-install-local # run this checkout's installer before site deployment
 ```
 
-For live local testing without overwriting the installed release binary:
+For live development without overwriting the installed release binary:
 
 ```sh
-make dev-use   # build target/debug and switch the running tmux server
-make dev-stop  # switch back to the existing target/release binary
+make dev-use                                # run this checkout on the host tmux server
+make dev-docker                             # run this checkout with Pi in Docker
+make dev-docker REF=master                  # clone and run GitHub master in Docker
+make dev-docker REF=my-feature              # clone and run a pushed branch in Docker
+make dev-docker TMUX_CONFIG=/path/to/tmux.conf # override host tmux config path
+make dev-stop                               # restore the existing release binary
 ```
 
-`dev-use` builds with mise-managed `rust@latest`.
-Both commands preserve sidebar state. Debug builds show
-`agenmux dev (YYYY-MM-DD HH:MM)` with the local build time. `dev-stop` restores
-the existing local release binary; it does not
-download a newer GitHub release.
+`dev-use` builds with mise-managed `rust@latest`. `dev-use` and `dev-stop`
+preserve sidebar state. Debug builds show `agenmux dev (YYYY-MM-DD HH:MM)`
+with the local build time. `dev-stop` restores the existing local release
+binary; it does not download a newer GitHub release. Docker mounts
+`~/.tmux.conf` by default; set `TMUX_CONFIG` to override its path. Docker drops
+host-specific `agenmux.tmux`/`agents-mon.tmux` bootstrap lines and runs the
+installer wizard against a writable copy. It does not edit the host config.
+Other host-only plugin paths need matching mounts.
+The Docker image caches system tools, Rust, and Pi; named volumes cache Cargo
+downloads and build output between runs.
 
 The OCI harness accepts Docker or Podman (override detection with
 `CONTAINER_ENGINE=podman`). `container-test` builds one pinned image containing

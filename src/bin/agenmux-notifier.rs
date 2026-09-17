@@ -13,7 +13,9 @@
 //! user's answer to the prompt, and posts a test notification when granted;
 //! exit 0 = granted, 4 = denied.
 
+#[cfg(any(target_os = "macos", test))]
 #[path = "agenmux-notifier/broker.rs"]
+#[cfg_attr(all(test, not(target_os = "macos")), allow(dead_code))]
 mod broker;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +54,13 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match parse(&args) {
         Some(Mode::Setup) => setup(),
+        #[cfg(any(target_os = "macos", test))]
         Some(Mode::Broker) => broker::serve(),
+        #[cfg(all(not(target_os = "macos"), not(test)))]
+        Some(Mode::Broker) => {
+            eprintln!("agenmux-notifier is macOS-only");
+            2
+        }
         Some(Mode::Notify(request)) => run(request),
         None => {
             eprintln!(
