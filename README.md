@@ -97,7 +97,7 @@ and refresh every two seconds.
 | `j` / `k`, `↑` / `↓` | Move selection |
 | `Enter` / `l` | Jump to the selected agent or pane |
 | `/` | Search fields available in the current mode |
-| `f` | Cycle `all → blocked → working → idle → done` |
+| `f` | Toggle **User attention** (show done, working, and blocked; hide idle) |
 | `Esc` | Exit search and clear filters |
 | `u` | Open version picker |
 | `?` | Show help |
@@ -114,7 +114,7 @@ changing selection or switching panes.
 During search, type normally, then press `Enter` to accept the query and restore
 `j`/`k` navigation; press `Enter` again to jump. `↑`/`↓` or
 `Ctrl-N`/`Ctrl-P` move while typing, and `Ctrl-U` clears the query without
-leaving search. State and text filters are mutually exclusive. Matching a
+leaving search. User attention and text filters are mutually exclusive. Matching a
 session keeps all its agents visible as context.
 
 Set `display.show_all_panes = true` in the application configuration to turn the
@@ -135,11 +135,11 @@ style, then pane command. Agent descriptions stay on the next indented line.
 
 Search in all-pane mode matches session, window, and pane metadata. A session or
 window match keeps its pane subtree, while a pane match keeps its session and
-window ancestors on screen. Status filtering remains agent-state filtering:
-only matching agent panes are results, with their session and window ancestors
-shown for context. With no inventory, all-pane mode says `no panes`; default
+window ancestors on screen. User attention filtering keeps done, working, and
+blocked agent panes, with their session and window ancestors shown for context;
+idle agents are hidden. With no inventory, all-pane mode says `no panes`; default
 mode says `no agents` when no agents are detected; either mode says `no matches`
-when a search or status filter has no results.
+when a search or User attention filter has no results.
 
 This setting changes only sidebar presentation and navigation. `scan`, `list`,
 `status`, agent detection, attention tracking, notifications, and the scan cache
