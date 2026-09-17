@@ -19,6 +19,33 @@ struct M {
     active: bool,
 }
 
+fn parse_measurement(line: &str) -> Option<M> {
+    let fields: Vec<&str> = line.split('|').collect();
+    let [pane, win, pw, ph, ws, wp, active, sess] = fields.as_slice() else {
+        return None;
+    };
+    let (Ok(w), Ok(h), Ok(panes)) = (
+        pw.parse::<usize>(),
+        ph.parse::<usize>(),
+        wp.parse::<usize>(),
+    ) else {
+        return None;
+    };
+    let (window_width, window_height) = ws
+        .split_once(' ')
+        .and_then(|(width, height)| Some((width.parse().ok()?, height.parse().ok()?)))?;
+    Some(M {
+        pane: (*pane).into(),
+        win: (*win).into(),
+        sess: (*sess).into(),
+        w,
+        h,
+        win_size: (window_width, window_height),
+        panes,
+        active: *active == "1",
+    })
+}
+
 /// Height to render the shared frame at. NOT the minimum: every visible pane
 /// shows the same frame, so folding to the shortest let one stale 23-row window
 /// in a session nobody is looking at clip the list everywhere. Size to the
@@ -222,6 +249,15 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
 }
 
 impl Sidebar {
+    fn measure_panes(&mut self) -> Vec<M> {
+        self.tmux
+            .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}|#{window_id}|#{pane_width}|#{pane_height}|#{window_width} #{window_height}|#{window_panes}|#{window_active}|#{session_id}'")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(parse_measurement)
+            .collect()
+    }
+
     /// Refresh preserved-pane inventory: min pane size drives the render, zero
     /// panes (after at least one existed, or a 30s startup grace) = false.
     /// Also detects a user dragging a sidebar border — width changed while
@@ -258,6 +294,25 @@ impl Sidebar {
         }
     }
 
+    /// Refresh only render dimensions after a layout notification. Drag
+    /// adoption and pane reconciliation stay on the periodic mirror tick.
+    pub(super) fn refresh_geometry(&mut self) -> bool {
+        let _ = self.tmux.sync();
+        let ms = self.measure_panes();
+        let Some(w) = ms.iter().map(|m| m.w).min() else {
+            return false;
+        };
+        let size = (w, watched_height(&ms, &self.active_session));
+        let Some(daemon) = self.daemon.as_mut() else {
+            return false;
+        };
+        if daemon.size == size {
+            return false;
+        }
+        daemon.size = size;
+        true
+    }
+
     pub(super) fn mirror_tick(&mut self) -> bool {
         // same barrier as active_pane: reading zero panes off a desynced
         // pipe used to tear the whole mirror set down
@@ -266,41 +321,8 @@ impl Sidebar {
         self.adopt_reload(refreshed);
         self.sync_panes_view();
         let width_changed = refreshed.width_changed;
-        let out = self
-            .tmux
-            .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}|#{window_id}|#{pane_width}|#{pane_height}|#{window_width} #{window_height}|#{window_panes}|#{window_active}|#{session_id}'")
-            .unwrap_or_default();
         let mut w = usize::MAX;
-        let mut ms: Vec<M> = Vec::new();
-        for l in out.lines() {
-            let f: Vec<&str> = l.split('|').collect();
-            let [pane, win, pw, ph, ws, wp, act, sess] = f.as_slice() else {
-                continue;
-            };
-            let (Ok(pw), Ok(ph), Ok(wp)) = (
-                pw.parse::<usize>(),
-                ph.parse::<usize>(),
-                wp.parse::<usize>(),
-            ) else {
-                continue;
-            };
-            let Some((ww, wh)) = ws
-                .split_once(' ')
-                .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
-            else {
-                continue;
-            };
-            ms.push(M {
-                pane: pane.to_string(),
-                win: win.to_string(),
-                sess: sess.to_string(),
-                w: pw,
-                h: ph,
-                win_size: (ww, wh),
-                panes: wp,
-                active: *act == "1",
-            });
-        }
+        let mut ms = self.measure_panes();
         if ms.is_empty() {
             let d = self.daemon.as_mut().unwrap();
             d.empty_ticks += 1;
