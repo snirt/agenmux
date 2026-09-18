@@ -2394,12 +2394,14 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
         "narrow render should clip the long title"
     );
 
-    // The narrow resize has just been reconciled. Leave time before the next
-    // two-second tick so this assertion proves the layout notification redraws.
-    thread::sleep(Duration::from_millis(1100));
+    // `@agenmux-width` is adopted only during periodic reconciliation. Keep it
+    // at 18 while waiting for the restored frame to prove the layout event
+    // redraws before the next tick.
     tmux.assert_tmux(&["resize-pane", "-t", &sidebar, "-x", "30"]);
-    tmux.wait_for(Duration::from_millis(650), || {
-        width() == "30" && frame() == wide_frame
+    tmux.wait_for(Duration::from_millis(1500), || {
+        width() == "30"
+            && frame() == wide_frame
+            && tmux.text(&["show-option", "-gqv", "@agenmux-width"]) == "18"
     });
 
     assert_success(
