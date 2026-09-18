@@ -61,6 +61,7 @@ impl Notifications {
             return true;
         }
         if line.starts_with("%layout-change") {
+            trace!("tmux layout-change notification");
             self.pending.layout = true;
             self.pending.focus = true;
             return true;

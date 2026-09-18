@@ -2365,10 +2365,13 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
             .is_empty()
     });
     let client = tmux.text(&["list-clients", "-F", "#{client_name}"]);
-    assert_success(
-        tmux.bin(&["toggle", "split", &client]),
-        "start resize test sidebar",
-    );
+    let debug_log = tmux.tmp.join("resize-debug");
+    let output = tmux
+        .bin_command(&["toggle", "split", &client])
+        .env("AGENMUX_DEBUG", &debug_log)
+        .output()
+        .unwrap();
+    assert_success(output, "start resize test sidebar");
     let sidebar = tmux.text(&[
         "list-panes",
         "-f",
@@ -2411,11 +2414,22 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
         configured_width = tmux.text(&["show-option", "-gqv", "@agenmux-width"]);
     }
     let restored = pane_width == "30" && restored_frame == wide_frame && configured_width == "18";
-    assert!(
-        restored,
-        "sidebar geometry did not redraw before periodic reconciliation: pane_width={pane_width}, @agenmux-width={configured_width}, frame_matches_wide={}, frame:\n{restored_frame}",
-        restored_frame == wide_frame
-    );
+    if !restored {
+        let layout_trace = std::fs::read_to_string(&debug_log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| {
+                line.contains("layout-change notification")
+                    || line.contains("layout geometry")
+                    || line.contains("layout redraw completed")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        panic!(
+            "sidebar geometry did not redraw before periodic reconciliation: pane_width={pane_width}, @agenmux-width={configured_width}, frame_matches_wide={}, frame:\n{restored_frame}\nlayout trace:\n{layout_trace}",
+            restored_frame == wide_frame
+        );
+    }
 
     assert_success(
         tmux.bin(&["key", "close", &client]),

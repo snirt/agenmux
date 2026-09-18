@@ -526,9 +526,13 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 if sb.superseded() {
                     return true; // a newer daemon owns the panes now
                 }
+                let previous_size = sb.daemon.as_ref().unwrap().size;
                 geometry_changed = sb.refresh_geometry();
+                let size = sb.daemon.as_ref().unwrap().size;
+                trace!("layout geometry {previous_size:?}->{size:?} changed={geometry_changed}");
                 if geometry_changed {
                     sb.render(true);
+                    trace!("layout redraw completed");
                     geometry_changed = false;
                 }
             }
