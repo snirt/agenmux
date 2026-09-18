@@ -522,7 +522,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             let mut geometry_changed = false;
             // Repaint for layout changes before scanning pane screens. Screen
             // capture can take long enough to leave the old geometry visible.
-            if sb.daemon.is_some() && !periodic && changes.layout {
+            if sb.daemon.is_some() && changes.layout {
                 if sb.superseded() {
                     return true; // a newer daemon owns the panes now
                 }
