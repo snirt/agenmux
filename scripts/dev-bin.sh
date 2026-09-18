@@ -13,18 +13,23 @@ if [ "$ACTION" = docker ]; then
   ref="${REF:-local}"
   config="${TMUX_CONFIG:-$HOME/.tmux.conf}"
   [ -f "$config" ] || { echo "agenmux: tmux config not found: $config" >&2; exit 1; }
-  config_dir="$(cd "$(dirname "$config")" && pwd)"
-  config="$config_dir/$(basename "$config")"
+  [ -L "$config" ] && config="$(realpath "$config")"
   docker build -t agenmux-dev -f "$DIR/scripts/Dockerfile.dev" "$DIR/scripts" || exit 1
   case "${XDG_CONFIG_HOME:-}" in
     /*) app_config="$XDG_CONFIG_HOME/agenmux" ;;
     *) app_config="$HOME/.config/agenmux" ;;
   esac
-  docker_args=(run --rm -it -e TERM=xterm-256color -e COLORTERM=truecolor -e "AGENMUX_REF=$ref" -e TMUX_CONFIG=/root/.tmux.conf -v "$DIR:/workspace" -v "$config:/root/.tmux.conf:ro" -v agenmux-pi-home:/root/.pi/agent -v agenmux-cargo-registry:/root/.cargo/registry -v agenmux-cargo-git:/root/.cargo/git -v agenmux-build-cache:/tmp/agenmux-target)
-  [ ! -f "$app_config/config.toml" ] || docker_args+=(--volume "$app_config/config.toml:/root/.config/agenmux/config.toml:ro")
-  [ ! -d "$app_config/agents" ] || docker_args+=(--volume "$app_config/agents:/root/.config/agenmux/agents:ro")
+  config_file="$app_config/config.toml"
+  [ -L "$config_file" ] && config_file="$(realpath "$config_file")"
+  agents_dir="$app_config/agents"
+  [ -L "$agents_dir" ] && agents_dir="$(realpath "$agents_dir")"
+  docker_args=(create --rm -it -e TERM=xterm-256color -e COLORTERM=truecolor -e "AGENMUX_REF=$ref" -e TMUX_CONFIG=/root/.tmux.conf -v "$DIR:/workspace" -v agenmux-pi-home:/root/.pi/agent -v agenmux-cargo-registry:/root/.cargo/registry -v agenmux-cargo-git:/root/.cargo/git -v agenmux-build-cache:/tmp/agenmux-target)
   docker_args+=(-w /workspace)
-  exec docker "${docker_args[@]}" agenmux-dev bash -lc '
+  container="$(docker "${docker_args[@]}" agenmux-dev bash -lc '
+    mkdir -p /root/.config/agenmux &&
+    cp /tmp/agenmux-tmux.conf /root/.tmux.conf &&
+    if [ -f /tmp/agenmux-config.toml ]; then cp /tmp/agenmux-config.toml /root/.config/agenmux/config.toml && chmod u+rw /root/.config/agenmux/config.toml; fi &&
+    if [ -d /tmp/agenmux-agents ]; then cp -R /tmp/agenmux-agents /root/.config/agenmux/agents && chmod -R u+rwX /root/.config/agenmux/agents; fi &&
     if [ "$AGENMUX_REF" = local ]; then
       src=/workspace
     else
@@ -43,7 +48,13 @@ if [ "$ACTION" = docker ]; then
     tmux -f "$TMUX_CONFIG" new-session -d -s agenmux -c /workspace &&
     tmux set-hook -g "client-attached[99]" "run-shell -b \"AGENMUX_DIR=$src /tmp/agenmux-target/debug/agenmux toggle split #{q:client_name}; tmux set-hook -gu client-attached[99]\"" &&
     exec tmux attach -t agenmux
-  '
+  ')" || exit 1
+  trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+  docker cp "$config" "$container:/tmp/agenmux-tmux.conf" || exit 1
+  [ ! -f "$config_file" ] || docker cp "$config_file" "$container:/tmp/agenmux-config.toml" || exit 1
+  [ ! -d "$agents_dir" ] || docker cp "$agents_dir" "$container:/tmp/agenmux-agents" || exit 1
+  docker start -ai "$container"
+  exit $?
 fi
 
 case "$ACTION" in

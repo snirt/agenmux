@@ -608,8 +608,8 @@ make dev-stop                               # restore the existing release binar
 `dev-use` builds with mise-managed `rust@latest`. `dev-use` and `dev-stop`
 preserve sidebar state. Debug builds show `agenmux dev (YYYY-MM-DD HH:MM)`
 with the local build time. `dev-stop` restores the existing local release
-binary; it does not download a newer GitHub release. Docker mounts
-`~/.tmux.conf` by default; set `TMUX_CONFIG` to override its path. Docker drops
+binary; it does not download a newer GitHub release. Docker copies
+`~/.tmux.conf` into the disposable container by default; set `TMUX_CONFIG` to override its path. Docker drops
 host-specific `agenmux.tmux`/`agents-mon.tmux` bootstrap lines and runs the
 installer wizard against a writable copy. It does not edit the host config.
 Other host-only plugin paths need matching mounts.
