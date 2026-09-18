@@ -517,7 +517,7 @@ fn key_bindings(config: &crate::app_config::AppConfig) -> Vec<(&'static str, Str
     }
     let mut prefixes = Vec::new();
     let mut continuations = Vec::new();
-    for binding in crate::input::available_sequences(config.tmux_management_enabled) {
+    for binding in crate::input::sequence_bindings(config) {
         let bytes = binding.sequence.as_bytes();
         let prefix = bytes[0];
         if crate::app_config::action_for(&config.normal, KeyChord::Printable(prefix)).is_some() {
@@ -915,5 +915,80 @@ mod tests {
         assert_ne!(nav_version(&defaults), nav_version(&custom));
         assert_eq!(nav_version(&defaults), nav_version(&config("version = 1")));
         assert!(nav_version(&defaults).starts_with("16."));
+    }
+
+    #[test]
+    fn launcher_bindings_are_gated_and_preserve_existing_keys() {
+        fn find<'a>(
+            keys: &'a [(&'static str, String, String)],
+            table: &str,
+            key: &str,
+        ) -> Option<&'a str> {
+            keys.iter()
+                .find(|(listed_table, listed_key, _)| *listed_table == table && listed_key == key)
+                .map(|(_, _, command)| command.as_str())
+        }
+        let disabled = key_bindings(&config(""));
+        assert_eq!(find(&disabled, NORMAL_TABLE, "e"), None);
+        assert_eq!(find(&disabled, NORMAL_TABLE, "o"), None);
+        assert!(
+            find(&disabled, NORMAL_TABLE, "u").is_some_and(|command| command.contains("versions"))
+        );
+        assert_eq!(
+            find(&disabled, NORMAL_TABLE, "G"),
+            Some(key_command("last", NORMAL_TABLE, false).as_str())
+        );
+        assert_eq!(
+            find(&disabled, NORMAL_TABLE, "g"),
+            Some(key_command("sequence-67", SEQUENCE_TABLE, false).as_str())
+        );
+
+        let enabled = config(
+            "[tmux_management]\nenabled=true\n[quick_launchers.terminal]\nsequence='ot'\nlabel='terminal'\ncommand='fish'",
+        );
+        let keys = key_bindings(&enabled);
+        assert_eq!(
+            find(&keys, NORMAL_TABLE, "e"),
+            Some(key_command("sequence-65", NORMAL_TABLE, false).as_str())
+        );
+        assert_eq!(
+            find(&keys, NORMAL_TABLE, "o"),
+            Some(key_command("sequence-6F", SEQUENCE_TABLE, false).as_str())
+        );
+        assert_eq!(
+            find(&keys, SEQUENCE_TABLE, "g"),
+            Some(key_command("sequence-67", NORMAL_TABLE, false).as_str())
+        );
+        assert_eq!(
+            find(&keys, SEQUENCE_TABLE, "t"),
+            Some(key_command("sequence-74", NORMAL_TABLE, false).as_str())
+        );
+        assert_eq!(
+            find(&keys, NORMAL_TABLE, "u"),
+            find(&disabled, NORMAL_TABLE, "u")
+        );
+        assert_eq!(
+            find(&keys, NORMAL_TABLE, "G"),
+            find(&disabled, NORMAL_TABLE, "G")
+        );
+        assert_eq!(
+            find(&keys, NORMAL_TABLE, "g"),
+            Some(key_command("sequence-67", SEQUENCE_TABLE, false).as_str())
+        );
+
+        let removed = config(
+            "[tmux_management]\nenabled=true\n[quick_launchers.nvim]\nenabled=false\n[quick_launchers.lazygit]\nenabled=false",
+        );
+        let removed = key_bindings(&removed);
+        assert_eq!(find(&removed, NORMAL_TABLE, "e"), None);
+        assert_eq!(find(&removed, NORMAL_TABLE, "o"), None);
+        assert_eq!(
+            find(&removed, NORMAL_TABLE, "G"),
+            find(&disabled, NORMAL_TABLE, "G")
+        );
+        assert_eq!(
+            find(&removed, NORMAL_TABLE, "u"),
+            find(&disabled, NORMAL_TABLE, "u")
+        );
     }
 }

@@ -1,4 +1,4 @@
-use crate::app_config::{Action, Keymap, Palette};
+use crate::app_config::{Action, Color, Ink, Keymap, Palette};
 use crate::input::term_size;
 use std::io::Write;
 
@@ -16,6 +16,70 @@ pub(super) fn join(parts: &[String]) -> String {
         .cloned()
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+fn fit_hint(hint: &str, width: usize) -> String {
+    if hint.chars().count() <= width {
+        return hint.into();
+    }
+    let mut segments: Vec<_> = hint.split(" · ").collect();
+    let pinned = match segments.as_slice() {
+        [help, settings, ..] if help.ends_with(" help") && settings.ends_with(" settings") => 2,
+        [settings, ..] if settings.ends_with(" settings") => 1,
+        _ => 0,
+    };
+    if pinned > 0 {
+        let mut included = segments[..pinned].to_vec();
+        let required = included.join(" · ");
+        if required.chars().count() > width {
+            return required.chars().take(width).collect();
+        }
+        for segment in segments.drain(pinned..) {
+            let candidate = format!("{} · {segment}", included.join(" · "));
+            if candidate.chars().count() > width {
+                let result = included.join(" · ");
+                return if result.chars().count() + 4 <= width {
+                    format!("{result} · …")
+                } else {
+                    result
+                };
+            }
+            included.push(segment);
+        }
+        return included.join(" · ");
+    }
+    let last = segments.last().copied().unwrap_or_default();
+    let keep_suffix =
+        last.ends_with(" settings") || (hint.starts_with("↵ nav ·") && last == "esc clear");
+    if !keep_suffix {
+        return hint.chars().take(width).collect();
+    }
+
+    let mut suffix = String::new();
+    let mut omitted = false;
+    while let Some(segment) = segments.pop() {
+        let candidate = if suffix.is_empty() {
+            segment.to_string()
+        } else {
+            format!("{segment} · {suffix}")
+        };
+        if candidate.chars().count() <= width {
+            suffix = candidate;
+        } else {
+            omitted = true;
+            break;
+        }
+    }
+    if suffix.is_empty() {
+        return hint.chars().take(width).collect();
+    }
+    if omitted {
+        let with_ellipsis = format!("… · {suffix}");
+        if with_ellipsis.chars().count() <= width {
+            return with_ellipsis;
+        }
+    }
+    suffix
 }
 
 pub(super) fn cursor_mark(
@@ -126,6 +190,107 @@ pub(super) fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
     out
 }
 
+fn framed_size(cols: usize, height: usize) -> Option<(usize, usize)> {
+    if cols >= 4 && height >= 4 {
+        Some((cols - 2, height - 2))
+    } else {
+        None
+    }
+}
+
+fn frame_pane(frame: &str, cols: usize, height: usize, color: &str) -> String {
+    let Some((inner_cols, inner_height)) = framed_size(cols, height) else {
+        return clip_frame(frame, cols, height.saturating_sub(1));
+    };
+    let mut content = clip_frame(frame, inner_cols, inner_height);
+    content = content
+        .replace(&format!("{E}[H"), &format!("{E}[2;2H"))
+        .replace('\n', &format!("\n{E}[2G"))
+        .replace(
+            &format!("{E}[{inner_cols}G"),
+            &format!("{E}[{}G", inner_cols + 1),
+        );
+
+    let horizontal = "─".repeat(inner_cols);
+    let mut out = content;
+    out.push_str(&format!("{E}[1;1H{color}┌{horizontal}┐{E}[0m"));
+    for row in 2..height {
+        out.push_str(&format!("{E}[{row};1H{color}│{E}[0m"));
+        out.push_str(&format!("{E}[{row};{cols}H{color}│{E}[0m"));
+    }
+    out.push_str(&format!("{E}[{height};1H{color}└{horizontal}┘{E}[0m"));
+    out
+}
+
+fn pane_frame_color(
+    palette: &Palette,
+    focused: bool,
+    tmux_active_border_fg: Option<Color>,
+) -> String {
+    if focused {
+        tmux_active_border_fg
+            .map(Ink::Typed)
+            .unwrap_or(palette.accent_fg)
+            .fg("")
+    } else {
+        palette.accent_fg.fg("")
+    }
+}
+
+#[cfg(test)]
+mod pane_frame_tests {
+    use super::*;
+
+    #[test]
+    fn narrow_hint_keeps_help_and_settings_visible() {
+        assert_eq!(
+            fit_hint("? help · s settings · e nvim · o launchers", 26),
+            "? help · s settings · …"
+        );
+    }
+
+    #[test]
+    fn narrow_search_hint_keeps_the_cancel_action_visible() {
+        assert_eq!(
+            fit_hint("↵ nav · ^u clear · esc clear", 26),
+            "… · ^u clear · esc clear"
+        );
+    }
+
+    #[test]
+    fn whole_pane_frame_insets_content_and_uses_accent_foreground() {
+        let color = "\x1b[38;5;33m";
+        let frame = frame_pane(&format!("{E}[Htitle{E}[K\n{E}[8G▐{E}[K{E}[J"), 10, 5, color);
+        assert!(frame.contains(&format!("{E}[2;2Htitle")), "{frame:?}");
+        assert!(frame.contains(&format!("\n{E}[2G")), "{frame:?}");
+        assert!(frame.contains(&format!("{E}[9G▐")), "{frame:?}");
+        assert!(frame.contains(&format!("{E}[1;1H{color}┌────────┐{E}[0m")));
+        assert!(frame.contains(&format!("{E}[2;1H{color}│{E}[0m")));
+        assert!(frame.contains(&format!("{E}[2;10H{color}│{E}[0m")));
+        assert!(frame.contains(&format!("{E}[5;1H{color}└────────┘{E}[0m")));
+        assert!(frame.contains(&format!("{E}[4;10H{color}│{E}[0m")));
+        assert!(!frame.contains("\x1b[48;") && !frame.contains("\x1b[49m"));
+    }
+
+    #[test]
+    fn frame_color_uses_tmux_active_border_only_while_focused() {
+        let palette = Palette::default();
+        let tmux = Some(Color::Rgb(245, 169, 127));
+        assert_eq!(
+            pane_frame_color(&palette, false, tmux),
+            palette.accent_fg.fg("")
+        );
+        assert_eq!(
+            pane_frame_color(&palette, true, tmux),
+            "\x1b[38;2;245;169;127m"
+        );
+        assert_eq!(
+            pane_frame_color(&palette, true, None),
+            palette.accent_fg.fg("")
+        );
+    }
+}
+
 pub(super) fn app_title() -> String {
     // The isolated renderer fixture child needs identical title geometry in
     // debug/release builds. Production builds have no test override.
@@ -144,6 +309,23 @@ pub(super) fn app_title() -> String {
 }
 
 impl Sidebar {
+    fn frame_size(&self, cols: usize, height: usize) -> Option<(usize, usize)> {
+        self.settings
+            .settings
+            .show_frame
+            .then(|| framed_size(cols, height))
+            .flatten()
+    }
+
+    pub(super) fn render_size(&self) -> (usize, usize) {
+        let (cols, height) = self
+            .daemon
+            .as_ref()
+            .map(|daemon| daemon.size)
+            .unwrap_or_else(term_size);
+        self.frame_size(cols, height).unwrap_or((cols, height))
+    }
+
     /// "<first chord> <what>", or nothing when the action is unbound.
     pub(super) fn hint(&self, keys: &Keymap, action: Action, what: &str) -> String {
         keys[&action]
@@ -214,17 +396,37 @@ impl Sidebar {
             .as_ref()
             .map(|d| d.size)
             .unwrap_or_else(term_size);
-        let cap = if cols == 0 {
+        let framed = self.frame_size(cols, height);
+        let (render_cols, render_height) = framed.unwrap_or((cols, height));
+        let cap = if render_cols == 0 {
             0
+        } else if framed.is_some() {
+            render_height
+        } else if self.settings.settings.show_frame {
+            render_height.saturating_sub(1)
         } else {
-            height.saturating_sub(1)
+            render_height
         };
-        let frame = clip_frame(&frame, cols, cap);
+        let frame = if framed.is_some() {
+            let color = pane_frame_color(
+                &self.palette,
+                self.plugin_selected,
+                self.tmux_active_border_fg,
+            );
+            frame_pane(&frame, cols, height, &color)
+        } else {
+            clip_frame(&frame, cols, cap)
+        };
         let rows: String = rows
             .lines()
             .take(cap.saturating_sub(1))
             .map(|r| format!("{r}\n"))
             .collect();
+        let rows = if framed.is_some() {
+            format!("-\n-\n{rows}")
+        } else {
+            rows
+        };
         // Restore the normal foreground after glyph/attribute resets, including
         // inside filled rows. Inherited dark foreground adds no bytes.
         let fg = self.palette.text_fg.fg("");
@@ -535,11 +737,13 @@ impl Sidebar {
             self.render_overlay(force);
             return;
         }
-        let (cols, trows) = match &self.daemon {
-            Some(d) => d.size,
-            None => term_size(),
-        };
-        let cap = trows.saturating_sub(1); // last row's newline would scroll
+        let (outer_cols, outer_rows) = self
+            .daemon
+            .as_ref()
+            .map(|daemon| daemon.size)
+            .unwrap_or_else(term_size);
+        let framed = self.frame_size(outer_cols, outer_rows);
+        let (cols, trows) = framed.unwrap_or((outer_cols, outer_rows));
 
         let muted = self.palette.muted_fg.fg("2");
         let top_bar = TopBar::new(&self.palette, self.plugin_selected, self.header_inherited);
@@ -590,11 +794,36 @@ impl Sidebar {
         let sequence_hint = join(
             &self
                 .key_sequence
-                .continuations(self.settings.settings.tmux_management_enabled)
+                .continuations(&self.settings.settings)
                 .into_iter()
                 .map(|(key, label)| format!("{key} {label}"))
                 .collect::<Vec<_>>(),
         );
+        let mut default_hints = vec![
+            self.hint(&self.normal_keys, Action::Help, "help"),
+            self.hint(&self.normal_keys, Action::Settings, "settings"),
+        ];
+        default_hints.push(update_hint.clone());
+        if self.settings.settings.tmux_management_enabled {
+            let mut prefixes = Vec::new();
+            for launcher in self
+                .settings
+                .settings
+                .quick_launchers
+                .iter()
+                .filter(|launcher| launcher.enabled)
+            {
+                if launcher.sequence.len() == 1 {
+                    default_hints.push(format!("{} {}", launcher.sequence, launcher.label));
+                } else if let Some(prefix) = launcher.sequence.chars().next() {
+                    if !prefixes.contains(&prefix) {
+                        prefixes.push(prefix);
+                        default_hints.push(format!("{prefix} launchers"));
+                    }
+                }
+            }
+        }
+        let default_hint = join(&default_hints);
         // The tree draws create and rename in place; only agent-only mode and
         // the delete confirmation use the cursor-row prompt.
         let inline = self
@@ -639,10 +868,19 @@ impl Sidebar {
                 self.hint(&self.normal_keys, Action::Reset, "clear"),
             ])
         } else {
-            update_hint
+            default_hint
         };
-        let hint: String = hint.chars().take(cols).collect();
+        let hint = fit_hint(&hint, cols.saturating_sub(2));
         let has_hint = !hint.is_empty();
+        let cap = if framed.is_some() {
+            trows
+        } else if self.settings.settings.show_frame {
+            trows.saturating_sub(1)
+        } else {
+            // The footer has no trailing newline, so it can use the physical
+            // bottom row. Without a footer, keep a row clear to avoid scroll.
+            trows.saturating_sub(usize::from(!has_hint))
+        };
         let space = cap.saturating_sub(1 + usize::from(has_hint));
         let used = title_len + filter.chars().count() + notice_len;
         let hdr = header_bg.as_str();
@@ -665,22 +903,27 @@ impl Sidebar {
             "{E}[H{hdr}{header_fg}{E}[1m{title}{E}[22m{muted}{filter}{E}[22m{notice}{hdr_pad}{E}[0m{E}[K\n"
         );
         let mut vis = String::new();
-        if has_hint {
-            frame.push_str(&format!("{muted}{hint}{E}[0m{E}[K\n"));
-            vis.push_str("-\n");
-        }
         let cursor = self.cursor_row();
         let inventory_mode = self.settings.settings.show_all_panes;
         if inventory_mode && self.panes.is_empty() {
-            frame.push_str(&format!("{muted}no panes{E}[0m{E}[K\n"));
+            if space > 0 {
+                frame.push_str(&format!("{muted}no panes{E}[0m{E}[K\n"));
+                vis.push_str("-\n");
+            }
         } else if !inventory_mode && self.rows.is_empty() {
-            frame.push_str(&format!("{muted}no agents{E}[0m{E}[K\n"));
+            if space > 0 {
+                frame.push_str(&format!("{muted}no agents{E}[0m{E}[K\n"));
+                vis.push_str("-\n");
+            }
         } else if self.visible.is_empty() {
             let reset = self.normal_keys[&Action::Reset]
                 .first()
                 .map(|c| format!(" · {} shows all", c.label(false)))
                 .unwrap_or_default();
-            frame.push_str(&format!("{muted}no matches{reset}{E}[0m{E}[K\n"));
+            if space > 0 {
+                frame.push_str(&format!("{muted}no matches{reset}{E}[0m{E}[K\n"));
+                vis.push_str("-\n");
+            }
         } else {
             // build selectable panes plus context, then window it
             let (mut lines, mut sel_top, mut sel_bot) = if inventory_mode {
@@ -758,7 +1001,10 @@ impl Sidebar {
                 // Right half by default; a long prompt (a typed name) pushes
                 // the record left and keeps its own tail, where typing happens.
                 let mut prompt: String = prompt;
-                let max_prompt = cols.saturating_sub(4);
+                // The list's scroll thumb occupies the last inner cell. Keep
+                // the edit cursor clear of it, including with the pane frame.
+                let prompt_cols = cols.saturating_sub(2);
+                let max_prompt = prompt_cols.saturating_sub(4);
                 if prompt.chars().count() > max_prompt {
                     let tail: String = prompt
                         .chars()
@@ -770,7 +1016,8 @@ impl Sidebar {
                         .collect();
                     prompt = format!("…{tail}");
                 }
-                let half = (cols / 2).min(cols.saturating_sub(prompt.chars().count() + 1));
+                let half =
+                    (prompt_cols / 2).min(prompt_cols.saturating_sub(prompt.chars().count() + 1));
                 let text = lines[sel_top].0.trim_end_matches('\n');
                 let text = text.strip_suffix(&format!("{E}[K")).unwrap_or(text);
                 // bar() padded the row to the full width; drop that fill so the
@@ -855,6 +1102,15 @@ impl Sidebar {
                     vis.push_str(&format!("{pane}\t{index}\t{}\n", usize::from(*selected)));
                 }
             }
+        }
+        if has_hint {
+            for _ in vis.lines().count()..space {
+                frame.push_str(&format!("{E}[K\n"));
+                vis.push_str("-\n");
+            }
+            let footer = self.palette.accent_fg.fg("");
+            frame.push_str(&format!("{footer}› {hint}{E}[0m{E}[K"));
+            vis.push_str("-\n");
         }
         frame.push_str(&format!("{E}[J"));
         self.emit(frame, &vis, force);
@@ -985,6 +1241,8 @@ mod tests {
             win_sizes: HashMap::new(),
             attached: String::new(),
         });
+        assert!(sb.settings.settings.show_frame);
+        assert_eq!(sb.render_size(), (78, 38));
         sb.rows = ["blocked", "working", "idle", "done"]
             .iter()
             .enumerate()
@@ -1156,15 +1414,18 @@ mod tests {
         );
         assert_eq!(
             ansi.replace_all(selected_agent, "").chars().count(),
-            sb.daemon.as_ref().unwrap().size.0,
+            sb.render_size().0,
             "selected inventory agent background reaches the final column"
         );
         let selected_bg = sb.palette.state_bg("working", true);
         assert!(
-            selected_title.starts_with(&selected_bg),
+            selected_title
+                .replace(&format!("{E}[2G"), "")
+                .starts_with(&selected_bg),
             "selected inventory description keeps cursor background"
         );
-        let plain_frame = ansi.replace_all(&sb.last_frame, "");
+        let content_frame = sb.last_frame.split(&format!("{E}[1;1H")).next().unwrap();
+        let plain_frame = ansi.replace_all(content_frame, "");
         assert!(
             ['├', '└', '│']
                 .iter()
@@ -1184,9 +1445,10 @@ mod tests {
             .find(|line| line.contains("editor"))
             .unwrap();
         assert!(
-            selected_pane.starts_with(&pane_bg)
-                && ansi.replace_all(selected_pane, "").chars().count()
-                    == sb.daemon.as_ref().unwrap().size.0,
+            selected_pane
+                .replace(&format!("{E}[2G"), "")
+                .starts_with(&pane_bg)
+                && ansi.replace_all(selected_pane, "").chars().count() == sb.render_size().0,
             "selected ordinary pane background spans the full row"
         );
         let pane_cursor = format!("{}❯", sb.palette.muted_fg.fg("2"));
@@ -1559,8 +1821,13 @@ mod tests {
         assert!(!overridden_help.contains("cs"), "{overridden_help}");
         sb.normal_keys.get_mut(&Action::Down).unwrap().pop();
         sb.overlay = None;
-        sb.key_sequence
-            .push('c', None, Instant::now(), Duration::from_secs(1), true);
+        sb.key_sequence.push(
+            'c',
+            None,
+            Instant::now(),
+            Duration::from_secs(1),
+            &sb.settings.settings,
+        );
         sb.render(true);
         assert!(
             sb.last_frame.contains("c create window"),
@@ -1601,6 +1868,148 @@ mod tests {
         assert!(footer.contains("n/e"), "{footer}");
         assert!(!footer.contains("j/k"), "{footer}");
         sb.attention_filter = false;
+
+        let active_file = crate::app_config::parse(
+            "[tmux_management]\nenabled=true\n[quick_launchers.terminal]\nsequence='ot'\nlabel='terminal'\ncommand='fish'",
+        )
+        .unwrap();
+        sb.settings.settings =
+            crate::app_config::resolve(&active_file, &Default::default()).unwrap();
+        sb.normal_keys = sb.settings.settings.normal.clone();
+        sb.search_keys = sb.settings.settings.search.clone();
+        sb.overlay = Some(Overlay::Help);
+        sb.render(true);
+        let help = sb.last_frame.clone();
+        let help_plain = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]")
+            .unwrap()
+            .replace_all(&help, "");
+        for (sequence, label) in [
+            ("e", "nvim"),
+            ("o", "optional launchers"),
+            ("og", "lazygit"),
+            ("ot", "terminal"),
+        ] {
+            assert!(
+                help_plain
+                    .lines()
+                    .any(|line| line.starts_with(sequence) && line.contains(label)),
+                "missing {sequence} {label}: {help_plain}"
+            );
+        }
+        sb.overlay = None;
+        sb.key_sequence.clear();
+        sb.render(true);
+        let launcher_footer = sb.last_frame.clone();
+        assert!(launcher_footer.contains("e nvim"), "{launcher_footer}");
+        assert!(launcher_footer.contains("o launch"), "{launcher_footer}");
+        assert!(launcher_footer.contains("s settings"), "{launcher_footer}");
+        assert!(!launcher_footer.contains("og lazygit"), "{launcher_footer}");
+        let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap();
+        let plain = ansi.replace_all(&launcher_footer, "");
+        let lines: Vec<_> = plain.lines().collect();
+        assert_eq!(lines.len(), 38, "{plain}");
+        assert!(
+            !lines[1].contains("e nvim"),
+            "hint leaked above the list: {plain}"
+        );
+        let footer_line = launcher_footer
+            .lines()
+            .find(|line| line.contains("› ? help · s settings"))
+            .unwrap();
+        let footer_content = footer_line.split(&format!("{E}[J")).next().unwrap();
+        let footer_plain = ansi.replace_all(footer_content, "");
+        assert!(
+            footer_plain.starts_with("› ? help · s settings · "),
+            "help and settings are the first hints: {footer_content}"
+        );
+        assert!(
+            footer_plain.contains("e nvim") && footer_plain.contains("o launchers"),
+            "other launcher hints follow settings: {footer_content}"
+        );
+        assert_eq!(ansi.replace_all(footer_content, "").chars().count(), 44);
+        assert!(
+            footer_content
+                .replace(&format!("{E}[2G"), "")
+                .starts_with(&sb.palette.accent_fg.fg("")),
+            "footer uses the theme accent foreground: {footer_content:?}"
+        );
+        assert!(
+            !footer_content.contains("\x1b[48;") && !footer_content.contains("\x1b[49m"),
+            "footer has no background fill: {footer_content:?}"
+        );
+        let rows = std::fs::read_to_string(&sb.rows_file).unwrap();
+        assert_eq!(rows.lines().count(), 39, "{rows}");
+        assert_eq!(
+            rows.lines().take(2).collect::<Vec<_>>(),
+            ["-", "-"],
+            "border and header rows are not clickable"
+        );
+        assert_eq!(
+            rows.lines().last(),
+            Some("-"),
+            "footer must not be clickable"
+        );
+
+        sb.settings.settings.show_frame = false;
+        assert_eq!(sb.render_size(), (80, 40));
+        sb.render(true);
+        let unframed: Vec<_> = sb.last_frame.lines().collect();
+        assert_eq!(unframed.len(), 40, "{}", sb.last_frame);
+        assert!(unframed.last().unwrap().contains("s settings"));
+        assert!(!sb.last_frame.contains('┌') && !sb.last_frame.contains('└'));
+        sb.settings.settings.show_frame = true;
+        sb.render(true);
+
+        sb.daemon.as_mut().unwrap().size = (80, 3);
+        sb.rows.clear();
+        sb.rebuild_visible(false);
+        sb.render(true);
+        let short = ansi.replace_all(&sb.last_frame, "");
+        let short_lines: Vec<_> = short.lines().collect();
+        assert_eq!(short_lines.len(), 2, "{short}");
+        assert!(short_lines[1].contains("› ? help"), "{short}");
+
+        sb.key_sequence.push(
+            'o',
+            None,
+            Instant::now(),
+            Duration::from_secs(1),
+            &sb.settings.settings,
+        );
+        sb.render(true);
+        let continuation = sb.last_frame.clone();
+        assert!(continuation.contains("g lazygit"), "{continuation}");
+        assert!(continuation.contains("t terminal"), "{continuation}");
+        sb.key_sequence.clear();
+
+        let removed_file = crate::app_config::parse(
+            "[tmux_management]\nenabled=true\n[quick_launchers.nvim]\nenabled=false\n[quick_launchers.lazygit]\nenabled=false\n[quick_launchers.terminal]\nsequence='ot'\nlabel='terminal'\ncommand='fish'\nenabled=false",
+        )
+        .unwrap();
+        sb.settings.settings =
+            crate::app_config::resolve(&removed_file, &Default::default()).unwrap();
+        sb.normal_keys = sb.settings.settings.normal.clone();
+        sb.overlay = Some(Overlay::Help);
+        sb.render(true);
+        let removed_help = sb.last_frame.clone();
+        assert!(!removed_help.contains("nvim"), "{removed_help}");
+        assert!(!removed_help.contains("lazygit"), "{removed_help}");
+        assert!(!removed_help.contains("terminal"), "{removed_help}");
+        assert!(
+            !removed_help.contains("optional launchers"),
+            "{removed_help}"
+        );
+
+        sb.settings.settings =
+            crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+        sb.normal_keys = sb.settings.settings.normal.clone();
+        sb.overlay = Some(Overlay::Help);
+        sb.render(true);
+        let gated_help = sb.last_frame.clone();
+        assert!(!gated_help.contains("nvim"), "{gated_help}");
+        assert!(!gated_help.contains("lazygit"), "{gated_help}");
+        assert!(!gated_help.contains("terminal"), "{gated_help}");
+        assert!(!gated_help.contains("cc"), "{gated_help}");
     }
 
     fn themed_frames(sb: &mut Sidebar) {
@@ -1723,7 +2132,7 @@ mod tests {
                                 if p.header_bg != Palette::default().header_bg {
                                     if focused || !sb.header_inherited {
                                         assert!(sb.last_frame.starts_with(&format!(
-                                            "{}{E}[2J{E}[H{}",
+                                            "{}{E}[2J{E}[2;2H{}",
                                             p.text_fg.fg(""),
                                             p.header_bg.bg()
                                         )));
@@ -1792,21 +2201,48 @@ mod tests {
                             for size in [(0, 0), (0, 4), (1, 1), (1, 3), (5, 6), (12, 4)] {
                                 sb.daemon.as_mut().unwrap().size = size;
                                 sb.render(true);
-                                let text = plain(&sb.last_frame);
-                                let final_column = format!("{E}[{}G", size.0);
+                                let framed = framed_size(size.0, size.1).is_some();
+                                let (cols, height) = framed_size(size.0, size.1).unwrap_or(size);
+                                let content = if framed_size(size.0, size.1).is_some() {
+                                    sb.last_frame.split(&format!("{E}[1;1H")).next().unwrap()
+                                } else {
+                                    &sb.last_frame
+                                };
+                                let text = plain(content);
+                                let final_column = format!(
+                                    "{E}[{}G",
+                                    if framed_size(size.0, size.1).is_some() {
+                                        cols + 1
+                                    } else {
+                                        cols
+                                    }
+                                );
                                 assert!(sb
                                     .last_frame
+                                    .split(&format!("{E}[1;1H"))
+                                    .next()
+                                    .unwrap()
                                     .lines()
                                     .zip(text.lines())
                                     .all(|(frame, text)| text.chars().count()
-                                        <= size.0 + usize::from(frame.contains(&final_column))));
-                                assert!(text.lines().count() <= size.1.saturating_sub(1));
+                                        <= cols + usize::from(frame.contains(&final_column))));
+                                assert!(
+                                    text.lines().count()
+                                        <= if framed {
+                                            height
+                                        } else {
+                                            height.saturating_sub(1)
+                                        },
+                                    "size={size:?} content={text:?}"
+                                );
                                 assert!(
                                     std::fs::read_to_string(&sb.rows_file)
                                         .unwrap()
                                         .lines()
                                         .count()
-                                        <= size.1.saturating_sub(2)
+                                        <= size.1.saturating_sub(1),
+                                    "size={size:?} rows={:?}",
+                                    std::fs::read_to_string(&sb.rows_file).unwrap()
                                 );
                             }
                             sb.daemon.as_mut().unwrap().size = (80, 40);

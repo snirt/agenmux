@@ -1173,6 +1173,344 @@ fn app_file(tmux: &TestTmux, text: &str) {
 }
 
 #[test]
+fn quick_launchers_open_selected_panes_safely_and_reload_transactionally() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmux = TestTmux::new("quick-launchers");
+    let tool = tmux.tmp.join("launcher tool/record runner");
+    std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
+    std::fs::write(
+        &tool,
+        "#!/bin/sh\nlog=$1\nshift\n{ printf '%s\\n' \"$PWD\"; printf '%s\\n' \"$@\"; } > \"$log\"\nexec sleep 300\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let ordinary_cwd = tmux.tmp.join("ordinary selected cwd");
+    let agent_cwd = tmux.tmp.join("agent selected cwd");
+    std::fs::create_dir_all(&ordinary_cwd).unwrap();
+    std::fs::create_dir_all(&agent_cwd).unwrap();
+    let ordinary = tmux.text(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "plugin:",
+        "-n",
+        "ordinary-target",
+        "-c",
+        ordinary_cwd.to_str().unwrap(),
+        "exec sleep 3600",
+    ]);
+    let codex = tmux.tmp.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nwhile :; do sleep 60; done\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let agent = tmux.text(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "plugin:",
+        "-n",
+        "agent-target",
+        "-c",
+        agent_cwd.to_str().unwrap(),
+        codex.to_str().unwrap(),
+    ]);
+
+    let nvim_log = tmux.tmp.join("nvim arguments.log");
+    let lazygit_log = tmux.tmp.join("lazygit arguments.log");
+    let terminal_log = tmux.tmp.join("terminal arguments.log");
+    let session_cwd = tmux.text(&["display-message", "-p", "-t", "plugin", "#{session_path}"]);
+    let marker = tmux.tmp.join("injected-command-ran");
+    let shell_expression = format!("$(touch {})", marker.display());
+    let suspicious_arg = format!("; touch {}; #", marker.display());
+    let nvim_args = vec![
+        nvim_log.to_string_lossy().to_string(),
+        "two words".into(),
+        "quote's preserved".into(),
+        shell_expression.clone(),
+        suspicious_arg.clone(),
+    ];
+    let lazygit_args = vec![
+        lazygit_log.to_string_lossy().to_string(),
+        "ordinary arg".into(),
+    ];
+    let terminal_args = vec![
+        terminal_log.to_string_lossy().to_string(),
+        "tmux default cwd".into(),
+    ];
+    let toml_string = |value: &str| toml_edit::Value::from(value).to_string();
+    let toml_array = |values: &[String]| {
+        let mut array = toml_edit::Array::new();
+        for value in values {
+            array.push(value.as_str());
+        }
+        toml_edit::Value::Array(array)
+            .to_string()
+            .trim()
+            .to_string()
+    };
+    let config = |lazygit_sequence: &str, management_enabled: bool, nvim_enabled: bool| {
+        format!(
+            "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false\n[tmux_management]\nenabled={management_enabled}\n[quick_launchers.nvim]\nsequence='e'\nlabel='nvim'\ncommand={}\nargs={}\nworking_directory='selected'\nenabled={nvim_enabled}\n[quick_launchers.lazygit]\nsequence={}\nlabel='lazygit'\ncommand={}\nargs={}\nworking_directory='selected'\nenabled=true\n[quick_launchers.terminal]\nsequence='ov'\nlabel='terminal'\ncommand={}\nargs={}\nworking_directory='tmux'\nenabled=true\n",
+            toml_string(&tool.to_string_lossy()),
+            toml_array(&nvim_args),
+            toml_string(lazygit_sequence),
+            toml_string(&tool.to_string_lossy()),
+            toml_array(&lazygit_args),
+            toml_string(&tool.to_string_lossy()),
+            toml_array(&terminal_args),
+        )
+    };
+    app_file(&tmux, &config("og", true, true));
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agenmux-bin",
+        env!("CARGO_BIN_EXE_agenmux"),
+    ]);
+    let mut viewer = tmux.attach();
+    tmux.wait_for(Duration::from_secs(3), || {
+        !tmux
+            .text(&["list-clients", "-F", "#{client_name}"])
+            .is_empty()
+    });
+    let client = tmux.text(&["list-clients", "-F", "#{client_name}"]);
+    assert_success(
+        tmux.bin(&["toggle", "split", &client]),
+        "start quick launcher sidebar",
+    );
+    let initial_sidebar = tmux.text(&[
+        "list-panes",
+        "-a",
+        "-f",
+        "#{==:#{pane_title},agenmux}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    assert!(!initial_sidebar.is_empty(), "sidebar pane not installed");
+    let initial_sidebar_window = tmux.text(&[
+        "display-message",
+        "-p",
+        "-t",
+        &initial_sidebar,
+        "#{window_id}",
+    ]);
+    tmux.wait_for(Duration::from_secs(8), || {
+        std::fs::read_to_string(tmux.tmp.join("agenmux-scan-cache"))
+            .unwrap_or_default()
+            .lines()
+            .any(|line| line.starts_with(&format!("{agent}\t")))
+            && std::fs::read_to_string(tmux.tmp.join("agenmux-rows"))
+                .unwrap_or_default()
+                .lines()
+                .any(|line| line.starts_with(&format!("{ordinary}\t")))
+    });
+
+    let selected = || {
+        std::fs::read_to_string(tmux.tmp.join("agenmux-rows"))
+            .unwrap_or_default()
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split('\t');
+                let pane = fields.next()?;
+                let _ordinal = fields.next()?;
+                (fields.next() == Some("1")).then(|| pane.to_string())
+            })
+            .unwrap_or_default()
+    };
+    let send_sequence = |sequence: &str| {
+        for byte in sequence.bytes() {
+            assert_success(
+                tmux.bin(&["key", &format!("sequence-{byte:02X}"), &client]),
+                sequence,
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let select = |target: &str| {
+        send_sequence("gg");
+        for _ in 0..16 {
+            if selected() == target {
+                return;
+            }
+            assert_success(tmux.bin(&["key", "down", &client]), "select pane row");
+            thread::sleep(Duration::from_millis(90));
+        }
+        panic!("could not select pane {target}; selected {}", selected());
+    };
+    let client_value = |field: &str| {
+        let filter = format!("#{{==:#{{client_name}},{client}}}");
+        tmux.text(&["list-clients", "-f", &filter, "-F", field])
+    };
+    let return_to_sidebar = || {
+        tmux.assert_tmux(&["select-window", "-t", &initial_sidebar_window]);
+        tmux.assert_tmux(&["select-pane", "-t", &initial_sidebar]);
+        tmux.assert_tmux(&["switch-client", "-c", &client, "-T", "agenmux"]);
+    };
+    let assert_launch = |log: &std::path::Path, cwd: &std::path::Path, expected: &[String]| {
+        tmux.wait_for(Duration::from_secs(5), || log.is_file());
+        let lines = std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let actual_cwd = std::fs::canonicalize(lines.first().unwrap()).unwrap();
+        let expected_cwd = std::fs::canonicalize(cwd).unwrap();
+        assert_eq!(actual_cwd, expected_cwd);
+        assert_eq!(&lines[1..], expected);
+        tmux.wait_for(Duration::from_secs(5), || {
+            let focused = client_value("#{pane_id}");
+            let current_path = tmux.text(&[
+                "display-message",
+                "-p",
+                "-t",
+                &focused,
+                "#{pane_current_path}",
+            ]);
+            client_value("#{pane_id}|#{client_key_table}") == format!("{focused}|root")
+                && std::fs::canonicalize(current_path).ok().as_ref() == Some(&expected_cwd)
+        });
+        let focused = client_value("#{pane_id}");
+        tmux.wait_for(Duration::from_secs(5), || {
+            std::fs::read_to_string(tmux.tmp.join("agenmux-rows"))
+                .unwrap_or_default()
+                .lines()
+                .any(|line| line.starts_with(&format!("{focused}\t")))
+        });
+    };
+
+    let initial_version = tmux.text(&["show-option", "-gqv", "@agenmux-nav-version"]);
+    assert!(tmux.binding("agenmux", "e").contains("sequence-65"));
+    assert!(tmux.binding("agenmux", "o").contains("sequence-6F"));
+    assert!(tmux
+        .binding("agenmux-sequence", "g")
+        .contains("sequence-67"));
+    assert!(tmux
+        .binding("agenmux-sequence", "v")
+        .contains("sequence-76"));
+    assert!(tmux.binding("agenmux", "G").contains("last"));
+    assert!(tmux.binding("agenmux", "u").contains("versions"));
+
+    // The first target is a real detected agent in all-pane mode. Its path,
+    // the executable path, and each argument contain spaces or shell syntax.
+    select(&agent);
+    send_sequence("e");
+    assert_launch(&nvim_log, &agent_cwd, &nvim_args[1..].to_vec());
+    assert!(
+        !marker.exists(),
+        "launcher arguments were interpreted by a shell"
+    );
+    return_to_sidebar();
+
+    // Tmux mode uses the target session's default working directory instead
+    // of the selected agent pane's current directory.
+    select(&agent);
+    send_sequence("ov");
+    assert_launch(
+        &terminal_log,
+        std::path::Path::new(&session_cwd),
+        &["tmux default cwd".into()],
+    );
+    return_to_sidebar();
+
+    // Reload changes and removes sequences in the live tmux tables.
+    app_file(&tmux, &config("ot", true, false));
+    assert_success(tmux.bin(&["config", "reload"]), "reload launcher bindings");
+    let reloaded_version = tmux.text(&["show-option", "-gqv", "@agenmux-nav-version"]);
+    assert_ne!(initial_version, reloaded_version);
+    assert!(tmux.binding("agenmux", "e").is_empty());
+    assert!(tmux.binding("agenmux", "o").contains("sequence-6F"));
+    assert!(tmux
+        .binding("agenmux-sequence", "t")
+        .contains("sequence-74"));
+    // Live views read the published token on the two-second periodic scan.
+    thread::sleep(Duration::from_secs(3));
+    select(&ordinary);
+    let window_count = tmux
+        .text(&["list-windows", "-t", "plugin", "-F", "#{window_id}"])
+        .lines()
+        .count();
+    send_sequence("og");
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        !lazygit_log.exists(),
+        "removed sequence still launched lazygit: {}",
+        std::fs::read_to_string(&lazygit_log).unwrap_or_default()
+    );
+    assert_eq!(
+        tmux.text(&["list-windows", "-t", "plugin", "-F", "#{window_id}"])
+            .lines()
+            .count(),
+        window_count,
+        "removed sequence created a window"
+    );
+    send_sequence("ot");
+    assert_launch(&lazygit_log, &ordinary_cwd, &["ordinary arg".into()]);
+
+    // An invalid conflicting reload keeps the currently installed tables and
+    // resolved generation intact.
+    app_file(&tmux, &config("u", true, false));
+    let invalid = tmux.bin(&["config", "reload"]);
+    assert_eq!(invalid.status.code(), Some(2));
+    assert_eq!(
+        tmux.text(&["show-option", "-gqv", "@agenmux-nav-version"]),
+        reloaded_version
+    );
+    assert!(tmux
+        .binding("agenmux-sequence", "t")
+        .contains("sequence-74"));
+
+    // Turning the management gate off removes launcher and mutation bindings;
+    // the legacy packet path is gated by the daemon's freshly loaded config too.
+    app_file(&tmux, &config("ot", false, false));
+    assert_success(tmux.bin(&["config", "reload"]), "disable quick launchers");
+    assert!(tmux.binding("agenmux", "e").is_empty());
+    assert!(tmux.binding("agenmux", "o").is_empty());
+    assert!(tmux.binding("agenmux", "c").is_empty());
+    assert!(tmux.binding("agenmux", "g").contains("sequence-67"));
+    assert!(tmux.binding("agenmux", "G").contains("last"));
+    assert!(tmux.binding("agenmux", "u").contains("versions"));
+    return_to_sidebar();
+    assert_success(
+        tmux.bin(&["key", "help", &client]),
+        "open help while disabling quick launchers",
+    );
+    tmux.wait_for(Duration::from_secs(5), || {
+        let frame = tmux.text(&["capture-pane", "-p", "-t", &initial_sidebar]);
+        frame.contains("this help")
+            && !frame.contains("nvim")
+            && !frame.contains("lazygit")
+            && !frame.contains("optional launchers")
+    });
+    assert_success(
+        tmux.bin(&["key", "escape", &client]),
+        "close help after disabling quick launchers",
+    );
+    let windows_before_legacy = tmux
+        .text(&["list-windows", "-t", "plugin", "-F", "#{window_id}"])
+        .lines()
+        .count();
+    send_sequence("e");
+    send_sequence("ot");
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        tmux.text(&["list-windows", "-t", "plugin", "-F", "#{window_id}"])
+            .lines()
+            .count(),
+        windows_before_legacy
+    );
+
+    let _ = viewer.kill();
+    let _ = viewer.wait();
+}
+
+#[test]
 fn setup_and_toggle_preserve_manual_launchers_and_old_metadata() {
     let tmux = TestTmux::new("manual-launchers");
     tmux.assert_tmux(&[
@@ -1626,6 +1964,13 @@ fn default_header_inherits_tmux_active_border_contrast() {
         "header background: {frame:?}"
     );
     assert!(frame.contains("38;5;236"), "header foreground: {frame:?}");
+    assert!(
+        frame
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains("38;2;245;169;127")),
+        "focused frame should use tmux active border color: {frame:?}"
+    );
     let ordinary = tmux.text(&[
         "list-panes",
         "-f",
@@ -1648,6 +1993,41 @@ fn default_header_inherits_tmux_active_border_contrast() {
     assert!(
         !frame.contains("48;2;245;169;127"),
         "unfocused header background: {frame:?}"
+    );
+    let border = frame.lines().next().unwrap_or("");
+    assert!(
+        border.contains("\x1b[34m") && !border.contains("38;2;245;169;127"),
+        "unfocused frame should retain the theme accent: {frame:?}"
+    );
+
+    // The frame switch belongs to Display settings and applies immediately.
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-t", &pane]);
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-T", "agenmux"]);
+    for key in ["settings", "down", "down"] {
+        assert_success(tmux.bin(&["key", key, &client]), "open frame setting");
+    }
+    tmux.wait_for(Duration::from_secs(3), || capture().contains("show frame"));
+    for key in ["enter", "down", "enter"] {
+        assert_success(tmux.bin(&["key", key, &client]), "disable pane frame");
+    }
+    let config = tmux.tmp.join("config/agenmux/config.toml");
+    tmux.wait_for(Duration::from_secs(3), || {
+        std::fs::read_to_string(&config).is_ok_and(|source| source.contains("show_frame = false"))
+    });
+    tmux.wait_for(Duration::from_secs(15), || capture().contains("saved"));
+    assert_success(tmux.bin(&["key", "close", &client]), "close settings");
+    tmux.wait_for(Duration::from_secs(5), || {
+        let frame = capture();
+        !frame.contains("— settings") && !frame.contains('┌') && frame.contains("s settings")
+    });
+    let unframed = capture();
+    assert!(
+        unframed
+            .trim_end()
+            .lines()
+            .last()
+            .is_some_and(|line| line.contains("s settings")),
+        "unframed footer should occupy the bottom row: {unframed:?}"
     );
     assert_success(tmux.bin(&["key", "close"]), "close inherited header");
     let _ = viewer.kill();
@@ -2329,7 +2709,7 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
     let tmux = TestTmux::new("resize-frame");
     app_file(
         &tmux,
-        "[display]\nshow_all_panes=true\nsidebar_width=30\n[behavior]\nnotifications=false",
+        "[display]\nshow_all_panes=true\nshow_frame=false\nsidebar_width=30\n[behavior]\nnotifications=false",
     );
     tmux.assert_tmux(&[
         "set-option",
@@ -2924,8 +3304,8 @@ fn all_panes_reload_preserves_daemon_and_selection() {
         "[display]\nshow_all_panes=true\n[behavior]\nnotifications=false",
     );
     assert_success(tmux.bin(&["config", "reload"]), "enable all panes");
-    tmux.wait_for(Duration::from_secs(3), &inventory_present);
-    tmux.wait_for(Duration::from_secs(3), || capture().contains("mixed"));
+    tmux.wait_for(Duration::from_secs(8), &inventory_present);
+    tmux.wait_for(Duration::from_secs(8), || capture().contains("mixed"));
     let row_map = std::fs::read_to_string(tmux.tmp.join("agenmux-rows")).unwrap();
     for pane in [&single, &ordinary, &ordinary_only] {
         assert_eq!(

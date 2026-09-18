@@ -8,6 +8,7 @@ version = 1
 [display]
 mode = "split"        # split | popup
 show_all_panes = false
+show_frame = true      # whole-pane Agenmux frame
 sidebar_width = 30    # cells, 1..=10000
 popup_width = 40
 popup_height = "auto" # "auto" or cells
@@ -20,6 +21,34 @@ notifications = true
 # cc/cs create, dd deletes the selected session/window/pane, r renames
 enabled = false
 confirm_delete = true
+
+# Quick launchers are available only when tmux management is enabled.
+# These entries show the built-in defaults and can be omitted when unchanged.
+[quick_launchers.nvim]
+sequence = "e"
+label = "nvim"
+command = "nvim"
+args = []
+working_directory = "selected" # selected pane cwd, or the tmux session default
+enabled = true
+
+[quick_launchers.lazygit]
+sequence = "og"
+label = "lazygit"
+command = "lazygit"
+args = []
+working_directory = "selected"
+enabled = true
+
+# A custom launcher entry needs all three fields below; args, working_directory,
+# and enabled have defaults.
+# [quick_launchers.tests]
+# sequence = "ot"
+# label = "cargo test"
+# command = "cargo"
+# args = ["test"]
+# working_directory = "selected"
+# enabled = true
 
 [theme]
 base = "dark"         # dark | light | terminal

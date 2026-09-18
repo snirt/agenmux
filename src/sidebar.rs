@@ -84,8 +84,8 @@ impl ScanSchedule {
 #[allow(unused_imports)]
 pub use crate::input::send_key;
 use crate::input::{
-    key_pending, poll_inputs, protocol_keys, read_key, read_search_key, settings_keys, Key,
-    KeySequence, RawMode, SequenceAction, SequenceResult,
+    key_pending, poll_inputs, protocol_keys, read_key_with_config, read_search_key, settings_keys,
+    Key, KeySequence, RawMode, SequenceAction, SequenceResult,
 };
 
 mod daemon;
@@ -138,6 +138,14 @@ struct MutationTarget {
     cwd: String,
     client: String,
 }
+
+#[derive(Clone, Debug)]
+struct LauncherTarget {
+    pane_id: String,
+    window_id: String,
+    session_id: String,
+    client: String,
+}
 /// One selectable row. Session and Window rows exist only with tmux
 /// management on; they carry the index of their first listed pane so jump
 /// and the row map keep a pane target.
@@ -179,6 +187,7 @@ pub struct Sidebar {
     /// value itself changes or the user toggles again. Never persisted.
     panes_override: Option<bool>,
     palette: Palette, // immutable startup snapshot shared by popup and split
+    tmux_active_border_fg: Option<Color>,
     header_inherited: bool,
     normal_keys: Keymap, // startup snapshot: keys never change while running
     search_keys: Keymap,
@@ -269,7 +278,7 @@ fn apply_tmux_header(settings: &mut crate::app_config::AppConfig, active: &str, 
                 .get_or_insert_with(Default::default)
                 .header_bg = Some(color);
             settings.sources.insert(
-                "theme.colors.header_bg",
+                "theme.colors.header_bg".into(),
                 "tmux pane-active-border-style fg".into(),
             );
         }
@@ -292,17 +301,19 @@ fn apply_tmux_header(settings: &mut crate::app_config::AppConfig, active: &str, 
             .header_fg = Some(color);
         settings
             .sources
-            .insert("theme.colors.header_fg", source.into());
+            .insert("theme.colors.header_fg".into(), source.into());
     }
 }
 
-fn inherit_tmux_header(settings: &mut crate::app_config::AppConfig) {
+fn inherit_tmux_header(settings: &mut crate::app_config::AppConfig) -> Option<Color> {
     let active = std::env::var("AGENMUX_TMUX_ACTIVE_BORDER_STYLE").unwrap_or_else(|_| {
         command(&["show-option", "-gv", "pane-active-border-style"]).unwrap_or_default()
     });
     let pane = std::env::var("AGENMUX_TMUX_WINDOW_STYLE")
         .unwrap_or_else(|_| command(&["show-option", "-gv", "window-style"]).unwrap_or_default());
+    let active_border_fg = tmux_style_color(&active, "fg");
     apply_tmux_header(settings, &active, &pane);
+    active_border_fg
 }
 
 fn uses_tmux_header_contrast(settings: &crate::app_config::AppConfig) -> bool {
@@ -329,7 +340,7 @@ fn new_sidebar(
     let update = update_available(&plugin_dir);
     let adopted_show_all_panes = settings.show_all_panes;
     let config_show_all = settings.show_all_panes;
-    inherit_tmux_header(&mut settings);
+    let tmux_active_border_fg = inherit_tmux_header(&mut settings);
     let header_inherited = uses_tmux_header_contrast(&settings);
     let palette = Palette::resolve(&settings.theme);
     let cached_rows = std::fs::read_to_string(&cache_file)
@@ -346,6 +357,7 @@ fn new_sidebar(
     let mut sb = Sidebar {
         tmux,
         palette,
+        tmux_active_border_fg,
         header_inherited,
         normal_keys: settings.normal.clone(),
         search_keys: settings.search.clone(),
@@ -661,7 +673,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 let key = if text_input && sb.daemon.is_none() {
                     read_search_key(key_fd, keys)
                 } else {
-                    read_key(key_fd, keys)
+                    read_key_with_config(key_fd, keys, &sb.settings.settings)
                 };
                 trace!("key {key:?}");
                 let navigation_step = if !editing_settings && sb.overlay.is_none() {
@@ -765,10 +777,19 @@ impl Sidebar {
                 client,
                 Instant::now(),
                 timeout,
-                self.settings.settings.tmux_management_enabled,
+                &self.settings.settings,
             ) {
-                SequenceResult::Match(SequenceAction::First, _) => self.dispatch_key(Key::First),
-                SequenceResult::Match(action, client) => self.begin_mutation(action, client),
+                SequenceResult::Match(
+                    crate::input::SequenceDispatch::Builtin(SequenceAction::First),
+                    _,
+                ) => self.dispatch_key(Key::First),
+                SequenceResult::Match(crate::input::SequenceDispatch::Builtin(action), client) => {
+                    self.begin_mutation(action, client)
+                }
+                SequenceResult::Match(
+                    crate::input::SequenceDispatch::QuickLauncher(id),
+                    client,
+                ) => self.begin_quick_launcher(&id, client),
                 SequenceResult::Pending | SequenceResult::Miss => DispatchResult::Continue,
             };
         }
@@ -836,6 +857,18 @@ impl Sidebar {
         DispatchResult::Continue
     }
 
+    fn selected_pane(&self) -> Option<(VisiblePane, PaneMeta)> {
+        let selected = self
+            .cursor_row()
+            .and_then(|row| self.visible.get(row).copied())?;
+        let pane = self
+            .panes
+            .iter()
+            .find(|pane| pane.pane == self.visible_pane_id(selected))?
+            .clone();
+        Some((selected, pane))
+    }
+
     fn begin_mutation(&mut self, action: SequenceAction, client: Option<String>) -> DispatchResult {
         if !self.settings.settings.tmux_management_enabled {
             return DispatchResult::Continue;
@@ -849,13 +882,7 @@ impl Sidebar {
         };
         // The row the user sees: with the client elsewhere, the cursor
         // follows the active pane while `sel` may lag one scan behind.
-        let selected = self
-            .cursor_row()
-            .and_then(|row| self.visible.get(row).copied());
-        let Some(pane) = selected.and_then(|row| {
-            let id = self.visible_pane_id(row);
-            self.panes.iter().find(|pane| pane.pane == id).cloned()
-        }) else {
+        let Some((selected, pane)) = self.selected_pane() else {
             self.mutation_error(&client, "selected pane no longer exists");
             return DispatchResult::Continue;
         };
@@ -868,16 +895,12 @@ impl Sidebar {
             .count()
             > 1;
         let action = match (action, selected) {
-            (SequenceAction::Delete, Some(VisiblePane::Session(_))) => {
-                SequenceAction::DeleteSession
-            }
-            (SequenceAction::Delete, Some(VisiblePane::Window(_))) => SequenceAction::DeleteWindow,
+            (SequenceAction::Delete, VisiblePane::Session(_)) => SequenceAction::DeleteSession,
+            (SequenceAction::Delete, VisiblePane::Window(_)) => SequenceAction::DeleteWindow,
             (SequenceAction::Delete, _) if split_window => SequenceAction::DeletePane,
             (SequenceAction::Delete, _) => SequenceAction::DeleteWindow,
-            (SequenceAction::Rename, Some(VisiblePane::Session(_))) => {
-                SequenceAction::RenameSession
-            }
-            (SequenceAction::Rename, Some(VisiblePane::Window(_))) => SequenceAction::RenameWindow,
+            (SequenceAction::Rename, VisiblePane::Session(_)) => SequenceAction::RenameSession,
+            (SequenceAction::Rename, VisiblePane::Window(_)) => SequenceAction::RenameWindow,
             (SequenceAction::Rename, _) if split_window => SequenceAction::RenamePane,
             (SequenceAction::Rename, _) => SequenceAction::RenameWindow,
             (action, _) => action,
@@ -929,6 +952,41 @@ impl Sidebar {
         }
     }
 
+    fn begin_quick_launcher(&mut self, id: &str, client: Option<String>) -> DispatchResult {
+        if !self.settings.settings.tmux_management_enabled {
+            return DispatchResult::Continue;
+        }
+        let client = client
+            .filter(|value| !value.is_empty())
+            .or_else(|| (!self.popup_client.is_empty()).then(|| self.popup_client.clone()));
+        let Some(client) = client else {
+            trace!("quick launcher ignored: invoking tmux client is unknown");
+            return DispatchResult::Continue;
+        };
+        let Some(launcher) = self
+            .settings
+            .settings
+            .quick_launchers
+            .iter()
+            .find(|launcher| launcher.id == id && launcher.enabled)
+            .cloned()
+        else {
+            self.mutation_error(&client, "launcher is no longer active");
+            return DispatchResult::Continue;
+        };
+        let Some((_, pane)) = self.selected_pane() else {
+            self.mutation_error(&client, "selected pane no longer exists");
+            return DispatchResult::Continue;
+        };
+        let target = LauncherTarget {
+            pane_id: pane.pane,
+            window_id: pane.window_id,
+            session_id: pane.session_id,
+            client,
+        };
+        self.execute_quick_launcher(&target, &launcher)
+    }
+
     fn enter_mutation_input(&mut self, client: &str) {
         trace!("mutation input on for {client}");
         self.follow_selection = true;
@@ -966,6 +1024,137 @@ impl Sidebar {
             "3000",
             &format!("agenmux: {message}"),
         ]);
+    }
+
+    fn revalidated_launcher_cwd(target: &LauncherTarget) -> Result<String, TmuxError> {
+        let response = crate::tmux::command(&[
+            "display-message",
+            "-p",
+            "-t",
+            &target.pane_id,
+            "#{pane_id}|#{window_id}|#{session_id}|#{pane_current_path}",
+        ])?;
+        Self::parse_launcher_cwd(target, &response)
+    }
+
+    fn launcher_session_cwd(target: &LauncherTarget) -> Result<String, TmuxError> {
+        let cwd = crate::tmux::command(&[
+            "display-message",
+            "-p",
+            "-t",
+            &target.session_id,
+            "#{session_path}",
+        ])?;
+        let cwd = cwd.trim_end_matches(['\n', '\r']);
+        if cwd.is_empty() {
+            return Err(TmuxError::Error(
+                "target session has no working directory".into(),
+            ));
+        }
+        Ok(cwd.to_string())
+    }
+
+    fn parse_launcher_cwd(target: &LauncherTarget, response: &str) -> Result<String, TmuxError> {
+        let response = response.strip_suffix('\n').unwrap_or(&response);
+        let mut fields = response.splitn(4, '|');
+        let (Some(pane), Some(window), Some(session), Some(cwd)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(TmuxError::Error(
+                "selected pane changed before launcher start".into(),
+            ));
+        };
+        if pane != target.pane_id || window != target.window_id || session != target.session_id {
+            return Err(TmuxError::Error(
+                "selected pane changed before launcher start".into(),
+            ));
+        }
+        if cwd.is_empty() {
+            return Err(TmuxError::Error(
+                "selected pane has no working directory".into(),
+            ));
+        }
+        Ok(cwd.to_string())
+    }
+
+    fn show_created_launcher(&self, client: &str, pane: &str) -> Result<(), TmuxError> {
+        let location = crate::tmux::command(&[
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{session_id}|#{window_id}|#{pane_id}",
+        ])?;
+        let mut fields = location.trim_end_matches(['\n', '\r']).split('|');
+        let (Some(session), Some(window), Some(actual_pane)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(TmuxError::Error(
+                "created launcher has no tmux location".into(),
+            ));
+        };
+        if actual_pane != pane {
+            return Err(TmuxError::Error(
+                "launcher target changed before client switch".into(),
+            ));
+        }
+        crate::tmux::command_status(&["switch-client", "-c", client, "-t", session])?;
+        crate::tmux::command_status(&["select-window", "-t", window])?;
+        crate::tmux::command_status(&["select-pane", "-t", pane])?;
+        crate::tmux::command_status(&["switch-client", "-c", client, "-T", "root"])?;
+        Ok(())
+    }
+
+    fn execute_quick_launcher(
+        &mut self,
+        target: &LauncherTarget,
+        launcher: &crate::app_config::QuickLauncher,
+    ) -> DispatchResult {
+        let selected_cwd = match Self::revalidated_launcher_cwd(target) {
+            Ok(cwd) => cwd,
+            Err(error) => {
+                self.mutation_error(&target.client, &error.to_string());
+                return DispatchResult::Continue;
+            }
+        };
+        let cwd = match launcher.working_directory {
+            crate::app_config::LauncherWorkingDirectory::Selected => selected_cwd,
+            crate::app_config::LauncherWorkingDirectory::Tmux => {
+                match Self::launcher_session_cwd(target) {
+                    Ok(cwd) => cwd,
+                    Err(error) => {
+                        self.mutation_error(&target.client, &error.to_string());
+                        return DispatchResult::Continue;
+                    }
+                }
+            }
+        };
+        let session = format!("{}:", target.session_id);
+        let mut args = vec!["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", &session];
+        args.extend(["-c", cwd.as_str()]);
+        args.push(&launcher.command);
+        args.extend(launcher.args.iter().map(String::as_str));
+        let pane = match crate::tmux::command(&args) {
+            Ok(output) => output.trim().to_string(),
+            Err(error) => {
+                self.mutation_error(&target.client, &error.to_string());
+                return DispatchResult::Continue;
+            }
+        };
+        self.refresh_requested = true;
+        self.pending_select = Some(pane.clone());
+        if let Err(error) = self.show_created_launcher(&target.client, &pane) {
+            self.mutation_error(
+                &target.client,
+                &format!("launched, but could not focus the new window: {error}"),
+            );
+            return DispatchResult::Continue;
+        }
+        if self.daemon.is_none() {
+            DispatchResult::Break
+        } else {
+            DispatchResult::Continue
+        }
     }
 
     fn target_is_live(target: &MutationTarget) -> bool {
@@ -1255,7 +1444,7 @@ impl Sidebar {
         if !refreshed.reloaded {
             return;
         }
-        inherit_tmux_header(&mut self.settings.settings);
+        self.tmux_active_border_fg = inherit_tmux_header(&mut self.settings.settings);
         self.header_inherited = uses_tmux_header_contrast(&self.settings.settings);
         self.palette = Palette::resolve(&self.settings.settings.theme);
         self.normal_keys = self.settings.settings.normal.clone();
@@ -1281,7 +1470,8 @@ impl Sidebar {
                 crate::app_config::KeyChord::Printable(prefix as u8),
             )
             .is_some();
-            let unavailable = !crate::input::available_sequences(management_enabled)
+            let unavailable = !crate::input::sequence_bindings(&self.settings.settings)
+                .iter()
                 .any(|binding| binding.sequence.starts_with(prefix));
             if shadowed || unavailable {
                 self.key_sequence.clear();
@@ -1538,6 +1728,35 @@ mod tests {
             navigation_key(&Key::Owned(Box::new(Key::Down), "client".into())),
             Some((NavigationTarget::Selection, 1))
         );
+    }
+
+    #[test]
+    fn launcher_revalidation_rejects_stale_identity_without_using_another_pane_cwd() {
+        let target = LauncherTarget {
+            pane_id: "%4".into(),
+            window_id: "@2".into(),
+            session_id: "$1".into(),
+            client: "client".into(),
+        };
+        assert_eq!(
+            Sidebar::parse_launcher_cwd(&target, "%4|@2|$1|/path/with|pipe\n")
+                .ok()
+                .as_deref(),
+            Some("/path/with|pipe")
+        );
+        for stale in [
+            "%9|@2|$1|/different/pane\n",
+            "%4|@8|$1|/different/window\n",
+            "%4|@2|$9|/different/session\n",
+            "%4|@2|$1|\n",
+        ] {
+            let error = Sidebar::parse_launcher_cwd(&target, stale).unwrap_err();
+            assert!(
+                error.to_string().contains("selected pane")
+                    || error.to_string().contains("working directory"),
+                "unexpected stale-target error: {error}"
+            );
+        }
     }
 
     #[test]

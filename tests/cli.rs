@@ -79,6 +79,7 @@ fn config_help_lists_every_configurable_key_without_a_server() {
             "[display]",
             "[behavior]",
             "[tmux_management]",
+            "[quick_launchers.<id>]",
             "[theme]",
             "[keys]",
             "[keys.normal]",
