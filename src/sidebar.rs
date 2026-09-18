@@ -519,6 +519,19 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             // Consume first: output observed by command-response reads during
             // this scan belongs to the next pass.
             let mut changes = sb.tmux.take_pending_changes();
+            let mut geometry_changed = false;
+            // Repaint for layout changes before scanning pane screens. Screen
+            // capture can take long enough to leave the old geometry visible.
+            if sb.daemon.is_some() && !periodic && changes.layout {
+                if sb.superseded() {
+                    return true; // a newer daemon owns the panes now
+                }
+                geometry_changed = sb.refresh_geometry();
+                if geometry_changed {
+                    sb.render(true);
+                    geometry_changed = false;
+                }
+            }
             // Focus first, output after: captures cost 30-130ms and the
             // cursor must not wait behind them. Deferred panes stay pending
             // and reach the next output scan under its usual throttle.
@@ -538,7 +551,6 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             if sb.daemon.is_some() && sb.superseded() {
                 return true; // a newer daemon owns the panes now
             }
-            let mut geometry_changed = false;
             // Preserved-pane inventory, pane reflow and drag detection are
             // periodic reconciliation. Layout notifications refresh only
             // render geometry; running the full reconciliation for every scan
@@ -553,8 +565,6 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                     .daemon
                     .as_ref()
                     .is_some_and(|daemon| daemon.size != previous_size);
-            } else if sb.daemon.is_some() && changes.layout {
-                geometry_changed = sb.refresh_geometry();
             }
             if sb.daemon.is_some() && periodic {
                 if let Some(log) = crate::diag::cap_daemon_log(

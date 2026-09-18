@@ -2398,11 +2398,24 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
     // at 18 while waiting for the restored frame to prove the layout event
     // redraws before the next tick.
     tmux.assert_tmux(&["resize-pane", "-t", &sidebar, "-x", "30"]);
-    tmux.wait_for(Duration::from_millis(1500), || {
-        width() == "30"
-            && frame() == wide_frame
-            && tmux.text(&["show-option", "-gqv", "@agenmux-width"]) == "18"
-    });
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    let mut pane_width = width();
+    let mut configured_width = tmux.text(&["show-option", "-gqv", "@agenmux-width"]);
+    let mut restored_frame = frame();
+    while !(pane_width == "30" && restored_frame == wide_frame && configured_width == "18")
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(20));
+        pane_width = width();
+        configured_width = tmux.text(&["show-option", "-gqv", "@agenmux-width"]);
+        restored_frame = frame();
+    }
+    let restored = pane_width == "30" && restored_frame == wide_frame && configured_width == "18";
+    assert!(
+        restored,
+        "sidebar geometry did not redraw before periodic reconciliation: pane_width={pane_width}, @agenmux-width={configured_width}, frame_matches_wide={}, frame:\n{restored_frame}",
+        restored_frame == wide_frame
+    );
 
     assert_success(
         tmux.bin(&["key", "close", &client]),
