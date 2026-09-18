@@ -2325,6 +2325,107 @@ fn tmux_management_creates_and_deletes_stable_targets() {
 }
 
 #[test]
+fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
+    let tmux = TestTmux::new("resize-frame");
+    app_file(
+        &tmux,
+        "[display]\nshow_all_panes=true\nsidebar_width=30\n[behavior]\nnotifications=false",
+    );
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agenmux-bin",
+        env!("CARGO_BIN_EXE_agenmux"),
+    ]);
+    let content = tmux.text(&["display-message", "-p", "#{pane_id}"]);
+    let sibling = tmux.text(&[
+        "split-window",
+        "-h",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &content,
+        "exec sleep 3600",
+    ]);
+    tmux.assert_tmux(&["select-pane", "-t", &sibling, "-T", "stable sibling"]);
+    tmux.assert_tmux(&[
+        "select-pane",
+        "-t",
+        &content,
+        "-T",
+        "stable geometry title long enough to clip",
+    ]);
+
+    let mut viewer = tmux.attach();
+    tmux.wait_for(Duration::from_secs(2), || {
+        !tmux
+            .text(&["list-clients", "-F", "#{client_name}"])
+            .is_empty()
+    });
+    let client = tmux.text(&["list-clients", "-F", "#{client_name}"]);
+    assert_success(
+        tmux.bin(&["toggle", "split", &client]),
+        "start resize test sidebar",
+    );
+    let sidebar = tmux.text(&[
+        "list-panes",
+        "-f",
+        "#{==:#{pane_title},agenmux}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    let width = || tmux.text(&["display-message", "-p", "-t", &sidebar, "#{pane_width}"]);
+    let frame = || tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
+    let wide_title = "stable geometry title l";
+    tmux.wait_for(Duration::from_secs(4), || {
+        width() == "30" && frame().contains(wide_title)
+    });
+
+    tmux.assert_tmux(&["resize-pane", "-t", &sidebar, "-x", "18"]);
+    tmux.wait_for(Duration::from_secs(4), || {
+        tmux.text(&["show-option", "-gqv", "@agenmux-width"]) == "18"
+    });
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        !frame().contains(wide_title),
+        "narrow render should clip the long title"
+    );
+
+    // `@agenmux-width` is adopted only during periodic reconciliation. Keep it
+    // at 18 while waiting for the restored frame to prove the layout event
+    // redraws before the next tick.
+    tmux.assert_tmux(&["resize-pane", "-t", &sidebar, "-x", "30"]);
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    let mut restored_frame = frame();
+    let mut pane_width = width();
+    let mut configured_width = tmux.text(&["show-option", "-gqv", "@agenmux-width"]);
+    while !(pane_width == "30" && restored_frame.contains(wide_title) && configured_width == "18")
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(20));
+        restored_frame = frame();
+        pane_width = width();
+        configured_width = tmux.text(&["show-option", "-gqv", "@agenmux-width"]);
+    }
+    let restored =
+        pane_width == "30" && restored_frame.contains(wide_title) && configured_width == "18";
+    assert!(
+        restored,
+        "sidebar geometry did not redraw before periodic reconciliation: pane_width={pane_width}, @agenmux-width={configured_width}, frame_contains_wide_title={}, frame:\n{restored_frame}",
+        restored_frame.contains(wide_title)
+    );
+
+    assert_success(
+        tmux.bin(&["key", "close", &client]),
+        "close resize test sidebar",
+    );
+    let _ = viewer.kill();
+    let _ = viewer.wait();
+}
+
+#[test]
 fn daemon_live_width_keeps_startup_file_and_last_valid_overrides() {
     let tmux = TestTmux::new("live-config");
     app_file(

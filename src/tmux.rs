@@ -14,6 +14,7 @@ pub struct PendingChanges {
     pub panes: HashSet<String>,
     pub full: bool,
     pub focus: bool,
+    pub layout: bool,
 }
 
 #[derive(Default)]
@@ -59,10 +60,12 @@ impl Notifications {
             }
             return true;
         }
-        if line.starts_with("%window-pane-changed")
-            || line.starts_with("%session-window-changed")
-            || line.starts_with("%layout-change")
-        {
+        if line.starts_with("%layout-change") {
+            self.pending.layout = true;
+            self.pending.focus = true;
+            return true;
+        }
+        if line.starts_with("%window-pane-changed") || line.starts_with("%session-window-changed") {
             self.pending.focus = true;
             return true;
         }
@@ -619,6 +622,15 @@ mod tests {
 
         assert!(notifications.observe("%client-session-changed /dev/pts/1 $2 other"));
         assert_eq!(notifications.attached_session.as_deref(), Some("$1"));
+        assert!(notifications.pending.focus);
+        assert!(!notifications.pending.full);
+    }
+
+    #[test]
+    fn layout_change_marks_focus_and_geometry_pending() {
+        let mut notifications = Notifications::default();
+        assert!(notifications.observe("%layout-change @1 layout"));
+        assert!(notifications.pending.layout);
         assert!(notifications.pending.focus);
         assert!(!notifications.pending.full);
     }

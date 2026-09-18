@@ -518,6 +518,19 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             // Consume first: output observed by command-response reads during
             // this scan belongs to the next pass.
             let mut changes = sb.tmux.take_pending_changes();
+            let mut geometry_changed = false;
+            // Repaint for layout changes before scanning pane screens. Screen
+            // capture can take long enough to leave the old geometry visible.
+            if sb.daemon.is_some() && changes.layout {
+                if sb.superseded() {
+                    return true; // a newer daemon owns the panes now
+                }
+                geometry_changed = sb.refresh_geometry();
+                if geometry_changed {
+                    sb.render(true);
+                    geometry_changed = false;
+                }
+            }
             // Focus first, output after: captures cost 30-130ms and the
             // cursor must not wait behind them. Deferred panes stay pending
             // and reach the next output scan under its usual throttle.
@@ -537,12 +550,20 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             if sb.daemon.is_some() && sb.superseded() {
                 return true; // a newer daemon owns the panes now
             }
-            // Preserved-pane inventory, sizing and drag detection are periodic
-            // reconciliation. Running them for output/focus scans can sample
-            // transient tmux layouts twice and mistake them for a user drag.
-            if sb.daemon.is_some() && periodic && !sb.mirror_tick() {
-                trace!("event loop exit: no preserved panes left");
-                break;
+            // Preserved-pane inventory, pane reflow and drag detection are
+            // periodic reconciliation. Layout notifications refresh only
+            // render geometry; running the full reconciliation for every scan
+            // can mistake transient tmux layouts for a user drag.
+            if sb.daemon.is_some() && periodic {
+                let previous_size = sb.daemon.as_ref().unwrap().size;
+                if !sb.mirror_tick() {
+                    trace!("event loop exit: no preserved panes left");
+                    break;
+                }
+                geometry_changed = sb
+                    .daemon
+                    .as_ref()
+                    .is_some_and(|daemon| daemon.size != previous_size);
             }
             if sb.daemon.is_some() && periodic {
                 if let Some(log) = crate::diag::cap_daemon_log(
@@ -562,7 +583,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 trace!("event loop exit: runtime keys path vanished");
                 break;
             }
-            sb.render(false);
+            sb.render(geometry_changed);
             // a scan takes tens of ms — with the pre-scan `now`, a tick due
             // mid-scan is missed and the poll sleeps its full stale remainder
             now = Instant::now();
@@ -1406,7 +1427,7 @@ impl Sidebar {
 
     fn has_immediate_change(&self) -> bool {
         let pending = self.tmux.pending_changes();
-        pending.full || pending.focus
+        pending.full || pending.focus || pending.layout
     }
 
     fn client_focus(&mut self) -> Option<crate::focus::ClientFocus> {
