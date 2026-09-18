@@ -80,6 +80,9 @@ SH
 cat >"$tmp/bin/docker" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >>"$TEST_DOCKER"
+case "${1:-}" in
+  create) printf 'test-container\n' ;;
+esac
 SH
 chmod +x "$tmp/bin/cargo" "$tmp/bin/tmux" "$tmp/bin/docker"
 
@@ -90,14 +93,22 @@ grep -qx setup "$tmp/runtime.log"
 grep -qx toggle "$tmp/runtime.log"
 grep -Fq "set-option -g @agenmux-bin $tmp/plugin/target/debug/agenmux" "$tmp/tmux.log"
 
-mkdir -p "$tmp/home/.config/agenmux/agents"
-touch "$tmp/home/.tmux.conf" "$tmp/home/.config/agenmux/config.toml"
+mkdir -p "$tmp/home/.config/agenmux/agents" "$tmp/home/dotfiles"
+touch "$tmp/home/dotfiles/tmux.conf" "$tmp/home/.config/agenmux/config.toml"
+ln -s "$tmp/home/dotfiles/tmux.conf" "$tmp/home/.tmux.conf"
+tmux_config="$(realpath "$tmp/home/dotfiles/tmux.conf")"
 TEST_DOCKER="$tmp/docker-default.log" HOME="$tmp/home" XDG_CONFIG_HOME= REF=master PATH="$tmp/bin:$PATH" \
   bash "$tmp/plugin/scripts/dev-bin.sh" docker
 grep -Fxq 'AGENMUX_REF=master' "$tmp/docker-default.log"
-grep -Fxq "$tmp/home/.tmux.conf:/root/.tmux.conf:ro" "$tmp/docker-default.log"
-grep -Fxq "$tmp/home/.config/agenmux/config.toml:/root/.config/agenmux/config.toml:ro" "$tmp/docker-default.log"
-grep -Fxq "$tmp/home/.config/agenmux/agents:/root/.config/agenmux/agents:ro" "$tmp/docker-default.log"
+! grep -Fq "$tmp/home/.tmux.conf:/root/.tmux.conf" "$tmp/docker-default.log"
+grep -Fxq "$tmux_config" "$tmp/docker-default.log"
+grep -Fxq 'test-container:/tmp/agenmux-tmux.conf' "$tmp/docker-default.log"
+! grep -Fq "$tmp/home/.config/agenmux/config.toml:/root/.config/agenmux/config.toml" "$tmp/docker-default.log"
+grep -Fxq cp "$tmp/docker-default.log"
+grep -Fxq "$tmp/home/.config/agenmux/config.toml" "$tmp/docker-default.log"
+grep -Fxq 'test-container:/tmp/agenmux-config.toml' "$tmp/docker-default.log"
+grep -Fxq "$tmp/home/.config/agenmux/agents" "$tmp/docker-default.log"
+grep -Fxq 'test-container:/tmp/agenmux-agents' "$tmp/docker-default.log"
 grep -Fxq 'TMUX_CONFIG=/root/.tmux.conf' "$tmp/docker-default.log"
 grep -Fxq 'build' "$tmp/docker-default.log"
 grep -Fxq 'agenmux-dev' "$tmp/docker-default.log"
@@ -131,7 +142,8 @@ touch "$tmp/tmux.conf"
 TEST_DOCKER="$tmp/docker-config.log" REF=local TMUX_CONFIG="$tmp/tmux.conf" PATH="$tmp/bin:$PATH" \
   bash "$tmp/plugin/scripts/dev-bin.sh" docker
 grep -Fxq "AGENMUX_REF=local" "$tmp/docker-config.log"
-grep -Fxq "$tmp/tmux.conf:/root/.tmux.conf:ro" "$tmp/docker-config.log"
+grep -Fxq "$tmp/tmux.conf" "$tmp/docker-config.log"
+grep -Fxq 'test-container:/tmp/agenmux-tmux.conf' "$tmp/docker-config.log"
 grep -Fxq 'TMUX_CONFIG=/root/.tmux.conf' "$tmp/docker-config.log"
 grep -Fq 'FROM node:24-trixie-slim' "$DIR/scripts/Dockerfile.dev"
 grep -Fq 'apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git ripgrep tmux zsh' "$DIR/scripts/Dockerfile.dev"
