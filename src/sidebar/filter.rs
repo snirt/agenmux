@@ -1,4 +1,3 @@
-use crate::input::Key;
 use crate::scan::{PaneMeta, PaneRow};
 use std::collections::HashSet;
 
@@ -331,47 +330,27 @@ impl Sidebar {
         self.last_frame.clear();
     }
 
-    pub(super) fn search_key(&mut self, key: Key) {
-        match key {
-            Key::Quit | Key::Close => self.clear_filter(),
-            // First Enter accepts query and hands j/k back to filtered
-            // navigation. Enter in normal mode then jumps to selection.
-            Key::Jump => self.search_focused = false,
-            Key::Down => self.move_sel(1),
-            Key::Up => self.move_sel(-1),
-            Key::Backspace => {
-                self.attention_filter = false;
-                self.query.pop();
-                self.rebuild_visible(true);
-            }
-            Key::ClearSearch => {
-                self.query.clear();
-                self.attention_filter = false;
-                self.rebuild_visible(false);
-            }
-            Key::Text(text) => {
-                self.attention_filter = false;
-                let room = 256usize.saturating_sub(self.query.chars().count());
-                self.query
-                    .extend(text.chars().filter(|c| !c.is_control()).take(room));
-                self.rebuild_visible(true);
-            }
-            Key::WheelUp => self.scroll_viewport(-1),
-            Key::WheelDown => self.scroll_viewport(1),
-            Key::AllStates => self.clear_filter(),
-            Key::TogglePanes => self.toggle_all_panes(),
-            Key::First
-            | Key::Last
-            | Key::Select(_)
-            | Key::Sequence(_, _)
-            | Key::Owned(_, _)
-            | Key::Search
-            | Key::ToggleAttention
-            | Key::Help
-            | Key::Versions
-            | Key::Settings
-            | Key::Other => {}
-        }
+    /// Append typed text to the live query. Typing replaces the attention
+    /// filter, and a narrowed list restarts from its first row.
+    pub(super) fn push_query(&mut self, text: &str) {
+        self.attention_filter = false;
+        let room = 256usize.saturating_sub(self.query.chars().count());
+        self.query
+            .extend(text.chars().filter(|c| !c.is_control()).take(room));
+        self.rebuild_visible(true);
+    }
+
+    pub(super) fn pop_query(&mut self) {
+        self.attention_filter = false;
+        self.query.pop();
+        self.rebuild_visible(true);
+    }
+
+    /// Empty the query but stay in search mode, keeping the selection.
+    pub(super) fn clear_query(&mut self) {
+        self.query.clear();
+        self.attention_filter = false;
+        self.rebuild_visible(false);
     }
 }
 

@@ -88,6 +88,8 @@ use crate::input::{
     KeySequence, RawMode, SequenceAction, SequenceResult,
 };
 
+mod action;
+use action::{normal_action, search_action, Action};
 mod daemon;
 pub use daemon::run_daemon;
 use daemon::Daemon;
@@ -474,10 +476,10 @@ impl NavigationRun {
     }
 
     fn apply(self, sidebar: &mut Sidebar) {
-        match self.target {
-            NavigationTarget::Selection => sidebar.move_sel(self.delta),
-            NavigationTarget::Viewport => sidebar.scroll_viewport(self.delta),
-        }
+        sidebar.apply(match self.target {
+            NavigationTarget::Selection => Action::MoveSelection(self.delta),
+            NavigationTarget::Viewport => Action::ScrollViewport(self.delta),
+        });
     }
 }
 
@@ -701,8 +703,10 @@ fn cleanup(rows_file: &PathBuf, pin: &Option<String>) {
 }
 
 impl Sidebar {
-    /// Route every logical key through active UI mode. Overlay row maps may
-    /// use mouse selection; normal list selection runs only after mode dispatch.
+    /// Route every logical key through the active UI mode: unwrap client
+    /// ownership, feed multi-key sequences, then resolve the key to an
+    /// `Action` for the mode and apply it. Overlays keep their own key
+    /// handling until they move onto actions too.
     fn dispatch_key(&mut self, key: Key) -> DispatchResult {
         let key = match key {
             Key::Owned(key, client) => {
@@ -752,67 +756,12 @@ impl Sidebar {
             };
         }
         self.key_sequence.clear();
-        match dispatch_mode(self.overlay.as_ref(), self.search_focused) {
+        let action = match dispatch_mode(self.overlay.as_ref(), self.search_focused) {
             DispatchMode::Overlay => return self.overlay_key(key),
-            DispatchMode::Search => {
-                self.search_key(key);
-                return DispatchResult::Continue;
-            }
-            DispatchMode::Normal => {}
-        }
-        if let Key::Select(index) = &key {
-            self.select_index(*index);
-            return DispatchResult::Continue;
-        }
-        match key {
-            Key::First => self.select_index(1),
-            Key::Last => self.select_index(self.visible.len()),
-            Key::Down => self.move_sel(1),
-            Key::Up => self.move_sel(-1),
-            Key::WheelUp => self.scroll_viewport(-1),
-            Key::WheelDown => self.scroll_viewport(1),
-            Key::Jump => {
-                if self.jump() {
-                    return DispatchResult::Break;
-                }
-            }
-            Key::Help => self.help(),
-            Key::Versions => self.versions(),
-            Key::Settings => self.settings(),
-            Key::Search => self.focus_search(),
-            Key::ToggleAttention => self.toggle_attention_filter(),
-            Key::AllStates => self.clear_filter(),
-            Key::TogglePanes => self.toggle_all_panes(),
-            Key::Quit => {
-                if self.daemon.is_none() {
-                    // Popup/tty mode owns stdin, so q/Ctrl-C/Ctrl-D closes it.
-                    if let Some(p) = &self.pin {
-                        let _ = std::fs::remove_file(p);
-                    }
-                    return DispatchResult::Break;
-                }
-                // In preserved-pane mode close arrives as Key::Close from the
-                // key table; Quit also covers FIFO EOF, which must not kill it.
-            }
-            Key::Close => {
-                if self.daemon.is_some() {
-                    // Finish teardown before a fast reopen can observe the
-                    // dying control client and attach panes to it.
-                    self.teardown();
-                    self.daemon = None;
-                    return DispatchResult::QuietExit;
-                }
-                return DispatchResult::Break;
-            }
-            Key::Owned(_, _)
-            | Key::Sequence(_, _)
-            | Key::Backspace
-            | Key::ClearSearch
-            | Key::Text(_)
-            | Key::Select(_)
-            | Key::Other => {}
-        }
-        DispatchResult::Continue
+            DispatchMode::Search => search_action(key),
+            DispatchMode::Normal => normal_action(key),
+        };
+        action.map_or(DispatchResult::Continue, |action| self.apply(action))
     }
 
     fn begin_mutation(&mut self, action: SequenceAction, client: Option<String>) -> DispatchResult {
