@@ -1477,10 +1477,21 @@ fn quick_launchers_open_selected_panes_safely_and_reload_transactionally() {
     assert!(tmux.binding("agenmux", "G").contains("last"));
     assert!(tmux.binding("agenmux", "u").contains("versions"));
     return_to_sidebar();
+    assert_success(
+        tmux.bin(&["key", "help", &client]),
+        "open help while disabling quick launchers",
+    );
     tmux.wait_for(Duration::from_secs(5), || {
         let frame = tmux.text(&["capture-pane", "-p", "-t", &initial_sidebar]);
-        !frame.contains("nvim") && !frame.contains("lazygit") && !frame.contains("launchers")
+        frame.contains("this help")
+            && !frame.contains("nvim")
+            && !frame.contains("lazygit")
+            && !frame.contains("optional launchers")
     });
+    assert_success(
+        tmux.bin(&["key", "escape", &client]),
+        "close help after disabling quick launchers",
+    );
     let windows_before_legacy = tmux
         .text(&["list-windows", "-t", "plugin", "-F", "#{window_id}"])
         .lines()
@@ -2698,7 +2709,7 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
     let tmux = TestTmux::new("resize-frame");
     app_file(
         &tmux,
-        "[display]\nshow_all_panes=true\nsidebar_width=30\n[behavior]\nnotifications=false",
+        "[display]\nshow_all_panes=true\nshow_frame=false\nsidebar_width=30\n[behavior]\nnotifications=false",
     );
     tmux.assert_tmux(&[
         "set-option",
