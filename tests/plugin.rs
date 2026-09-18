@@ -2399,16 +2399,16 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
     // redraws before the next tick.
     tmux.assert_tmux(&["resize-pane", "-t", &sidebar, "-x", "30"]);
     let deadline = Instant::now() + Duration::from_millis(1500);
+    let mut restored_frame = frame();
     let mut pane_width = width();
     let mut configured_width = tmux.text(&["show-option", "-gqv", "@agenmux-width"]);
-    let mut restored_frame = frame();
     while !(pane_width == "30" && restored_frame == wide_frame && configured_width == "18")
         && Instant::now() < deadline
     {
         thread::sleep(Duration::from_millis(20));
+        restored_frame = frame();
         pane_width = width();
         configured_width = tmux.text(&["show-option", "-gqv", "@agenmux-width"]);
-        restored_frame = frame();
     }
     let restored = pane_width == "30" && restored_frame == wide_frame && configured_width == "18";
     assert!(
