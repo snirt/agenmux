@@ -92,7 +92,7 @@ grep -Fq "set-option -g @agenmux-bin $tmp/plugin/target/debug/agenmux" "$tmp/tmu
 
 mkdir -p "$tmp/home/.config/agenmux/agents"
 touch "$tmp/home/.tmux.conf" "$tmp/home/.config/agenmux/config.toml"
-TEST_DOCKER="$tmp/docker-default.log" HOME="$tmp/home" REF=master PATH="$tmp/bin:$PATH" \
+TEST_DOCKER="$tmp/docker-default.log" HOME="$tmp/home" XDG_CONFIG_HOME= REF=master PATH="$tmp/bin:$PATH" \
   bash "$tmp/plugin/scripts/dev-bin.sh" docker
 grep -Fxq 'AGENMUX_REF=master' "$tmp/docker-default.log"
 grep -Fxq "$tmp/home/.tmux.conf:/root/.tmux.conf:ro" "$tmp/docker-default.log"
