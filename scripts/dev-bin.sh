@@ -16,7 +16,14 @@ if [ "$ACTION" = docker ]; then
   config_dir="$(cd "$(dirname "$config")" && pwd)"
   config="$config_dir/$(basename "$config")"
   docker build -t agenmux-dev -f "$DIR/scripts/Dockerfile.dev" "$DIR/scripts" || exit 1
-  docker_args=(run --rm -it -e TERM=xterm-256color -e COLORTERM=truecolor -e "AGENMUX_REF=$ref" -e TMUX_CONFIG=/root/.tmux.conf -v "$DIR:/workspace" -v "$config:/root/.tmux.conf:ro" -v agenmux-pi-home:/root/.pi/agent -v agenmux-cargo-registry:/root/.cargo/registry -v agenmux-cargo-git:/root/.cargo/git -v agenmux-build-cache:/tmp/agenmux-target -w /workspace)
+  case "${XDG_CONFIG_HOME:-}" in
+    /*) app_config="$XDG_CONFIG_HOME/agenmux" ;;
+    *) app_config="$HOME/.config/agenmux" ;;
+  esac
+  docker_args=(run --rm -it -e TERM=xterm-256color -e COLORTERM=truecolor -e "AGENMUX_REF=$ref" -e TMUX_CONFIG=/root/.tmux.conf -v "$DIR:/workspace" -v "$config:/root/.tmux.conf:ro" -v agenmux-pi-home:/root/.pi/agent -v agenmux-cargo-registry:/root/.cargo/registry -v agenmux-cargo-git:/root/.cargo/git -v agenmux-build-cache:/tmp/agenmux-target)
+  [ ! -f "$app_config/config.toml" ] || docker_args+=(--volume "$app_config/config.toml:/root/.config/agenmux/config.toml:ro")
+  [ ! -d "$app_config/agents" ] || docker_args+=(--volume "$app_config/agents:/root/.config/agenmux/agents:ro")
+  docker_args+=(-w /workspace)
   exec docker "${docker_args[@]}" agenmux-dev bash -lc '
     if [ "$AGENMUX_REF" = local ]; then
       src=/workspace
@@ -25,13 +32,16 @@ if [ "$ACTION" = docker ]; then
       src=/tmp/agenmux
     fi &&
     CARGO_TARGET_DIR=/tmp/agenmux-target cargo build --manifest-path "$src/Cargo.toml" &&
-    sed -E "/(agents-mon|agenmux)\.tmux/d; /^[[:space:]]*(set|set-option)[[:space:]].*default-(shell|command)([[:space:]]|$)/d" "$TMUX_CONFIG" >/tmp/tmux.conf &&
+    sed -E "/(agents-mon|agenmux)\.tmux/d; /^[[:space:]]*(set|set-option)[[:space:]].*default-(shell|command)([[:space:]]|$)/d; s/(choose-tree[[:space:]]+-[A-Za-z]*)y([A-Za-z]*)/\1\2/g; s/,(width=[^,\"]+|align=[^,\"]+)//g" "$TMUX_CONFIG" >/tmp/tmux.conf &&
     echo "set -g default-shell /bin/bash" >>/tmp/tmux.conf &&
+    echo "set -g default-terminal tmux-256color" >>/tmp/tmux.conf &&
+    echo "set -as terminal-features ,xterm-256color:RGB" >>/tmp/tmux.conf &&
+    echo "set -g @agenmux-bin /tmp/agenmux-target/debug/agenmux" >>/tmp/tmux.conf &&
+    printf "\033[2J\033[H" &&
     AGENMUX_DIR="$src" AGENMUX_SKIP_UPDATE=1 AGENMUX_FORCE_WIZARD=1 AGENMUX_TMUX_CONF=/tmp/tmux.conf sh /workspace/install.sh &&
     TMUX_CONFIG=/tmp/tmux.conf &&
-    tmux -f "$TMUX_CONFIG" new-session -d -s agenmux -c /workspace pi &&
-    tmux set-option -g @agenmux-bin /tmp/agenmux-target/debug/agenmux &&
-    tmux run-shell "AGENMUX_DIR=$src /tmp/agenmux-target/debug/agenmux setup" &&
+    tmux -f "$TMUX_CONFIG" new-session -d -s agenmux -c /workspace &&
+    tmux set-hook -g "client-attached[99]" "run-shell -b \"AGENMUX_DIR=$src /tmp/agenmux-target/debug/agenmux toggle split #{q:client_name}; tmux set-hook -gu client-attached[99]\"" &&
     exec tmux attach -t agenmux
   '
 fi
