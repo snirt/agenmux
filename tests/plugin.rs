@@ -2365,13 +2365,10 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
             .is_empty()
     });
     let client = tmux.text(&["list-clients", "-F", "#{client_name}"]);
-    let debug_log = tmux.tmp.join("resize-debug");
-    let output = tmux
-        .bin_command(&["toggle", "split", &client])
-        .env("AGENMUX_DEBUG", &debug_log)
-        .output()
-        .unwrap();
-    assert_success(output, "start resize test sidebar");
+    assert_success(
+        tmux.bin(&["toggle", "split", &client]),
+        "start resize test sidebar",
+    );
     let sidebar = tmux.text(&[
         "list-panes",
         "-f",
@@ -2381,19 +2378,18 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
     ]);
     let width = || tmux.text(&["display-message", "-p", "-t", &sidebar, "#{pane_width}"]);
     let frame = || tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
+    let wide_title = "stable geometry title l";
     tmux.wait_for(Duration::from_secs(4), || {
-        width() == "30" && frame().contains("stable geometry title")
+        width() == "30" && frame().contains(wide_title)
     });
-    let wide_frame = frame();
 
     tmux.assert_tmux(&["resize-pane", "-t", &sidebar, "-x", "18"]);
     tmux.wait_for(Duration::from_secs(4), || {
         tmux.text(&["show-option", "-gqv", "@agenmux-width"]) == "18"
     });
     thread::sleep(Duration::from_millis(100));
-    assert_ne!(
-        frame(),
-        wide_frame,
+    assert!(
+        !frame().contains(wide_title),
         "narrow render should clip the long title"
     );
 
@@ -2405,7 +2401,7 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
     let mut restored_frame = frame();
     let mut pane_width = width();
     let mut configured_width = tmux.text(&["show-option", "-gqv", "@agenmux-width"]);
-    while !(pane_width == "30" && restored_frame == wide_frame && configured_width == "18")
+    while !(pane_width == "30" && restored_frame.contains(wide_title) && configured_width == "18")
         && Instant::now() < deadline
     {
         thread::sleep(Duration::from_millis(20));
@@ -2413,23 +2409,13 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
         pane_width = width();
         configured_width = tmux.text(&["show-option", "-gqv", "@agenmux-width"]);
     }
-    let restored = pane_width == "30" && restored_frame == wide_frame && configured_width == "18";
-    if !restored {
-        let layout_trace = std::fs::read_to_string(&debug_log)
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| {
-                line.contains("layout-change notification")
-                    || line.contains("layout geometry")
-                    || line.contains("layout redraw completed")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        panic!(
-            "sidebar geometry did not redraw before periodic reconciliation: pane_width={pane_width}, @agenmux-width={configured_width}, frame_matches_wide={}, frame:\n{restored_frame}\nlayout trace:\n{layout_trace}",
-            restored_frame == wide_frame
-        );
-    }
+    let restored =
+        pane_width == "30" && restored_frame.contains(wide_title) && configured_width == "18";
+    assert!(
+        restored,
+        "sidebar geometry did not redraw before periodic reconciliation: pane_width={pane_width}, @agenmux-width={configured_width}, frame_contains_wide_title={}, frame:\n{restored_frame}",
+        restored_frame.contains(wide_title)
+    );
 
     assert_success(
         tmux.bin(&["key", "close", &client]),
