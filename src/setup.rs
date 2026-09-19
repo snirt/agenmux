@@ -238,6 +238,44 @@ pub fn run(plugin_dir: &Path) -> i32 {
     }
 }
 
+/// Plugin-entry setup. TPM-style managers run every `*.tmux` in the plugin
+/// root and the eager installer re-enters after `install-bin.sh`, so one
+/// reload calls setup about four times over, each spending ~330 tmux
+/// processes to reinstall what is already there. Skip when the server
+/// already carries this contract; bare `setup` stays unconditional so it
+/// remains the diagnostic that reinstalls.
+pub fn run_if_needed(plugin_dir: &Path) -> i32 {
+    let config = match crate::app_config::current(None) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("agenmux: {e}");
+            return e.exit_code();
+        }
+    };
+    if installed_current(&config) {
+        return 0;
+    }
+    run_config(plugin_dir, &config)
+}
+
+/// True when the tmux server already carries this binary's setup contract.
+/// Same fingerprint `toggle` and config reload compare against: `nav_version`
+/// folds in NAV_LAYOUT, so bumping that constant on a contract change reruns
+/// setup here exactly as it already does there. The runtime binary is checked
+/// too, so swapping @agenmux-bin reinstalls even when the keymaps match.
+fn installed_current(config: &crate::app_config::AppConfig) -> bool {
+    let Ok(bin) = std::env::current_exe() else {
+        return false;
+    };
+    let option = |name: &str| {
+        tmux::command(&["show-option", "-gqv", name])
+            .map(|value| value.trim_end().to_owned())
+            .unwrap_or_default()
+    };
+    option("@agenmux-nav-version") == nav_version(config)
+        && option("@agenmux-runtime-bin") == bin.to_string_lossy()
+}
+
 pub fn run_config(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> i32 {
     match setup(plugin_dir, config) {
         Ok(()) => 0,
