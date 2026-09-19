@@ -353,7 +353,7 @@ SH
 #!/usr/bin/env bash
 case "\$*" in
 --version) printf 'agenmux $version\\n' ;;
-setup) printf 'setup\\n' >>"$tmp/engine.log"; exit "\${SETUP_STATUS:-0}" ;;
+'setup --if-needed') printf 'setup\\n' >>"$tmp/engine.log"; exit "\${SETUP_STATUS:-0}" ;;
 *) exit 2 ;;
 esac
 SH

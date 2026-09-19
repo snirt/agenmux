@@ -238,6 +238,33 @@ pub fn run(plugin_dir: &Path) -> i32 {
     }
 }
 
+pub fn run_if_needed(plugin_dir: &Path) -> i32 {
+    let config = match crate::app_config::current(None) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("agenmux: {e}");
+            return e.exit_code();
+        }
+    };
+    if installed_current(&config) {
+        return 0;
+    }
+    run_config(plugin_dir, &config)
+}
+
+fn installed_current(config: &crate::app_config::AppConfig) -> bool {
+    let Ok(bin) = std::env::current_exe() else {
+        return false;
+    };
+    let option = |name: &str| {
+        tmux::command(&["show-option", "-gqv", name])
+            .map(|value| value.trim_end().to_owned())
+            .unwrap_or_default()
+    };
+    option("@agenmux-nav-version") == nav_version(config)
+        && option("@agenmux-runtime-bin") == bin.to_string_lossy()
+}
+
 pub fn run_config(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> i32 {
     match setup(plugin_dir, config) {
         Ok(()) => 0,
@@ -315,10 +342,12 @@ fn setup(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> Result<(),
         // Editing uses a fixed table so changing normal/search bindings cannot
         // strand an open TextEdit or Select control.
         clone_root_table(SETTINGS_TABLE)?;
-        install_settings_keys()?;
+        let mut bindings = Vec::new();
+        install_settings_keys(&mut bindings);
         clear_table(SEQUENCE_TABLE)?;
-        install_keys(config)?;
-        install_wheel_keys(&bin)?;
+        install_keys(&mut bindings, config);
+        install_wheel_keys(&mut bindings, &bin);
+        tmux::command_batch(&bindings)?;
         install_picker_filter(config.hide_windows.as_deref())?;
         install_status(&bin)?;
         tmux::command_status(&[
@@ -457,8 +486,12 @@ fn clone_root_table(table: &str) -> Result<(), TmuxError> {
     }
 }
 
-fn bind(table: &str, key: &str, command: &str) -> Result<(), TmuxError> {
-    tmux::command_status(&["bind-key", "-T", table, key, command])
+fn queue_bind(commands: &mut Vec<Vec<String>>, table: &str, key: &str, command: &str) {
+    commands.push(
+        ["bind-key", "-T", table, key, command]
+            .map(str::to_owned)
+            .to_vec(),
+    );
 }
 
 /// Navigation keys skip `run-shell`: tmux spawns the user's shell per job
@@ -619,13 +652,14 @@ fn key_bindings(config: &crate::app_config::AppConfig) -> Vec<(&'static str, Str
     out
 }
 
-fn install_settings_keys() -> Result<(), TmuxError> {
+fn install_settings_keys(commands: &mut Vec<Vec<String>>) {
     for code in 32u8..=126 {
-        bind(
+        queue_bind(
+            commands,
             SETTINGS_TABLE,
             &KeyChord::Printable(code).tmux_name(),
             &key_command(&format!("text-{code:02X}"), SETTINGS_TABLE, false),
-        )?;
+        );
     }
     // Select widgets accept arrows; Left/Right mirror Up/Down for compact panes
     // where horizontal movement is the natural dropdown gesture.
@@ -639,28 +673,29 @@ fn install_settings_keys() -> Result<(), TmuxError> {
         ("BSpace", "backspace"),
         ("C-u", "clear-search"),
     ] {
-        bind(
+        queue_bind(
+            commands,
             SETTINGS_TABLE,
             key,
             &key_command(action, SETTINGS_TABLE, false),
-        )?;
+        );
     }
-    bind(
+    queue_bind(
+        commands,
         SETTINGS_TABLE,
         "Any",
         "switch-client -T agenmux-settings-edit",
-    )
+    );
 }
 
-fn install_keys(config: &crate::app_config::AppConfig) -> Result<(), TmuxError> {
+fn install_keys(commands: &mut Vec<Vec<String>>, config: &crate::app_config::AppConfig) {
     for (table, key, command) in key_bindings(config) {
-        bind(table, &key, &command)?;
+        queue_bind(commands, table, &key, &command);
     }
-    Ok(())
 }
 
-/// Table layout version plus a keymap fingerprint: toggle reruns setup when
-/// either changes, so edited keys apply without a manual setup.
+/// Table layout version plus a setup fingerprint: toggle reruns setup when
+/// either changes, so edited bindings apply without a manual setup.
 pub fn nav_version(config: &crate::app_config::AppConfig) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for (table, key, command) in key_bindings(config) {
@@ -668,10 +703,19 @@ pub fn nav_version(config: &crate::app_config::AppConfig) -> String {
             hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
         }
     }
+    for byte in config
+        .hide_windows
+        .as_deref()
+        .unwrap_or_default()
+        .bytes()
+        .chain(std::iter::once(config.hide_windows.is_some().into()))
+    {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+    }
     format!("{NAV_LAYOUT}.{hash:016x}")
 }
 
-fn install_wheel_keys(_bin: &str) -> Result<(), TmuxError> {
+fn install_wheel_keys(commands: &mut Vec<Vec<String>>, _bin: &str) {
     for table in [NORMAL_TABLE, SEARCH_TABLE] {
         for (key, action, native) in [
             (
@@ -685,10 +729,9 @@ fn install_wheel_keys(_bin: &str) -> Result<(), TmuxError> {
             let command = format!(
                 r#"if-shell -F '#{{==:#{{pane_title}},agenmux}}' "{plugin}; switch-client -T {table}" "{native}""#
             );
-            bind(table, key, &command)?;
+            queue_bind(commands, table, key, &command);
         }
     }
-    Ok(())
 }
 
 fn install_mouse(_bin: &str) -> Result<(), TmuxError> {
