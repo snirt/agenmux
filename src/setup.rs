@@ -694,14 +694,23 @@ fn install_keys(commands: &mut Vec<Vec<String>>, config: &crate::app_config::App
     }
 }
 
-/// Table layout version plus a keymap fingerprint: toggle reruns setup when
-/// either changes, so edited keys apply without a manual setup.
+/// Table layout version plus a setup fingerprint: toggle reruns setup when
+/// either changes, so edited bindings apply without a manual setup.
 pub fn nav_version(config: &crate::app_config::AppConfig) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for (table, key, command) in key_bindings(config) {
         for byte in [table.as_bytes(), key.as_bytes(), command.as_bytes(), b"\0"].concat() {
             hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
         }
+    }
+    for byte in config
+        .hide_windows
+        .as_deref()
+        .unwrap_or_default()
+        .bytes()
+        .chain(std::iter::once(config.hide_windows.is_some().into()))
+    {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
     }
     format!("{NAV_LAYOUT}.{hash:016x}")
 }

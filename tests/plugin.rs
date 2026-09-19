@@ -3760,6 +3760,17 @@ fn setup_if_needed_skips_an_unchanged_contract() {
         "--if-needed reinstalled an unchanged contract"
     );
 
+    app_file(&server, "[behavior]\nhide_windows = 'hidden*'");
+    assert_success(
+        server.bin(&["setup", "--if-needed"]),
+        "setup --if-needed after hide_windows change",
+    );
+    assert!(
+        server.binding("prefix", "w").contains("hidden*"),
+        "--if-needed ignored a changed picker filter"
+    );
+
+    server.assert_tmux(&["unbind-key", "-T", "agenmux", key]);
     assert_success(server.bin(&["setup"]), "forced setup");
     assert_eq!(
         server.binding("agenmux", key),
