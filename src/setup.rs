@@ -238,6 +238,34 @@ pub fn run(plugin_dir: &Path) -> i32 {
     }
 }
 
+pub fn run_if_needed(plugin_dir: &Path) -> i32 {
+    let config = match crate::app_config::current(None) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("agenmux: {e}");
+            return e.exit_code();
+        }
+    };
+    if installed_current(&config) {
+        return 0;
+    }
+    run_config(plugin_dir, &config)
+}
+
+/// Same fingerprint as `toggle`; bump NAV_LAYOUT on a contract change.
+fn installed_current(config: &crate::app_config::AppConfig) -> bool {
+    let Ok(bin) = std::env::current_exe() else {
+        return false;
+    };
+    let option = |name: &str| {
+        tmux::command(&["show-option", "-gqv", name])
+            .map(|value| value.trim_end().to_owned())
+            .unwrap_or_default()
+    };
+    option("@agenmux-nav-version") == nav_version(config)
+        && option("@agenmux-runtime-bin") == bin.to_string_lossy()
+}
+
 pub fn run_config(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> i32 {
     match setup(plugin_dir, config) {
         Ok(()) => 0,

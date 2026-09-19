@@ -106,7 +106,7 @@ install_launcher "$(option @agenmux-popup-key e)" \
 
 # Only a verified engine performs application setup and validation.
 if engine_current; then
-  AGENMUX_DIR="$CURRENT_DIR" "$BIN" setup || {
+  AGENMUX_DIR="$CURRENT_DIR" "$BIN" setup --if-needed || {
     rc=$?
     tmux display-message 'agenmux: setup failed; run agenmux config check --effective and agenmux setup for diagnostics' 2>/dev/null || true
     exit "$rc"

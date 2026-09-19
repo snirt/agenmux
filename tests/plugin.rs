@@ -3743,3 +3743,28 @@ fn toggle_reinstalls_key_tables_after_a_keymap_change() {
     let _ = viewer_process.kill();
     let _ = viewer_process.wait();
 }
+
+/// `--if-needed` skips an unchanged contract; bare `setup` still reinstalls.
+#[test]
+fn setup_if_needed_skips_an_unchanged_contract() {
+    let server = TestTmux::new("if-needed");
+    assert_success(server.bin(&["setup"]), "setup");
+    let key = "Space";
+    let installed = server.binding("agenmux", key);
+    assert!(!installed.is_empty(), "setup installed no {key} binding");
+
+    server.assert_tmux(&["unbind-key", "-T", "agenmux", key]);
+    assert_success(server.bin(&["setup", "--if-needed"]), "setup --if-needed");
+    assert_eq!(
+        server.binding("agenmux", key),
+        "",
+        "--if-needed reinstalled an unchanged contract"
+    );
+
+    assert_success(server.bin(&["setup"]), "forced setup");
+    assert_eq!(
+        server.binding("agenmux", key),
+        installed,
+        "bare setup no longer reinstalls"
+    );
+}
