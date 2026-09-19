@@ -78,6 +78,7 @@ fn main() {
             }
         },
         ["setup"] => setup::run(&plugin_dir()),
+        ["setup", "--if-needed"] => setup::run_if_needed(&plugin_dir()),
         ["toggle"] => toggle::run(&plugin_dir(), None, None),
         ["toggle", mode] => toggle::run(&plugin_dir(), Some(mode), None),
         ["toggle", mode, client] => toggle::run(&plugin_dir(), Some(mode), Some(client)),
