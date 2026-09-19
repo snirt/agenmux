@@ -149,6 +149,45 @@ pub fn command_status(args: &[&str]) -> Result<(), TmuxError> {
     command(args).map(drop)
 }
 
+pub fn command_batch(commands: &[Vec<String>]) -> Result<(), TmuxError> {
+    const MAX_BYTES: usize = 8 * 1024;
+    let mut start = 0;
+    let mut bytes = 0;
+    for (index, args) in commands.iter().enumerate() {
+        let command_bytes = args.iter().map(|arg| arg.len() + 1).sum::<usize>() + 1;
+        if index != start && bytes + command_bytes > MAX_BYTES {
+            command_batch_chunk(&commands[start..index])?;
+            start = index;
+            bytes = 0;
+        }
+        bytes += command_bytes;
+    }
+    command_batch_chunk(&commands[start..])
+}
+
+fn command_batch_chunk(commands: &[Vec<String>]) -> Result<(), TmuxError> {
+    if commands.is_empty() {
+        return Ok(());
+    }
+    let mut command = Command::new("tmux");
+    for (index, args) in commands.iter().enumerate() {
+        if index != 0 {
+            command.arg(";");
+        }
+        command.args(args);
+    }
+    let output = command.output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(TmuxError::Error(
+            String::from_utf8_lossy(&output.stderr)
+                .trim_end()
+                .to_string(),
+        ))
+    }
+}
+
 pub fn command_spawn(args: &[&str]) -> Result<(), TmuxError> {
     Command::new("tmux").args(args).spawn()?;
     Ok(())

@@ -3744,9 +3744,6 @@ fn toggle_reinstalls_key_tables_after_a_keymap_change() {
     let _ = viewer_process.wait();
 }
 
-/// The guard that keeps a plugin reload from reinstalling what is already
-/// installed: `--if-needed` skips once the contract matches, and bare `setup`
-/// still reinstalls unconditionally so it stays a usable diagnostic.
 #[test]
 fn setup_if_needed_skips_an_unchanged_contract() {
     let server = TestTmux::new("if-needed");
@@ -3755,8 +3752,6 @@ fn setup_if_needed_skips_an_unchanged_contract() {
     let installed = server.binding("agenmux", key);
     assert!(!installed.is_empty(), "setup installed no {key} binding");
 
-    // Stand in for the work a redundant run would redo: if the guard fails
-    // open, setup rebinds this and the assertion below catches it.
     server.assert_tmux(&["unbind-key", "-T", "agenmux", key]);
     assert_success(server.bin(&["setup", "--if-needed"]), "setup --if-needed");
     assert_eq!(
