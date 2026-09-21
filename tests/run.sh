@@ -727,13 +727,19 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
     sleep 0.1
   done
   $T new-window -t t: "sh -c 'sleep 1; exec \"$tmp/claude\"'"
-  sleep 3
   neww="$($T display-message -p -t t: '#{window_id}')"
   new_ok=0
-  $T list-panes -t "$neww" -F '#{pane_title}' | grep -qx agenmux && new_ok=1
-  delayed_sidebar="$($T list-panes -t "$neww" -F '#{pane_id}	#{pane_title}' |
-    awk -F'\t' '$2 == "agenmux" { print $1; exit }')"
-  delayed_frame="$($T capture-pane -p -t "$delayed_sidebar" -S -)"
+  delayed_frame=""
+  for _ in $(seq 1 50); do
+    delayed_sidebar="$($T list-panes -t "$neww" -F '#{pane_id}	#{pane_title}' |
+      awk -F'\t' '$2 == "agenmux" { print $1; exit }')"
+    if [ -n "$delayed_sidebar" ]; then
+      new_ok=1
+      delayed_frame="$($T capture-pane -p -t "$delayed_sidebar" -S -)"
+      printf '%s\n' "$delayed_frame" | grep -Fq claude && break
+    fi
+    sleep 0.1
+  done
   # concurrent adds must not double-split. One window switch fires two [43]
   # hooks, so racing pane-add commands are routine, and a check-then-split
   # without the native lock would let every one of them through.
