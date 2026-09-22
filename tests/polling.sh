@@ -22,12 +22,18 @@ export XDG_CONFIG_HOME="$tmp/config"
 export XDG_STATE_HOME="$tmp/state"
 mkdir -p "$XDG_CONFIG_HOME/agenmux/agents"
 
-# A zombie still answers kill -0, so only a live, unreaped process counts.
+# A zombie still answers kill -0, so only a live, unreaped process counts. The
+# pid may also have been reused after agenmux exited; only an agenmux process
+# is ours to wait for or kill.
 running() {
-  local stat
-  stat="$(ps -o stat= -p "$1" 2>/dev/null)" || return 1
+  local stat comm
+  read -r stat comm < <(ps -o stat=,comm= -p "$1" 2>/dev/null) || return 1
   case "$stat" in
     '' | *Z*) return 1 ;;
+  esac
+  case "$comm" in
+    *agenmux*) ;;
+    *) return 1 ;;
   esac
 }
 
