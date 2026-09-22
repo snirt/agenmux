@@ -731,7 +731,7 @@ impl Sidebar {
                     text.push_str(&format!(
                         " {error}no releases found — checking…{E}[0m\n\n\
                          {muted}{}{E}[0m",
-                        self.hint(&self.normal_keys, Action::Close, "back")
+                        self.back_hint()
                     ));
                 } else {
                     for (i, t) in tags.iter().enumerate() {
@@ -746,7 +746,7 @@ impl Sidebar {
                     let hint = join(&[
                         self.hint(&self.normal_keys, Action::Jump, "switch"),
                         self.nav_label(true, true),
-                        self.hint(&self.normal_keys, Action::Close, "back"),
+                        self.back_hint(),
                     ]);
                     text.push_str(&format!("\n{muted}{hint}{E}[0m"));
                 }
@@ -850,7 +850,7 @@ impl Sidebar {
                         self.close_overlay();
                         return super::DispatchResult::Continue;
                     }
-                    Key::Quit | Key::Close => {
+                    Key::AllStates | Key::Quit | Key::Close => {
                         self.close_overlay();
                         return super::DispatchResult::Continue;
                     }
