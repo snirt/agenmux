@@ -2007,9 +2007,8 @@ fn default_header_inherits_tmux_active_border_contrast() {
         assert_success(tmux.bin(&["key", key, &client]), "open frame setting");
     }
     tmux.wait_for(Duration::from_secs(3), || capture().contains("show frame"));
-    for key in ["enter", "down", "enter"] {
-        assert_success(tmux.bin(&["key", key, &client]), "disable pane frame");
-    }
+    // Enter flips a boolean directly; there is no true/false dropdown.
+    assert_success(tmux.bin(&["key", "enter", &client]), "disable pane frame");
     let config = tmux.tmp.join("config/agenmux/config.toml");
     tmux.wait_for(Duration::from_secs(3), || {
         std::fs::read_to_string(&config).is_ok_and(|source| source.contains("show_frame = false"))

@@ -316,6 +316,14 @@ fn is_bool_setting(name: &str) -> bool {
 
 fn setting_value(name: &str, buffer: &str) -> Result<String, String> {
     let value = buffer.trim();
+    if name == "keys.sequence_timeout_ms" {
+        return value
+            .parse::<u64>()
+            .ok()
+            .filter(|ms| *ms > 0)
+            .map(|ms| ms.to_string())
+            .ok_or_else(|| "expected a positive integer".into());
+    }
     if name.starts_with("keys.") {
         let mut array = toml_edit::Array::new();
         if value == "," {
@@ -375,9 +383,17 @@ fn choices(name: &str) -> Option<&'static [&'static str]> {
         _ if name.starts_with("quick_launchers.") && name.ends_with(".working_directory") => {
             Some(&["selected", "tmux"])
         }
-        _ if is_bool_setting(name) => Some(&["true", "false"]),
         _ => None,
     }
+}
+
+/// Booleans flip in place instead of opening an editor.
+fn toggled_value(row: &SettingRow) -> Option<&'static str> {
+    is_bool_setting(&row.name).then_some(if row.initial == "true" {
+        "false"
+    } else {
+        "true"
+    })
 }
 
 fn initial_setting_value(row: &SettingRow) -> String {
@@ -1194,15 +1210,28 @@ impl Sidebar {
                     }
                     Key::Jump => {
                         if let Some(row) = rows.get(settings.sel) {
-                            let value = initial_setting_value(row);
-                            let editor = choices(&row.name).map_or_else(
-                                || Editor::TextEdit(TextEdit::new(value.clone())),
-                                |options| Editor::Select(Select::new(&value, options)),
-                            );
-                            settings.edit = Some(SettingEdit {
-                                name: row.name.clone(),
-                                editor,
-                            });
+                            if let Some(value) = toggled_value(row) {
+                                match crate::app_config::edit_document(
+                                    &settings.source,
+                                    &row.name,
+                                    Some(value),
+                                ) {
+                                    Ok(source) => candidate = Some(source),
+                                    Err(error) => {
+                                        settings.message = Some((true, error.to_string()))
+                                    }
+                                }
+                            } else {
+                                let value = initial_setting_value(row);
+                                let editor = choices(&row.name).map_or_else(
+                                    || Editor::TextEdit(TextEdit::new(value.clone())),
+                                    |options| Editor::Select(Select::new(&value, options)),
+                                );
+                                settings.edit = Some(SettingEdit {
+                                    name: row.name.clone(),
+                                    editor,
+                                });
+                            }
                         }
                     }
                     Key::AllStates | Key::Quit | Key::Close if settings.search.is_some() => {
@@ -1429,7 +1458,32 @@ mod tests {
         assert_eq!(visible[0].name, "display.show_frame");
         assert_eq!(setting_group(&visible[0].name), "Display");
         assert_eq!(setting_label(&visible[0].name), "show frame");
-        assert_eq!(choices(&visible[0].name), Some(&["true", "false"][..]));
+        assert_eq!(choices(&visible[0].name), None);
+        assert_eq!(visible[0].initial, "true");
+        assert_eq!(toggled_value(&visible[0]), Some("false"));
+        let toggled = crate::app_config::edit_document(
+            &settings.source,
+            &visible[0].name,
+            toggled_value(&visible[0]),
+        )
+        .unwrap();
+        let toggled = crate::app_config::parse(&toggled)
+            .and_then(|file| crate::app_config::resolve(&file, &Default::default()))
+            .unwrap();
+        assert!(!toggled.show_frame);
+        let hidden = SettingRow {
+            name: visible[0].name.clone(),
+            persisted: "false".into(),
+            initial: "false".into(),
+            effective: "false".into(),
+            source: "file".into(),
+        };
+        assert_eq!(toggled_value(&hidden), Some("true"));
+        let width = settings_rows(&settings.source, &effective)
+            .into_iter()
+            .find(|row| row.name == "display.sidebar_width")
+            .unwrap();
+        assert_eq!(toggled_value(&width), None);
 
         settings.search = Some(TextEdit::new("split".into()));
         assert!(visible_settings_rows(&settings, &effective).is_empty());
@@ -1457,6 +1511,16 @@ mod tests {
             "[\"j\", \"Down\"]"
         );
         assert_eq!(setting_value("keys.normal.down", ",").unwrap(), "[\",\"]");
+        assert_eq!(
+            setting_value("keys.sequence_timeout_ms", " 3000 ").unwrap(),
+            "3000"
+        );
+        for invalid in ["0", "-1", "1.5", "j", ""] {
+            assert_eq!(
+                setting_value("keys.sequence_timeout_ms", invalid).unwrap_err(),
+                "expected a positive integer"
+            );
+        }
         let effective =
             crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
         let mut settings = Settings {
