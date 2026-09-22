@@ -1325,12 +1325,14 @@ fn quick_launchers_open_selected_panes_safely_and_reload_transactionally() {
             })
             .collect::<Vec<_>>()
     };
-    let selected = || {
+    // Header rows in all-pane mode carry a pane id too, so one pane can own
+    // several ordinals. Track the selected ordinal, not just its pane.
+    let selection = || {
         row_map()
             .into_iter()
-            .find_map(|(pane, _, selected)| selected.then_some(pane))
-            .unwrap_or_default()
+            .find_map(|(pane, ordinal, selected)| selected.then_some((pane, ordinal)))
     };
+    let selected = || selection().map(|(pane, _)| pane).unwrap_or_default();
     let send_sequence = |sequence: &str| {
         for byte in sequence.bytes() {
             assert_success(
@@ -1345,29 +1347,31 @@ fn quick_launchers_open_selected_panes_safely_and_reload_transactionally() {
     // rather than assuming a fixed delay was enough.
     let select = |target: &str| {
         for _ in 0..16 {
-            let rows = row_map();
-            let ordinal = |pane: &str| {
-                rows.iter()
-                    .find(|(candidate, _, _)| candidate == pane)
-                    .map(|(_, ordinal, _)| *ordinal)
-            };
-            let current = selected();
-            if current == target {
-                return;
-            }
-            let (Some(from), Some(to)) = (ordinal(&current), ordinal(target)) else {
+            let Some((current, from)) = selection() else {
                 thread::sleep(Duration::from_millis(50));
                 continue;
             };
+            // The pane's own row follows any header that carries its id.
+            let Some(to) = row_map()
+                .into_iter()
+                .filter(|(pane, _, _)| pane == target)
+                .map(|(_, ordinal, _)| ordinal)
+                .next_back()
+            else {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            };
+            if current == target && from == to {
+                return;
+            }
             let key = if to > from { "down" } else { "up" };
             assert_success(tmux.bin(&["key", key, &client]), "select pane row");
             // A read that races the rows rewrite sees no selection; it is not a move.
             let moved = (0..40).any(|_| {
                 thread::sleep(Duration::from_millis(50));
-                let now = selected();
-                !now.is_empty() && now != current
+                selection().is_some_and(|(_, ordinal)| ordinal != from)
             });
-            assert!(moved, "{key} did not move the selection from {current}");
+            assert!(moved, "{key} did not move the selection from row {from}");
         }
         panic!("could not select pane {target}; selected {}", selected());
     };
