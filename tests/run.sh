@@ -781,8 +781,13 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   sleep 0.2
   stayed="$($T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agenmux)"
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key close
-  sleep 2
-  left="$($T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agenmux)"
+  # Teardown of every mirror can outlast a fixed pause on a slow runner; wait
+  # for the panes and the frame file to go instead.
+  for _ in $(seq 1 100); do
+    left="$($T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agenmux)"
+    [ "$left" -eq 0 ] && [ ! -f "$tmp/agenmux-frame" ] && break
+    sleep 0.1
+  done
   if [ "$mirrors" -eq 1 ] && [ "$processless" -eq 1 ] && [ "$focus_kept" -eq 1 ] &&
     [ "$keys_ok" -eq 1 ] && [ "$control_ok" -eq 1 ] && [ "$stayed" -gt 0 ] &&
     printf '%s\n' "$live_frame" | grep -Fq agents &&
