@@ -1312,16 +1312,23 @@ fn quick_launchers_open_selected_panes_safely_and_reload_transactionally() {
                 .any(|line| line.starts_with(&format!("{ordinary}\t")))
     });
 
-    let selected = || {
+    // Selectable rows as (pane, ordinal, selected), in the order they render.
+    let row_map = || {
         std::fs::read_to_string(tmux.tmp.join("agenmux-rows"))
             .unwrap_or_default()
             .lines()
-            .find_map(|line| {
+            .filter_map(|line| {
                 let mut fields = line.split('\t');
-                let pane = fields.next()?;
-                let _ordinal = fields.next()?;
-                (fields.next() == Some("1")).then(|| pane.to_string())
+                let pane = fields.next()?.to_string();
+                let ordinal = fields.next()?.parse::<usize>().ok()?;
+                Some((pane, ordinal, fields.next() == Some("1")))
             })
+            .collect::<Vec<_>>()
+    };
+    let selected = || {
+        row_map()
+            .into_iter()
+            .find_map(|(pane, _, selected)| selected.then_some(pane))
             .unwrap_or_default()
     };
     let send_sequence = |sequence: &str| {
@@ -1333,14 +1340,34 @@ fn quick_launchers_open_selected_panes_safely_and_reload_transactionally() {
             thread::sleep(Duration::from_millis(100));
         }
     };
+    // The rows file trails key presses on a slow runner. Step toward the target
+    // one row at a time and wait for each move to land before reading again,
+    // rather than assuming a fixed delay was enough.
     let select = |target: &str| {
-        send_sequence("gg");
         for _ in 0..16 {
-            if selected() == target {
+            let rows = row_map();
+            let ordinal = |pane: &str| {
+                rows.iter()
+                    .find(|(candidate, _, _)| candidate == pane)
+                    .map(|(_, ordinal, _)| *ordinal)
+            };
+            let current = selected();
+            if current == target {
                 return;
             }
-            assert_success(tmux.bin(&["key", "down", &client]), "select pane row");
-            thread::sleep(Duration::from_millis(90));
+            let (Some(from), Some(to)) = (ordinal(&current), ordinal(target)) else {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            };
+            let key = if to > from { "down" } else { "up" };
+            assert_success(tmux.bin(&["key", key, &client]), "select pane row");
+            // A read that races the rows rewrite sees no selection; it is not a move.
+            let moved = (0..40).any(|_| {
+                thread::sleep(Duration::from_millis(50));
+                let now = selected();
+                !now.is_empty() && now != current
+            });
+            assert!(moved, "{key} did not move the selection from {current}");
         }
         panic!("could not select pane {target}; selected {}", selected());
     };
