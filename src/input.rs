@@ -765,11 +765,10 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
     }
     let runtime = tmux::runtime_dir();
 
-    let target = y
-        .checked_sub(1)
-        .and_then(|line| {
-            let rows = std::fs::read_to_string(runtime.join("agenmux-rows")).ok()?;
-            let mut fields = rows.lines().nth(line)?.split_whitespace();
+    let target = std::fs::read_to_string(runtime.join("agenmux-rows"))
+        .ok()
+        .and_then(|rows| {
+            let mut fields = rows.lines().nth(y)?.split_whitespace();
             let target = fields.next()?.to_string();
             let index = fields.next()?.parse::<u32>().ok()?;
             let selected = fields.next() == Some("1");

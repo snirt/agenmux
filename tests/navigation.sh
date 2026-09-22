@@ -1139,7 +1139,7 @@ mouse_x=$((sidebar_left + 1))
 for _ in 1 2 3; do
   ordinary_row="$(awk -v target="$ordinary_target" '$1 == target { print NR; exit }' \
     "$tmp/agenmux-rows")"
-  mouse_y=$((sidebar_top + ordinary_row + 1))
+  mouse_y=$((sidebar_top + ordinary_row))
   tmux -S "$sock" switch-client -c "$client" -t "$work"
   tmux -S "$sock" switch-client -c "$client" -T root
   printf '\033[<0;%d;%dM' "$mouse_x" "$mouse_y" >&9
@@ -1163,7 +1163,7 @@ done
 sleep 0.6
 ordinary_row="$(awk -v target="$ordinary_target" '$1 == target { print NR; exit }' \
   "$tmp/agenmux-rows")"
-mouse_y=$((sidebar_top + ordinary_row + 1))
+mouse_y=$((sidebar_top + ordinary_row))
 printf '\033[<0;%d;%dM' "$mouse_x" "$mouse_y" >&9
 for _ in $(seq 1 40); do
   ordinary_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
