@@ -689,13 +689,13 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
     "$BIN_ABS" toggle split
   sleep 2
   mirrors=0
-  processless=0
+  readers=0
   for w in $($T list-windows -t t -F '#{window_id}'); do
     pane_info="$($T list-panes -t "$w" -F '#{pane_title} #{pane_pid}' |
       awk '$1 == "agenmux" { print; exit }')"
     if [ -n "$pane_info" ]; then
       mirrors=$((mirrors + 1))
-      [ "${pane_info##* }" = 0 ] && processless=$((processless + 1))
+      [ "${pane_info##* }" -gt 0 ] && readers=$((readers + 1))
     fi
   done
   focus_kept=0
@@ -785,20 +785,20 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   # for the panes and the frame file to go instead.
   for _ in $(seq 1 100); do
     left="$($T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agenmux)"
-    [ "$left" -eq 0 ] && [ ! -f "$tmp/agenmux-frame" ] && break
+    [ "$left" -eq 0 ] && [ -z "$(find "$tmp" -name 'agenmux-frame-%*' -type p -print -quit)" ] && break
     sleep 0.1
   done
-  if [ "$mirrors" -eq 1 ] && [ "$processless" -eq 1 ] && [ "$focus_kept" -eq 1 ] &&
+  if [ "$mirrors" -eq 1 ] && [ "$readers" -eq 1 ] && [ "$focus_kept" -eq 1 ] &&
     [ "$keys_ok" -eq 1 ] && [ "$control_ok" -eq 1 ] && [ "$stayed" -gt 0 ] &&
     printf '%s\n' "$live_frame" | grep -Fq agents &&
     [ "$before" = "$after" ] && [ "$new_ok" -eq 1 ] &&
     printf '%s\n' "$delayed_frame" | grep -Fq claude &&
     [ "$raced" -eq 1 ] && [ "$widths" = 45 ] && [ "$optw" = 45 ] &&
     [ "$optw2" = 45 ] &&
-    [ "$left" -eq 0 ] && [ ! -f "$tmp/agenmux-frame" ]; then
+    [ "$left" -eq 0 ] && [ -z "$(find "$tmp" -name 'agenmux-frame-%*' -type p -print -quit)" ]; then
     echo "ok   mirror-mode-no-bump-lifecycle"
   else
-    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors processless=$processless focus=$focus_kept keys=$keys_ok control=$control_ok stayed=$stayed live=$([ -n "$live_frame" ] && echo y || echo n) layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok delayed=$([ -n "$delayed_frame" ] && printf '%s\n' "$delayed_frame" | grep -Fq claude && echo y || echo n) raced=$raced widths=$widths optw=$optw optw2=$optw2 left=$left"
+    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors readers=$readers focus=$focus_kept keys=$keys_ok control=$control_ok stayed=$stayed live=$([ -n "$live_frame" ] && echo y || echo n) layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok delayed=$([ -n "$delayed_frame" ] && printf '%s\n' "$delayed_frame" | grep -Fq claude && echo y || echo n) raced=$raced widths=$widths optw=$optw optw2=$optw2 left=$left"
     fail=1
   fi
   $T kill-server 2>/dev/null || true
@@ -850,9 +850,9 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
     printf '%s\n' "$list_before" | grep -Fq codex &&
     [ "$list_after" = "$list_before" ] &&
     ! printf '%s\n' "$list_moved" | grep -Fq '❯'; then
-    echo "ok   overlays-render-in-processless-panes"
+    echo "ok   overlays-render-in-sidebar-panes"
   else
-    echo "FAIL overlays-render-in-processless-panes: opened=$opened help=$help_alive versions=$vers_alive list=[$list_before/$list_after/$list_moved]"
+    echo "FAIL overlays-render-in-sidebar-panes: opened=$opened help=$help_alive versions=$vers_alive list=[$list_before/$list_after/$list_moved]"
     fail=1
   fi
   $T kill-server 2>/dev/null || true

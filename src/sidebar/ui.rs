@@ -154,32 +154,140 @@ impl Select {
 
 pub(super) struct TextEdit {
     value: String,
+    cursor: usize, // UTF-8 byte boundary
+    limit: usize,  // character count
 }
 
 impl TextEdit {
     pub(super) fn new(value: String) -> Self {
-        Self { value }
+        Self::with_limit(value, 512)
+    }
+
+    pub(super) fn with_limit(value: String, limit: usize) -> Self {
+        let cursor = value.len();
+        Self {
+            value,
+            cursor,
+            limit,
+        }
     }
 
     pub(super) fn value(&self) -> &str {
         &self.value
     }
 
-    pub(super) fn push(&mut self, text: &str) {
-        if self.value.len() + text.len() <= 512 {
-            self.value.push_str(text);
+    pub(super) fn display(&self, mark: &str) -> String {
+        format!(
+            "{}{mark}{}",
+            &self.value[..self.cursor],
+            &self.value[self.cursor..]
+        )
+    }
+    pub(super) fn display_clipped(&self, mark: &str, width: usize) -> String {
+        let before: Vec<char> = self.value[..self.cursor].chars().collect();
+        let after: Vec<char> = self.value[self.cursor..].chars().collect();
+        let room = width.saturating_sub(1);
+        let right = after.len().min(room / 2);
+        let left = before.len().min(room - right);
+        let right = after.len().min(room - left);
+        let mut left_part: Vec<char> = before[before.len() - left..].to_vec();
+        let mut right_part: Vec<char> = after[..right].to_vec();
+        if left < before.len() && !left_part.is_empty() {
+            left_part[0] = '…';
         }
+        if right < after.len() && !right_part.is_empty() {
+            *right_part.last_mut().unwrap() = '…';
+        }
+        format!(
+            "{}{mark}{}",
+            left_part.iter().collect::<String>(),
+            right_part.iter().collect::<String>()
+        )
+    }
+
+    pub(super) fn push(&mut self, text: &str) {
+        let room = self.limit.saturating_sub(self.value.chars().count());
+        let clean: String = text
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(room)
+            .collect();
+        self.value.insert_str(self.cursor, &clean);
+        self.cursor += clean.len();
     }
 
     pub(super) fn backspace(&mut self) {
-        self.value.pop();
+        if let Some((start, _)) = self.value[..self.cursor].char_indices().next_back() {
+            self.value.drain(start..self.cursor);
+            self.cursor = start;
+        }
+    }
+
+    pub(super) fn delete(&mut self) {
+        if let Some(c) = self.value[self.cursor..].chars().next() {
+            self.value.drain(self.cursor..self.cursor + c.len_utf8());
+        }
+    }
+
+    pub(super) fn move_left(&mut self) {
+        if let Some((start, _)) = self.value[..self.cursor].char_indices().next_back() {
+            self.cursor = start;
+        }
+    }
+
+    pub(super) fn move_right(&mut self) {
+        if let Some(c) = self.value[self.cursor..].chars().next() {
+            self.cursor += c.len_utf8();
+        }
+    }
+
+    pub(super) fn home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub(super) fn end(&mut self) {
+        self.cursor = self.value.len();
+    }
+    pub(super) fn handle(&mut self, key: &crate::input::Key) -> bool {
+        use crate::input::Key;
+        match key {
+            Key::Text(text) => self.push(text),
+            Key::Backspace => self.backspace(),
+            Key::Delete => self.delete(),
+            Key::Left => self.move_left(),
+            Key::Right => self.move_right(),
+            Key::Home => self.home(),
+            Key::End => self.end(),
+            Key::ClearSearch => self.clear(),
+            _ => return false,
+        }
+        true
     }
 
     pub(super) fn clear(&mut self) {
         self.value.clear();
+        self.cursor = 0;
     }
 }
 
+impl From<&str> for TextEdit {
+    fn from(value: &str) -> Self {
+        Self::with_limit(value.into(), 256)
+    }
+}
+
+impl From<String> for TextEdit {
+    fn from(value: String) -> Self {
+        Self::with_limit(value, 256)
+    }
+}
+
+impl std::ops::Deref for TextEdit {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.value()
+    }
+}
 pub(super) enum Editor {
     Select(Select),
     TextEdit(TextEdit),
@@ -247,13 +355,31 @@ mod tests {
     }
 
     #[test]
-    fn text_edit_caps_input_and_edits_value() {
-        let mut edit = TextEdit::new("value".into());
-        edit.push("!");
+    fn text_edit_inserts_and_deletes_at_unicode_cursor() {
+        let mut edit = TextEdit::with_limit("a界c".into(), 5);
+        edit.move_left();
+        edit.move_left();
+        assert_eq!(edit.display("▏"), "a▏界c");
+        edit.push("é\n🙂!");
+        assert_eq!(edit.value(), "aé🙂界c");
         edit.backspace();
-        assert_eq!(edit.value(), "value");
+        edit.delete();
+        assert_eq!(edit.value(), "aéc");
+        edit.home();
+        edit.move_right();
+        assert_eq!(edit.display("▏"), "a▏éc");
+        edit.end();
+        edit.push("!");
+        assert_eq!(edit.value(), "aéc!");
         edit.clear();
         edit.push(&"x".repeat(513));
-        assert_eq!(edit.value(), "");
+        assert_eq!(edit.value().len(), 5);
+        edit = TextEdit::with_limit("abcdefghijk".into(), 20);
+        edit.home();
+        edit.move_right();
+        edit.move_right();
+        assert_eq!(edit.display_clipped("▏", 5), "ab▏c…");
+        edit.end();
+        assert_eq!(edit.display_clipped("▏", 5), "…ijk▏");
     }
 }

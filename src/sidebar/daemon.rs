@@ -474,7 +474,7 @@ impl Sidebar {
         };
         let d = self.daemon.as_mut().unwrap();
         if d.writers.reconcile(visible_panes) {
-            // A new empty pane has no copy of the last frame yet.
+            // A new pane reader has no copy of the last frame yet.
             self.last_frame.clear();
         }
         d.win_sizes = ms
@@ -517,7 +517,7 @@ impl Sidebar {
         }
     }
 
-    /// Preserved-pane shutdown: close visible writers, kill empty panes and
+    /// Preserved-pane shutdown: close visible writers, kill sidebar panes and
     /// restore layouts through the native pane lifecycle, then drop the key
     /// FIFO and row map.
     /// Drop only what is ours. The panes, the FIFO path and the rows file

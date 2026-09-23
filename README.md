@@ -686,11 +686,11 @@ in `agents/*.conf`, so adding or tuning agents never needs a rebuild. Building
 on macOS needs rustc 1.90 or newer (for the native notification helper).
 
 Sidebar (`split`) mode creates and live-renders the focused window before open
-returns. Other windows receive processless panes lazily when a real client visits
-them, so startup cost does not grow with hidden-window count. These panes have no
-shell or `agenmux` child (`pane_pid=0`); the single daemon scans the global
-inventory but writes frames only to windows currently visible in attached clients.
-With every client detached, one active pane stays warm for the next attach.
+returns. Other windows receive panes lazily when a real client visits them, so
+startup cost does not grow with hidden-window count. Each pane runs a lightweight
+input reader for terminal paste; the single daemon scans the global inventory
+and sends frames only to panes visible in attached clients. With every client
+detached, one active pane stays warm for the next attach.
 
 GitHub Actions also builds ready-to-use plugin archives for x86_64 and ARM64 on
 Linux and macOS. The Linux binaries are statically linked for portability.

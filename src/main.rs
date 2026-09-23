@@ -58,6 +58,7 @@ fn main() {
         ["status"] => cmd_status(),
         ["sidebar"] => sidebar::run(plugin_dir(), scan_cache_path()),
         ["daemon"] => sidebar::run_daemon(plugin_dir(), scan_cache_path()),
+        ["sidebar-pane"] => pane_writers::run_pane(),
         ["key", key] => sidebar::send_key(key, None),
         ["key", key, client] => sidebar::send_key(key, Some(client)),
         ["click", pane, y, client] => y.parse().map_or(2, |y| input::click(pane, y, client)),

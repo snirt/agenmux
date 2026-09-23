@@ -914,7 +914,7 @@ for _ in $(seq 1 80); do
 done
 
 # Simulate leaving through an agent jump, then restoring the exact client's
-# processless-sidebar focus and navigation table.
+# sidebar-reader focus and navigation table.
 tmux -S "$sock" switch-client -c "$client" -T root
 tmux -S "$sock" switch-client -c "$client" -t "$work"
 tmux -S "$sock" switch-client -c "$client" -t "$sidebar"
@@ -952,6 +952,25 @@ for _ in $(seq 1 60); do
     has "$search_hint" 'esc clear' &&
     [ "$search_table" = agenmux-search ]; then
     search_works=1
+    break
+  fi
+  sleep 0.05
+done
+# Paste through the attached tmux client, not paste-buffer -p (which bypasses
+# tmux's client-side bracketed-paste decoding).
+client_paste_works=0
+printf '\025' >&9
+for _ in $(seq 1 40); do
+  client_paste_clear="$(pane_header "$sidebar")"
+  ! has "$client_paste_clear" '/navigation' && break
+  sleep 0.05
+done
+printf '\033[200~navigation\033[201~' >&9
+for _ in $(seq 1 60); do
+  client_paste_frame="$(pane_header "$sidebar")"
+  if has "$client_paste_frame" '/navigation' &&
+    [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux-search ]; then
+    client_paste_works=1
     break
   fi
   sleep 0.05
@@ -1534,6 +1553,7 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   [ "$slow_gg_expires" -eq 1 ] &&
   [ "$return_table" = agenmux ] && [ "$return_focus" = agenmux ] &&
   [ "$fourth" != "$third" ] && [ "$search_works" -eq 1 ] &&
+  [ "$client_paste_works" -eq 1 ] &&
   [ "$search_accept_works" -eq 1 ] && [ "$search_jk_works" -eq 1 ] &&
   [ "$search_edges_work" -eq 1 ] &&
   [ "$search_blur_works" -eq 1 ] && [ "$attention_filter_works" -eq 1 ] &&
@@ -1554,6 +1574,7 @@ if [ "$table" = agenmux ] && [ "$initial_focus" = agenmux ] &&
   [ "$notification_stale_noop" -eq 1 ]; then
   echo "ok   attached-client-jk-navigation"
 else
+  echo "client-paste: works=$client_paste_works clear=[$client_paste_clear] result=[$client_paste_frame]"
   echo "edge-nav: long=$edge_long_list_works slow=$slow_gg_expires search=$search_edges_work"
   echo "sustained-input: keys=$sustained_navigation_works [$held_start->$held_mid->$held_boundary/$held_stable->$held_up_mid->$held_reset/$held_reset_stable] wheel=$wheel_burst_works [$wheel_burst_top->$wheel_burst_mid->$wheel_burst_reset/$wheel_burst_stable selected=$wheel_burst_selected/$wheel_burst_selected_after]"
   echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$settings_hint_visible/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$attention_filter_works/$attention_targets/$attention_frame/$attention_hint/$all_filter_works/$all_targets/$all_frame] reload=[$reload_hint_follows/$reload_hint] ordinary=[$ordinary_keyboard_jump/$ordinary_first_click/$ordinary_mouse_jump/$ordinary_restored_false target=$ordinary_target focus=$ordinary_focus table=$ordinary_table] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"

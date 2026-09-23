@@ -17,11 +17,11 @@ pub(super) enum Overlay {
     Settings(Settings),
     Create {
         target: MutationTarget,
-        name: String,
+        name: TextEdit,
     },
     Rename {
         target: MutationTarget,
-        name: String,
+        name: TextEdit,
     },
     Confirm(MutationTarget),
 }
@@ -106,7 +106,6 @@ impl Overlay {
     /// Text a prompt shows on the cursor row when the tree cannot draw it in
     /// place (agent-only mode), with whether it is a destructive confirmation.
     pub(super) fn inline_prompt(&self) -> Option<(String, bool)> {
-        let typed = |name: &str| -> String { name.chars().filter(|c| !c.is_control()).collect() };
         Some(match self {
             Overlay::Confirm(target) => {
                 let kind = match target.action {
@@ -121,7 +120,7 @@ impl Overlay {
                     SequenceAction::CreateSession => "session",
                     _ => "window",
                 };
-                (format!("new {kind}: {}▏", typed(name)), false)
+                (format!("new {kind}: {}", name.display("▏")), false)
             }
             Overlay::Rename { target, name } => {
                 let kind = match target.action {
@@ -129,7 +128,7 @@ impl Overlay {
                     SequenceAction::RenameWindow => "window",
                     _ => "session",
                 };
-                (format!("{kind} name: {}▏", typed(name)), false)
+                (format!("{kind} name: {}", name.display("▏")), false)
             }
             Overlay::Help | Overlay::Versions { .. } | Overlay::Settings(_) => return None,
         })
@@ -490,8 +489,8 @@ fn render_settings(
     }) = &settings.edit
     {
         out.push_str(&format!(
-            "\n{name}\n\n> {}_\n\nEnter apply · Esc cancel",
-            edit.value()
+            "\n{name}\n\n> {}\n\nEnter apply · Esc cancel",
+            edit.display_clipped("_", cols.saturating_sub(2))
         ));
         if let Some((error, message)) = &settings.message {
             out.push_str(&format!(
@@ -509,9 +508,12 @@ fn render_settings(
     });
     if let Some(search) = &settings.search {
         out.push_str(&format!(
-            "\n/ {}{}\n",
-            search.value(),
-            if settings.search_editing { "_" } else { "" }
+            "\n/ {}\n",
+            if settings.search_editing {
+                search.display_clipped("_", cols.saturating_sub(2))
+            } else {
+                search.value().into()
+            }
         ));
     } else {
         out.push_str("\n/ search\n");
@@ -637,14 +639,6 @@ fn render_settings(
     let frame = clip_frame(&out, cols, rows.saturating_sub(1));
     targets.truncate(frame.lines().count().saturating_sub(1));
     (frame, targets)
-}
-fn append_name(name: &mut String, text: &str) {
-    let remaining = 128usize.saturating_sub(name.chars().count());
-    name.extend(
-        text.chars()
-            .filter(|character| !character.is_control())
-            .take(remaining),
-    );
 }
 
 impl Sidebar {
@@ -829,7 +823,10 @@ impl Sidebar {
                     .chars()
                     .filter(|character| !character.is_control())
                     .collect();
-                self.overlay = Some(Overlay::Rename { target, name });
+                self.overlay = Some(Overlay::Rename {
+                    target,
+                    name: TextEdit::with_limit(name, 128),
+                });
             }
             Err(error) => {
                 self.restore_mutation_input(&target.client);
@@ -875,39 +872,35 @@ impl Sidebar {
                 chosen = tags.get(sel).cloned();
                 self.overlay = Some(Overlay::Versions { sel, chosen });
             }
-            Overlay::Create { target, mut name } => match key {
-                Key::Text(text) => {
-                    append_name(&mut name, &text);
+            Overlay::Create { target, mut name } => {
+                if name.handle(&key) {
                     self.overlay = Some(Overlay::Create { target, name });
+                } else {
+                    match key {
+                        Key::Jump => return self.execute_mutation(&target, name.value()),
+                        Key::AllStates | Key::Quit | Key::Close => {
+                            self.restore_mutation_input(&target.client)
+                        }
+                        _ => self.overlay = Some(Overlay::Create { target, name }),
+                    }
                 }
-                Key::Backspace => {
-                    name.pop();
-                    self.overlay = Some(Overlay::Create { target, name });
-                }
-                Key::Jump => return self.execute_mutation(&target, &name),
-                Key::AllStates | Key::ClearSearch | Key::Quit | Key::Close => {
-                    self.restore_mutation_input(&target.client);
-                }
-                _ => self.overlay = Some(Overlay::Create { target, name }),
-            },
-            Overlay::Rename { target, mut name } => match key {
-                Key::Text(text) => {
-                    append_name(&mut name, &text);
+            }
+            Overlay::Rename { target, mut name } => {
+                if name.handle(&key) {
                     self.overlay = Some(Overlay::Rename { target, name });
+                } else {
+                    match key {
+                        Key::Jump if name.trim().is_empty() => {
+                            self.restore_mutation_input(&target.client)
+                        }
+                        Key::Jump => return self.execute_mutation(&target, name.value()),
+                        Key::AllStates | Key::Quit | Key::Close => {
+                            self.restore_mutation_input(&target.client)
+                        }
+                        _ => self.overlay = Some(Overlay::Rename { target, name }),
+                    }
                 }
-                Key::Backspace => {
-                    name.pop();
-                    self.overlay = Some(Overlay::Rename { target, name });
-                }
-                Key::Jump if name.trim().is_empty() => {
-                    self.restore_mutation_input(&target.client);
-                }
-                Key::Jump => return self.execute_mutation(&target, &name),
-                Key::AllStates | Key::ClearSearch | Key::Quit | Key::Close => {
-                    self.restore_mutation_input(&target.client);
-                }
-                _ => self.overlay = Some(Overlay::Rename { target, name }),
-            },
+            }
             Overlay::Confirm(target) => {
                 let confirmed = matches!(key, Key::Text(ref text) if text == "y");
                 if confirmed {
@@ -1126,30 +1119,24 @@ impl Sidebar {
                     _ => {}
                 }
             } else if let Some(edit) = &mut settings.edit {
+                if let Editor::TextEdit(editor) = &mut edit.editor {
+                    if editor.handle(&key) {
+                        self.last_frame.clear();
+                        return;
+                    }
+                }
                 match key {
-                    Key::Text(text) => match &mut edit.editor {
-                        Editor::TextEdit(editor) => editor.push(&text),
-                        Editor::Select(select) => {
-                            if let Some(delta) = select_delta {
+                    Key::Backspace | Key::ClearSearch | Key::Delete | Key::Home | Key::End => {}
+                    Key::Text(_) | Key::Up | Key::Down | Key::Left | Key::Right => {
+                        if let Editor::Select(select) = &mut edit.editor {
+                            let delta = match key {
+                                Key::Left => Some(-1),
+                                Key::Right => Some(1),
+                                _ => select_delta,
+                            };
+                            if let Some(delta) = delta {
                                 select.move_by(delta);
                             }
-                        }
-                    },
-                    Key::Backspace => {
-                        if let Editor::TextEdit(editor) = &mut edit.editor {
-                            editor.backspace();
-                        }
-                    }
-                    Key::ClearSearch => {
-                        if let Editor::TextEdit(editor) = &mut edit.editor {
-                            editor.clear();
-                        }
-                    }
-                    Key::Up | Key::Down => {
-                        if let (Editor::Select(select), Some(delta)) =
-                            (&mut edit.editor, select_delta)
-                        {
-                            select.move_by(delta);
                         }
                     }
                     Key::Jump => {
@@ -1169,22 +1156,18 @@ impl Sidebar {
                     _ => {}
                 }
             } else {
+                if settings.search_editing && settings.search.as_mut().unwrap().handle(&key) {
+                    if matches!(
+                        key,
+                        Key::Text(_) | Key::Backspace | Key::Delete | Key::ClearSearch
+                    ) {
+                        settings.sel = 0;
+                        settings.scroll = 0;
+                    }
+                    self.last_frame.clear();
+                    return;
+                }
                 match key {
-                    Key::Text(text) if settings.search_editing => {
-                        settings.search.as_mut().unwrap().push(&text);
-                        settings.sel = 0;
-                        settings.scroll = 0;
-                    }
-                    Key::Backspace if settings.search_editing => {
-                        settings.search.as_mut().unwrap().backspace();
-                        settings.sel = 0;
-                        settings.scroll = 0;
-                    }
-                    Key::ClearSearch if settings.search_editing => {
-                        settings.search.as_mut().unwrap().clear();
-                        settings.sel = 0;
-                        settings.scroll = 0;
-                    }
                     Key::Jump if settings.search_editing => {
                         settings.search_editing = false;
                         settings.sel = 0;
@@ -1320,10 +1303,10 @@ mod tests {
 
     #[test]
     fn names_are_limited_by_characters_without_splitting_utf8() {
-        let mut name = "界".repeat(127);
-        append_name(&mut name, "界x\n");
-        assert_eq!(name.chars().count(), 128);
-        assert!(name.ends_with('界'));
+        let mut name = TextEdit::with_limit("界".repeat(127), 128);
+        name.push("界x\n");
+        assert_eq!(name.value().chars().count(), 128);
+        assert!(name.value().ends_with('界'));
     }
 
     #[test]

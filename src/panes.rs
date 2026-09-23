@@ -289,10 +289,14 @@ pub(crate) fn pane_add_record(
         return 1;
     }
 
+    let bin = match std::env::current_exe() {
+        Ok(bin) => bin,
+        Err(_) => return 1,
+    };
+    let runtime = format!("AGENMUX_RUNTIME_DIR={}", tmux::runtime_dir().display());
     let output = Command::new("tmux")
         .args([
             "split-window",
-            "-I",
             "-hbf",
             "-d",
             "-l",
@@ -302,7 +306,11 @@ pub(crate) fn pane_add_record(
             "-P",
             "-F",
             "#{pane_id}",
+            "-e",
+            &runtime,
         ])
+        .arg(bin)
+        .arg("sidebar-pane")
         .stdin(Stdio::null())
         .output();
     let pane = match output {
@@ -504,6 +512,7 @@ pub(crate) fn teardown_panes() -> i32 {
         };
         let _ = tmux::command_status(&["kill-pane", "-t", pane]);
         restore_layout(window);
+        let _ = std::fs::remove_file(crate::pane_writers::frame_path(&tmux::runtime_dir(), pane));
     }
 
     let options = tmux::lines(&["show-options", "-g"]).unwrap_or_default();

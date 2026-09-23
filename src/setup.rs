@@ -644,6 +644,19 @@ fn key_bindings(config: &crate::app_config::AppConfig) -> Vec<(&'static str, Str
             ));
         }
     }
+    for (key, action) in [
+        ("Left", "left"),
+        ("Right", "right"),
+        ("Home", "home"),
+        ("End", "end"),
+        ("DC", "delete"),
+    ] {
+        out.push((
+            SEARCH_TABLE,
+            key.into(),
+            key_command(action, SEARCH_TABLE, false),
+        ));
+    }
     out.push((
         SEARCH_TABLE,
         "Any".into(),
@@ -662,12 +675,15 @@ fn install_settings_keys(commands: &mut Vec<Vec<String>>) {
         );
     }
     // Select widgets accept arrows; Left/Right mirror Up/Down for compact panes
-    // where horizontal movement is the natural dropdown gesture.
+    // Select widgets still use Left/Right as Up/Down; text fields use cursor movement.
     for (key, action) in [
         ("Up", "up"),
         ("Down", "down"),
-        ("Left", "up"),
-        ("Right", "down"),
+        ("Left", "left"),
+        ("Right", "right"),
+        ("Home", "home"),
+        ("End", "end"),
+        ("DC", "delete"),
         ("Enter", "enter"),
         ("Escape", "escape"),
         ("BSpace", "backspace"),
@@ -853,6 +869,18 @@ mod tests {
             find(SEARCH_TABLE, "\\;"),
             Some(key_command("text-3B", SEARCH_TABLE, false).as_str())
         );
+        for (key, action) in [
+            ("Left", "left"),
+            ("Right", "right"),
+            ("Home", "home"),
+            ("End", "end"),
+            ("DC", "delete"),
+        ] {
+            assert_eq!(
+                find(SEARCH_TABLE, key),
+                Some(key_command(action, SEARCH_TABLE, false).as_str())
+            );
+        }
         assert!(find(SEARCH_TABLE, "Any").is_some() && find(NORMAL_TABLE, "Any").is_some());
         assert!(find(NORMAL_TABLE, "g").is_some());
         assert_eq!(find(NORMAL_TABLE, "c"), None);
