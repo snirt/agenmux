@@ -751,7 +751,8 @@ fn overlay_click_rows_target_the_clicked_pane() {
         .unwrap();
     std::fs::write(tmux.tmp.join("agenmux-rows"), "-\n=\t3\t0\n").unwrap();
 
-    assert_success(tmux.bin(&["click", &pane, "2", &viewer]), "agenmux click");
+    // tmux reports pane-local mouse rows from zero.
+    assert_success(tmux.bin(&["click", &pane, "1", &viewer]), "agenmux click");
     // Non-blocking read: a dropped packet fails here instead of hanging.
     assert_eq!(
         unsafe { libc::fcntl(fifo.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
