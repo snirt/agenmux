@@ -40,20 +40,28 @@ impl Snapshot {
 
     /// BFS over the pane's process tree, root included (agent may be the
     /// pane command itself); argv fetched for just this subtree.
-    fn descendant_argvs(&mut self, root: u32) -> Vec<Vec<String>> {
-        self.descendants(root).into_iter().map(|(_, a)| a).collect()
+    fn descendant_argvs(&mut self, root: u32, depth: usize) -> Vec<Vec<String>> {
+        self.descendants(root, depth)
+            .into_iter()
+            .map(|(_, a)| a)
+            .collect()
     }
 
-    /// (start epoch secs, argv) per process in the pane's subtree.
-    fn descendants(&mut self, root: u32) -> Vec<(u64, Vec<String>)> {
-        let mut queue = vec![root];
+    /// (start epoch secs, argv) per process in the pane's subtree, at most
+    /// `depth` levels below the root.
+    fn descendants(&mut self, root: u32, depth: usize) -> Vec<(u64, Vec<String>)> {
+        let mut queue = vec![(root, 0)];
         let mut i = 0;
         while i < queue.len() {
-            if let Some(kids) = self.children.get(&queue[i]) {
-                queue.extend(kids);
+            let (pid, level) = queue[i];
+            if level < depth {
+                if let Some(kids) = self.children.get(&pid) {
+                    queue.extend(kids.iter().map(|k| (*k, level + 1)));
+                }
             }
             i += 1;
         }
+        let queue: Vec<u32> = queue.into_iter().map(|(pid, _)| pid).collect();
         let pids: Vec<Pid> = queue.iter().map(|p| Pid::from_u32(*p)).collect();
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&pids),
@@ -79,7 +87,7 @@ impl Snapshot {
 /// earliest one when wrappers re-exec the same bin.
 pub fn agent_start(conf: &AgentConf, snap: &mut Option<Snapshot>, pane_pid: u32) -> Option<u64> {
     let snap = snap.get_or_insert_with(Snapshot::take);
-    snap.descendants(pane_pid)
+    snap.descendants(pane_pid, usize::MAX)
         .into_iter()
         .filter(|(_, argv)| {
             conf.bins.iter().any(|b| b == normalize_bin(&argv[0]))
@@ -139,19 +147,20 @@ pub fn identify(
     if let Some(i) = agent_for_bin(confs, normalize_bin(cmd)) {
         return Some(i);
     }
-    // Only shells and agent-launching runtimes may delegate the pane to a child.
-    // Editors, lazygit and other foreground apps own their child processes.
+    // Only shells and agent-launching runtimes may delegate the pane to a
+    // descendant. Editors, lazygit and other foreground apps own their child
+    // processes, so only the pane process and its direct children (the
+    // foreground app itself) are checked: Claude's native build reports a
+    // version-named command ("2.1.280") while its argv[0] is "claude".
     // ponytail: add a runtime here if a new agent wrapper must expose its child.
-    if ![
+    let delegates = [
         "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "nu", "pwsh", "node", "bun",
         "deno", "python", "python3", "ruby", "env", "npm", "npx", "pnpm", "yarn", "uv",
     ]
-    .contains(&normalize_bin(cmd))
-    {
-        return None;
-    }
+    .contains(&normalize_bin(cmd));
     let snap = snap.get_or_insert_with(Snapshot::take);
-    for argv in snap.descendant_argvs(pane_pid) {
+    let depth = if delegates { usize::MAX } else { 1 };
+    for argv in snap.descendant_argvs(pane_pid, depth) {
         if let Some(i) = agent_for_bin(confs, normalize_bin(&argv[0])) {
             return Some(i);
         }
@@ -258,8 +267,39 @@ mod tests {
         let mut snap = None;
         for app in ["nvim", "lazygit", "htop"] {
             assert_eq!(identify(&cs, &mut snap, 0, app), None, "{app}");
-            assert!(snap.is_none(), "{app} must not search child processes");
         }
         assert_eq!(identify(&cs, &mut snap, 0, "pi"), Some(0));
+    }
+
+    #[test]
+    fn foreground_agent_matches_by_argv_but_not_its_grandchildren() {
+        // Shell pane (root) -> foreground app -> its child. Claude's native
+        // build: tmux reports "2.1.280" while argv[0] is "claude"; `sleep`
+        // renamed via `exec -a` stands in for both levels.
+        let spawn = |script: &str| {
+            let child = std::process::Command::new("bash")
+                .args(["-c", script])
+                .spawn()
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            child
+        };
+        let cs = confs();
+        let mut agent = spawn("exec -a pi sleep 30 & wait");
+        let found = identify(&cs, &mut None, agent.id(), "2.1.280");
+        let mut app = spawn("bash -c 'exec -a pi sleep 30 & wait' & wait");
+        let nested = identify(&cs, &mut None, app.id(), "nvim");
+        for c in [&mut agent, &mut app] {
+            let _ = std::process::Command::new("pkill")
+                .args(["-P", &c.id().to_string()])
+                .status();
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        assert_eq!(found, Some(0), "foreground argv[0] names the agent");
+        assert_eq!(
+            nested, None,
+            "a foreground app's child never identifies the pane"
+        );
     }
 }
