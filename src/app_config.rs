@@ -79,6 +79,7 @@ pub struct DisplayConfig {
     pub mode: Option<DisplayMode>,
     pub show_all_panes: Option<bool>,
     pub show_frame: Option<bool>,
+    pub agent_label: Option<AgentLabel>,
     pub sidebar_width: Option<u16>,
     pub popup_width: Option<u16>,
     pub popup_height: Option<PopupHeight>,
@@ -88,6 +89,14 @@ pub struct DisplayConfig {
 pub enum DisplayMode {
     Split,
     Popup,
+}
+/// How agent rows name their agent: `AGENT_ICON` and name, icon, or name.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(try_from = "String")]
+pub enum AgentLabel {
+    IconText,
+    Icon,
+    Text,
 }
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -143,6 +152,7 @@ macro_rules! string_values {
     };
 }
 string_values!(DisplayMode, "expected split or popup", "split" => Split, "popup" => Popup);
+string_values!(AgentLabel, "expected icon-text, icon, or text", "icon-text" => IconText, "icon" => Icon, "text" => Text);
 string_values!(AutoHeight, "expected auto", "auto" => Auto);
 string_values!(ThemeBase, "expected dark, light, or terminal", "dark" => Dark, "light" => Light, "terminal" => Terminal);
 
@@ -1094,6 +1104,7 @@ pub struct AppConfig {
     pub mode: DisplayMode,
     pub show_all_panes: bool,
     pub show_frame: bool,
+    pub agent_label: AgentLabel,
     pub sidebar_width: u16,
     pub popup_width: u16,
     pub popup_height: PopupHeight,
@@ -1195,6 +1206,7 @@ pub fn resolve_cli(
             ("display.mode", "default"),
             ("display.show_all_panes", "default"),
             ("display.show_frame", "default"),
+            ("display.agent_label", "default"),
             ("display.sidebar_width", "default"),
             ("display.popup_width", "default"),
             ("display.popup_height", "default"),
@@ -1214,6 +1226,7 @@ pub fn resolve_cli(
         mode: DisplayMode::Split,
         show_all_panes: false,
         show_frame: true,
+        agent_label: AgentLabel::IconText,
         sidebar_width: 30,
         popup_width: 40,
         popup_height: PopupHeight::Auto(AutoHeight::Auto),
@@ -1244,6 +1257,7 @@ pub fn resolve_cli(
             set!(mode, d.mode, "display.mode");
             set!(show_all_panes, d.show_all_panes, "display.show_all_panes");
             set!(show_frame, d.show_frame, "display.show_frame");
+            set!(agent_label, d.agent_label, "display.agent_label");
             set!(sidebar_width, d.sidebar_width, "display.sidebar_width");
             set!(popup_width, d.popup_width, "display.popup_width");
             set!(popup_height, d.popup_height, "display.popup_height");
@@ -1643,6 +1657,7 @@ tmux option still wins over the file.
   sidebar_width   1..=10000 cells                     (30)
   popup_width     1..=10000 cells                     (40)
   popup_height    "auto" or 1..=10000 cells           (auto)
+  agent_label     icon-text | icon | text             (icon-text)
 
 [behavior]
   notifications   true | false                        (true)
@@ -1736,6 +1751,15 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
                 PopupHeight::Auto(_) => "auto".into(),
                 PopupHeight::Cells(n) => n.to_string(),
             },
+        ),
+        (
+            "display.agent_label".into(),
+            match config.agent_label {
+                AgentLabel::IconText => "icon-text",
+                AgentLabel::Icon => "icon",
+                AgentLabel::Text => "text",
+            }
+            .into(),
         ),
         (
             "behavior.notifications".into(),
@@ -2372,7 +2396,9 @@ mod tests {
             .sources
             .iter()
             .filter(|(field, _)| {
-                **field != "display.show_all_panes" && **field != "display.show_frame"
+                **field != "display.show_all_panes"
+                    && **field != "display.show_frame"
+                    && **field != "display.agent_label"
             })
             .filter(|(field, _)| field.starts_with("display.") || field.starts_with("behavior."))
             .all(|(_, source)| source.starts_with("tmux @agenmux-")));

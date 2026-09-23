@@ -138,7 +138,9 @@ Agent rows in both views prefix the agent name with its `AGENT_ICON`. Built-in d
 Claude `nf-cod-claude` and Codex `nf-cod-openai` (both need Nerd Fonts 3.5+), Pi and
 Oh My Pi `nf-md-pi`, and generic fallbacks for OpenCode (`nf-cod-code`) and Hermes
 (`nf-cod-hubot`), which have no dedicated Nerd Fonts glyph. The text name always follows
-the icon, so a missing glyph never hides which agent a row is.
+the icon by default, so a missing glyph never hides which agent a row is.
+`display.agent_label` picks `icon-text` (default), `icon`, or `text`; an agent
+without an icon always shows its name.
 
 Search in all-pane mode matches session, window, and pane metadata. A session or
 window match keeps its pane subtree, while a pane match keeps its session and
@@ -227,6 +229,7 @@ show_frame = true # whole-pane Agenmux frame
 sidebar_width = 30
 popup_width = 40
 popup_height = "auto"
+agent_label = "icon-text" # icon-text | icon | text
 [behavior]
 notifications = true
 # hide_windows = "agents*" # omitted: leave your picker alone

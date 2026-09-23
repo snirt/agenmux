@@ -378,11 +378,20 @@ impl Sidebar {
             .join(" ")
     }
 
-    /// Agent name prefixed with its configured `AGENT_ICON`, if any.
+    /// Agent name and/or its configured `AGENT_ICON`, per
+    /// `display.agent_label`; an agent without an icon always shows its name.
     fn agent_label(&self, agent: &str) -> String {
-        match self.confs.iter().find(|c| c.name == agent) {
-            Some(c) if !c.icon.is_empty() => format!("{} {agent}", c.icon),
-            _ => agent.to_string(),
+        use crate::app_config::AgentLabel;
+        let icon = self
+            .confs
+            .iter()
+            .find(|c| c.name == agent)
+            .map_or("", |c| c.icon.as_str());
+        match self.settings.settings.agent_label {
+            _ if icon.is_empty() => agent.to_string(),
+            AgentLabel::IconText => format!("{icon} {agent}"),
+            AgentLabel::Icon => icon.to_string(),
+            AgentLabel::Text => agent.to_string(),
         }
     }
 
@@ -1590,6 +1599,21 @@ mod tests {
                 .trim_start_matches(' ')
                 .to_string()
         };
+        use crate::app_config::AgentLabel;
+        for (label, expected, absent) in [
+            (AgentLabel::Icon, "◆ repo", "claude"),
+            (AgentLabel::Text, "claude repo", "◆"),
+        ] {
+            sb.settings.settings.agent_label = label;
+            sb.render(true);
+            let plain = ansi.replace_all(&sb.last_frame, "").to_string();
+            let line = plain.lines().find(|line| line.contains("repo")).unwrap();
+            assert!(
+                line.contains(expected) && !line.contains(absent),
+                "{label:?} agent label: {line}"
+            );
+        }
+        sb.settings.settings.agent_label = AgentLabel::IconText;
         for all_panes in [true, false] {
             sb.settings.settings.show_all_panes = all_panes;
             sb.rebuild_visible(false);

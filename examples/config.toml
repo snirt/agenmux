@@ -12,6 +12,7 @@ show_frame = true      # whole-pane Agenmux frame
 sidebar_width = 30    # cells, 1..=10000
 popup_width = 40
 popup_height = "auto" # "auto" or cells
+agent_label = "icon-text" # agent rows: icon-text | icon | text
 
 [behavior]
 notifications = true
