@@ -139,6 +139,17 @@ pub fn identify(
     if let Some(i) = agent_for_bin(confs, normalize_bin(cmd)) {
         return Some(i);
     }
+    // Only shells and agent-launching runtimes may delegate the pane to a child.
+    // Editors, lazygit and other foreground apps own their child processes.
+    // ponytail: add a runtime here if a new agent wrapper must expose its child.
+    if ![
+        "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "nu", "pwsh", "node", "bun",
+        "deno", "python", "python3", "ruby", "env", "npm", "npx", "pnpm", "yarn", "uv",
+    ]
+    .contains(&normalize_bin(cmd))
+    {
+        return None;
+    }
     let snap = snap.get_or_insert_with(Snapshot::take);
     for argv in snap.descendant_argvs(pane_pid) {
         if let Some(i) = agent_for_bin(confs, normalize_bin(&argv[0])) {
@@ -158,6 +169,9 @@ pub type IdentCache = HashMap<(String, u32, String), String>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_CONF: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
     fn normalize() {
@@ -167,7 +181,11 @@ mod tests {
     }
 
     fn confs() -> Vec<AgentConf> {
-        let dir = std::env::temp_dir().join(format!("am-procs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "am-procs-{}-{}",
+            std::process::id(),
+            NEXT_CONF.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("pi.conf"),
@@ -233,5 +251,15 @@ mod tests {
             "/n/@oh-my-pi/pi-coding-agent/dist/cli.js".into(),
         ];
         assert_eq!(agent_for_argv(&cs, &omp), Some(0));
+    }
+    #[test]
+    fn foreground_app_children_do_not_identify_pane() {
+        let cs = confs();
+        let mut snap = None;
+        for app in ["nvim", "lazygit", "htop"] {
+            assert_eq!(identify(&cs, &mut snap, 0, app), None, "{app}");
+            assert!(snap.is_none(), "{app} must not search child processes");
+        }
+        assert_eq!(identify(&cs, &mut snap, 0, "pi"), Some(0));
     }
 }
