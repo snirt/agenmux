@@ -25,6 +25,8 @@ pub struct AgentConf {
     pub title_strip: Option<Regex>,
     pub subject_screen: Option<Regex>,
     pub subject_cmd: Option<String>,
+    /// Sidebar glyph shown before the agent name; empty = name only.
+    pub icon: String,
 }
 
 /// Extract `KEY=value` assignments from shell-syntax conf text without
@@ -128,11 +130,14 @@ fn words(s: &str) -> Vec<String> {
     s.split_whitespace().map(str::to_string).collect()
 }
 
-pub fn load_conf(path: &Path) -> std::io::Result<AgentConf> {
-    let name = path
-        .file_stem()
+fn conf_name(path: &Path) -> String {
+    path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+pub fn load_conf(path: &Path) -> std::io::Result<AgentConf> {
+    let name = conf_name(path);
     let src = std::fs::read_to_string(path)?;
     let mut c = AgentConf {
         name: name.clone(),
@@ -147,10 +152,34 @@ pub fn load_conf(path: &Path) -> std::io::Result<AgentConf> {
         title_strip: None,
         subject_screen: None,
         subject_cmd: None,
+        icon: String::new(),
     };
-    for (key, val) in parse_assignments(&src) {
-        // empty value = unset (bash `gre` never matches an empty pattern)
+    apply(&mut c, &src);
+    Ok(c)
+}
+
+/// Set only the keys `src` assigns. An empty value clears that key back to
+/// its default (bash `gre` never matches an empty pattern), so an override
+/// file can switch off a built-in rule or icon with `KEY=""`.
+fn apply(c: &mut AgentConf, src: &str) {
+    let name = c.name.clone();
+    for (key, val) in parse_assignments(src) {
         if val.is_empty() {
+            match key.as_str() {
+                "AGENT_BINS" => c.bins.clear(),
+                "AGENT_PATH_HINTS" => c.path_hints.clear(),
+                "BLOCKED_TITLE" => c.blocked_title = None,
+                "BLOCKED_SCREEN" => c.blocked_screen = None,
+                "WORKING_TITLE" => c.working_title = None,
+                "WORKING_SCREEN" => c.working_screen = None,
+                "IDLE_SCREEN" => c.idle_screen = None,
+                "CHECK_ORDER" => c.check_order = vec![Check::Bt, Check::Wt, Check::Bs, Check::Ws],
+                "TITLE_STRIP" => c.title_strip = None,
+                "SUBJECT_SCREEN" => c.subject_screen = None,
+                "SUBJECT_CMD" => c.subject_cmd = None,
+                "AGENT_ICON" => c.icon.clear(),
+                _ => {}
+            }
             continue;
         }
         match key.as_str() {
@@ -177,21 +206,28 @@ pub fn load_conf(path: &Path) -> std::io::Result<AgentConf> {
             "TITLE_STRIP" => c.title_strip = re_sed(&name, &key, &val),
             "SUBJECT_SCREEN" => c.subject_screen = re_sed(&name, &key, &val),
             "SUBJECT_CMD" => c.subject_cmd = Some(val),
+            "AGENT_ICON" => c.icon = val,
             _ => {}
         }
     }
-    Ok(c)
 }
 
-/// Builtin agents/, then user confs overriding by filename (position kept).
+/// Builtin agents/, then user confs by filename: a same-named file overrides
+/// only the keys it assigns (position kept); a new name adds an agent.
 pub fn load_all(plugin_dir: &Path) -> Vec<AgentConf> {
-    let mut confs: Vec<AgentConf> = Vec::new();
     let config_home = std::env::var("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| Path::new(&std::env::var("HOME").unwrap_or_default()).join(".config"));
-    let legacy_user_dir = config_home.join("tmux-agents-mon/agents");
-    let user_dir = config_home.join("agenmux/agents");
-    for dir in [&plugin_dir.join("agents"), &legacy_user_dir, &user_dir] {
+    load_dirs(&[
+        plugin_dir.join("agents"),
+        config_home.join("tmux-agents-mon/agents"),
+        config_home.join("agenmux/agents"),
+    ])
+}
+
+fn load_dirs(dirs: &[std::path::PathBuf]) -> Vec<AgentConf> {
+    let mut confs: Vec<AgentConf> = Vec::new();
+    for dir in dirs {
         let mut files: Vec<_> = match std::fs::read_dir(dir) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok().map(|e| e.path()))
@@ -201,10 +237,17 @@ pub fn load_all(plugin_dir: &Path) -> Vec<AgentConf> {
         };
         files.sort();
         for f in files {
-            if let Ok(c) = load_conf(&f) {
-                match confs.iter().position(|x| x.name == c.name) {
-                    Some(i) => confs[i] = c,
-                    None => confs.push(c),
+            let name = conf_name(&f);
+            match confs.iter_mut().find(|x| x.name == name) {
+                Some(c) => {
+                    if let Ok(src) = std::fs::read_to_string(&f) {
+                        apply(c, &src);
+                    }
+                }
+                None => {
+                    if let Ok(c) = load_conf(&f) {
+                        confs.push(c);
+                    }
                 }
             }
         }
@@ -230,6 +273,41 @@ mod tests {
         let a = parse_assignments(src);
         assert_eq!(a[0].1, "a \"b\" c");
         assert_eq!(a[1], ("X".into(), "v".into()));
+    }
+
+    #[test]
+    fn override_sets_only_mentioned_keys() {
+        let dir = std::env::temp_dir().join(format!("agenmux-conf-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let user = dir.join("user");
+        std::fs::create_dir_all(dir.join("plugin/agents")).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            dir.join("plugin/agents/a.conf"),
+            "AGENT_BINS=\"a\"\nWORKING_SCREEN='busy'\nTITLE_STRIP='^A '\nAGENT_ICON=\"x\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("plugin/agents/b.conf"), "AGENT_ICON=\"y\"\n").unwrap();
+        std::fs::write(user.join("a.conf"), "AGENT_ICON=\"z\"\nTITLE_STRIP=\"\"\n").unwrap();
+        std::fs::write(user.join("b.conf"), "AGENT_ICON=\"\"\n").unwrap();
+        std::fs::write(user.join("c.conf"), "AGENT_BINS=\"c\"\n").unwrap();
+        let confs = load_dirs(&[dir.join("plugin/agents"), user]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let names: Vec<_> = confs.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c"]);
+        let a = &confs[0];
+        assert_eq!(a.icon, "z", "mentioned key overrides");
+        assert_eq!(a.bins, ["a"], "unmentioned key keeps the built-in value");
+        assert!(a.working_screen.as_ref().unwrap().is_match("busy"));
+        assert!(
+            a.title_strip.is_none(),
+            "empty value clears the built-in rule"
+        );
+        assert_eq!(
+            confs[1].icon, "",
+            "empty AGENT_ICON disables the built-in icon"
+        );
+        assert_eq!(confs[2].bins, ["c"]);
     }
 
     #[test]

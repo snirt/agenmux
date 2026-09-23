@@ -133,6 +133,12 @@ done-colored `▢ command` row; when selected, its full row uses `theme.colors.p
 rows keep their state styling and show the animated status glyph, agent name in its original
 style, then pane command. Agent descriptions stay on the next indented line.
 
+Agent rows in both views prefix the agent name with its `AGENT_ICON`. Built-in defaults:
+Claude `nf-cod-claude` and Codex `nf-cod-openai` (both need Nerd Fonts 3.5+), Pi and
+Oh My Pi `nf-md-pi`, and generic fallbacks for OpenCode (`nf-cod-code`) and Hermes
+(`nf-cod-hubot`), which have no dedicated Nerd Fonts glyph. The text name always follows
+the icon, so a missing glyph never hides which agent a row is.
+
 Search in all-pane mode matches session, window, and pane metadata. A session or
 window match keeps its pane subtree, while a pane match keeps its session and
 window ancestors on screen. User attention filtering keeps done, working, and
@@ -555,7 +561,16 @@ the scanner and update commands are suitable for direct shell use.
 ## Adding / overriding agents
 
 Drop a `.conf` in `~/.config/agenmux/agents/`. A file with the same name
-as a built-in (see `agents/`) replaces it wholesale. Example:
+as a built-in (see `agents/`) overrides only the keys it assigns; every other
+key keeps its built-in value. Assigning an empty value (`KEY=""`) clears that
+key, so a one-line file changes or removes a built-in icon:
+
+```bash
+# ~/.config/agenmux/agents/claude.conf
+AGENT_ICON="✻"    # or AGENT_ICON="" for the name only
+```
+
+A new file name adds a custom agent. Example:
 
 ```bash
 # ~/.config/agenmux/agents/aider.conf
@@ -570,7 +585,11 @@ CHECK_ORDER="bt wt bs ws"          # rule order; first hit wins, fallback is idl
 TITLE_STRIP='^aider: '              # optional regex removed from the pane title
 SUBJECT_SCREEN=''                   # optional sed -E capture used as the subject line
 SUBJECT_CMD=''                      # optional shell snippet used as a final subject fallback
+AGENT_ICON=""                       # optional glyph or short string shown before the agent name
 ```
+
+`AGENT_ICON` width is counted per character, like other sidebar text: Nerd Font
+glyphs fit, but double-width characters such as emoji or CJK may misalign rows.
 
 `CHECK_ORDER` tokens: `bt`/`bs` blocked title/screen, `wt`/`ws` working
 title/screen, `is` idle screen. Order matters when states can look alike —

@@ -378,6 +378,14 @@ impl Sidebar {
             .join(" ")
     }
 
+    /// Agent name prefixed with its configured `AGENT_ICON`, if any.
+    fn agent_label(&self, agent: &str) -> String {
+        match self.confs.iter().find(|c| c.name == agent) {
+            Some(c) if !c.icon.is_empty() => format!("{} {agent}", c.icon),
+            _ => agent.to_string(),
+        }
+    }
+
     fn dot(&self, state: &str) -> String {
         let on = (self.tick / 2).is_multiple_of(2);
         let fg = self.palette.state_fg(state).fg("");
@@ -628,7 +636,7 @@ impl Sidebar {
                 format!(
                     "{base}{mark}{prefix}{} {E}[1m{}{E}[0m ",
                     self.dot(state),
-                    row.agent
+                    self.agent_label(&row.agent)
                 )
             } else if expanded {
                 format!("{base}{mark}{prefix}{window_icon}▢{E}[0m ")
@@ -972,7 +980,8 @@ impl Sidebar {
                     let dot = self.dot(&r.state);
                     let win = r.loc.split_once(':').map(|x| x.1).unwrap_or("");
                     let mut rest = format!("{win} {}", r.cwd);
-                    let agent_len = r.agent.chars().count();
+                    let label = self.agent_label(&r.agent);
+                    let agent_len = label.chars().count();
                     let avail = cols.saturating_sub(6 + agent_len);
                     if avail > 0 {
                         rest = rest.chars().take(avail).collect();
@@ -982,7 +991,7 @@ impl Sidebar {
                     } else {
                         String::new()
                     };
-                    let row = format!(" {mark}{dot} {E}[1m{}{E}[0m {muted}{rest}{E}[0m", r.agent);
+                    let row = format!(" {mark}{dot} {E}[1m{label}{E}[0m {muted}{rest}{E}[0m");
                     let width = 6 + agent_len + rest.chars().count();
                     lines.push((
                         format!("{}{E}[K\n", bar(&row, &row_bg, cols, width)),
@@ -1547,6 +1556,51 @@ mod tests {
             "the titled pane replaces its command, not both: {npm_row}"
         );
         sb.panes[1].pane_title.clear();
+
+        // AGENT_ICON prefixes the agent name in both views and counts toward
+        // row width; the tests above cover the icon-less name-only rows.
+        let icon_conf = dir.join("claude.conf");
+        std::fs::write(&icon_conf, "AGENT_ICON=\"◆\"\n").unwrap();
+        let confs = std::mem::replace(
+            &mut sb.confs,
+            vec![crate::conf::load_conf(&icon_conf).unwrap()],
+        );
+        let agent_line = |sb: &Sidebar| {
+            let line = sb
+                .last_frame
+                .lines()
+                .find(|line| line.contains("claude"))
+                .unwrap();
+            ansi.replace_all(line, "")
+                .trim_start_matches(' ')
+                .to_string()
+        };
+        for all_panes in [true, false] {
+            sb.settings.settings.show_all_panes = all_panes;
+            sb.rebuild_visible(false);
+            for size in [(80, 40), (20, 40)] {
+                sb.daemon.as_mut().unwrap().size = size;
+                sb.render(true);
+                let line = agent_line(&sb);
+                assert!(
+                    line.contains("◆ claude"),
+                    "icon precedes agent name (all_panes={all_panes}): {line}"
+                );
+                let rows_line = sb
+                    .last_frame
+                    .lines()
+                    .find(|line| line.contains("claude"))
+                    .unwrap();
+                assert!(
+                    ansi.replace_all(rows_line, "").chars().count() <= sb.render_size().0 + 2,
+                    "icon row clips to the pane width (all_panes={all_panes}, {size:?})"
+                );
+            }
+        }
+        sb.daemon.as_mut().unwrap().size = (80, 40);
+        sb.settings.settings.show_all_panes = true;
+        sb.confs = confs;
+        sb.rebuild_visible(false);
 
         // The "." toggle flips the live view between agents and the full tree.
         assert!(sb.settings.settings.show_all_panes);
