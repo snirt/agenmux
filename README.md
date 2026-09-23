@@ -131,7 +131,8 @@ ordinary panes as well as agent panes.
 All-pane hierarchy uses indentation without connector glyphs. Nested ordinary panes use a
 done-colored `▢ command` row; when selected, its full row uses `theme.colors.pane_bg`. Agent
 rows keep their state styling and show the animated status glyph, agent name in its original
-style, then pane command. Agent descriptions stay on the next indented line.
+style, then pane command. Agent descriptions stay on the next indented line. An ordinary pane
+running `nvim` shows the Neovim icon (`nf-linux-neovim`) in place of its window or pane glyph.
 
 Agent rows in both views prefix the agent name with its `AGENT_ICON`. Built-in defaults:
 Claude `nf-cod-claude` and Codex `nf-cod-openai` (both need Nerd Fonts 3.5+), Pi and

@@ -638,10 +638,15 @@ impl Sidebar {
                     self.dot(state),
                     self.agent_label(&row.agent)
                 )
-            } else if expanded {
-                format!("{base}{mark}{prefix}{window_icon}▢{E}[0m ")
             } else {
-                format!("{base}{mark}{prefix}{window_icon}\u{eb7f}{E}[0m ")
+                let glyph = if pane.command == "nvim" {
+                    "\u{f36f}" // nf-linux-neovim
+                } else if expanded {
+                    "▢"
+                } else {
+                    "\u{eb7f}"
+                };
+                format!("{base}{mark}{prefix}{window_icon}{glyph}{E}[0m ")
             };
             // Agent rows show the working directory for session context, like
             // the agent-only view; a collapsed single-pane window shows its
@@ -1387,7 +1392,7 @@ mod tests {
             .lines()
             .find(|line| line.contains("npm"))
             .unwrap();
-        let single_window_marker = format!("{}", sb.palette.done_fg.fg(""));
+        let single_window_marker = format!("{}\u{f36f}", sb.palette.done_fg.fg(""));
         let parent_window_marker = format!("{}", sb.palette.accent_fg.fg("1"));
         let pane_marker = format!("{}▢", sb.palette.done_fg.fg(""));
         assert!(
@@ -1398,8 +1403,18 @@ mod tests {
         );
         assert_eq!(
             ansi.replace_all(collapsed_pane, ""),
-            "    editor",
-            "collapsed ordinary windows use muted window name rows"
+            "   \u{f36f} editor",
+            "an nvim pane swaps its window glyph for the Neovim icon"
+        );
+        let shell_pane = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("shell"))
+            .unwrap();
+        assert_eq!(
+            ansi.replace_all(shell_pane, "").trim_end(),
+            "   \u{eb7f} shell",
+            "other collapsed ordinary windows keep the window glyph"
         );
         assert_eq!(
             ansi.replace_all(expanded_pane, ""),
