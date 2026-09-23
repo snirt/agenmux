@@ -26,7 +26,7 @@ src/app_config.rs:        options.insert("@agents-mon-width".into(), "44".into()
 src/app_config.rs:        options.insert("@agents-mon-width".into(), "77".into());
 src/app_config.rs:    for prefix in ["@agenmux-", "@agents-mon-"] {
 src/app_config.rs:    for prefix in ["@agents-mon-", "@agenmux-"] {
-src/conf.rs:    let legacy_user_dir = config_home.join("tmux-agents-mon/agents");
+src/conf.rs:        config_home.join("tmux-agents-mon/agents"),
 src/diag.rs:        let path = crate::compat_env("AGENMUX_DEBUG", "AGENTS_MON_DEBUG")
 src/main.rs:    compat_env("AGENMUX_SELF", "AGENTS_MON_SELF").filter(|s| !s.is_empty())
 src/main.rs:    if let Some(d) = compat_env("AGENMUX_DIR", "AGENTS_MON_DIR") {

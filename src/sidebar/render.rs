@@ -378,6 +378,23 @@ impl Sidebar {
             .join(" ")
     }
 
+    /// Agent name and/or its configured `AGENT_ICON`, per
+    /// `display.agent_label`; an agent without an icon always shows its name.
+    fn agent_label(&self, agent: &str) -> String {
+        use crate::app_config::AgentLabel;
+        let icon = self
+            .confs
+            .iter()
+            .find(|c| c.name == agent)
+            .map_or("", |c| c.icon.as_str());
+        match self.settings.settings.agent_label {
+            _ if icon.is_empty() => agent.to_string(),
+            AgentLabel::IconText => format!("{icon} {agent}"),
+            AgentLabel::Icon => icon.to_string(),
+            AgentLabel::Text => agent.to_string(),
+        }
+    }
+
     fn dot(&self, state: &str) -> String {
         let on = (self.tick / 2).is_multiple_of(2);
         let fg = self.palette.state_fg(state).fg("");
@@ -627,12 +644,16 @@ impl Sidebar {
                 format!(
                     "{base}{mark}{prefix}{} {E}[1m{}{E}[0m ",
                     self.dot(state),
-                    row.agent
+                    self.agent_label(&row.agent)
                 )
-            } else if expanded {
-                format!("{base}{mark}{prefix}{window_icon}▢{E}[0m ")
             } else {
-                format!("{base}{mark}{prefix}{window_icon}\u{eb7f}{E}[0m ")
+                let glyph = match pane.command.as_str() {
+                    "nvim" => "\u{f36f}",    // nf-linux-neovim
+                    "lazygit" => "\u{e702}", // nf-dev-git
+                    _ if expanded => "▢",
+                    _ => "\u{eb7f}",
+                };
+                format!("{base}{mark}{prefix}{window_icon}{glyph}{E}[0m ")
             };
             // Agent rows show the working directory for session context, like
             // the agent-only view; a collapsed single-pane window shows its
@@ -976,7 +997,8 @@ impl Sidebar {
                     let dot = self.dot(&r.state);
                     let win = r.loc.split_once(':').map(|x| x.1).unwrap_or("");
                     let mut rest = format!("{win} {}", r.cwd);
-                    let agent_len = r.agent.chars().count();
+                    let label = self.agent_label(&r.agent);
+                    let agent_len = label.chars().count();
                     let avail = cols.saturating_sub(6 + agent_len);
                     if avail > 0 {
                         rest = rest.chars().take(avail).collect();
@@ -986,7 +1008,7 @@ impl Sidebar {
                     } else {
                         String::new()
                     };
-                    let row = format!(" {mark}{dot} {E}[1m{}{E}[0m {muted}{rest}{E}[0m", r.agent);
+                    let row = format!(" {mark}{dot} {E}[1m{label}{E}[0m {muted}{rest}{E}[0m");
                     let width = 6 + agent_len + rest.chars().count();
                     lines.push((
                         format!("{}{E}[K\n", bar(&row, &row_bg, cols, width)),
@@ -1382,7 +1404,7 @@ mod tests {
             .lines()
             .find(|line| line.contains("npm"))
             .unwrap();
-        let single_window_marker = format!("{}", sb.palette.done_fg.fg(""));
+        let single_window_marker = format!("{}\u{f36f}", sb.palette.done_fg.fg(""));
         let parent_window_marker = format!("{}", sb.palette.accent_fg.fg("1"));
         let pane_marker = format!("{}▢", sb.palette.done_fg.fg(""));
         assert!(
@@ -1393,8 +1415,18 @@ mod tests {
         );
         assert_eq!(
             ansi.replace_all(collapsed_pane, ""),
-            "    editor",
-            "collapsed ordinary windows use muted window name rows"
+            "   \u{f36f} editor",
+            "an nvim pane swaps its window glyph for the Neovim icon"
+        );
+        let shell_pane = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("shell"))
+            .unwrap();
+        assert_eq!(
+            ansi.replace_all(shell_pane, "").trim_end(),
+            "   \u{eb7f} shell",
+            "other collapsed ordinary windows keep the window glyph"
         );
         assert_eq!(
             ansi.replace_all(expanded_pane, ""),
@@ -1551,6 +1583,80 @@ mod tests {
             "the titled pane replaces its command, not both: {npm_row}"
         );
         sb.panes[1].pane_title.clear();
+
+        sb.panes[3].command = "lazygit".into();
+        sb.render(true);
+        let lazygit_pane = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("shell"))
+            .unwrap();
+        assert_eq!(
+            ansi.replace_all(lazygit_pane, "").trim_end(),
+            "   \u{e702} shell",
+            "a lazygit pane swaps its window glyph for the git icon"
+        );
+        sb.panes[3].command = "zsh".into();
+
+        // AGENT_ICON prefixes the agent name in both views and counts toward
+        // row width; the tests above cover the icon-less name-only rows.
+        let icon_conf = dir.join("claude.conf");
+        std::fs::write(&icon_conf, "AGENT_ICON=\"◆\"\n").unwrap();
+        let confs = std::mem::replace(
+            &mut sb.confs,
+            vec![crate::conf::load_conf(&icon_conf).unwrap()],
+        );
+        let agent_line = |sb: &Sidebar| {
+            let line = sb
+                .last_frame
+                .lines()
+                .find(|line| line.contains("claude"))
+                .unwrap();
+            ansi.replace_all(line, "")
+                .trim_start_matches(' ')
+                .to_string()
+        };
+        use crate::app_config::AgentLabel;
+        for (label, expected, absent) in [
+            (AgentLabel::Icon, "◆ repo", "claude"),
+            (AgentLabel::Text, "claude repo", "◆"),
+        ] {
+            sb.settings.settings.agent_label = label;
+            sb.render(true);
+            let plain = ansi.replace_all(&sb.last_frame, "").to_string();
+            let line = plain.lines().find(|line| line.contains("repo")).unwrap();
+            assert!(
+                line.contains(expected) && !line.contains(absent),
+                "{label:?} agent label: {line}"
+            );
+        }
+        sb.settings.settings.agent_label = AgentLabel::IconText;
+        for all_panes in [true, false] {
+            sb.settings.settings.show_all_panes = all_panes;
+            sb.rebuild_visible(false);
+            for size in [(80, 40), (20, 40)] {
+                sb.daemon.as_mut().unwrap().size = size;
+                sb.render(true);
+                let line = agent_line(&sb);
+                assert!(
+                    line.contains("◆ claude"),
+                    "icon precedes agent name (all_panes={all_panes}): {line}"
+                );
+                let rows_line = sb
+                    .last_frame
+                    .lines()
+                    .find(|line| line.contains("claude"))
+                    .unwrap();
+                assert!(
+                    ansi.replace_all(rows_line, "").chars().count() <= sb.render_size().0 + 2,
+                    "icon row clips to the pane width (all_panes={all_panes}, {size:?})"
+                );
+            }
+        }
+        sb.daemon.as_mut().unwrap().size = (80, 40);
+        sb.settings.settings.show_all_panes = true;
+        sb.confs = confs;
+        sb.rebuild_visible(false);
 
         // The "." toggle flips the live view between agents and the full tree.
         assert!(sb.settings.settings.show_all_panes);

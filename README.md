@@ -131,7 +131,17 @@ ordinary panes as well as agent panes.
 All-pane hierarchy uses indentation without connector glyphs. Nested ordinary panes use a
 done-colored `▢ command` row; when selected, its full row uses `theme.colors.pane_bg`. Agent
 rows keep their state styling and show the animated status glyph, agent name in its original
-style, then pane command. Agent descriptions stay on the next indented line.
+style, then pane command. Agent descriptions stay on the next indented line. An ordinary pane
+running `nvim` shows the Neovim icon (`nf-linux-neovim`), and one running `lazygit` the git
+icon (`nf-dev-git`), in place of its window or pane glyph.
+
+Agent rows in both views prefix the agent name with its `AGENT_ICON`. Built-in defaults:
+Claude `nf-cod-claude` and Codex `nf-cod-openai` (both need Nerd Fonts 3.5+). Agents
+without a Nerd Fonts glyph use plain text: `Pı` for Pi and Oh My Pi (the logo's P and
+dotless i), `OC` for OpenCode (its own title prefix), and `⚕` for Hermes. The text name
+always follows the icon by default, so a missing glyph never hides which agent a row is.
+`display.agent_label` picks `icon-text` (default), `icon`, or `text`; an agent
+without an icon always shows its name.
 
 Search in all-pane mode matches session, window, and pane metadata. A session or
 window match keeps its pane subtree, while a pane match keeps its session and
@@ -220,6 +230,7 @@ show_frame = true # whole-pane Agenmux frame
 sidebar_width = 30
 popup_width = 40
 popup_height = "auto"
+agent_label = "icon-text" # icon-text | icon | text
 [behavior]
 notifications = true
 # hide_windows = "agents*" # omitted: leave your picker alone
@@ -555,7 +566,16 @@ the scanner and update commands are suitable for direct shell use.
 ## Adding / overriding agents
 
 Drop a `.conf` in `~/.config/agenmux/agents/`. A file with the same name
-as a built-in (see `agents/`) replaces it wholesale. Example:
+as a built-in (see `agents/`) overrides only the keys it assigns; every other
+key keeps its built-in value. Assigning an empty value (`KEY=""`) clears that
+key, so a one-line file changes or removes a built-in icon:
+
+```bash
+# ~/.config/agenmux/agents/claude.conf
+AGENT_ICON="✻"    # or AGENT_ICON="" for the name only
+```
+
+A new file name adds a custom agent. Example:
 
 ```bash
 # ~/.config/agenmux/agents/aider.conf
@@ -570,7 +590,11 @@ CHECK_ORDER="bt wt bs ws"          # rule order; first hit wins, fallback is idl
 TITLE_STRIP='^aider: '              # optional regex removed from the pane title
 SUBJECT_SCREEN=''                   # optional sed -E capture used as the subject line
 SUBJECT_CMD=''                      # optional shell snippet used as a final subject fallback
+AGENT_ICON=""                       # optional glyph or short string shown before the agent name
 ```
+
+`AGENT_ICON` width is counted per character, like other sidebar text: Nerd Font
+glyphs fit, but double-width characters such as emoji or CJK may misalign rows.
 
 `CHECK_ORDER` tokens: `bt`/`bs` blocked title/screen, `wt`/`ws` working
 title/screen, `is` idle screen. Order matters when states can look alike —

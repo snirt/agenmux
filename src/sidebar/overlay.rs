@@ -378,6 +378,7 @@ fn setting_value(name: &str, buffer: &str) -> Result<String, String> {
 fn choices(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "display.mode" => Some(&["split", "popup"]),
+        "display.agent_label" => Some(&["icon-text", "icon", "text"]),
         "theme.base" => Some(&["dark", "light", "terminal"]),
         _ if name.starts_with("quick_launchers.") && name.ends_with(".working_directory") => {
             Some(&["selected", "tmux"])
