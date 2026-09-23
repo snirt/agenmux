@@ -648,12 +648,11 @@ impl Sidebar {
                     self.agent_label(&row.agent)
                 )
             } else {
-                let glyph = if pane.command == "nvim" {
-                    "\u{f36f}" // nf-linux-neovim
-                } else if expanded {
-                    "▢"
-                } else {
-                    "\u{eb7f}"
+                let glyph = match pane.command.as_str() {
+                    "nvim" => "\u{f36f}",    // nf-linux-neovim
+                    "lazygit" => "\u{e702}", // nf-dev-git
+                    _ if expanded => "▢",
+                    _ => "\u{eb7f}",
                 };
                 format!("{base}{mark}{prefix}{window_icon}{glyph}{E}[0m ")
             };
@@ -1580,6 +1579,20 @@ mod tests {
             "the titled pane replaces its command, not both: {npm_row}"
         );
         sb.panes[1].pane_title.clear();
+
+        sb.panes[3].command = "lazygit".into();
+        sb.render(true);
+        let lazygit_pane = sb
+            .last_frame
+            .lines()
+            .find(|line| line.contains("shell"))
+            .unwrap();
+        assert_eq!(
+            ansi.replace_all(lazygit_pane, "").trim_end(),
+            "   \u{e702} shell",
+            "a lazygit pane swaps its window glyph for the git icon"
+        );
+        sb.panes[3].command = "zsh".into();
 
         // AGENT_ICON prefixes the agent name in both views and counts toward
         // row width; the tests above cover the icon-less name-only rows.

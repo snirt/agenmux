@@ -19,8 +19,9 @@ Neovim panes in the all-panes inventory.
   clears the key to its default, so `AGENT_ICON=""` disables a built-in icon.
 - Icons are looked up from loaded confs at render time; scan TSV, search,
   and notifications stay unchanged.
-- Ordinary panes whose command is `nvim` show `nf-linux-neovim` (U+F36F) in
-  place of the window/pane glyph, with the same styling. Not configurable.
+- Ordinary panes whose command is `nvim` show `nf-linux-neovim` (U+F36F), and
+  `lazygit` panes `nf-dev-git` (U+E702), in place of the window/pane glyph,
+  with the same styling. Not configurable.
 
 ## Verification
 
