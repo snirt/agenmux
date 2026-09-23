@@ -13,8 +13,9 @@ Neovim panes in the all-panes inventory.
 - Width is counted per character like other sidebar text; double-width
   characters may misalign and are documented as such.
 - Built-in defaults: Claude `nf-cod-claude` (U+EC82), Codex `nf-cod-openai`
-  (U+EC81), both Nerd Fonts 3.5+; Pi and Oh My Pi `nf-md-pi` (U+F03FF);
-  generic OpenCode `nf-cod-code` (U+EAC4) and Hermes `nf-cod-hubot` (U+EB08).
+  (U+EC81), both Nerd Fonts 3.5+; Pi and Oh My Pi `Pı` (P + dotless i
+  U+0131); OpenCode `OC`, its own title prefix; Hermes plain `⚕`
+  (U+2695).
 - User `agents/<name>.conf` overrides only the keys it assigns. An empty value
   clears the key to its default, so `AGENT_ICON=""` disables a built-in icon.
 - Icons are looked up from loaded confs at render time; scan TSV, search,

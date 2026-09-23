@@ -136,10 +136,10 @@ running `nvim` shows the Neovim icon (`nf-linux-neovim`), and one running `lazyg
 icon (`nf-dev-git`), in place of its window or pane glyph.
 
 Agent rows in both views prefix the agent name with its `AGENT_ICON`. Built-in defaults:
-Claude `nf-cod-claude` and Codex `nf-cod-openai` (both need Nerd Fonts 3.5+), Pi and
-Oh My Pi `nf-md-pi`, and generic fallbacks for OpenCode (`nf-cod-code`) and Hermes
-(`nf-cod-hubot`), which have no dedicated Nerd Fonts glyph. The text name always follows
-the icon by default, so a missing glyph never hides which agent a row is.
+Claude `nf-cod-claude` and Codex `nf-cod-openai` (both need Nerd Fonts 3.5+). Agents
+without a Nerd Fonts glyph use plain text: `Pı` for Pi and Oh My Pi (the logo's P and
+dotless i), `OC` for OpenCode (its own title prefix), and `⚕` for Hermes. The text name
+always follows the icon by default, so a missing glyph never hides which agent a row is.
 `display.agent_label` picks `icon-text` (default), `icon`, or `text`; an agent
 without an icon always shows its name.
 
