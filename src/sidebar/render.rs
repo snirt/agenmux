@@ -498,13 +498,12 @@ impl Sidebar {
         let (mut session_id, mut window_id) = ("", "");
         // Rename edits the record's own name field; create grows the tree by
         // one placeholder row whose name the user is typing.
-        let typed = |name: &str| -> String { name.chars().filter(|c| !c.is_control()).collect() };
         let renaming = match &self.overlay {
-            Some(Overlay::Rename { name, .. }) => Some(typed(name)),
+            Some(Overlay::Rename { name, .. }) => Some(name),
             _ => None,
         };
         let creating = match &self.overlay {
-            Some(Overlay::Create { target, name }) => Some((target, typed(name))),
+            Some(Overlay::Create { target, name }) => Some((target, name)),
             _ => None,
         };
         let cursor = if creating.is_some() { None } else { cursor };
@@ -540,8 +539,8 @@ impl Sidebar {
                     let pane = &self.panes[i];
                     session_id = &pane.session_id;
                     window_id = "";
-                    let name: String = match renaming.as_deref().filter(|_| selected) {
-                        Some(edit) => format!("{edit}▏"),
+                    let name: String = match renaming.filter(|_| selected) {
+                        Some(edit) => edit.display_clipped("▏", cols.saturating_sub(2)),
                         None => pane.session_name.chars().take(cols).collect(),
                     };
                     (i, format!("{}{accent}{name}{E}[0m", header_mark(selected)))
@@ -549,8 +548,8 @@ impl Sidebar {
                 VisiblePane::Window(i) => {
                     let pane = &self.panes[i];
                     window_id = &pane.window_id;
-                    let name = match renaming.as_deref().filter(|_| selected) {
-                        Some(edit) => format!("{edit}▏"),
+                    let name = match renaming.filter(|_| selected) {
+                        Some(edit) => edit.display_clipped("▏", cols.saturating_sub(6)),
                         None => pane.window_name.clone(),
                     };
                     (
@@ -621,7 +620,7 @@ impl Sidebar {
             let base = if selectable_headers { "  " } else { " " };
             let prefix = if expanded { "  " } else { "" };
             // The editable field sits where the record's name is shown.
-            let edit = renaming.as_deref().filter(|_| selected);
+            let edit = renaming.filter(|_| selected);
             // Everything on the row before the editable name, so the edit field
             // can be clipped to keep its cursor on screen in a narrow pane.
             let lead = if let Some(row) = agent {
@@ -650,22 +649,9 @@ impl Sidebar {
             };
             let field = match edit {
                 Some(edit) => {
-                    // Show the tail: a long name keeps its cursor visible.
-                    let room = cols.saturating_sub(width_of(&lead) + 1).max(1);
-                    let shown: String = if edit.chars().count() > room {
-                        let tail: String = edit
-                            .chars()
-                            .rev()
-                            .take(room - 1)
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .rev()
-                            .collect();
-                        format!("…{tail}")
-                    } else {
-                        edit.to_string()
-                    };
-                    format!("{accent}{shown}▏{E}[0m")
+                    // Keep insertion cursor visible when the name exceeds pane width.
+                    let room = cols.saturating_sub(width_of(&lead)).max(1);
+                    format!("{accent}{}{E}[0m", edit.display_clipped("▏", room))
                 }
                 None => format!("{muted}{name}{E}[0m"),
             };
@@ -715,11 +701,19 @@ impl Sidebar {
         if let Some((target, name)) = creating {
             let (row, at) = match target.action {
                 crate::input::SequenceAction::CreateSession => (
-                    format!("{}{accent}{name}▏{E}[0m", header_mark(true)),
+                    format!(
+                        "{}{accent}{}{E}[0m",
+                        header_mark(true),
+                        name.display_clipped("▏", cols.saturating_sub(2))
+                    ),
                     lines.len(),
                 ),
                 _ => (
-                    format!("  {}{accent}\u{eb7f} {name}▏{E}[0m", header_mark(true)),
+                    format!(
+                        "  {}{accent}\u{eb7f} {}{E}[0m",
+                        header_mark(true),
+                        name.display_clipped("▏", cols.saturating_sub(6))
+                    ),
                     session_end.unwrap_or(lines.len()),
                 ),
             };
@@ -777,22 +771,32 @@ impl Sidebar {
             None => (String::new(), 0, String::new()),
         };
         let filtering = self.attention_filter || !self.query.trim().is_empty();
-        let mut filter = if self.attention_filter {
-            " [attention]".to_string()
-        } else if self.search_focused || !self.query.is_empty() {
-            let query: String = self.query.chars().filter(|c| !c.is_control()).collect();
-            format!(" /{query}")
-        } else {
-            String::new()
-        };
-        if filtering {
+        let count = if filtering {
             let total = if self.settings.settings.show_all_panes {
                 self.panes.len()
             } else {
                 self.rows.len()
             };
-            filter.push_str(&format!(" {}/{}", self.visible.len(), total));
-        }
+            format!(" {}/{}", self.visible.len(), total)
+        } else {
+            String::new()
+        };
+        let mut filter = if self.attention_filter {
+            " [attention]".to_string()
+        } else if self.search_focused || !self.query.is_empty() {
+            let query = if self.search_focused {
+                self.query.display_clipped(
+                    "▏",
+                    cols.saturating_sub(notice_len + count.chars().count() + 2),
+                )
+            } else {
+                self.query.value().to_string()
+            };
+            format!(" /{query}")
+        } else {
+            String::new()
+        };
+        filter.push_str(&count);
         let filter: String = filter
             .chars()
             .take(cols.saturating_sub(notice_len))

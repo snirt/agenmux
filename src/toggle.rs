@@ -241,7 +241,7 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
                     .map_err(|_| "cannot launch daemon; check executable")?,
             );
             // Startup is synchronous only for the requested window. Hooks add
-            // processless sidebars lazily as real clients visit other windows.
+            // sidebar readers lazily as real clients visit other windows.
             if panes::pane_add_record(window.as_deref(), config, &mut created) != 0 {
                 return Err("cannot create startup pane");
             }

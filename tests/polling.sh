@@ -93,7 +93,7 @@ tmux -S "$sock" select-pane -t "$primary" -T constant-title
 server_pid="$(tmux -S "$sock" display-message -p '#{pid}')"
 
 # Start through the public lifecycle so startup creates and measures the focused
-# processless sidebar before acknowledging the first live scan.
+# sidebar reader before acknowledging the first live scan.
 tmux -S "$sock" set-option -g @agenmux-bin "$BIN"
 env TMPDIR="$tmp" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" XDG_STATE_HOME="$XDG_STATE_HOME" \
   TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" AGENMUX_DEBUG="$debug" \

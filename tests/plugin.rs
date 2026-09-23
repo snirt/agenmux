@@ -437,7 +437,9 @@ fn mirror_add_is_idempotent_under_concurrent_calls() {
         .filter(|line| line.starts_with("agenmux\t"))
         .collect::<Vec<_>>();
     assert_eq!(mirrors.len(), 1, "{panes}");
-    assert_eq!(mirrors[0], "agenmux\t0\t30");
+    let fields = mirrors[0].split('\t').collect::<Vec<_>>();
+    assert_eq!(fields[2], "30");
+    assert!(fields[1].parse::<u32>().is_ok_and(|pid| pid > 0), "{panes}");
 }
 
 #[test]
@@ -1090,7 +1092,17 @@ fn native_toggle_preserves_split_and_popup_behavior() {
         "-F",
         "#{window_id}\t#{pane_pid}",
     ]);
-    assert_eq!(sidebars, format!("{focused_window}\t0"), "{sidebars}");
+    assert!(
+        sidebars.starts_with(&format!("{focused_window}\t")),
+        "{sidebars}"
+    );
+    assert!(
+        sidebars
+            .split('\t')
+            .nth(1)
+            .is_some_and(|pid| pid.parse::<u32>().is_ok_and(|pid| pid > 0)),
+        "{sidebars}"
+    );
     let selected = tmux.text(&[
         "display-message",
         "-p",
@@ -1099,6 +1111,29 @@ fn native_toggle_preserves_split_and_popup_behavior() {
         "#{pane_title}\t#{client_key_table}",
     ]);
     assert_eq!(selected, "agenmux\tagenmux");
+
+    let sidebar = tmux.text(&[
+        "list-panes",
+        "-t",
+        &focused_window,
+        "-f",
+        "#{==:#{pane_title},agenmux}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    assert_success(tmux.bin(&["key", "search", &client]), "focus split search");
+    tmux.assert_tmux(&["set-buffer", "-b", "split-paste", "sl☃\nq"]);
+    tmux.assert_tmux(&["paste-buffer", "-p", "-b", "split-paste", "-t", &sidebar]);
+    tmux.wait_for(Duration::from_secs(3), || {
+        tmux.text(&["capture-pane", "-p", "-t", &sidebar])
+            .contains("sl☃q")
+    });
+    assert_success(tmux.bin(&["key", "escape", &client]), "exit split search");
+    tmux.wait_for(Duration::from_secs(3), || {
+        !tmux
+            .text(&["capture-pane", "-p", "-t", &sidebar])
+            .contains("sl☃q")
+    });
 
     assert_success(
         tmux.bin(&["toggle", "split", &client]),
@@ -1128,7 +1163,13 @@ fn native_toggle_preserves_split_and_popup_behavior() {
         "#{window_id}\t#{pane_pid}",
     ]);
     assert_eq!(lazy.lines().count(), 2, "{lazy}");
-    assert!(lazy.lines().all(|line| line.ends_with("\t0")), "{lazy}");
+    assert!(
+        lazy.lines().all(|line| line
+            .split('\t')
+            .nth(1)
+            .is_some_and(|pid| pid.parse::<u32>().is_ok_and(|pid| pid > 0))),
+        "{lazy}"
+    );
     assert_eq!(
         tmux.text(&[
             "display-message",
@@ -3239,7 +3280,10 @@ fn all_panes_reload_preserves_daemon_and_selection() {
     tmux.wait_for(Duration::from_secs(5), || {
         tmux.text(&["list-panes", "-a", "-F", "#{pane_title}\t#{pane_pid}"])
             .lines()
-            .filter(|line| *line == "agenmux\t0")
+            .filter(|line| {
+                line.strip_prefix("agenmux\t")
+                    .is_some_and(|pid| pid.parse::<u32>().is_ok_and(|pid| pid > 0))
+            })
             .count()
             == 1
             && std::fs::read_to_string(tmux.tmp.join("agenmux-scan-cache"))
@@ -3257,7 +3301,7 @@ fn all_panes_reload_preserves_daemon_and_selection() {
         }
     };
     assert_agent_only_cache();
-    // Hidden windows receive their processless sidebar lazily on first visit.
+    // Hidden windows receive their sidebar reader lazily on first visit.
     tmux.assert_tmux(&["switch-client", "-c", &client, "-t", &agent]);
     tmux.wait_for(Duration::from_secs(5), || {
         !tmux
@@ -3326,7 +3370,10 @@ fn all_panes_reload_preserves_daemon_and_selection() {
     assert!(!control.is_empty() && !daemon.is_empty());
     assert_eq!(sidebars.lines().count(), 2, "{sidebars}");
     assert!(
-        sidebars.lines().all(|line| line.ends_with("\t0")),
+        sidebars.lines().all(|line| line
+            .split('\t')
+            .nth(1)
+            .is_some_and(|pid| pid.parse::<u32>().is_ok_and(|pid| pid > 0))),
         "{sidebars}"
     );
 
@@ -3579,7 +3626,12 @@ fn startup_ack_waits_for_focused_live_frame() {
     assert_eq!(rows.len(), 1, "{sidebars}");
     let fields = rows[0].split('\t').collect::<Vec<_>>();
     assert_eq!(fields.get(1), Some(&focused_window.as_str()), "{sidebars}");
-    assert_eq!(fields.get(2), Some(&"0"), "{sidebars}");
+    assert!(
+        fields
+            .get(2)
+            .is_some_and(|pid| pid.parse::<u32>().is_ok_and(|pid| pid > 0)),
+        "{sidebars}"
+    );
     let pane = fields[0];
     let frame = tmux.text(&["capture-pane", "-p", "-t", pane]);
     assert!(

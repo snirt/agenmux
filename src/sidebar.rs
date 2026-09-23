@@ -5,7 +5,7 @@
 // Two entry points share the engine:
 //  - run():        tty mode — popup pane, draws to stdout, keys from stdin.
 //  - run_daemon(): headless preserved-pane mode — frames go directly to the
-//    processless panes visible in attached clients; keys arrive over a FIFO.
+//    sidebar readers in panes visible to attached clients; keys arrive over a FIFO.
 //    The panes never move between windows, so switching causes no join-pane
 //    reflow (the "bump").
 use crate::app_config::{Color, KeyMode, Keymap, Palette};
@@ -199,7 +199,7 @@ pub struct Sidebar {
     rows: Vec<PaneRow>, // complete debounced view-model; never filter cache/status
     panes: Vec<PaneMeta>, // latest complete sidebar-excluded inventory
     visible: Vec<VisiblePane>, // selectable panes; headers never enter this projection
-    query: String,
+    query: ui::TextEdit,
     attention_filter: bool,
     search_focused: bool,
     key_sequence: KeySequence,
@@ -373,7 +373,7 @@ fn new_sidebar(
         rows: Vec::new(),
         panes: Vec::new(),
         visible: Vec::new(),
-        query: String::new(),
+        query: ui::TextEdit::from(""),
         attention_filter: false,
         search_focused: false,
         key_sequence: KeySequence::default(),
@@ -848,6 +848,11 @@ impl Sidebar {
             }
             Key::Owned(_, _)
             | Key::Sequence(_, _)
+            | Key::Left
+            | Key::Right
+            | Key::Home
+            | Key::End
+            | Key::Delete
             | Key::Backspace
             | Key::ClearSearch
             | Key::Text(_)
@@ -924,7 +929,7 @@ impl Sidebar {
                 self.enter_mutation_input(&target.client);
                 self.overlay = Some(Overlay::Create {
                     target,
-                    name: String::new(),
+                    name: ui::TextEdit::with_limit(String::new(), 128),
                 });
                 DispatchResult::Continue
             }
@@ -1055,7 +1060,7 @@ impl Sidebar {
     }
 
     fn parse_launcher_cwd(target: &LauncherTarget, response: &str) -> Result<String, TmuxError> {
-        let response = response.strip_suffix('\n').unwrap_or(&response);
+        let response = response.strip_suffix('\n').unwrap_or(response);
         let mut fields = response.splitn(4, '|');
         let (Some(pane), Some(window), Some(session), Some(cwd)) =
             (fields.next(), fields.next(), fields.next(), fields.next())

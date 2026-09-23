@@ -16,6 +16,8 @@ impl RawMode {
             t.c_cc[libc::VMIN] = 1;
             t.c_cc[libc::VTIME] = 0;
             libc::tcsetattr(0, libc::TCSANOW, &t);
+            print!("\x1b[?2004h");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
             RawMode(Some(orig))
         }
     }
@@ -24,6 +26,8 @@ impl RawMode {
 impl Drop for RawMode {
     fn drop(&mut self) {
         if let Some(orig) = self.0 {
+            print!("\x1b[?2004l");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
             unsafe { libc::tcsetattr(0, libc::TCSANOW, &orig) };
         }
     }
@@ -103,6 +107,11 @@ pub(crate) enum Key {
     Sequence(char, Option<String>),
     Owned(Box<Key>, String),
     Up,
+    Left,
+    Right,
+    Home,
+    End,
+    Delete,
     Select(usize),
     Down,
     WheelUp,
@@ -358,6 +367,7 @@ fn escape_chord(mut next: impl FnMut() -> Option<u8>) -> Option<KeyChord> {
         b'F' => KeyChord::End,
         digit @ b'1'..=b'8' if a == b'[' && next()? == b'~' => match digit {
             b'1' | b'7' => KeyChord::Home,
+            b'3' => KeyChord::Delete,
             b'4' | b'8' => KeyChord::End,
             b'5' => KeyChord::PageUp,
             b'6' => KeyChord::PageDown,
@@ -433,7 +443,19 @@ fn decode_protocol_payload(
             .map(|byte| Key::Text(char::from(byte).to_string()))
             .unwrap_or(Key::Other),
         _ => chord(first, next)
-            .and_then(|chord| action_key(keys, chord))
+            .and_then(|chord| {
+                if keys.contains_key(&Action::Accept) {
+                    match chord {
+                        KeyChord::Left => return Some(Key::Left),
+                        KeyChord::Right => return Some(Key::Right),
+                        KeyChord::Home => return Some(Key::Home),
+                        KeyChord::End => return Some(Key::End),
+                        KeyChord::Delete => return Some(Key::Delete),
+                        _ => {}
+                    }
+                }
+                action_key(keys, chord)
+            })
             .unwrap_or(match first {
                 b'G' => Key::Last,
                 b'.' => Key::TogglePanes,
@@ -555,9 +577,57 @@ pub(crate) fn read_key_with_config(
                 .map(|client| Key::Owned(Box::new(key), client))
                 .unwrap_or(Key::Other);
         }
+        // Literal text from a split pane's PTY. Keep each packet <= PIPE_BUF
+        // so it cannot interleave with a tmux key-table packet on the FIFO.
+        0x09 => {
+            let (Some(high), Some(low)) = (next(), next()) else {
+                return Key::Other;
+            };
+            let len = u16::from_be_bytes([high, low]) as usize;
+            if len == 0 || len > 480 {
+                return Key::Other;
+            }
+            let mut bytes = Vec::with_capacity(len);
+            for _ in 0..len {
+                let Some(byte) = next() else {
+                    return Key::Other;
+                };
+                bytes.push(byte);
+            }
+            return String::from_utf8(bytes)
+                .map(Key::Text)
+                .unwrap_or(Key::Other);
+        }
         _ => {}
     }
     decode_protocol_payload(b, next, keys, config)
+}
+
+/// Consume a terminal's bracketed paste as one edit; never interpret pasted
+/// Enter/Escape as commands. Drain oversized pastes before the next key.
+fn read_paste(fd: libc::c_int) -> Key {
+    let mut bytes = Vec::new();
+    let mut tail = [0u8; 6];
+    let mut count = 0usize;
+    while poll_fd(fd, Some(Duration::from_secs(1))) {
+        let Some(byte) = read_byte(fd) else { break };
+        tail[count % 6] = byte;
+        count += 1;
+        if count >= 6
+            && (0..6)
+                .map(|i| tail[(count + i) % 6])
+                .eq(b"\x1b[201~".iter().copied())
+        {
+            if count <= 65536 {
+                bytes.truncate(bytes.len().saturating_sub(5));
+            }
+            return Key::Text(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        if bytes.len() < 65536 {
+            bytes.push(byte);
+        }
+    }
+    Key::Other
 }
 
 /// Popup/tty search owns printable input. Daemon search receives printable
@@ -567,9 +637,42 @@ pub(crate) fn read_search_key(fd: libc::c_int, keys: &Keymap) -> Key {
         return Key::Quit;
     };
     let next = || {
-        poll_fd(fd, Some(Duration::from_millis(50)))
+        poll_fd(fd, Some(Duration::from_millis(100)))
             .then(|| read_byte(fd))
             .flatten()
+    };
+    let mut prefix = Vec::new();
+    if first == 0x1b {
+        if let Some(a) = next() {
+            prefix.push(a);
+            if a == b'[' {
+                if let Some(b) = next() {
+                    prefix.push(b);
+                    if b == b'2' {
+                        if let Some(c) = next() {
+                            prefix.push(c);
+                            if c == b'0' {
+                                for _ in 0..2 {
+                                    if let Some(byte) = next() {
+                                        prefix.push(byte);
+                                    }
+                                }
+                            }
+                        }
+                        if prefix == b"[200~" {
+                            return read_paste(fd);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let bare_escape = first == 0x1b && prefix.is_empty();
+    let mut prefix = prefix.into_iter();
+    let mut next = || {
+        prefix
+            .next()
+            .or_else(|| if bare_escape { None } else { next() })
     };
     if first >= 0x20 && first != 0x7f {
         let len = if first < 0x80 {
@@ -595,7 +698,14 @@ pub(crate) fn read_search_key(fd: libc::c_int, keys: &Keymap) -> Key {
             .unwrap_or(Key::Other);
     }
     chord(first, next)
-        .and_then(|chord| action_key(keys, chord))
+        .and_then(|chord| match chord {
+            KeyChord::Left => Some(Key::Left),
+            KeyChord::Right => Some(Key::Right),
+            KeyChord::Home => Some(Key::Home),
+            KeyChord::End => Some(Key::End),
+            KeyChord::Delete => Some(Key::Delete),
+            _ => action_key(keys, chord),
+        })
         .unwrap_or(match first {
             0x03 | 0x04 => Key::Quit,
             _ => Key::Other,
@@ -671,6 +781,11 @@ fn send_key_inner(name: &str, client: Option<&str>) -> i32 {
             "last" => b"G".to_vec(),
             "up" => b"\x1b[A".to_vec(),
             "down" => b"\x1b[B".to_vec(),
+            "left" => b"\x1b[D".to_vec(),
+            "right" => b"\x1b[C".to_vec(),
+            "home" => b"\x1b[H".to_vec(),
+            "end" => b"\x1b[F".to_vec(),
+            "delete" => b"\x1b[3~".to_vec(),
             "enter" => b"\r".to_vec(),
             "escape" => b"\x1b".to_vec(),
             "backspace" => vec![0x7f],
@@ -724,6 +839,29 @@ pub(crate) fn buffer_key_bytes(action: &str) -> Option<&'static [u8]> {
 
 fn send_bytes(bytes: &[u8]) -> i32 {
     send_bytes_to(&crate::tmux::runtime_dir(), bytes)
+}
+
+/// Relay terminal paste to the daemon without interpreting its bytes as keys.
+pub(crate) fn send_text_to(runtime: &std::path::Path, text: &str) -> i32 {
+    let mut limit = text.len().min(2048);
+    while !text.is_char_boundary(limit) {
+        limit -= 1;
+    }
+    let mut remaining = &text[..limit];
+    while !remaining.is_empty() {
+        let mut end = remaining.len().min(480);
+        while !remaining.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (chunk, rest) = remaining.split_at(end);
+        let mut packet = vec![0x09, (chunk.len() >> 8) as u8, chunk.len() as u8];
+        packet.extend_from_slice(chunk.as_bytes());
+        if send_bytes_to(runtime, &packet) != 0 {
+            return 1;
+        }
+        remaining = rest;
+    }
+    0
 }
 
 fn send_bytes_to(runtime: &std::path::Path, bytes: &[u8]) -> i32 {
@@ -970,6 +1108,46 @@ mod tests {
     }
 
     #[test]
+    fn popup_text_keys_and_bracketed_paste_are_atomic() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let keys = default_keys(crate::app_config::KeyMode::Search);
+        let feed = |bytes: &[u8]| {
+            assert_eq!(
+                unsafe { libc::write(fds[1], bytes.as_ptr().cast(), bytes.len()) },
+                bytes.len() as isize
+            )
+        };
+        for (bytes, expected) in [
+            (b"\x1b[D".as_slice(), "left"),
+            (b"\x1bOC", "right"),
+            (b"\x1b[H", "home"),
+            (b"\x1b[4~", "end"),
+            (b"\x1b[3~", "delete"),
+        ] {
+            feed(bytes);
+            let key = read_search_key(fds[0], &keys);
+            assert!(matches!(
+                (key, expected),
+                (Key::Left, "left")
+                    | (Key::Right, "right")
+                    | (Key::Home, "home")
+                    | (Key::End, "end")
+                    | (Key::Delete, "delete")
+            ));
+        }
+        feed(b"\x1b[200~hello\n\x1b[A\xc3\xa9\x1b[201~x");
+        assert!(
+            matches!(read_search_key(fds[0], &keys), Key::Text(text) if text == "hello\n\x1b[Aé")
+        );
+        assert!(matches!(read_search_key(fds[0], &keys), Key::Text(text) if text == "x"));
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    #[test]
     fn built_in_sequences_share_dispatch_continuations_and_expiry() {
         let start = Instant::now();
         let timeout = Duration::from_millis(1000);
@@ -1194,6 +1372,32 @@ command = "fish"
             action_key(settings_keys(), KeyChord::Right),
             Some(Key::Down)
         ));
+    }
+
+    #[test]
+    fn split_text_packets_preserve_unicode_across_fifo_chunks() {
+        let runtime =
+            std::env::temp_dir().join(format!("agenmux-paste-test-{}", std::process::id()));
+        std::fs::create_dir_all(&runtime).unwrap();
+        let path = runtime.join("agenmux-keys");
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) };
+        assert!(fd >= 0);
+        let text = "é".repeat(245);
+        assert_eq!(send_text_to(&runtime, &text), 0);
+        let keys = default_keys(crate::app_config::KeyMode::Search);
+        let mut received = String::new();
+        for _ in 0..2 {
+            match read_key(fd, &keys) {
+                Key::Text(chunk) => received.push_str(&chunk),
+                key => panic!("unexpected paste packet: {key:?}"),
+            }
+        }
+        assert_eq!(received, text);
+        unsafe { libc::close(fd) };
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(runtime).unwrap();
     }
 
     #[test]

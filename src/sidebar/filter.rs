@@ -332,6 +332,16 @@ impl Sidebar {
     }
 
     pub(super) fn search_key(&mut self, key: Key) {
+        if self.query.handle(&key) {
+            if matches!(
+                key,
+                Key::Text(_) | Key::Backspace | Key::Delete | Key::ClearSearch
+            ) {
+                self.attention_filter = false;
+                self.rebuild_visible(!matches!(key, Key::ClearSearch));
+            }
+            return;
+        }
         match key {
             Key::Quit | Key::Close => self.clear_filter(),
             // First Enter accepts query and hands j/k back to filtered
@@ -339,28 +349,19 @@ impl Sidebar {
             Key::Jump => self.search_focused = false,
             Key::Down => self.move_sel(1),
             Key::Up => self.move_sel(-1),
-            Key::Backspace => {
-                self.attention_filter = false;
-                self.query.pop();
-                self.rebuild_visible(true);
-            }
-            Key::ClearSearch => {
-                self.query.clear();
-                self.attention_filter = false;
-                self.rebuild_visible(false);
-            }
-            Key::Text(text) => {
-                self.attention_filter = false;
-                let room = 256usize.saturating_sub(self.query.chars().count());
-                self.query
-                    .extend(text.chars().filter(|c| !c.is_control()).take(room));
-                self.rebuild_visible(true);
-            }
             Key::WheelUp => self.scroll_viewport(-1),
             Key::WheelDown => self.scroll_viewport(1),
             Key::AllStates => self.clear_filter(),
             Key::TogglePanes => self.toggle_all_panes(),
             Key::First
+            | Key::Left
+            | Key::Right
+            | Key::Home
+            | Key::End
+            | Key::Delete
+            | Key::Text(_)
+            | Key::Backspace
+            | Key::ClearSearch
             | Key::Last
             | Key::Select(_)
             | Key::Sequence(_, _)
