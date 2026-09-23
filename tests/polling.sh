@@ -22,8 +22,38 @@ export XDG_CONFIG_HOME="$tmp/config"
 export XDG_STATE_HOME="$tmp/state"
 mkdir -p "$XDG_CONFIG_HOME/agenmux/agents"
 
+# A zombie still answers kill -0, so only a live, unreaped process counts. The
+# pid may also have been reused after agenmux exited; only an agenmux process
+# is worth waiting for.
+running() {
+  local stat comm
+  read -r stat comm < <(ps -o stat=,comm= -p "$1" 2>/dev/null) || return 1
+  case "$stat" in
+    '' | *Z*) return 1 ;;
+  esac
+  case "$comm" in
+    *agenmux*) ;;
+    *) return 1 ;;
+  esac
+}
+
 cleanup() {
   tmux -S "$sock" kill-server 2>/dev/null || true
+  # The daemon outlives kill-server briefly and may still append its trace or
+  # rewrite rows and cache under $tmp, recreating files rm -rf already removed.
+  # Every trace line starts with the writer's pid; wait for those to exit.
+  # A matching name cannot prove a pid is still this test's daemon, so never
+  # kill one: a wrong match only costs the bounded wait.
+  local pids pid alive=''
+  pids="$(sed -n 's/^\[\([0-9][0-9]*\)\].*/\1/p' "$debug" 2>/dev/null | sort -u)" || pids=''
+  for _ in $(seq 1 50); do
+    alive=''
+    for pid in $pids; do
+      running "$pid" && alive="$alive $pid"
+    done
+    [ -z "$alive" ] && break
+    sleep .1
+  done
   rm -rf "$tmp"
 }
 trap cleanup EXIT
