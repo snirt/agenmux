@@ -169,6 +169,9 @@ pub type IdentCache = HashMap<(String, u32, String), String>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_CONF: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
     fn normalize() {
@@ -178,7 +181,11 @@ mod tests {
     }
 
     fn confs() -> Vec<AgentConf> {
-        let dir = std::env::temp_dir().join(format!("am-procs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "am-procs-{}-{}",
+            std::process::id(),
+            NEXT_CONF.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("pi.conf"),
