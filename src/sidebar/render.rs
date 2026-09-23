@@ -332,6 +332,19 @@ impl Sidebar {
             .first()
             .map_or(String::new(), |c| format!("{} {what}", c.label(true)))
     }
+    /// "q/esc back": overlays close on both the close and the reset key.
+    pub(super) fn back_hint(&self) -> String {
+        let keys = [Action::Close, Action::Reset]
+            .iter()
+            .filter_map(|action| self.normal_keys[action].first())
+            .map(|c| c.label(true))
+            .collect::<Vec<_>>();
+        if keys.is_empty() {
+            String::new()
+        } else {
+            format!("{} back", keys.join("/"))
+        }
+    }
     pub(super) fn hints(&self, parts: &[(Action, &str)]) -> String {
         join(
             &parts
@@ -1129,7 +1142,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::super::{new_sidebar, Daemon, MutationTarget, Overlay};
-    use crate::input::SequenceAction;
+    use crate::input::{Key, SequenceAction};
 
     fn row(pane: &str) -> PaneRow {
         PaneRow {
@@ -1684,6 +1697,7 @@ mod tests {
         sb.rebuild_visible(false);
         themed_frames(&mut sb);
         custom_key_hints(&mut sb);
+        versions_close_keys(&mut sb);
         if let Some(output) = std::env::var_os("AGENMUX_THEME_VISUAL_DIR") {
             visual_frames(&mut sb, &PathBuf::from(output));
         }
@@ -1771,6 +1785,25 @@ mod tests {
                 .status()
                 .unwrap()
                 .success());
+        }
+    }
+
+    /// Escape backs out of the version picker like q does, and its hint says so.
+    fn versions_close_keys(sb: &mut Sidebar) {
+        let settings =
+            crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+        sb.normal_keys = settings.normal.clone();
+        sb.daemon.as_mut().unwrap().size = (80, 40);
+        for key in [Key::AllStates, Key::Close] {
+            sb.overlay = Some(Overlay::Versions {
+                sel: 0,
+                chosen: None,
+            });
+            sb.last_frame.clear();
+            sb.render(true);
+            assert!(sb.last_frame.contains("q/esc back"), "{}", sb.last_frame);
+            sb.dispatch_key(key.clone());
+            assert!(sb.overlay.is_none(), "{key:?} leaves the picker open");
         }
     }
 
