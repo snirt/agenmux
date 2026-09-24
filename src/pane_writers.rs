@@ -34,7 +34,11 @@ impl PaneWriter {
     }
 
     fn emit(&mut self, frame: &[u8]) -> std::io::Result<()> {
-        self.0.write_all(frame)
+        // macOS can block forever when one FIFO write exceeds its 8 KiB buffer.
+        for chunk in frame.chunks(4096) {
+            self.0.write_all(chunk)?;
+        }
+        Ok(())
     }
 }
 
@@ -172,4 +176,57 @@ pub(crate) fn run_pane() -> i32 {
     drop(frames);
     let _ = std::fs::remove_file(path);
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_frame_reaches_polling_fifo_reader() {
+        let runtime = std::env::temp_dir().join(format!(
+            "agenmux-large-frame-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&runtime).unwrap();
+        let path = frame_path(&runtime, "%1");
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let fd = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) };
+        assert!(fd >= 0);
+        let mut reader = unsafe { File::from_raw_fd(fd) };
+
+        let frame = vec![b'x'; 20_000];
+        let sent = frame.clone();
+        let writer = std::thread::spawn(move || {
+            PaneWriter::open(&runtime, "%1")
+                .unwrap()
+                .emit(&sent)
+                .unwrap();
+            std::fs::remove_file(path).unwrap();
+            std::fs::remove_dir(runtime).unwrap();
+        });
+        let mut received = Vec::new();
+        while received.len() < frame.len() {
+            let mut event = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert_eq!(
+                unsafe { libc::poll(&mut event, 1, 2_000) },
+                1,
+                "FIFO stalled"
+            );
+            let mut buf = [0; 8192];
+            let n = reader.read(&mut buf).unwrap();
+            received.extend_from_slice(&buf[..n]);
+        }
+        writer.join().unwrap();
+        assert_eq!(received, frame);
+    }
 }
