@@ -146,11 +146,24 @@ $plugin"
   printf '\n'
   if ask "Add them to $(tilde "$CONF")?" y; then
     if [ -n "$tpm_user" ]; then
-      # ENVIRON, not -v: BSD awk rejects newlines in -v values. Copy back
-      # instead of mv so a symlinked conf (dotfiles) keeps its link.
-      block="$block" awk '/tpm\/tpm/ && !done { print ENVIRON["block"]; done = 1 } { print }' \
-        "$CONF" >"$CONF.agenmux.tmp" && cat "$CONF.agenmux.tmp" >"$CONF" && rm "$CONF.agenmux.tmp" ||
-        die "could not edit $(tilde "$CONF")"
+      # Replace the file a dotfiles symlink points at, not the link itself.
+      # readlink without -f: macOS before 12.3 lacks it. Link loops never get
+      # here; the [ -f ] check above already failed on them.
+      target="$CONF"
+      while [ -L "$target" ]; do
+        link="$(readlink "$target")"
+        case "$link" in /*) target="$link" ;; *) target="$(dirname "$target")/$link" ;; esac
+      done
+      # The rename is atomic, so a failed write never leaves a partial config.
+      # cp -p first so the rewritten file keeps the original's mode.
+      # ENVIRON, not -v: BSD awk rejects newlines in -v values.
+      tmp="$target.agenmux.tmp"
+      { cp -p "$target" "$tmp" &&
+        block="$block" awk '/tpm\/tpm/ && !done { print ENVIRON["block"]; done = 1 } { print }' \
+          "$target" >"$tmp" && mv "$tmp" "$target"; } || {
+        rm -f "$tmp"
+        die "could not edit $(tilde "$target")"
+      }
     else
       printf '%s\n' "$block" >>"$CONF"
     fi
