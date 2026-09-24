@@ -80,10 +80,25 @@ Ordinary PRs do not need new release notes. Once the checks and platform builds
 pass on `master`, CI tags that commit and publishes the release from the same
 run. A `master` push whose version is already tagged does nothing.
 
-`make release` remains a guarded manual fallback for a local bump commit and
-tag on `master`. It pushes both atomically; use it only when automatic
-publication cannot be used. CI rejects a manually pushed tag that does not
-match the manifest.
+`make release` is a guarded manual alternative when CI publication is unavailable
+**before** preparing a version PR. Start with a clean worktree:
+
+```sh
+git switch master
+git pull --ff-only
+# Edit RELEASE_NOTES.md for the new release.
+make patch-bump                  # or make minor-bump; runs both test suites
+git diff                         # review notes and Cargo files
+git add RELEASE_NOTES.md Cargo.toml Cargo.lock
+git commit -m "chore: bump version to $(bash scripts/version.sh)"
+git tag "$(bash scripts/version.sh tag)"
+make release                     # atomically pushes master and the tag
+```
+
+It requires exactly one local bump commit ahead of `origin/master` with that
+commit message and tag at `HEAD`. It cannot retry publication after a version
+PR has already merged. CI rejects a manually pushed tag that does not match
+the manifest.
 
 ## Reporting bugs
 

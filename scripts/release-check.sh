@@ -64,7 +64,7 @@ if [ "$mode" != prepare ]; then
   if [ "$lock_version" != "$version" ]; then
     fail "Cargo.lock has agenmux $lock_version, but Cargo.toml has $version; run cargo metadata to refresh the lockfile"
   fi
-  cargo metadata --locked --no-deps --format-version 1 >/dev/null || {
+  cargo metadata --locked --format-version 1 >/dev/null || {
     fail 'Cargo.lock is stale; run cargo metadata to refresh it'
   }
 fi

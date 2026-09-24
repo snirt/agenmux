@@ -16,6 +16,7 @@ if [[ ! "$old" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
 fi
 if ! git diff --quiet HEAD -- Cargo.toml Cargo.lock; then
   echo 'Cargo.toml or Cargo.lock has uncommitted changes; review them before preparing a release' >&2
+  echo 'If a previous bump failed during tests, rerun cargo test --locked and bash tests/run.sh instead' >&2
   exit 1
 fi
 
@@ -29,7 +30,7 @@ bash scripts/release-check.sh prepare "$new"
 sed -i.bak "s/^version = \"$old\"/version = \"$new\"/" Cargo.toml
 rm Cargo.toml.bak
 cargo metadata --format-version 1 >/dev/null
-cargo metadata --locked --no-deps --format-version 1 >/dev/null
+cargo metadata --locked --format-version 1 >/dev/null
 cargo test --locked
 bash tests/run.sh
 echo "prepared v$new; review git diff, then commit the version files and release notes in a PR"

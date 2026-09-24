@@ -45,14 +45,14 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          case "$EVENT_NAME" in
-            pull_request) ./scripts/release-check.sh pr "origin/$BASE_REF" ;;
-            push)
-              case "$GITHUB_REF" in
-                refs/tags/v*) ./scripts/release-check.sh tag "$REF_NAME" ;;
-                refs/heads/master) ./scripts/release-check.sh master ;;
-              esac ;;
-          esac
+          if [ "$EVENT_NAME" = pull_request ]; then
+            ./scripts/release-check.sh pr "origin/$BASE_REF"
+          else
+            case "$GITHUB_REF" in
+              refs/tags/v*) ./scripts/release-check.sh tag "$REF_NAME" ;;
+              refs/heads/master) ./scripts/release-check.sh master ;;
+            esac
+          fi
 
   sanity:
     name: Real tmux sanity

@@ -51,7 +51,7 @@ printf 'notes for 0.6.2\n' >"$work/RELEASE_NOTES.md"
 make -s -C "$work" bump >"$tmp/out"
 [ "$(bash "$work/scripts/version.sh")" = 0.6.2 ]
 grep -Fq 'version = "0.6.2"' "$work/Cargo.lock"
-cargo metadata --manifest-path "$work/Cargo.toml" --locked --no-deps --format-version 1 >/dev/null
+cargo metadata --manifest-path "$work/Cargo.toml" --locked --format-version 1 >/dev/null
 [ -f "$work/rust-tests-ran" ] && [ -f "$work/shell-tests-ran" ]
 [ "$(git -C "$work" rev-list --count HEAD)" = 1 ]
 [ "$(git -C "$work" tag --list 'v*' | wc -l | tr -d ' ')" = 1 ]
@@ -80,6 +80,19 @@ fail_with 'shell suite failed' make -s -C "$work" patch-bump
 [ -f "$work/rust-tests-ran" ]
 [ "$(bash "$work/scripts/version.sh")" = 0.6.2 ]
 ! grep -Fq 'prepared v0.6.2' "$tmp/out"
+fail_with 'rerun cargo test --locked and bash tests/run.sh' make -s -C "$work" patch-bump
+
+fixture stale_dependency
+git -C "$work" branch base
+printf 'notes for 0.6.2\n' >"$work/RELEASE_NOTES.md"
+sed -i.bak 's/0.6.1/0.6.2/' "$work/Cargo.toml"
+rm "$work/Cargo.toml.bak"
+cargo metadata --manifest-path "$work/Cargo.toml" --format-version 1 >/dev/null
+mkdir -p "$work/local-dep/src"
+printf '[package]\nname = "local-dep"\nversion = "0.1.0"\nedition = "2021"\n' >"$work/local-dep/Cargo.toml"
+printf '' >"$work/local-dep/src/lib.rs"
+printf '\n[dependencies]\nlocal-dep = { path = "local-dep" }\n' >>"$work/Cargo.toml"
+fail_with 'Cargo.lock is stale' bash "$work/scripts/release-check.sh" pr base
 
 fixture invalid
 sed -i.bak 's/0.6.1/invalid/' "$work/Cargo.toml"
@@ -107,6 +120,18 @@ git -C "$work" add .
 git -C "$work" commit -qm 'prepare release'
 git -C "$work" tag v0.6.2
 bash "$work/scripts/release-check.sh" tag v0.6.2 >"$tmp/out"
+awk '/^      - name: Check release readiness$/ { step=1; next }
+  step && /^        run: \|$/ { script=1; next }
+  script && /^          / { sub(/^          /, ""); print; next }
+  script { exit }' "$DIR/.github/workflows/build.yml" >"$tmp/check-workflow.sh"
+[ -s "$tmp/check-workflow.sh" ]
+(
+  cd "$work"
+  fail_with 'does not match Cargo.toml' env EVENT_NAME=workflow_dispatch \
+    GITHUB_REF=refs/tags/v0.6.3 REF_NAME=v0.6.3 bash "$tmp/check-workflow.sh"
+  EVENT_NAME=workflow_dispatch GITHUB_REF=refs/tags/v0.6.2 \
+    REF_NAME=v0.6.2 bash "$tmp/check-workflow.sh" >"$tmp/out"
+)
 printf 'notes for 0.6.1\n' >"$work/RELEASE_NOTES.md"
 fail_with 'RELEASE_NOTES.md is empty or unchanged' bash "$work/scripts/release-check.sh" tag v0.6.2
 
