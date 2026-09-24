@@ -293,7 +293,10 @@ pub(crate) fn pane_add_record(
         Ok(bin) => bin,
         Err(_) => return 1,
     };
-    let runtime = format!("AGENMUX_RUNTIME_DIR={}", tmux::runtime_dir().display());
+    let runtime = match tmux::prepare_runtime_dir() {
+        Ok(dir) => format!("AGENMUX_RUNTIME_DIR={}", dir.display()),
+        Err(_) => return 1,
+    };
     let output = Command::new("tmux")
         .args([
             "split-window",

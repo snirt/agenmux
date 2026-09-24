@@ -58,7 +58,7 @@ pub fn run(plugin_dir: &Path, requested_mode: Option<&str>, requested_client: Op
     }
     // Closing an existing popup is a recovery path, including a broken file.
     if matches!(requested_mode, Some("popup") | None | Some("")) {
-        let pin = std::env::temp_dir().join("agenmux-pin");
+        let pin = tmux::runtime_dir().join("agenmux-pin");
         if pin.exists() {
             return if std::fs::remove_file(pin).is_ok() {
                 0
@@ -186,6 +186,13 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
     if !reuse {
         panes::stop_daemon();
         panes::teardown();
+        let runtime = match tmux::prepare_runtime_dir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                eprintln!("agenmux: cannot prepare runtime directory: {error}");
+                return 1;
+            }
+        };
         let generation = format!(
             "{}-{}",
             std::process::id(),
@@ -203,7 +210,6 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
         let bin = binary(plugin_dir);
         let mut child = None;
         let mut created = Vec::new();
-        let runtime = std::env::temp_dir();
         let new_files = ["agenmux-rows", "agenmux-scan-cache"]
             .map(|name| runtime.join(name))
             .into_iter()
@@ -361,7 +367,14 @@ fn select_sidebar(client: Option<&str>) {
 }
 
 fn popup(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::AppConfig) -> i32 {
-    let pin = std::env::temp_dir().join("agenmux-pin");
+    let runtime = match tmux::prepare_runtime_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("agenmux: cannot prepare runtime directory: {error}");
+            return 1;
+        }
+    };
+    let pin = runtime.join("agenmux-pin");
     if pin.exists() {
         let _ = std::fs::remove_file(pin);
         return 0;
@@ -465,7 +478,7 @@ fn popup(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
 }
 
 fn scan_cache() -> PathBuf {
-    std::env::temp_dir().join("agenmux-scan-cache")
+    tmux::runtime_dir().join("agenmux-scan-cache")
 }
 
 fn popup_height(cache: &Path, client: Option<&str>) -> usize {

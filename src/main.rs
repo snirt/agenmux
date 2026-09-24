@@ -116,7 +116,7 @@ fn plugin_dir() -> PathBuf {
 }
 
 fn scan_cache_path() -> PathBuf {
-    std::env::temp_dir().join("agenmux-scan-cache")
+    tmux::runtime_dir().join("agenmux-scan-cache")
 }
 
 fn self_pane() -> Option<String> {

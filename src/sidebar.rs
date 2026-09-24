@@ -445,7 +445,7 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     };
     let self_pane = std::env::var("TMUX_PANE").unwrap_or_default();
     let pin = crate::compat_env("AGENMUX_PIN", "AGENTS_MON_PIN").filter(|p| !p.is_empty());
-    let rows_file = std::env::temp_dir().join(format!(
+    let rows_file = crate::tmux::runtime_dir().join(format!(
         "agenmux-rows-{}",
         self_pane.trim_start_matches('%')
     ));

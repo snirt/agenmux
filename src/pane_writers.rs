@@ -51,7 +51,7 @@ impl PaneWriters {
     pub fn new() -> PaneWriters {
         PaneWriters {
             writers: HashMap::new(),
-            runtime: std::env::temp_dir(),
+            runtime: crate::tmux::runtime_dir(),
         }
     }
 
