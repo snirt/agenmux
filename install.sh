@@ -146,9 +146,11 @@ $plugin"
   printf '\n'
   if ask "Add them to $(tilde "$CONF")?" y; then
     if [ -n "$tpm_user" ]; then
-      # ENVIRON, not -v: BSD awk rejects newlines in -v values
+      # ENVIRON, not -v: BSD awk rejects newlines in -v values. Copy back
+      # instead of mv so a symlinked conf (dotfiles) keeps its link.
       block="$block" awk '/tpm\/tpm/ && !done { print ENVIRON["block"]; done = 1 } { print }' \
-        "$CONF" >"$CONF.agenmux.tmp" && mv "$CONF.agenmux.tmp" "$CONF" || die "could not edit $(tilde "$CONF")"
+        "$CONF" >"$CONF.agenmux.tmp" && cat "$CONF.agenmux.tmp" >"$CONF" && rm "$CONF.agenmux.tmp" ||
+        die "could not edit $(tilde "$CONF")"
     else
       printf '%s\n' "$block" >>"$CONF"
     fi

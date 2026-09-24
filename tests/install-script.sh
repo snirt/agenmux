@@ -63,6 +63,15 @@ sh "$DIR/install.sh" >/dev/null && sh "$DIR/install.sh" >/dev/null
 check tpm-conf "$(cat "$home/.tmux.conf")" \
   "$(printf "set -g mouse on\nset -g @agenmux-key 'A'\nset -g @agenmux-popup-key 'a'\nset -g @plugin 'snirt/agenmux'\nrun \"~/.tmux/plugins/tpm/tpm\"")"
 
+# a dotfiles symlink stays a symlink; the TPM edit lands in its target
+mkdir -p "$home/dotfiles"
+printf 'run "~/.tmux/plugins/tpm/tpm"\n' >"$home/dotfiles/tmux.conf"
+ln -sf "$home/dotfiles/tmux.conf" "$home/.tmux.conf"
+sh "$DIR/install.sh" >/dev/null
+check symlink-kept "$([ -L "$home/.tmux.conf" ] && echo yes)" yes
+check symlink-target "$(grep -c agenmux "$home/dotfiles/tmux.conf")" 3
+rm "$home/.tmux.conf"
+
 # a legacy agents-mon line is left alone rather than loading the plugin twice
 printf 'run-shell ~/.tmux/plugins/tmux-agents-mon/agents-mon.tmux\n' >"$home/.tmux.conf"
 sh "$DIR/install.sh" >/dev/null
