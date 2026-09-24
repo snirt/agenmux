@@ -20,7 +20,8 @@ fn await_daemon(child: &mut Child) -> Result<(), &'static str> {
             return Err("daemon readiness channel unavailable");
         }
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // An active server with many panes can take longer than five seconds to scan.
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if child
             .try_wait()
