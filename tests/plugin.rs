@@ -628,6 +628,65 @@ fn separate_servers_with_shared_tmpdir_keep_their_own_keys() {
 }
 
 #[test]
+fn returning_to_selected_sidebar_restores_its_key_table() {
+    let tmux = TestTmux::new("return-sidebar");
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agenmux-bin",
+        env!("CARGO_BIN_EXE_agenmux"),
+    ]);
+    let mut viewer = tmux.attach();
+    tmux.wait_for(Duration::from_secs(2), || {
+        !tmux
+            .text(&["list-clients", "-F", "#{client_name}"])
+            .is_empty()
+    });
+    let client = tmux.text(&["list-clients", "-F", "#{client_name}"]);
+    assert_success(tmux.bin(&["setup"]), "setup session return");
+    assert_success(
+        tmux.bin(&["toggle", "split", &client]),
+        "open sidebar for session return",
+    );
+    let sidebar = tmux.text(&[
+        "list-panes",
+        "-a",
+        "-f",
+        "#{==:#{pane_title},agenmux}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    tmux.assert_tmux(&["select-pane", "-t", &sidebar]);
+    let state = || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{pane_title}|#{client_key_table}",
+        ])
+    };
+    tmux.wait_for(Duration::from_secs(2), || state() == "agenmux|agenmux");
+
+    tmux.assert_tmux(&["new-session", "-d", "-s", "elsewhere", "exec sleep 60"]);
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-t", "elsewhere"]);
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-T", "root"]);
+    assert!(state().ends_with("|root"));
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-t", "plugin"]);
+    tmux.wait_for(Duration::from_secs(2), || state() == "agenmux|agenmux");
+
+    tmux.assert_tmux(&["new-window", "-d", "-t", "plugin:", "exec sleep 60"]);
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-t", "plugin:1"]);
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-T", "root"]);
+    assert!(state().ends_with("|root"));
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-t", "plugin:0"]);
+    tmux.wait_for(Duration::from_secs(2), || state() == "agenmux|agenmux");
+
+    let _ = viewer.kill();
+    let _ = viewer.wait();
+}
+
+#[test]
 #[ignore = "diagnostic lifecycle latency report"]
 fn lifecycle_latency_report() {
     for windows in [1usize, 40] {

@@ -211,6 +211,18 @@ pub fn pane_add(window: Option<&str>) -> i32 {
     }
 }
 
+/// A session/window hook names the client that moved. Its selected pane can
+/// already be a sidebar, so after-select-pane will not fire on this transition.
+pub fn pane_add_for_client(window: &str, client: &str) -> i32 {
+    if !client.is_empty()
+        && tmux::command(&["display-message", "-p", "-c", client, "#{pane_title}"])
+            .is_ok_and(|title| title.trim_end() == "agenmux")
+    {
+        let _ = tmux::command_status(&["switch-client", "-c", client, "-T", "agenmux"]);
+    }
+    pane_add(Some(window))
+}
+
 pub fn pane_add_config(window: Option<&str>, config: &crate::app_config::AppConfig) -> i32 {
     pane_add_record(window, config, &mut Vec::new())
 }

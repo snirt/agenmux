@@ -66,6 +66,7 @@ fn main() {
         ["wheel", pane, "down"] => input::wheel(pane, input::Direction::Down),
         ["pane-add"] => panes::pane_add(None),
         ["pane-add", window] => panes::pane_add(Some(window)),
+        ["pane-add", window, client] => panes::pane_add_for_client(window, client),
         ["pane-orphan"] => panes::pane_orphan(),
         ["pane-pin"] => panes::pane_pin(),
         ["teardown"] => match panes::lifecycle_lock() {
@@ -91,7 +92,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: agenmux [--version|config [--help|check [--effective]|reload]|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|setup|toggle [split|popup] [client]|releases refresh|update [latest|vX.Y.Z]|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
+                "usage: agenmux [--version|config [--help|check [--effective]|reload]|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window [client]]|pane-orphan|pane-pin|teardown|setup|toggle [split|popup] [client]|releases refresh|update [latest|vX.Y.Z]|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
             );
             2
         }
