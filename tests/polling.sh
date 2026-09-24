@@ -17,7 +17,6 @@ command -v tmux >/dev/null || {
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/agenmux-polling.XXXXXX")"
 sock="$tmp/tmux.sock"
 debug="$tmp/debug.log"
-cache="$tmp/agenmux-scan-cache"
 export XDG_CONFIG_HOME="$tmp/config"
 export XDG_STATE_HOME="$tmp/state"
 mkdir -p "$XDG_CONFIG_HOME/agenmux/agents"
@@ -98,6 +97,7 @@ tmux -S "$sock" set-option -g @agenmux-bin "$BIN"
 env TMPDIR="$tmp" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" XDG_STATE_HOME="$XDG_STATE_HOME" \
   TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" AGENMUX_DEBUG="$debug" \
   "$BIN" toggle split
+cache="$(tmux -S "$sock" show-option -gqv @agenmux-runtime-dir)/agenmux-scan-cache"
 state_count() {
   awk -F '\t' -v state="$1" '$4 == state { n++ } END { print n + 0 }' "$cache" 2>/dev/null || printf '0\n'
 }

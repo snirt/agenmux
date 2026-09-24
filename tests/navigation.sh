@@ -45,6 +45,9 @@ command -v tmux >/dev/null || exit 0
 command -v expect >/dev/null || exit 0
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/agenmux-navigation.XXXXXX")"
+# This key-table harness edits row maps directly; keep its runtime files in the
+# harness directory. Separate tests cover the per-server default.
+export AGENMUX_RUNTIME_DIR="$tmp"
 # Never let a developer's application file decide this harness's keys, and
 # remap one navigation key so the split-mode hints are proven to come from the
 # configured keymap rather than the daemon's protocol defaults.

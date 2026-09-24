@@ -97,6 +97,7 @@ fi
 before="$(pgrep -f 'agenmux daemon' 2>/dev/null | sort)"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" toggle split
+runtime="$(tmux -S "$sock" show-option -gqv @agenmux-runtime-dir)"
 daemon=''
 for _ in $(seq 1 60); do
   after="$(pgrep -f 'agenmux daemon' 2>/dev/null | sort)"
@@ -104,11 +105,11 @@ for _ in $(seq 1 60); do
   [ -n "$daemon" ] && break
   sleep 0.1
 done
-[ -n "$daemon" ] && [ -p "$tmp/agenmux-keys" ] || {
+[ -n "$daemon" ] && [ -p "$runtime/agenmux-keys" ] || {
   echo "FAIL daemon-exits-without-runtime-dir: no daemon or FIFO after restart"
   exit 1
 }
-rm -f "$tmp/agenmux-keys"
+rm -f "$runtime/agenmux-keys"
 exits_without_fifo=0
 for _ in $(seq 1 40); do
   kill -0 "$daemon" 2>/dev/null || {
