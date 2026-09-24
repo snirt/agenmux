@@ -231,6 +231,8 @@ impl Tmux {
 
     fn connect_with_output(output: bool) -> Result<Tmux, TmuxError> {
         let mut cmd = Command::new("tmux");
+        // A stale $TMUX socket must not start a new server while attaching.
+        cmd.arg("-N");
         // stay on the pane's server even on a non-default socket ($TMUX is
         // "socket_path,pid,session"); the var itself must go — a control
         // client is not a nested session
