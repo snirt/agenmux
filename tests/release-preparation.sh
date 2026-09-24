@@ -7,13 +7,15 @@ trap 'rm -rf "$tmp"' EXIT
 
 fixture() {
   work="$tmp/$1"
-  mkdir -p "$work/scripts" "$work/src"
+  mkdir -p "$work/scripts" "$work/src" "$work/tests"
   cp "$DIR/Makefile" "$work/Makefile"
   cp "$DIR/scripts/bump.sh" "$DIR/scripts/release-check.sh" \
     "$DIR/scripts/version.sh" "$work/scripts/"
   chmod +x "$work/scripts/"*.sh
   printf '[package]\nname = "agenmux"\nversion = "0.6.1"\nedition = "2021"\n' >"$work/Cargo.toml"
-  printf '' >"$work/src/lib.rs"
+  printf '#[test] fn ran() { std::fs::write("rust-tests-ran", "").unwrap(); }\n' >"$work/src/lib.rs"
+  printf '#!/usr/bin/env bash\n: > shell-tests-ran\n' >"$work/tests/run.sh"
+  chmod +x "$work/tests/run.sh"
   printf 'notes for 0.6.1\n' >"$work/RELEASE_NOTES.md"
   cargo generate-lockfile --manifest-path "$work/Cargo.toml" >/dev/null
   git -C "$work" init -q -b master
@@ -50,6 +52,7 @@ make -s -C "$work" bump >"$tmp/out"
 [ "$(bash "$work/scripts/version.sh")" = 0.6.2 ]
 grep -Fq 'version = "0.6.2"' "$work/Cargo.lock"
 cargo metadata --manifest-path "$work/Cargo.toml" --locked --no-deps --format-version 1 >/dev/null
+[ -f "$work/rust-tests-ran" ] && [ -f "$work/shell-tests-ran" ]
 [ "$(git -C "$work" rev-list --count HEAD)" = 1 ]
 [ "$(git -C "$work" tag --list 'v*' | wc -l | tr -d ' ')" = 1 ]
 
@@ -69,6 +72,14 @@ printf 'notes for 0.7.0\n' >"$work/RELEASE_NOTES.md"
 make -s -C "$work" minor-bump >"$tmp/out"
 [ "$(bash "$work/scripts/version.sh")" = 0.7.0 ]
 grep -Fq 'version = "0.7.0"' "$work/Cargo.lock"
+
+fixture failed_tests
+printf 'notes for 0.6.2\n' >"$work/RELEASE_NOTES.md"
+printf '#!/usr/bin/env bash\necho "shell suite failed" >&2\nexit 1\n' >"$work/tests/run.sh"
+fail_with 'shell suite failed' make -s -C "$work" patch-bump
+[ -f "$work/rust-tests-ran" ]
+[ "$(bash "$work/scripts/version.sh")" = 0.6.2 ]
+! grep -Fq 'prepared v0.6.2' "$tmp/out"
 
 fixture invalid
 sed -i.bak 's/0.6.1/invalid/' "$work/Cargo.toml"

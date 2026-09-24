@@ -15,8 +15,8 @@
 
 ## Releases
 
-- Update `RELEASE_NOTES.md`, then run `make patch-bump` or `make minor-bump` (`make bump` is a patch alias). Review the diff and open a PR; these commands do not commit or tag.
-- Use the same `cargo test` and `tests/run.sh` checks as contributors. CI checks readiness before builds and publishes from green `master`; `make release` is the guarded manual fallback.
+- Update `RELEASE_NOTES.md`, then run `make patch-bump` or `make minor-bump` (`make bump` is a patch alias). Both run `cargo test --locked` and `tests/run.sh`; review the diff and open a PR. No commit or tag is created.
+- CI checks readiness before builds and publishes from green `master`; `make release` is the guarded manual fallback.
 
 ## GitHub issues
 

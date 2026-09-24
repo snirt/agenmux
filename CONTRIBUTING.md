@@ -67,14 +67,15 @@ config format.
 make patch-bump          # 0.6.1 -> 0.6.2; make bump is an alias
 make minor-bump          # 0.6.1 -> 0.7.0 instead, resetting patch to zero
 git diff                 # review notes, Cargo.toml, and Cargo.lock
-cargo test
-tests/run.sh
 ```
 
-Preparation checks that notes changed since the previous release, then updates
-the manifest and generated lockfile. It creates no commit or tag. Commit the
-three files and open a PR. CI checks release readiness on version-changing PRs
-and again on untagged `master` or a manually pushed release tag, before builds.
+Preparation checks that notes changed since the previous release, updates
+the manifest and generated lockfile, then runs `cargo test --locked` and
+`tests/run.sh`. If a suite fails, fix it and rerun the suites before opening a
+PR; version files remain edited for review. The command creates no commit or
+tag. Commit the three files and open a PR. CI checks release readiness on
+version-changing PRs and again on untagged `master` or a manually pushed release
+tag, before builds.
 Ordinary PRs do not need new release notes. Once the checks and platform builds
 pass on `master`, CI tags that commit and publishes the release from the same
 run. A `master` push whose version is already tagged does nothing.

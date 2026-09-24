@@ -53,7 +53,7 @@ install-app:
 release:
 	./scripts/release.sh
 
-# update RELEASE_NOTES.md first; these only edit Cargo.toml and Cargo.lock
+# update RELEASE_NOTES.md first; these edit Cargo files and run both test suites
 bump patch-bump:
 	./scripts/bump.sh patch
 

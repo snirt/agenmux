@@ -30,4 +30,6 @@ sed -i.bak "s/^version = \"$old\"/version = \"$new\"/" Cargo.toml
 rm Cargo.toml.bak
 cargo metadata --format-version 1 >/dev/null
 cargo metadata --locked --no-deps --format-version 1 >/dev/null
+cargo test --locked
+bash tests/run.sh
 echo "prepared v$new; review git diff, then commit the version files and release notes in a PR"
