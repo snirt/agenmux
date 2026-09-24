@@ -887,6 +887,9 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
         installed_hooks.push('\n');
     }
     assert!(!installed_hooks.contains("/scripts/"), "{installed_hooks}");
+    // tmux's default 500ms repeat-time plus the margin past its reset.
+    // tmux reprints the flags in its own order, so match only the delay.
+    assert!(installed_hooks.contains(" -d 0.600 "), "{installed_hooks}");
     for command in ["pane-orphan", "pane-pin", "pane-add"] {
         assert!(installed_hooks.contains(command), "{installed_hooks}");
     }

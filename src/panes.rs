@@ -514,6 +514,7 @@ pub(crate) fn teardown_panes() -> i32 {
         restore_layout(window);
         let _ = std::fs::remove_file(crate::pane_writers::frame_path(&tmux::runtime_dir(), pane));
     }
+    crate::setup::release_client_tables();
 
     let options = tmux::lines(&["show-options", "-g"]).unwrap_or_default();
     for row in options {

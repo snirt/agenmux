@@ -388,6 +388,29 @@ pub fn reclaim_client_tables() {
     }
 }
 
+/// Return clients left in a plugin key table without a sidebar to root. The
+/// delayed repeat re-check can re-enter the table while q is still closing.
+pub fn release_client_tables() {
+    let Ok(clients) = tmux::command(&[
+        "list-clients",
+        "-F",
+        "#{client_name}|#{client_key_table}|#{pane_title}",
+    ]) else {
+        return;
+    };
+    for line in clients.lines() {
+        let mut fields = line.splitn(3, '|');
+        let (Some(client), Some(table), Some(title)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if table.starts_with(NORMAL_TABLE) && title != "agenmux" {
+            let _ = tmux::command_status(&["switch-client", "-c", client, "-T", "root"]);
+        }
+    }
+}
+
 fn clear_legacy_options_and_hooks(windows: &[String]) -> Result<(), TmuxError> {
     for window in windows {
         // Best effort: the list is a snapshot, and a window the user closed
@@ -448,12 +471,44 @@ fn install_hooks(_bin: &str) -> Result<(), TmuxError> {
         tmux::command_status(&["set-hook", "-g", hook, &add])?;
     }
     tmux::command_status(&["set-hook", "-gu", "window-layout-changed[43]"])?;
+    // Focusing the sidebar must enter its key table however focus arrives.
+    // The delayed re-check evaluates the client's own current pane and only
+    // leaves root, so it never overrides a table the user has since entered.
+    let reenter = "if -F '#{&&:#{==:#{pane_title},agenmux},#{==:#{client_key_table},root}}' { switch-client -T agenmux }";
+    // A repeatable binding (-r, e.g. prefix arrows) leaves the client
+    // repeating in the prefix table (tmux resets non-repeating bindings to
+    // root before they run); when repeat-time expires tmux resets it to root,
+    // undoing the switch below, so check again once that has happened. Only
+    // then: a delayed check after an ordinary select could re-enter the table
+    // just as q or Enter leaves the sidebar.
+    let after_repeat = repeat_reset_delay()?
+        .map(|delay| {
+            format!("if -F '#{{==:#{{client_key_table}},prefix}}' {{ run-shell -b -d {delay:.3} -C {{ {reenter} }} }} ; ")
+        })
+        .unwrap_or_default();
     tmux::command_status(&[
         "set-hook",
         "-g",
         "after-select-pane[44]",
-        "if -F '#{==:#{pane_title},agenmux}' { switch-client -T agenmux }",
+        &format!(
+            "if -F '#{{==:#{{pane_title}},agenmux}}' {{ {after_repeat}switch-client -T agenmux }}"
+        ),
     ])
+}
+
+/// Seconds after a repeatable binding before tmux has reset its client to the
+/// root table, or `None` when repeating is disabled.
+// ponytail: global options read at setup; per-session or later changes to
+// repeat-time apply after the next setup.
+fn repeat_reset_delay() -> Result<Option<f64>, TmuxError> {
+    let mut ms = 0u32;
+    // initial-repeat-time exists only on newer tmux; -q leaves it empty elsewhere.
+    for name in ["repeat-time", "initial-repeat-time"] {
+        let value = tmux::command(&["show-options", "-gqv", name])?;
+        ms = ms.max(value.trim().parse().unwrap_or(0));
+    }
+    // Margin so the re-check runs after tmux's own repeat timer.
+    Ok((ms > 0).then(|| f64::from(ms) / 1000.0 + 0.1))
 }
 
 fn clone_root_table(table: &str) -> Result<(), TmuxError> {
