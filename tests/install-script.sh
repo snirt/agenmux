@@ -63,6 +63,51 @@ sh "$DIR/install.sh" >/dev/null && sh "$DIR/install.sh" >/dev/null
 check tpm-conf "$(cat "$home/.tmux.conf")" \
   "$(printf "set -g mouse on\nset -g @agenmux-key 'A'\nset -g @agenmux-popup-key 'a'\nset -g @plugin 'snirt/agenmux'\nrun \"~/.tmux/plugins/tpm/tpm\"")"
 
+# a dotfiles symlink stays a symlink; the TPM edit lands in its target,
+# through a relative link chain, keeping the target's mode
+mkdir -p "$home/dotfiles/tmux"
+printf 'run "~/.tmux/plugins/tpm/tpm"\n' >"$home/dotfiles/tmux/tmux.conf"
+chmod 600 "$home/dotfiles/tmux/tmux.conf"
+ln -s tmux/tmux.conf "$home/dotfiles/tmux.conf"
+ln -sf dotfiles/tmux.conf "$home/.tmux.conf"
+symlink_status=0
+sh "$DIR/install.sh" >/dev/null || symlink_status=$?
+check symlink-exit "$symlink_status" 0
+check symlink-kept "$(readlink "$home/.tmux.conf") $(readlink "$home/dotfiles/tmux.conf")" \
+  "dotfiles/tmux.conf tmux/tmux.conf"
+check symlink-target "$(cat "$home/dotfiles/tmux/tmux.conf")" \
+  "$(printf "set -g @agenmux-key 'A'\nset -g @agenmux-popup-key 'a'\nset -g @plugin 'snirt/agenmux'\nrun \"~/.tmux/plugins/tpm/tpm\"")"
+check symlink-mode "$(ls -l "$home/dotfiles/tmux/tmux.conf" | cut -c1-10)" "-rw-------"
+check symlink-no-tmp "$(find "$home" -name '*.agenmux.tmp' | wc -l | tr -d ' ')" 0
+
+# a failed rewrite leaves the config intact and no temp file behind;
+# root ignores the read-only dir, so containers skip this case
+if [ "$(id -u)" != 0 ]; then
+  chmod 500 "$home/dotfiles/tmux"
+  failed_status=0
+  AGENMUX_FORCE_WIZARD=1 sh "$DIR/install.sh" >/dev/null 2>&1 || failed_status=$?
+  chmod 700 "$home/dotfiles/tmux"
+  check failed-exit "$failed_status" 1
+  check failed-intact "$(grep -c agenmux "$home/dotfiles/tmux/tmux.conf")" 3
+  check failed-no-tmp "$(find "$home" -name '*.agenmux.tmp' | wc -l | tr -d ' ')" 0
+fi
+rm "$home/.tmux.conf"
+
+# commented lines neither count as a declaration nor anchor the TPM insert
+printf "# set -g @plugin 'snirt/agenmux'\n# run '~/.tmux/plugins/tpm/tpm'\nrun '~/.tmux/plugins/tpm/tpm'\n" >"$home/.tmux.conf"
+sh "$DIR/install.sh" >/dev/null
+check commented-conf "$(cat "$home/.tmux.conf")" \
+  "$(printf "# set -g @plugin 'snirt/agenmux'\n# run '~/.tmux/plugins/tpm/tpm'\nset -g @agenmux-key 'A'\nset -g @agenmux-popup-key 'a'\nset -g @plugin 'snirt/agenmux'\nrun '~/.tmux/plugins/tpm/tpm'")"
+
+# curl | sh cut off mid-download runs nothing
+cut_home="$home/cut"
+mkdir -p "$cut_home"
+cut_status=0
+head -c "$(($(wc -c <"$DIR/install.sh") - 10))" "$DIR/install.sh" |
+  HOME="$cut_home" sh >/dev/null 2>&1 || cut_status=$?
+check truncated-fails "$([ "$cut_status" -ne 0 ] && echo yes)" yes
+check truncated-no-writes "$(find "$cut_home" -mindepth 1 | wc -l | tr -d ' ')" 0
+
 # a legacy agents-mon line is left alone rather than loading the plugin twice
 printf 'run-shell ~/.tmux/plugins/tmux-agents-mon/agents-mon.tmux\n' >"$home/.tmux.conf"
 sh "$DIR/install.sh" >/dev/null
