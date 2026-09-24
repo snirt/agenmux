@@ -93,6 +93,21 @@ if [ "$(id -u)" != 0 ]; then
 fi
 rm "$home/.tmux.conf"
 
+# commented lines neither count as a declaration nor anchor the TPM insert
+printf "# set -g @plugin 'snirt/agenmux'\n# run '~/.tmux/plugins/tpm/tpm'\nrun '~/.tmux/plugins/tpm/tpm'\n" >"$home/.tmux.conf"
+sh "$DIR/install.sh" >/dev/null
+check commented-conf "$(cat "$home/.tmux.conf")" \
+  "$(printf "# set -g @plugin 'snirt/agenmux'\n# run '~/.tmux/plugins/tpm/tpm'\nset -g @agenmux-key 'A'\nset -g @agenmux-popup-key 'a'\nset -g @plugin 'snirt/agenmux'\nrun '~/.tmux/plugins/tpm/tpm'")"
+
+# curl | sh cut off mid-download runs nothing
+cut_home="$home/cut"
+mkdir -p "$cut_home"
+cut_status=0
+head -c "$(($(wc -c <"$DIR/install.sh") - 10))" "$DIR/install.sh" |
+  HOME="$cut_home" sh >/dev/null 2>&1 || cut_status=$?
+check truncated-fails "$([ "$cut_status" -ne 0 ] && echo yes)" yes
+check truncated-no-writes "$(find "$cut_home" -mindepth 1 | wc -l | tr -d ' ')" 0
+
 # a legacy agents-mon line is left alone rather than loading the plugin twice
 printf 'run-shell ~/.tmux/plugins/tmux-agents-mon/agents-mon.tmux\n' >"$home/.tmux.conf"
 sh "$DIR/install.sh" >/dev/null

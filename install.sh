@@ -60,129 +60,137 @@ ask_key() {
   done
 }
 
-# site/logo.png rendered as braille (48 columns): green agen, faded mu, >< chevrons
-printf '\n'
-printf '%s  ⣴⠶⠶⣦⡀ ⣠⡶⠶⢶⡶ ⢠⡶⠶⢶⣄ ⣠⡶⠶⣦ ⢠⡶⠶%s⣦⣴⠶⢶⡀⢰⡆  ⢰⡆%s⠰⣦⡀ %s ⣠⡶%s\n' "$green" "$dim" "$green" "$dim" "$reset"
-printf '%s ⢸⡇  ⢸⣷⠰⣿   ⣿ ⣿⠶⠶⠶⠿ ⣿  ⢸⡇⣿⡇ %s⢸⡇ ⢸⡇⢸⡇  ⣸⡇%s ⢈⣿⠆%s⢸⣏%s\n' "$green" "$dim" "$green" "$dim" "$reset"
-printf '%s ⠈⠻⠶⠶⠿⠟ ⠙⠷⠶⠾⠃ ⠘⠷⠶⠶⠃ ⠿  ⠸⠇⠿⠃ %s⠸⠇ ⠸⠇ ⠻⠶⠶⠟ %s⠰⠟⠁ %s ⠙⠷%s\n' "$green" "$dim" "$green" "$dim" "$reset"
-printf '%s        ⠿⣤⣤⣴⠟%s\n' "$green" "$reset"
-printf '\n  %s⣿ tmux sidebar for AI coding agents%s\n\n' "$dim" "$reset"
-if [ -n "$interactive" ]; then
-  printf '  %sFont check:%s ⣿  ⠹    ▢\n' "$bold" "$reset"
-  printf '  If  is a box or blank, configure a Nerd Font in your terminal.\n\n'
-fi
-
-for cmd in git tmux bash; do
-  command -v "$cmd" >/dev/null 2>&1 || die "$cmd is required"
-done
-
-# the installer runs inside tmux more often than not; follow that server's
-# socket so a custom -L/-S session still gets reloaded
-tmux() {
-  if [ -n "${TMUX:-}" ]; then command tmux -S "${TMUX%%,*}" "$@"; else command tmux "$@"; fi
-}
-version() { bash "$DIR/scripts/version.sh" tag 2>/dev/null || printf 'unknown'; }
-
-# Linked worktrees use a .git file instead of a .git directory. In Docker the
-# file may point outside the mounted checkout, but skip-update users still have
-# all the plugin files they need and must not trigger a clone into that tree.
-if [ -d "$DIR/.git" ] || [ -f "$DIR/.git" ]; then
-  before="$(version)"
-  if [ "${AGENMUX_SKIP_UPDATE:-}" != 1 ]; then
-    git -C "$DIR" pull --ff-only --quiet </dev/null || die "git pull failed in $(tilde "$DIR")"
+# Everything runs from main, called on the last line: under curl | sh a
+# dropped connection then runs nothing instead of half a script.
+main() {
+  # site/logo.png rendered as braille (48 columns): green agen, faded mu, >< chevrons
+  printf '\n'
+  printf '%s  ⣴⠶⠶⣦⡀ ⣠⡶⠶⢶⡶ ⢠⡶⠶⢶⣄ ⣠⡶⠶⣦ ⢠⡶⠶%s⣦⣴⠶⢶⡀⢰⡆  ⢰⡆%s⠰⣦⡀ %s ⣠⡶%s\n' "$green" "$dim" "$green" "$dim" "$reset"
+  printf '%s ⢸⡇  ⢸⣷⠰⣿   ⣿ ⣿⠶⠶⠶⠿ ⣿  ⢸⡇⣿⡇ %s⢸⡇ ⢸⡇⢸⡇  ⣸⡇%s ⢈⣿⠆%s⢸⣏%s\n' "$green" "$dim" "$green" "$dim" "$reset"
+  printf '%s ⠈⠻⠶⠶⠿⠟ ⠙⠷⠶⠾⠃ ⠘⠷⠶⠶⠃ ⠿  ⠸⠇⠿⠃ %s⠸⠇ ⠸⠇ ⠻⠶⠶⠟ %s⠰⠟⠁ %s ⠙⠷%s\n' "$green" "$dim" "$green" "$dim" "$reset"
+  printf '%s        ⠿⣤⣤⣴⠟%s\n' "$green" "$reset"
+  printf '\n  %s⣿ tmux sidebar for AI coding agents%s\n\n' "$dim" "$reset"
+  if [ -n "$interactive" ]; then
+    printf '  %sFont check:%s ⣿  ⠹    ▢\n' "$bold" "$reset"
+    printf '  If  is a box or blank, configure a Nerd Font in your terminal.\n\n'
   fi
-  after="$(version)"
-  if [ "$before" = "$after" ]; then
-    ok plugin "$after already current in $(tilde "$DIR")"
+
+  for cmd in git tmux bash; do
+    command -v "$cmd" >/dev/null 2>&1 || die "$cmd is required"
+  done
+
+  # the installer runs inside tmux more often than not; follow that server's
+  # socket so a custom -L/-S session still gets reloaded
+  tmux() {
+    if [ -n "${TMUX:-}" ]; then command tmux -S "${TMUX%%,*}" "$@"; else command tmux "$@"; fi
+  }
+  version() { bash "$DIR/scripts/version.sh" tag 2>/dev/null || printf 'unknown'; }
+  # conf_has PATTERN: a live (uncommented) tmux.conf line matches
+  conf_has() { grep -v '^[[:space:]]*#' "$CONF" | grep -q "$1"; }
+
+  # Linked worktrees use a .git file instead of a .git directory. In Docker the
+  # file may point outside the mounted checkout, but skip-update users still have
+  # all the plugin files they need and must not trigger a clone into that tree.
+  if [ -d "$DIR/.git" ] || [ -f "$DIR/.git" ]; then
+    before="$(version)"
+    if [ "${AGENMUX_SKIP_UPDATE:-}" != 1 ]; then
+      git -C "$DIR" pull --ff-only --quiet </dev/null || die "git pull failed in $(tilde "$DIR")"
+    fi
+    after="$(version)"
+    if [ "$before" = "$after" ]; then
+      ok plugin "$after already current in $(tilde "$DIR")"
+    else
+      ok plugin "updated $before → $after in $(tilde "$DIR")"
+    fi
   else
-    ok plugin "updated $before → $after in $(tilde "$DIR")"
+    git clone --quiet "$REPO" "$DIR" </dev/null || die "git clone failed"
+    ok plugin "cloned $(version) to $(tilde "$DIR")"
   fi
-else
-  git clone --quiet "$REPO" "$DIR" </dev/null || die "git clone failed"
-  ok plugin "cloned $(version) to $(tilde "$DIR")"
-fi
 
-# same root the engine resolves: XDG_CONFIG_HOME when absolute, else ~/.config
-case "${XDG_CONFIG_HOME:-}" in
-/*) CFG="$XDG_CONFIG_HOME/agenmux" ;;
-*) CFG="$HOME/.config/agenmux" ;;
-esac
-mkdir -p "$CFG/agents" || die "cannot create $(tilde "$CFG")"
-ok config "$(tilde "$CFG")/ (config.toml optional, agents/ for overrides)"
+  # same root the engine resolves: XDG_CONFIG_HOME when absolute, else ~/.config
+  case "${XDG_CONFIG_HOME:-}" in
+  /*) CFG="$XDG_CONFIG_HOME/agenmux" ;;
+  *) CFG="$HOME/.config/agenmux" ;;
+  esac
+  mkdir -p "$CFG/agents" || die "cannot create $(tilde "$CFG")"
+  ok config "$(tilde "$CFG")/ (config.toml optional, agents/ for overrides)"
 
-if [ -n "${AGENMUX_TMUX_CONF:-}" ]; then
-  CONF="$AGENMUX_TMUX_CONF"
-elif [ -f "$HOME/.tmux.conf" ]; then
-  CONF="$HOME/.tmux.conf"
-elif [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf" ]; then
-  CONF="${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"
-else
-  CONF="$HOME/.tmux.conf"
-fi
-[ -f "$CONF" ] || : >"$CONF" || die "cannot create $(tilde "$CONF")"
-
-if [ "${AGENMUX_FORCE_WIZARD:-}" != 1 ] && grep -q agents-mon "$CONF"; then
-  skip tmux.conf "still loads agents-mon; see README › Upgrading from agents-mon"
-elif [ "${AGENMUX_FORCE_WIZARD:-}" != 1 ] && grep -q agenmux "$CONF"; then
-  skip tmux.conf "unchanged, already declares agenmux"
-else
-  # TPM removes plugins it does not know about on clean, so declare it the TPM
-  # way: the @plugin line must sit above the line that runs tpm.
-  if [ -d "$TPM" ] && grep -q tpm/tpm "$CONF"; then
-    tpm_user=1 plugin="set -g @plugin 'snirt/agenmux'"
+  if [ -n "${AGENMUX_TMUX_CONF:-}" ]; then
+    CONF="$AGENMUX_TMUX_CONF"
+  elif [ -f "$HOME/.tmux.conf" ]; then
+    CONF="$HOME/.tmux.conf"
+  elif [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf" ]; then
+    CONF="${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"
   else
-    tpm_user="" plugin="run-shell \"$(tilde "$DIR")/agenmux.tmux\""
+    CONF="$HOME/.tmux.conf"
   fi
-  printf '\n  Launcher keys, pressed after the tmux prefix:\n'
-  sidebar_key="$(ask_key "Sidebar toggle" A)"
-  popup_key="$(ask_key "Popup toggle" a)"
-  [ "$sidebar_key" != "$popup_key" ] || die "sidebar and popup need different keys"
-  # options must precede the plugin line; the plugin reads them when it loads
-  block="set -g @agenmux-key '$sidebar_key'
+  [ -f "$CONF" ] || : >"$CONF" || die "cannot create $(tilde "$CONF")"
+
+  if [ "${AGENMUX_FORCE_WIZARD:-}" != 1 ] && conf_has agents-mon; then
+    skip tmux.conf "still loads agents-mon; see README › Upgrading from agents-mon"
+  elif [ "${AGENMUX_FORCE_WIZARD:-}" != 1 ] && conf_has agenmux; then
+    skip tmux.conf "unchanged, already declares agenmux"
+  else
+    # TPM removes plugins it does not know about on clean, so declare it the TPM
+    # way: the @plugin line must sit above the line that runs tpm.
+    if [ -d "$TPM" ] && conf_has tpm/tpm; then
+      tpm_user=1 plugin="set -g @plugin 'snirt/agenmux'"
+    else
+      tpm_user="" plugin="run-shell \"$(tilde "$DIR")/agenmux.tmux\""
+    fi
+    printf '\n  Launcher keys, pressed after the tmux prefix:\n'
+    sidebar_key="$(ask_key "Sidebar toggle" A)"
+    popup_key="$(ask_key "Popup toggle" a)"
+    [ "$sidebar_key" != "$popup_key" ] || die "sidebar and popup need different keys"
+    # options must precede the plugin line; the plugin reads them when it loads
+    block="set -g @agenmux-key '$sidebar_key'
 set -g @agenmux-popup-key '$popup_key'
 $plugin"
-  printf '\n  Lines for %s%s%s:\n\n' "$bold" "$(tilde "$CONF")" "$reset"
-  printf '%s\n' "$block" | sed 's/^/      /'
-  printf '\n'
-  if ask "Add them to $(tilde "$CONF")?" y; then
-    if [ -n "$tpm_user" ]; then
-      # Replace the file a dotfiles symlink points at, not the link itself.
-      # readlink without -f: macOS before 12.3 lacks it. Link loops never get
-      # here; the [ -f ] check above already failed on them.
-      target="$CONF"
-      while [ -L "$target" ]; do
-        link="$(readlink "$target")"
-        case "$link" in /*) target="$link" ;; *) target="$(dirname "$target")/$link" ;; esac
-      done
-      # The rename is atomic, so a failed write never leaves a partial config.
-      # cp -p first so the rewritten file keeps the original's mode.
-      # ENVIRON, not -v: BSD awk rejects newlines in -v values.
-      tmp="$target.agenmux.tmp"
-      { cp -p "$target" "$tmp" &&
-        block="$block" awk '/tpm\/tpm/ && !done { print ENVIRON["block"]; done = 1 } { print }' \
-          "$target" >"$tmp" && mv "$tmp" "$target"; } || {
-        rm -f "$tmp"
-        die "could not edit $(tilde "$target")"
-      }
-    else
-      printf '%s\n' "$block" >>"$CONF"
-    fi
-    ok tmux.conf "updated $(tilde "$CONF")"
-  else
-    skip tmux.conf "left untouched; add the lines above yourself, options before the plugin line"
+    printf '\n  Lines for %s%s%s:\n\n' "$bold" "$(tilde "$CONF")" "$reset"
+    printf '%s\n' "$block" | sed 's/^/      /'
     printf '\n'
-    exit 0
+    if ask "Add them to $(tilde "$CONF")?" y; then
+      if [ -n "$tpm_user" ]; then
+        # Replace the file a dotfiles symlink points at, not the link itself.
+        # readlink without -f: macOS before 12.3 lacks it. Link loops never get
+        # here; the [ -f ] check above already failed on them.
+        target="$CONF"
+        while [ -L "$target" ]; do
+          link="$(readlink "$target")"
+          case "$link" in /*) target="$link" ;; *) target="$(dirname "$target")/$link" ;; esac
+        done
+        # The rename is atomic, so a failed write never leaves a partial config.
+        # cp -p first so the rewritten file keeps the original's mode.
+        # ENVIRON, not -v: BSD awk rejects newlines in -v values.
+        tmp="$target.agenmux.tmp"
+        { cp -p "$target" "$tmp" &&
+          block="$block" awk '!/^[[:space:]]*#/ && /tpm\/tpm/ && !done { print ENVIRON["block"]; done = 1 } { print }' \
+            "$target" >"$tmp" && mv "$tmp" "$target"; } || {
+          rm -f "$tmp"
+          die "could not edit $(tilde "$target")"
+        }
+      else
+        printf '%s\n' "$block" >>"$CONF"
+      fi
+      ok tmux.conf "updated $(tilde "$CONF")"
+    else
+      skip tmux.conf "left untouched; add the lines above yourself, options before the plugin line"
+      printf '\n'
+      exit 0
+    fi
   fi
-fi
 
-if tmux list-sessions >/dev/null 2>&1; then
-  tmux source-file "$CONF" || die "tmux rejected $(tilde "$CONF"); fix the error above and run: tmux source-file $(tilde "$CONF")"
-  ok tmux "reloaded; the engine downloads now, the first toggle waits for it"
-else
-  ok tmux "not running; the engine downloads on first start"
-fi
+  if tmux list-sessions >/dev/null 2>&1; then
+    tmux source-file "$CONF" || die "tmux rejected $(tilde "$CONF"); fix the error above and run: tmux source-file $(tilde "$CONF")"
+    ok tmux "reloaded; the engine downloads now, the first toggle waits for it"
+  else
+    ok tmux "not running; the engine downloads on first start"
+  fi
 
-printf '\n  Next: inside tmux press %sprefix + %s%s for the sidebar, %sprefix + %s%s for a popup.\n' \
-  "$bold" "${sidebar_key:-A}" "$reset" "$bold" "${popup_key:-e}" "$reset"
-printf '  %sStatus-bar summary, keys, width, notifications: https://github.com/snirt/agenmux#usage%s\n' "$dim" "$reset"
-printf '  %sApp config and agent overrides live in %s/%s\n\n' "$dim" "$(tilde "$CFG")" "$reset"
+  printf '\n  Next: inside tmux press %sprefix + %s%s for the sidebar, %sprefix + %s%s for a popup.\n' \
+    "$bold" "${sidebar_key:-A}" "$reset" "$bold" "${popup_key:-e}" "$reset"
+  printf '  %sStatus-bar summary, keys, width, notifications: https://github.com/snirt/agenmux#usage%s\n' "$dim" "$reset"
+  printf '  %sApp config and agent overrides live in %s/%s\n\n' "$dim" "$(tilde "$CFG")" "$reset"
+}
+
+main
