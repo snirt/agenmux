@@ -13,6 +13,11 @@
 
 - Store implementation plans in `docs/plans/`. Never write plans under `docs/superpowers/`.
 
+## Releases
+
+- Update `RELEASE_NOTES.md`, then run `make patch-bump` or `make minor-bump` (`make bump` is a patch alias). Both run `cargo test --locked` and `tests/run.sh`; review the diff and open a PR. No commit or tag is created.
+- CI checks readiness before builds and publishes from green `master`; `make release` is the guarded manual fallback.
+
 ## GitHub issues
 
 - When creating a GitHub issue, apply appropriate existing labels based on its title and description.

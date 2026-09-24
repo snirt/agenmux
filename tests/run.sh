@@ -32,6 +32,9 @@ fi
 if ! "$DIR/tests/make-release.sh"; then
   fail=1
 fi
+if ! "$DIR/tests/release-preparation.sh"; then
+  fail=1
+fi
 if ! "$DIR/tests/stale-dev-bin-recovery.sh"; then
   fail=1
 fi

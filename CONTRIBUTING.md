@@ -60,25 +60,45 @@ config format.
 
 ## Releasing
 
-`Cargo.toml` is the only source of truth for the project version. Update its
-`[package].version`, let Cargo refresh the generated lockfile, and write the
-release notes:
+`Cargo.toml` is the only source of truth for the project version. Update
+`RELEASE_NOTES.md` first, then prepare a patch or minor release:
 
 ```sh
-cargo check
-scripts/version.sh tag   # the tag CI will create, e.g. v0.5.0
+make patch-bump          # 0.6.1 -> 0.6.2; make bump is an alias
+make minor-bump          # 0.6.1 -> 0.7.0 instead, resetting patch to zero
+git diff                 # review notes, Cargo.toml, and Cargo.lock
 ```
 
-Commit the manifest, lockfile, and `RELEASE_NOTES.md` changes and merge them to
-`master` like any other change. Once the version, sanity, and platform build
-jobs pass on `master`, CI tags that commit with the manifest version and
-publishes the release from the same run. `RELEASE_NOTES.md` must differ from
-the previous release's, or the tag job fails and nothing is published. A
-`master` push whose version is already tagged does nothing.
+Preparation checks that notes changed since the previous release, updates
+the manifest and generated lockfile, then runs `cargo test --locked` and
+`tests/run.sh`. If a suite fails, fix it and rerun the suites before opening a
+PR; version files remain edited for review. The command creates no commit or
+tag. Commit the three files and open a PR. CI checks release readiness on
+version-changing PRs and again on untagged `master` or a manually pushed release
+tag, before builds.
+Ordinary PRs do not need new release notes. Once the checks and platform builds
+pass on `master`, CI tags that commit and publishes the release from the same
+run. A `master` push whose version is already tagged does nothing.
 
-Pushing the tag yourself still works (`make release` does this): CI rejects a
-tag that does not match the manifest, and the automatic tag job skips a
-version that is already tagged.
+`make release` is a guarded manual alternative when CI publication is unavailable
+**before** preparing a version PR. Start with a clean worktree:
+
+```sh
+git switch master
+git pull --ff-only
+# Edit RELEASE_NOTES.md for the new release.
+make patch-bump                  # or make minor-bump; runs both test suites
+git diff                         # review notes and Cargo files
+git add RELEASE_NOTES.md Cargo.toml Cargo.lock
+git commit -m "chore: bump version to $(bash scripts/version.sh)"
+git tag "$(bash scripts/version.sh tag)"
+make release                     # atomically pushes master and the tag
+```
+
+It requires exactly one local bump commit ahead of `origin/master` with that
+commit message and tag at `HEAD`. It cannot retry publication after a version
+PR has already merged. CI rejects a manually pushed tag that does not match
+the manifest.
 
 ## Reporting bugs
 
