@@ -60,25 +60,29 @@ config format.
 
 ## Releasing
 
-`Cargo.toml` is the only source of truth for the project version. Update its
-`[package].version`, let Cargo refresh the generated lockfile, and write the
-release notes:
+`Cargo.toml` is the only source of truth for the project version. Update
+`RELEASE_NOTES.md` first, then prepare a patch or minor release:
 
 ```sh
-cargo check
-scripts/version.sh tag   # the tag CI will create, e.g. v0.5.0
+make patch-bump          # 0.6.1 -> 0.6.2; make bump is an alias
+make minor-bump          # 0.6.1 -> 0.7.0 instead, resetting patch to zero
+git diff                 # review notes, Cargo.toml, and Cargo.lock
+cargo test
+tests/run.sh
 ```
 
-Commit the manifest, lockfile, and `RELEASE_NOTES.md` changes and merge them to
-`master` like any other change. Once the version, sanity, and platform build
-jobs pass on `master`, CI tags that commit with the manifest version and
-publishes the release from the same run. `RELEASE_NOTES.md` must differ from
-the previous release's, or the tag job fails and nothing is published. A
-`master` push whose version is already tagged does nothing.
+Preparation checks that notes changed since the previous release, then updates
+the manifest and generated lockfile. It creates no commit or tag. Commit the
+three files and open a PR. CI checks release readiness on version-changing PRs
+and again on untagged `master` or a manually pushed release tag, before builds.
+Ordinary PRs do not need new release notes. Once the checks and platform builds
+pass on `master`, CI tags that commit and publishes the release from the same
+run. A `master` push whose version is already tagged does nothing.
 
-Pushing the tag yourself still works (`make release` does this): CI rejects a
-tag that does not match the manifest, and the automatic tag job skips a
-version that is already tagged.
+`make release` remains a guarded manual fallback for a local bump commit and
+tag on `master`. It pushes both atomically; use it only when automatic
+publication cannot be used. CI rejects a manually pushed tag that does not
+match the manifest.
 
 ## Reporting bugs
 

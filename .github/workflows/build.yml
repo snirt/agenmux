@@ -36,13 +36,27 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Validate release tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: ./scripts/version.sh check-tag "$GITHUB_REF_NAME"
+      - name: Check release readiness
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request) ./scripts/release-check.sh pr "origin/$BASE_REF" ;;
+            push)
+              case "$GITHUB_REF" in
+                refs/tags/v*) ./scripts/release-check.sh tag "$REF_NAME" ;;
+                refs/heads/master) ./scripts/release-check.sh master ;;
+              esac ;;
+          esac
 
   sanity:
     name: Real tmux sanity
+    needs: version
     runs-on: ubuntu-latest
 
     steps:
@@ -54,6 +68,7 @@ jobs:
 
   build:
     name: ${{ matrix.artifact }}
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -150,6 +165,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Tag master with the manifest version
         id: tag
@@ -161,19 +178,7 @@ jobs:
             echo "created=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # a bump must ship notes: refuse notes identical to the previous release's
-          prev="$(git ls-remote --tags --refs origin 'v*' | awk -F/ '{ print $NF }' | sort -V | tail -1)"
-          if [ -n "$prev" ]; then
-            git fetch -q --depth=1 origin "refs/tags/$prev:refs/tags/$prev"
-            if git diff --quiet "$prev" HEAD -- RELEASE_NOTES.md; then
-              echo "::error::RELEASE_NOTES.md is unchanged since $prev; update it before releasing $tag"
-              exit 1
-            fi
-          fi
-          [ -s RELEASE_NOTES.md ] || {
-            echo "::error::RELEASE_NOTES.md is empty; write it before releasing $tag"
-            exit 1
-          }
+          ./scripts/release-check.sh master
           git tag "$tag" "$GITHUB_SHA"
           if git push origin "refs/tags/$tag"; then
             echo "created $tag at $GITHUB_SHA"

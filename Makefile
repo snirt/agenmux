@@ -2,7 +2,7 @@ CONTAINER_ENGINE ?= $(shell command -v docker 2>/dev/null || command -v podman 2
 CONTAINER_IMAGE ?= agenmux-dev
 CONTAINER_TMUX_CONF_ARGS = $(if $(AGENMUX_CONTAINER_TMUX_CONF),--volume "$(abspath $(AGENMUX_CONTAINER_TMUX_CONF)):/tmp/agenmux-tmux.conf:ro" --env AGENMUX_CONTAINER_TMUX_CONF=/tmp/agenmux-tmux.conf)
 
-.PHONY: test build clean dev-use dev-docker dev-stop bump release install-app container-build container-test container-use container-install container-install-local check-container-engine
+.PHONY: test build clean dev-use dev-docker dev-stop bump patch-bump minor-bump release install-app container-build container-test container-use container-install container-install-local check-container-engine
 test:
 	./tests/run.sh
 
@@ -53,6 +53,9 @@ install-app:
 release:
 	./scripts/release.sh
 
-# update RELEASE_NOTES.md, then patch-bump, test, commit, and tag (no push)
-bump:
-	./scripts/bump.sh
+# update RELEASE_NOTES.md first; these only edit Cargo.toml and Cargo.lock
+bump patch-bump:
+	./scripts/bump.sh patch
+
+minor-bump:
+	./scripts/bump.sh minor
