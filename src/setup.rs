@@ -580,11 +580,21 @@ fn key_bindings(config: &crate::app_config::AppConfig) -> Vec<(&'static str, Str
     let mut out = Vec::new();
     // First: later binds win, so the catch-all must not overwrite a user chord.
     // `Any` is tmux's fallback for keys nothing else claims, so it never does.
-    for key in ["Space", "Any"] {
+    // Tree keys are fixed defaults too; a configured chord or launcher prefix
+    // on the same key replaces them below.
+    for (key, action) in [
+        ("Any", "other"),
+        ("Space", "space"),
+        ("h", "h"),
+        ("Left", "left"),
+        ("Right", "right"),
+        ("z", "collapse-all"),
+        ("Z", "expand-all"),
+    ] {
         out.push((
             NORMAL_TABLE,
             key.into(),
-            key_command("space", NORMAL_TABLE, true),
+            key_command(action, NORMAL_TABLE, true),
         ));
     }
     // Edge navigation is fixed, not a configurable action, but it is still a
@@ -937,6 +947,21 @@ mod tests {
             );
         }
         assert!(find(SEARCH_TABLE, "Any").is_some() && find(NORMAL_TABLE, "Any").is_some());
+        // Unclaimed keys must not reach the daemon as Space, which toggles.
+        for (key, action) in [
+            ("Any", "other"),
+            ("Space", "space"),
+            ("h", "h"),
+            ("Left", "left"),
+            ("Right", "right"),
+            ("z", "collapse-all"),
+            ("Z", "expand-all"),
+        ] {
+            assert_eq!(
+                find(NORMAL_TABLE, key),
+                Some(key_command(action, NORMAL_TABLE, true).as_str())
+            );
+        }
         assert!(find(NORMAL_TABLE, "g").is_some());
         assert_eq!(find(NORMAL_TABLE, "c"), None);
         assert_eq!(find(NORMAL_TABLE, "d"), None);

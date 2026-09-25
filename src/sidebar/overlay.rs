@@ -665,7 +665,7 @@ impl Sidebar {
         let (cols, rows) = self.render_size();
         let top_bar = TopBar::new(&self.palette, self.plugin_selected, self.header_inherited);
         let header = top_bar.foreground("1");
-        let muted = self.palette.muted_fg.fg("2");
+        let muted = self.palette.muted_fg.fg("");
         let idle = self.palette.idle_fg.fg("");
         let working = self.palette.working_fg.fg("");
         let blocked = self.palette.blocked_fg.fg("");
@@ -717,6 +717,19 @@ impl Sidebar {
                         keys.push((binding.sequence, binding.label));
                     }
                 }
+                // Fixed all-pane tree keys, listed while no action claims them.
+                for (label, chord, what) in [
+                    (
+                        "Space",
+                        KeyChord::Printable(b' '),
+                        "fold branch (h/← fold, → open)",
+                    ),
+                    ("z/Z", KeyChord::Printable(b'z'), "fold / open all branches"),
+                ] {
+                    if action_for(&self.normal_keys, chord).is_none() {
+                        keys.push((label.into(), what.into()));
+                    }
+                }
                 let keys: String = keys
                     .iter()
                     .filter(|(label, _)| !label.is_empty())
@@ -727,7 +740,7 @@ impl Sidebar {
 {E}[1mstatus{E}[0m\n\
  {idle}⣿{E}[0m  idle\n\
  {working}⠹{E}[0m  working (spinner)\n\
- {blocked}⣿{E}[0m  blocked, waiting for input (blinks)\n\
+ {blocked}{E}[1m!{E}[0m  blocked, waiting for input (blinks)\n\
  {done}⣿{E}[0m  done, not viewed yet (blinks)\n\n\
 {E}[1mkeys{E}[0m\n{keys}\n\
 {muted}press any key to return{E}[0m"

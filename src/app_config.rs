@@ -365,7 +365,7 @@ impl Palette {
             header_bg: Typed(Color::Indexed(236)),
             pane_bg: Typed(Color::Indexed(236)),
             text_fg: Inherited,
-            muted_fg: Inherited,
+            muted_fg: Typed(Color::Indexed(245)),
             accent_fg: Basic(4),
             error_fg: Inherited,
             blocked_fg: Basic(1),
