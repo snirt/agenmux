@@ -14,6 +14,7 @@ use crate::conf::AgentConf;
 use crate::procs::IdentCache;
 use crate::scan::{self, PaneMeta, PaneRow};
 use crate::tmux::{command, command_status, PendingChanges, Tmux, TmuxError};
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -198,9 +199,11 @@ pub struct Sidebar {
     tracker: Tracker,
     rows: Vec<PaneRow>, // complete debounced view-model; never filter cache/status
     panes: Vec<PaneMeta>, // latest complete sidebar-excluded inventory
-    visible: Vec<VisiblePane>, // selectable panes; headers never enter this projection
+    visible: Vec<VisiblePane>, // selectable rows, including all-pane session/window headers
     query: ui::TextEdit,
     attention_filter: bool,
+    // Collapsed session and window ids ("$n"/"@n"): stable across rescans.
+    collapsed: HashSet<String>,
     search_focused: bool,
     key_sequence: KeySequence,
     refresh_requested: bool,
@@ -375,6 +378,7 @@ fn new_sidebar(
         visible: Vec::new(),
         query: ui::TextEdit::from(""),
         attention_filter: false,
+        collapsed: HashSet::new(),
         search_focused: false,
         key_sequence: KeySequence::default(),
         refresh_requested: false,
@@ -825,6 +829,11 @@ impl Sidebar {
             Key::ToggleAttention => self.toggle_attention_filter(),
             Key::AllStates => self.clear_filter(),
             Key::TogglePanes => self.toggle_all_panes(),
+            Key::ToggleBranch => self.toggle_branch(),
+            Key::Left => self.collapse_branch(),
+            Key::Right => self.expand_branch(),
+            Key::CollapseAll => self.set_all_collapsed(true),
+            Key::ExpandAll => self.set_all_collapsed(false),
             Key::Quit => {
                 if self.daemon.is_none() {
                     // Popup/tty mode owns stdin, so q/Ctrl-C/Ctrl-D closes it.
@@ -848,8 +857,6 @@ impl Sidebar {
             }
             Key::Owned(_, _)
             | Key::Sequence(_, _)
-            | Key::Left
-            | Key::Right
             | Key::Home
             | Key::End
             | Key::Delete

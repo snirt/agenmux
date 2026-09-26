@@ -100,9 +100,15 @@ impl VisiblePane {
     }
 }
 
-/// Session and window rows appear only with tmux management on; they are
-/// the cursor targets `dd` deletes as a whole.
-fn with_record_rows(panes: &[PaneMeta], indices: Vec<usize>) -> Vec<VisiblePane> {
+/// Session and split-window header rows: the branches that collapse, and the
+/// cursor targets `dd` deletes as a whole. `collapsed` is None while filtering,
+/// so every match shows under its ancestors.
+fn with_record_rows(
+    panes: &[PaneMeta],
+    indices: Vec<usize>,
+    collapsed: Option<&HashSet<String>>,
+) -> Vec<VisiblePane> {
+    let hidden = |id: &str| collapsed.is_some_and(|set| set.contains(id));
     let mut out = Vec::with_capacity(indices.len() * 2);
     let (mut session, mut window) = ("", "");
     for i in indices {
@@ -111,6 +117,9 @@ fn with_record_rows(panes: &[PaneMeta], indices: Vec<usize>) -> Vec<VisiblePane>
             session = &pane.session_id;
             window = "";
             out.push(VisiblePane::Session(i));
+        }
+        if hidden(session) {
+            continue;
         }
         if pane.window_id != window {
             window = &pane.window_id;
@@ -123,7 +132,9 @@ fn with_record_rows(panes: &[PaneMeta], indices: Vec<usize>) -> Vec<VisiblePane>
                 out.push(VisiblePane::Window(i));
             }
         }
-        out.push(VisiblePane::Inventory(i));
+        if !hidden(window) {
+            out.push(VisiblePane::Inventory(i));
+        }
     }
     out
 }
@@ -243,7 +254,24 @@ impl Sidebar {
                 .iter()
                 .position(|&pane| pane.is_pane() && self.visible_pane_id(pane) == self.sel_pane)
         };
-        match exact.or_else(physical) {
+        // A pane hidden by a collapsed branch hands the cursor to its nearest
+        // visible header: the split window's, else the session's.
+        let ancestor = || {
+            let selected = self.sel_occurrence.as_ref()?;
+            if !self.panes.iter().any(|pane| pane.pane == self.sel_pane) {
+                return None;
+            }
+            [selected.window_id.as_str(), ""].iter().find_map(|window| {
+                self.visible.iter().position(|&pane| {
+                    matches!(pane, VisiblePane::Session(_) | VisiblePane::Window(_))
+                        && self.visible_occurrence(pane).is_some_and(|occurrence| {
+                            occurrence.session_id == selected.session_id
+                                && occurrence.window_id == *window
+                        })
+                })
+            })
+        };
+        match exact.or_else(physical).or_else(ancestor) {
             Some(i) => {
                 self.sel = i + 1;
                 self.sync_sel_pane();
@@ -264,11 +292,8 @@ impl Sidebar {
                 &self.query,
                 self.attention_filter,
             );
-            if self.settings.settings.tmux_management_enabled {
-                with_record_rows(&self.panes, indices)
-            } else {
-                indices.into_iter().map(VisiblePane::Inventory).collect()
-            }
+            let collapsed = self.collapsing().then_some(&self.collapsed);
+            with_record_rows(&self.panes, indices, collapsed)
         } else {
             filtered_indices(&self.rows, &self.query, self.attention_filter)
                 .into_iter()
@@ -331,6 +356,116 @@ impl Sidebar {
         self.last_frame.clear();
     }
 
+    /// Collapse state shapes only the unfiltered all-pane tree; the agent list
+    /// has no branches.
+    pub(super) fn collapsing(&self) -> bool {
+        self.settings.settings.show_all_panes
+            && !self.attention_filter
+            && self.query.trim().is_empty()
+    }
+
+    pub(super) fn branch_collapsed(&self, id: &str) -> bool {
+        self.collapsing() && self.collapsed.contains(id)
+    }
+
+    fn branch_id(&self, row: VisiblePane) -> Option<&str> {
+        match row {
+            VisiblePane::Session(i) => Some(&self.panes[i].session_id),
+            VisiblePane::Window(i) => Some(&self.panes[i].window_id),
+            VisiblePane::Agent(_) | VisiblePane::Inventory(_) => None,
+        }
+    }
+
+    /// Nearest header above `index` that contains its row.
+    fn parent_header(&self, index: usize) -> Option<usize> {
+        let (i, below_window) = match self.visible[index] {
+            VisiblePane::Inventory(i) => (i, true),
+            VisiblePane::Window(i) => (i, false),
+            VisiblePane::Session(_) | VisiblePane::Agent(_) => return None,
+        };
+        let pane = &self.panes[i];
+        (0..index).rev().find(|&j| match self.visible[j] {
+            VisiblePane::Window(q) => below_window && self.panes[q].window_id == pane.window_id,
+            VisiblePane::Session(q) => self.panes[q].session_id == pane.session_id,
+            _ => false,
+        })
+    }
+
+    fn set_collapsed(&mut self, header: usize, collapse: bool) {
+        let Some(id) = self.branch_id(self.visible[header]).map(str::to_string) else {
+            return;
+        };
+        if collapse {
+            self.collapsed.insert(id);
+        } else {
+            self.collapsed.remove(&id);
+        }
+        self.select_index(header + 1);
+        self.rebuild_visible(false);
+    }
+
+    /// Toggle the selected header, or the header of the selected pane.
+    pub(super) fn toggle_branch(&mut self) {
+        let Some(index) = self.cursor_row().filter(|_| self.collapsing()) else {
+            return;
+        };
+        let header = match self.branch_id(self.visible[index]) {
+            Some(_) => Some(index),
+            None => self.parent_header(index),
+        };
+        if let Some(header) = header {
+            let collapsed = self
+                .branch_id(self.visible[header])
+                .is_some_and(|id| self.collapsed.contains(id));
+            self.set_collapsed(header, !collapsed);
+        }
+    }
+
+    /// Collapse an open header; from a pane or a closed header, step out to
+    /// the parent header.
+    pub(super) fn collapse_branch(&mut self) {
+        let Some(index) = self.cursor_row().filter(|_| self.collapsing()) else {
+            return;
+        };
+        match self.branch_id(self.visible[index]) {
+            Some(id) if !self.collapsed.contains(id) => self.set_collapsed(index, true),
+            _ => {
+                if let Some(parent) = self.parent_header(index) {
+                    self.select_index(parent + 1);
+                }
+            }
+        }
+    }
+
+    pub(super) fn expand_branch(&mut self) {
+        let Some(index) = self.cursor_row().filter(|_| self.collapsing()) else {
+            return;
+        };
+        if self
+            .branch_id(self.visible[index])
+            .is_some_and(|id| self.collapsed.contains(id))
+        {
+            self.set_collapsed(index, false);
+        }
+    }
+
+    /// `z` folds every session; `Z` opens every branch.
+    pub(super) fn set_all_collapsed(&mut self, collapse: bool) {
+        if !self.collapsing() {
+            return;
+        }
+        if collapse {
+            self.collapsed = self
+                .panes
+                .iter()
+                .map(|pane| pane.session_id.clone())
+                .collect();
+        } else {
+            self.collapsed.clear();
+        }
+        self.rebuild_visible(false);
+    }
+
     pub(super) fn search_key(&mut self, key: Key) {
         if self.query.handle(&key) {
             if matches!(
@@ -371,6 +506,9 @@ impl Sidebar {
             | Key::Help
             | Key::Versions
             | Key::Settings
+            | Key::ToggleBranch
+            | Key::CollapseAll
+            | Key::ExpandAll
             | Key::Other => {}
         }
     }

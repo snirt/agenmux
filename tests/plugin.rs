@@ -2269,7 +2269,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         );
     };
     send_sequence("cc");
-    sidebar_shows("\u{eb7f} ▏");
+    sidebar_shows("▼ ▏");
     for _ in 0..2 {
         assert_success(
             tmux.bin(&["key", "sequence-63", "missing-client"]),
@@ -2343,9 +2343,9 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         .lines()
         .count();
     send_sequence("cc");
-    sidebar_shows("\u{eb7f} ▏");
+    sidebar_shows("▼ ▏");
     send_text("w");
-    sidebar_shows("\u{eb7f} w▏");
+    sidebar_shows("▼ w▏");
     assert_success(tmux.bin(&["key", "enter"]), "accept window name");
     tmux.wait_for(Duration::from_secs(4), || {
         tmux.text(&["list-windows", "-a", "-F", "#{window_id}"])
@@ -2466,7 +2466,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             .unwrap_or_default()
             .lines()
             .find(|line| line.starts_with(&format!("{session_pane}\t")))
-            .is_some_and(|line| line.ends_with("\t1"))
+            .is_some_and(|line| line.ends_with("\t2"))
     };
     for _ in 0..5 {
         assert_success(tmux.bin(&["key", "up", &client]), "move to session row");
@@ -2833,7 +2833,8 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
     ]);
     let width = || tmux.text(&["display-message", "-p", "-t", &sidebar, "#{pane_width}"]);
     let frame = || tmux.text(&["capture-pane", "-p", "-t", &sidebar]);
-    let wide_title = "stable geometry title l";
+    // The "↳ " preview marker takes two of the 30 columns.
+    let wide_title = "stable geometry title";
     tmux.wait_for(Duration::from_secs(4), || {
         width() == "30" && frame().contains(wide_title)
     });
@@ -3388,13 +3389,16 @@ fn all_panes_reload_preserves_daemon_and_selection() {
     tmux.wait_for(Duration::from_secs(8), &inventory_present);
     tmux.wait_for(Duration::from_secs(8), || capture().contains("mixed"));
     let row_map = std::fs::read_to_string(tmux.tmp.join("agenmux-rows")).unwrap();
+    // Header rows name their first pane, so one pane spans up to three
+    // ordinals: session header, window header, and its own row.
     for pane in [&single, &ordinary, &ordinary_only] {
-        assert_eq!(
-            row_map
-                .lines()
-                .filter(|line| line.split('\t').next() == Some(pane.as_str()))
-                .count(),
-            1,
+        let ordinals: std::collections::BTreeSet<_> = row_map
+            .lines()
+            .filter(|line| line.split('\t').next() == Some(pane.as_str()))
+            .filter_map(|line| line.split('\t').nth(1))
+            .collect();
+        assert!(
+            (1..=3).contains(&ordinals.len()),
             "ordinary pane {pane} missing or duplicated: {row_map}"
         );
     }
@@ -3451,7 +3455,7 @@ fn all_panes_reload_preserves_daemon_and_selection() {
     assert_success(tmux.bin(&["config", "reload"]), "disable all panes");
     tmux.wait_for(Duration::from_secs(3), || !inventory_present());
     tmux.wait_for(Duration::from_secs(3), || !capture().contains(&ordinary));
-    assert_eq!(selected(), agent);
+    tmux.wait_for(Duration::from_secs(3), || selected() == agent);
     assert_agent_only_cache();
     assert_eq!(
         tmux.text(&["show-option", "-gqv", "@agenmux-control-client"]),

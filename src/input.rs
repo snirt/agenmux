@@ -128,6 +128,9 @@ pub(crate) enum Key {
     ToggleAttention,
     AllStates,
     TogglePanes,
+    ToggleBranch,
+    CollapseAll,
+    ExpandAll,
     Text(String),
     Other,
 }
@@ -442,32 +445,42 @@ fn decode_protocol_payload(
             .filter(|byte| (0x20..=0x7e).contains(byte))
             .map(|byte| Key::Text(char::from(byte).to_string()))
             .unwrap_or(Key::Other),
-        _ => chord(first, next)
-            .and_then(|chord| {
-                if keys.contains_key(&Action::Accept) {
-                    match chord {
-                        KeyChord::Left => return Some(Key::Left),
-                        KeyChord::Right => return Some(Key::Right),
-                        KeyChord::Home => return Some(Key::Home),
-                        KeyChord::End => return Some(Key::End),
-                        KeyChord::Delete => return Some(Key::Delete),
-                        _ => {}
+        _ => {
+            let chord = chord(first, next);
+            chord
+                .and_then(|chord| {
+                    if keys.contains_key(&Action::Accept) {
+                        match chord {
+                            KeyChord::Left => return Some(Key::Left),
+                            KeyChord::Right => return Some(Key::Right),
+                            KeyChord::Home => return Some(Key::Home),
+                            KeyChord::End => return Some(Key::End),
+                            KeyChord::Delete => return Some(Key::Delete),
+                            _ => {}
+                        }
                     }
-                }
-                action_key(keys, chord)
-            })
-            .unwrap_or(match first {
-                b'G' => Key::Last,
-                b'.' => Key::TogglePanes,
-                byte if sequence_bindings(config)
-                    .iter()
-                    .any(|binding| binding.sequence.as_bytes()[0] == byte) =>
-                {
-                    Key::Sequence(char::from(byte), None)
-                }
-                0x03 | 0x04 => Key::Quit,
-                _ => Key::Other,
-            }),
+                    action_key(keys, chord)
+                })
+                .unwrap_or(match first {
+                    b'G' => Key::Last,
+                    b'.' => Key::TogglePanes,
+                    byte if sequence_bindings(config)
+                        .iter()
+                        .any(|binding| binding.sequence.as_bytes()[0] == byte) =>
+                    {
+                        Key::Sequence(char::from(byte), None)
+                    }
+                    // Fixed tree keys, like `G` and `.`: a configured chord wins.
+                    b' ' => Key::ToggleBranch,
+                    b'h' => Key::Left,
+                    b'z' => Key::CollapseAll,
+                    b'Z' => Key::ExpandAll,
+                    0x03 | 0x04 => Key::Quit,
+                    0x1b if chord == Some(KeyChord::Left) => Key::Left,
+                    0x1b if chord == Some(KeyChord::Right) => Key::Right,
+                    _ => Key::Other,
+                })
+        }
     }
 }
 
@@ -794,6 +807,11 @@ fn send_key_inner(name: &str, client: Option<&str>) -> i32 {
             "filter" => b"f".to_vec(),
             "all" => vec![0x0c],
             "space" => b" ".to_vec(),
+            // Unclaimed keys: any byte the protocol decodes to nothing.
+            "other" => vec![0x0b],
+            "h" => b"h".to_vec(),
+            "collapse-all" => b"z".to_vec(),
+            "expand-all" => b"Z".to_vec(),
             "j" => b"j".to_vec(),
             "k" => b"k".to_vec(),
             "wheel-up" => vec![0x01],
@@ -909,7 +927,8 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
             let mut fields = rows.lines().nth(y)?.split_whitespace();
             let target = fields.next()?.to_string();
             let index = fields.next()?.parse::<u32>().ok()?;
-            let selected = fields.next() == Some("1");
+            // 0 unselected, 1 selected row, 2 selected branch header.
+            let selected = fields.next().unwrap_or("0").to_string();
             Some((target, index, selected))
         })
         // "=" is the clicked sidebar pane itself: overlay rows are rendered
@@ -923,7 +942,9 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
 
     // Every hop below is one tmux fork: chained commands, not one per step.
     if let Some((target, index, selected)) = target {
-        if selected {
+        if selected == "2" {
+            let _ = send_bytes_to(&runtime, b" "); // toggle branch
+        } else if selected == "1" {
             let _ = send_bytes_to(&runtime, &[0x0c]); // "all"
             let _ = tmux::command_status(&[
                 "switch-client",
@@ -1045,6 +1066,31 @@ mod tests {
         ));
         feed(b"G");
         assert!(matches!(read_key(fds[0], &keys), Key::Last));
+        // Tree keys: Space toggles, h/Left collapse, Right expands, z/Z all.
+        for (bytes, expected) in [
+            (b" ".as_slice(), "toggle"),
+            (b"h", "left"),
+            (b"\x1b[D", "left"),
+            (b"\x1b[C", "right"),
+            (b"z", "collapse-all"),
+            (b"Z", "expand-all"),
+            (&[0x0b], "other"),
+        ] {
+            feed(bytes);
+            let key = read_key(fds[0], &keys);
+            assert!(
+                matches!(
+                    (&key, expected),
+                    (Key::ToggleBranch, "toggle")
+                        | (Key::Left, "left")
+                        | (Key::Right, "right")
+                        | (Key::CollapseAll, "collapse-all")
+                        | (Key::ExpandAll, "expand-all")
+                        | (Key::Other, "other")
+                ),
+                "{bytes:?}: {key:?}"
+            );
+        }
         feed(&[0x01]);
         assert!(matches!(read_key(fds[0], &keys), Key::WheelUp));
         feed(&[0x02]);

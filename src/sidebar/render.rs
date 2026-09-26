@@ -399,9 +399,10 @@ impl Sidebar {
         let on = (self.tick / 2).is_multiple_of(2);
         let fg = self.palette.state_fg(state).fg("");
         match state {
+            // Blocked and done both blink; the glyph, not the hue, tells them apart.
             "blocked" => {
                 if on {
-                    format!("{fg}⣿{E}[0m")
+                    format!("{}!{E}[0m", self.palette.blocked_fg.fg("1"))
                 } else {
                     " ".into()
                 }
@@ -469,7 +470,12 @@ impl Sidebar {
             )
         };
         // Rows map must match what the click helper sees under each rendered row.
-        let _ = std::fs::write(&self.rows_file, &rows);
+        // Rename it into place: every frame rewrites it, and a truncate-then-
+        // write lets a concurrent click read an empty map.
+        let staged = self.rows_file.with_extension("tmp");
+        if std::fs::write(&staged, &rows).is_ok() {
+            let _ = std::fs::rename(&staged, &self.rows_file);
+        }
         let changed = force || frame != self.last_frame;
         match &mut self.daemon {
             None => {
@@ -496,7 +502,7 @@ impl Sidebar {
         cursor: Option<usize>,
         accent: &str,
         muted: &str,
-    ) -> (Vec<(String, String, usize, bool)>, usize, usize) {
+    ) -> (Vec<(String, String, usize, u8)>, usize, usize) {
         let mut counts = std::collections::HashMap::new();
         for pane in &self.panes {
             *counts
@@ -506,13 +512,30 @@ impl Sidebar {
         let window_icon = self.palette.done_fg.fg("");
         let mut lines = Vec::new();
         let (mut sel_top, mut sel_bot) = (0usize, 0usize);
-        // With management on, Session/Window rows are selectable entries of
-        // `visible`; otherwise the same headers are drawn from the pane rows.
-        let selectable_headers = self
-            .visible
-            .iter()
-            .any(|row| matches!(row, VisiblePane::Session(_)));
-        let (mut session_id, mut window_id) = ("", "");
+        // `▼` open, `▶` collapsed. A collapsed header carries the most urgent
+        // status its hidden agents have, so a blocked agent stays visible.
+        let branch = |id: &str, in_branch: &dyn Fn(&crate::scan::PaneMeta) -> bool| {
+            if !self.branch_collapsed(id) {
+                return ("▼", String::new());
+            }
+            let urgent = self
+                .panes
+                .iter()
+                .filter(|pane| in_branch(pane))
+                .filter_map(|pane| pane.agent_index.and_then(|i| self.rows.get(i)))
+                .map(|row| row.state.as_str())
+                .max_by_key(|state| match *state {
+                    "blocked" => 3,
+                    "done" => 2,
+                    "working" => 1,
+                    _ => 0,
+                })
+                .filter(|state| *state != "idle");
+            (
+                "▶",
+                urgent.map_or(String::new(), |state| format!(" {}", self.dot(state))),
+            )
+        };
         // Rename edits the record's own name field; create grows the tree by
         // one placeholder row whose name the user is typing.
         let renaming = match &self.overlay {
@@ -554,24 +577,34 @@ impl Sidebar {
                 VisiblePane::Agent(_) => continue,
                 VisiblePane::Session(i) => {
                     let pane = &self.panes[i];
-                    session_id = &pane.session_id;
-                    window_id = "";
+                    let (marker, hidden) =
+                        branch(&pane.session_id, &|p| p.session_id == pane.session_id);
                     let name: String = match renaming.filter(|_| selected) {
-                        Some(edit) => edit.display_clipped("▏", cols.saturating_sub(2)),
+                        Some(edit) => edit.display_clipped("▏", cols.saturating_sub(4)),
                         None => pane.session_name.chars().take(cols).collect(),
                     };
-                    (i, format!("{}{accent}{name}{E}[0m", header_mark(selected)))
+                    (
+                        i,
+                        format!(
+                            "{}{accent}{marker} {name}{E}[0m{hidden}",
+                            header_mark(selected)
+                        ),
+                    )
                 }
                 VisiblePane::Window(i) => {
                     let pane = &self.panes[i];
-                    window_id = &pane.window_id;
+                    let (marker, hidden) =
+                        branch(&pane.window_id, &|p| p.window_id == pane.window_id);
                     let name = match renaming.filter(|_| selected) {
                         Some(edit) => edit.display_clipped("▏", cols.saturating_sub(6)),
                         None => pane.window_name.clone(),
                     };
                     (
                         i,
-                        format!("  {}{accent}\u{eb7f} {name}{E}[0m", header_mark(selected)),
+                        format!(
+                            "  {}{accent}{marker} {name}{E}[0m{hidden}",
+                            header_mark(selected)
+                        ),
                     )
                 }
                 VisiblePane::Inventory(i) => (i, String::new()),
@@ -586,11 +619,12 @@ impl Sidebar {
                 if selected {
                     sel_top = lines.len();
                 }
+                // A click on the selected header toggles its branch.
                 lines.push((
                     format!("{}{E}[K\n", bar(&header, &row_bg, cols, width_of(&header))),
                     pane.pane.clone(),
                     ordinal + 1,
-                    selected,
+                    u8::from(selected) * 2,
                 ));
                 if selected {
                     sel_bot = lines.len() - 1;
@@ -604,23 +638,6 @@ impl Sidebar {
                 continue;
             }
             let expanded = counts[&(pane.session_id.as_str(), pane.window_id.as_str())] > 1;
-            if !selectable_headers {
-                if pane.session_id != session_id {
-                    session_id = &pane.session_id;
-                    window_id = "";
-                    let name: String = pane.session_name.chars().take(cols).collect();
-                    lines.push((format!("{accent}{name}{E}[0m{E}[K\n"), "-".into(), 0, false));
-                }
-                if expanded && pane.window_id != window_id {
-                    window_id = &pane.window_id;
-                    lines.push((
-                        format!("   {accent}\u{eb7f} {}{E}[0m{E}[K\n", pane.window_name),
-                        "-".into(),
-                        0,
-                        false,
-                    ));
-                }
-            }
             if selected {
                 sel_top = lines.len();
             }
@@ -631,10 +648,9 @@ impl Sidebar {
             } else {
                 header_mark(selected)
             };
-            // Selectable headers reserve cursor-mark columns: sessions at 0,
-            // windows at 2, panes under a split window at 4. Plain headers
-            // keep the flat layout.
-            let base = if selectable_headers { "  " } else { " " };
+            // Headers reserve cursor-mark columns: sessions at 0, windows at 2,
+            // panes under a split window at 4.
+            let base = "  ";
             let prefix = if expanded { "  " } else { "" };
             // The editable field sits where the record's name is shown.
             let edit = renaming.filter(|_| selected);
@@ -686,27 +702,22 @@ impl Sidebar {
                 format!("{}{E}[K\n", bar(&row, &row_bg, cols, width_of(&row))),
                 pane.pane.clone(),
                 ordinal + 1,
-                selected,
+                u8::from(selected),
             ));
             if let Some(row) = agent.filter(|row| !row.title.is_empty()) {
-                let title_prefix = match (selectable_headers, expanded) {
-                    (true, true) => "        ",
-                    (true, false) => "      ",
-                    (false, true) => "       ",
-                    (false, false) => "     ",
-                };
+                let title_prefix = if expanded { "        " } else { "      " };
                 let title: String = row
                     .title
                     .chars()
-                    .take(cols.saturating_sub(title_prefix.chars().count()))
+                    .take(cols.saturating_sub(title_prefix.chars().count() + 2))
                     .collect();
-                let width = title_prefix.chars().count() + title.chars().count();
-                let line = format!("{title_prefix}{muted}{title}{E}[0m");
+                let width = title_prefix.chars().count() + 2 + title.chars().count();
+                let line = format!("{title_prefix}{muted}↳ {title}{E}[0m");
                 lines.push((
                     format!("{}{E}[K\n", bar(&line, &row_bg, cols, width)),
                     pane.pane.clone(),
                     ordinal + 1,
-                    selected,
+                    u8::from(selected),
                 ));
             }
             if selected {
@@ -723,15 +734,15 @@ impl Sidebar {
             let (row, at) = match target.action {
                 crate::input::SequenceAction::CreateSession => (
                     format!(
-                        "{}{accent}{}{E}[0m",
+                        "{}{accent}▼ {}{E}[0m",
                         header_mark(true),
-                        name.display_clipped("▏", cols.saturating_sub(2))
+                        name.display_clipped("▏", cols.saturating_sub(4))
                     ),
                     lines.len(),
                 ),
                 _ => (
                     format!(
-                        "  {}{accent}\u{eb7f} {}{E}[0m",
+                        "  {}{accent}▼ {}{E}[0m",
                         header_mark(true),
                         name.display_clipped("▏", cols.saturating_sub(6))
                     ),
@@ -745,7 +756,7 @@ impl Sidebar {
                     format!("{}{E}[K\n", bar(&row, &bg, cols, width_of(&row))),
                     "-".into(),
                     0,
-                    false,
+                    0,
                 ),
             );
             sel_top = at;
@@ -773,7 +784,7 @@ impl Sidebar {
         let framed = self.frame_size(outer_cols, outer_rows);
         let (cols, trows) = framed.unwrap_or((outer_cols, outer_rows));
 
-        let muted = self.palette.muted_fg.fg("2");
+        let muted = self.palette.muted_fg.fg("");
         let top_bar = TopBar::new(&self.palette, self.plugin_selected, self.header_inherited);
         let header_fg = top_bar.foreground("");
         let header_bg = top_bar.background();
@@ -798,7 +809,11 @@ impl Sidebar {
             } else {
                 self.rows.len()
             };
-            format!(" {}/{}", self.visible.len(), total)
+            format!(
+                " {}/{}",
+                self.visible.iter().filter(|row| row.is_pane()).count(),
+                total
+            )
         } else {
             String::new()
         };
@@ -986,7 +1001,7 @@ impl Sidebar {
                             format!("{accent}{sess_clipped}{E}[0m{E}[K\n"),
                             "-".into(),
                             0,
-                            false,
+                            0,
                         ));
                     }
                     if Some(n) == cursor {
@@ -1014,17 +1029,17 @@ impl Sidebar {
                         format!("{}{E}[K\n", bar(&row, &row_bg, cols, width)),
                         r.pane.clone(),
                         n + 1,
-                        selected,
+                        u8::from(selected),
                     ));
                     if !r.title.is_empty() {
-                        let t: String = r.title.chars().take(cols.saturating_sub(5)).collect();
-                        let line = format!("     {muted}{t}{E}[0m");
-                        let width = 5 + t.chars().count();
+                        let t: String = r.title.chars().take(cols.saturating_sub(7)).collect();
+                        let line = format!("     {muted}↳ {t}{E}[0m");
+                        let width = 7 + t.chars().count();
                         lines.push((
                             format!("{}{E}[K\n", bar(&line, &row_bg, cols, width)),
                             r.pane.clone(),
                             n + 1,
-                            selected,
+                            u8::from(selected),
                         ));
                     }
                     if Some(n) == cursor {
@@ -1138,7 +1153,7 @@ impl Sidebar {
                 if pane == "-" {
                     vis.push_str("-\n");
                 } else {
-                    vis.push_str(&format!("{pane}\t{index}\t{}\n", usize::from(*selected)));
+                    vis.push_str(&format!("{pane}\t{index}\t{selected}\n"));
                 }
             }
         }
@@ -1373,7 +1388,7 @@ mod tests {
         sb.overlay = None;
         sb.update = None;
         sb.plugin_selected = true;
-        sb.sel = 3;
+        sb.sel = 5;
         sb.active = "%22".into();
         sb.active_session = "$1".into();
         sb.rebuild_visible(false);
@@ -1397,7 +1412,7 @@ mod tests {
         let parent_window = sb
             .last_frame
             .lines()
-            .find(|line| line.contains(" server"))
+            .find(|line| line.contains("▼ server"))
             .unwrap();
         let expanded_pane = sb
             .last_frame
@@ -1405,7 +1420,7 @@ mod tests {
             .find(|line| line.contains("npm"))
             .unwrap();
         let single_window_marker = format!("{}\u{f36f}", sb.palette.done_fg.fg(""));
-        let parent_window_marker = format!("{}", sb.palette.accent_fg.fg("1"));
+        let parent_window_marker = format!("{}▼", sb.palette.accent_fg.fg("1"));
         let pane_marker = format!("{}▢", sb.palette.done_fg.fg(""));
         assert!(
             collapsed_pane.contains(&single_window_marker)
@@ -1415,7 +1430,7 @@ mod tests {
         );
         assert_eq!(
             ansi.replace_all(collapsed_pane, ""),
-            "   \u{f36f} editor",
+            "    \u{f36f} editor",
             "an nvim pane swaps its window glyph for the Neovim icon"
         );
         let shell_pane = sb
@@ -1425,17 +1440,17 @@ mod tests {
             .unwrap();
         assert_eq!(
             ansi.replace_all(shell_pane, "").trim_end(),
-            "   \u{eb7f} shell",
+            "    \u{eb7f} shell",
             "other collapsed ordinary windows keep the window glyph"
         );
         assert_eq!(
             ansi.replace_all(expanded_pane, ""),
-            "     ▢ npm",
+            "      ▢ npm",
             "expanded ordinary panes use nested pane markers"
         );
         let selected_agent_plain = ansi.replace_all(selected_agent, "");
         let record = selected_agent_plain
-            .strip_prefix(" ❯   ")
+            .strip_prefix("  ❯   ")
             .expect("selected expanded agent keeps hierarchy indentation");
         let after_status = record.chars().skip(1).collect::<String>();
         assert_eq!(
@@ -1483,10 +1498,10 @@ mod tests {
         );
         assert!(
             ansi.replace_all(selected_title, "")
-                .starts_with("       Implement sidebar tree"),
+                .starts_with("        ↳ Implement sidebar tree"),
             "inventory description is indented beneath its pane"
         );
-        sb.select_index(1);
+        sb.select_index(2);
         sb.render(true);
         let selected_pane = sb
             .last_frame
@@ -1500,7 +1515,7 @@ mod tests {
                 && ansi.replace_all(selected_pane, "").chars().count() == sb.render_size().0,
             "selected ordinary pane background spans the full row"
         );
-        let pane_cursor = format!("{}❯", sb.palette.muted_fg.fg("2"));
+        let pane_cursor = format!("{}❯", sb.palette.muted_fg.fg(""));
         assert!(
             selected_pane.contains(&pane_cursor),
             "selected ordinary pane cursor uses muted pane color"
@@ -1508,7 +1523,7 @@ mod tests {
         let selected_agent_rows = std::fs::read_to_string(&sb.rows_file)
             .unwrap()
             .lines()
-            .filter(|line| *line == "%22\t3\t0")
+            .filter(|line| *line == "%22\t5\t0")
             .count();
         assert_eq!(
             selected_agent_rows, 2,
@@ -1545,7 +1560,7 @@ mod tests {
             .expect("session rename shows the edit field in place");
         assert_eq!(
             ansi.replace_all(session_line, "").trim_end(),
-            "❯ EDITING▏",
+            "❯ ▼ EDITING▏",
             "session rename replaces the session name at its own position"
         );
         // A pane inside the expanded window edits at its command position.
@@ -1593,7 +1608,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             ansi.replace_all(lazygit_pane, "").trim_end(),
-            "   \u{e702} shell",
+            "    \u{e702} shell",
             "a lazygit pane swaps its window glyph for the git icon"
         );
         sb.panes[3].command = "zsh".into();
@@ -1707,6 +1722,67 @@ mod tests {
                 .escape_default()
         ));
 
+        // Collapsible branches: work{editor, server{npm, node(agent)}},
+        // personal{shell}. Headers are cursor stops even without management.
+        {
+            use crate::input::Key;
+            let management = sb.settings.settings.tmux_management_enabled;
+            sb.settings.settings.tmux_management_enabled = false;
+            sb.rebuild_visible(false);
+            let plain = |sb: &mut Sidebar| {
+                sb.render(true);
+                ansi.replace_all(&sb.last_frame, "").to_string()
+            };
+            assert_eq!(sb.visible.len(), 7, "headers are selectable rows");
+            assert!(std::fs::read_to_string(&sb.rows_file)
+                .unwrap()
+                .contains("%21\t3\t2"));
+            sb.select_index(5);
+            sb.dispatch_key(Key::Left);
+            assert_eq!(sb.sel, 3, "h on a pane steps out to its window header");
+            sb.dispatch_key(Key::Left);
+            assert_eq!(sb.visible.len(), 5, "h on an open header collapses it");
+            let frame = plain(&mut sb);
+            assert!(frame.contains("▶ server"), "{frame}");
+            assert!(
+                frame
+                    .lines()
+                    .any(|line| line.contains("▶ server") && line.contains(|c| SPIN.contains(&c))),
+                "a collapsed header shows its hidden working agent: {frame}"
+            );
+            sb.dispatch_key(Key::Right);
+            assert_eq!(sb.visible.len(), 7);
+            assert!(plain(&mut sb).contains("▼ server"));
+            sb.select_index(5);
+            sb.dispatch_key(Key::ToggleBranch);
+            assert_eq!(
+                (sb.visible.len(), sb.sel),
+                (5, 3),
+                "Space on a pane folds its branch and keeps the cursor on it"
+            );
+            sb.select_index(1);
+            sb.dispatch_key(Key::ToggleBranch);
+            assert_eq!(sb.visible.len(), 3, "a collapsed session hides its windows");
+            assert!(plain(&mut sb).contains("▶ work"));
+            sb.query = "npm".into();
+            sb.rebuild_visible(false);
+            assert!(
+                plain(&mut sb).contains("▢ npm"),
+                "search reveals matches under collapsed branches"
+            );
+            sb.query.clear();
+            sb.rebuild_visible(false);
+            assert_eq!(sb.visible.len(), 3, "search leaves collapse state intact");
+            sb.dispatch_key(Key::ExpandAll);
+            assert_eq!(sb.visible.len(), 7);
+            sb.dispatch_key(Key::CollapseAll);
+            assert_eq!(sb.visible.len(), 2);
+            sb.dispatch_key(Key::ExpandAll);
+            sb.settings.settings.tmux_management_enabled = management;
+            sb.rebuild_visible(false);
+            sb.select_index(3);
+        }
+
         for (label, query, attention_filter) in [
             ("session query", "work", false),
             ("window query", "server", false),
@@ -1722,7 +1798,7 @@ mod tests {
             if label == "pane query" {
                 let plain = ansi.replace_all(&sb.last_frame, "");
                 assert!(
-                    plain.lines().any(|line| line.starts_with("    server"))
+                    plain.lines().any(|line| line.contains("▼ server"))
                         && plain.lines().any(|line| line.trim_end().ends_with("▢ npm")),
                     "a physical multi-pane window stays expanded after filtering"
                 );
@@ -1761,18 +1837,18 @@ mod tests {
         sb.active_session = "$2".into();
         assert_eq!(
             sb.cursor_row(),
-            Some(4),
+            Some(7),
             "active linked pane prefers active session"
         );
-        sb.select_index(5);
+        sb.select_index(8);
         assert_eq!(sb.sel_occurrence.as_ref().unwrap().session_id, "$2");
         sb.panes.retain(|pane| pane.window_id != "@4");
         sb.rebuild_visible(false);
-        assert_eq!(sb.sel, 3, "selection falls back to the physical pane");
+        assert_eq!(sb.sel, 5, "selection falls back to the physical pane");
         assert_eq!(sb.sel_occurrence.as_ref().unwrap().session_id, "$1");
         sb.panes.retain(|pane| pane.pane != "%22");
         sb.rebuild_visible(false);
-        assert_eq!(sb.sel, 3, "selection keeps the nearest valid ordinal");
+        assert_eq!(sb.sel, 5, "selection keeps the nearest valid ordinal");
         assert_eq!(sb.sel_pane, "%31");
 
         sb.plugin_selected = true;
@@ -2051,10 +2127,7 @@ mod tests {
         let plain = ansi.replace_all(&launcher_footer, "");
         let lines: Vec<_> = plain.lines().collect();
         assert_eq!(lines.len(), 38, "{plain}");
-        assert!(
-            !lines[1].contains("e nvim"),
-            "hint leaked above the list: {plain}"
-        );
+        assert!(!lines[1].contains("e nvim"), "hint leaked above the list");
         let footer_line = launcher_footer
             .lines()
             .find(|line| line.contains("› ? help · s settings"))
@@ -2263,7 +2336,7 @@ mod tests {
                                 );
                             }
                             if [1, 2, 3, 4, 5, 6, 7, 8, 9].contains(&mode) {
-                                assert!(sb.last_frame.contains(&p.muted_fg.fg("2")));
+                                assert!(sb.last_frame.contains(&p.muted_fg.fg("")));
                             }
                             if mode == 5 || mode == 6 {
                                 let overlay_header = if focused || !sb.header_inherited {
