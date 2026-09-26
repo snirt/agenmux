@@ -470,7 +470,12 @@ impl Sidebar {
             )
         };
         // Rows map must match what the click helper sees under each rendered row.
-        let _ = std::fs::write(&self.rows_file, &rows);
+        // Rename it into place: every frame rewrites it, and a truncate-then-
+        // write lets a concurrent click read an empty map.
+        let staged = self.rows_file.with_extension("tmp");
+        if std::fs::write(&staged, &rows).is_ok() {
+            let _ = std::fs::rename(&staged, &self.rows_file);
+        }
         let changed = force || frame != self.last_frame;
         match &mut self.daemon {
             None => {

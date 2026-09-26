@@ -3455,7 +3455,7 @@ fn all_panes_reload_preserves_daemon_and_selection() {
     assert_success(tmux.bin(&["config", "reload"]), "disable all panes");
     tmux.wait_for(Duration::from_secs(3), || !inventory_present());
     tmux.wait_for(Duration::from_secs(3), || !capture().contains(&ordinary));
-    assert_eq!(selected(), agent);
+    tmux.wait_for(Duration::from_secs(3), || selected() == agent);
     assert_agent_only_cache();
     assert_eq!(
         tmux.text(&["show-option", "-gqv", "@agenmux-control-client"]),
