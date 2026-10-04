@@ -10,6 +10,7 @@ toml = "0.8"
 toml_edit = "0.22"
 libc = "0.2"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+unicode-width = "0.2.2"
 
 # native notifications for the Agenmux.app helper (src/bin/agenmux-notifier.rs)
 [target.'cfg(target_os = "macos")'.dependencies]
