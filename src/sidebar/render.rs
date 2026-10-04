@@ -1,6 +1,7 @@
 use crate::app_config::{Action, Color, Ink, Keymap, Palette};
 use crate::input::term_size;
 use std::io::Write;
+use unicode_width::UnicodeWidthStr;
 
 use super::overlay::{current_tag, Overlay};
 use super::ui::{bar, TopBar};
@@ -97,81 +98,27 @@ pub(super) fn cursor_mark(
     format!("{fg}❯{E}[0m ")
 }
 
-/// Terminal cells one character occupies: 0 for combining marks and other
-/// zero-width code points, 2 for East Asian wide/fullwidth characters and
-/// emoji, 1 otherwise. A wide character counted as one cell overruns the pane
-/// and the terminal wraps it onto the next row.
-pub(super) fn cell_width(c: char) -> usize {
-    match c as u32 {
-        0x0300..=0x036F
-        | 0x0483..=0x0489
-        | 0x0E31
-        | 0x0E34..=0x0E3A
-        | 0x0E47..=0x0E4E
-        | 0x1AB0..=0x1AFF
-        | 0x1DC0..=0x1DFF
-        | 0x200B..=0x200F
-        | 0x2060..=0x2064
-        | 0x20D0..=0x20FF
-        | 0xFE00..=0xFE0F
-        | 0xFE20..=0xFE2F
-        | 0xE0100..=0xE01EF => 0,
-        0x1100..=0x115F
-        | 0x231A..=0x231B
-        | 0x23E9..=0x23EC
-        | 0x23F0
-        | 0x23F3
-        | 0x25FD..=0x25FE
-        | 0x2614..=0x2615
-        | 0x2648..=0x2653
-        | 0x267F
-        | 0x2693
-        | 0x26A1
-        | 0x26AA..=0x26AB
-        | 0x26BD..=0x26BE
-        | 0x26C4..=0x26C5
-        | 0x26CE
-        | 0x26D4
-        | 0x26EA
-        | 0x26F2..=0x26F3
-        | 0x26F5
-        | 0x26FA
-        | 0x26FD
-        | 0x2705
-        | 0x270A..=0x270B
-        | 0x2728
-        | 0x274C
-        | 0x274E
-        | 0x2753..=0x2755
-        | 0x2757
-        | 0x2795..=0x2797
-        | 0x27B0
-        | 0x27BF
-        | 0x2B1B..=0x2B1C
-        | 0x2B50
-        | 0x2B55
-        | 0x2E80..=0x303E
-        | 0x3041..=0x33FF
-        | 0x3400..=0x4DBF
-        | 0x4E00..=0x9FFF
-        | 0xA000..=0xA4CF
-        | 0xA960..=0xA97F
-        | 0xAC00..=0xD7A3
-        | 0xF900..=0xFAFF
-        | 0xFE30..=0xFE4F
-        | 0xFF00..=0xFF60
-        | 0xFFE0..=0xFFE6
-        | 0x1F300..=0x1F64F
-        | 0x1F680..=0x1F6FF
-        | 0x1F900..=0x1F9FF
-        | 0x1FA70..=0x1FAFF
-        | 0x20000..=0x3FFFD => 2,
-        _ => 1,
+/// Terminal cells one text unit occupies: 0 for combining marks and other
+/// zero-width code points, 2 for East Asian wide characters and emoji, 1
+/// otherwise. A unit is one character, or a character followed by U+FE0F:
+/// tmux draws such an emoji presentation sequence in two cells even when the
+/// base character is narrow on its own.
+pub(super) fn cell_width(unit: &str) -> usize {
+    if unit.ends_with('\u{FE0F}') && unit.chars().count() == 2 {
+        return 2;
     }
+    unit.width()
 }
 
-/// Clip generated SGR/CSI frames without splitting an escape or wrapping a
-/// logical click row. Widths are terminal cells (see `cell_width`).
+/// Take the next text unit: the character plus a directly following U+FE0F.
+fn next_unit(c: char, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut unit = String::from(c);
+    if let Some(selector) = chars.next_if_eq(&'\u{FE0F}') {
+        unit.push(selector);
+    }
+    unit
+}
+
 /// Visible-width clip of one styled line, padded to exactly `width` cells.
 /// Escape sequences pass through; a truncated line ends in `…`.
 pub(super) fn clip_width(line: &str, width: usize) -> String {
@@ -192,7 +139,8 @@ pub(super) fn clip_width(line: &str, width: usize) -> String {
             }
             continue;
         }
-        let cells = cell_width(c);
+        let unit = next_unit(c, &mut chars);
+        let cells = cell_width(&unit);
         let more = chars.peek().is_some_and(|next| *next != '\x1b');
         if shown + cells > width || (shown + cells == width && more) {
             if shown < width {
@@ -201,13 +149,15 @@ pub(super) fn clip_width(line: &str, width: usize) -> String {
             }
             break;
         }
-        out.push(c);
+        out.push_str(&unit);
         shown += cells;
     }
     out.push_str(&" ".repeat(width.saturating_sub(shown)));
     out
 }
 
+/// Clip generated SGR/CSI frames without splitting an escape or wrapping a
+/// logical click row. Widths are terminal cells (see `cell_width`).
 pub(super) fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
     if cols == 0 || cap == 0 {
         return format!("{E}[H{E}[0m{E}[J");
@@ -215,7 +165,7 @@ pub(super) fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
     let mut out = String::new();
     let mut row = 0;
     let mut col = 0;
-    let mut chars = frame.chars();
+    let mut chars = frame.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
             out.push(c);
@@ -258,9 +208,10 @@ pub(super) fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
                 break;
             }
         } else {
-            let cells = cell_width(c);
+            let unit = next_unit(c, &mut chars);
+            let cells = cell_width(&unit);
             if col + cells <= cols {
-                out.push(c);
+                out.push_str(&unit);
                 col += cells;
             } else {
                 // A wide character that no longer fits is dropped whole; pad
@@ -332,13 +283,36 @@ mod pane_frame_tests {
         let clipped = clip_frame("ab cd 一二三四\nnext\n", 10, 5);
         let first = clipped.lines().next().unwrap();
         assert_eq!(first, "ab cd 一二");
-        assert_eq!(first.chars().map(cell_width).sum::<usize>(), 10);
+        assert_eq!(cell_width(first), 10);
         assert!(clipped.contains("\nnext\n"));
         // A wide character that would straddle the edge is dropped, not split.
         let straddle = clip_frame("abc 一二三\n", 7, 5);
         assert_eq!(straddle.lines().next().unwrap(), "abc 一 ");
         assert_eq!(clip_width("一二三四", 6), "一二… ");
         assert_eq!(clip_width("一二", 4), "一二");
+    }
+
+    #[test]
+    fn emoji_take_two_cells_including_presentation_sequences() {
+        for emoji in ["\u{1F7E2}", "\u{1F004}", "\u{1F236}", "\u{2764}\u{FE0F}"] {
+            assert_eq!(cell_width(emoji), 2, "{emoji:?}");
+        }
+        assert_eq!(cell_width("\u{2764}"), 1, "text presentation heart is narrow");
+        // The sequence moves as one unit: it never fits a single free cell.
+        let row = clip_frame("ab\u{2764}\u{FE0F}cd\n", 3, 5);
+        assert_eq!(row.lines().next().unwrap(), "ab ");
+        let row = clip_frame("ab\u{2764}\u{FE0F}cd\n", 4, 5);
+        assert_eq!(row.lines().next().unwrap(), "ab\u{2764}\u{FE0F}");
+        assert_eq!(clip_width("\u{1F7E2}\u{1F7E2}", 3), "\u{1F7E2}…");
+    }
+
+    #[test]
+    fn zero_width_marks_do_not_count_as_cells() {
+        assert_eq!(cell_width("e\u{0301}"), 1);
+        assert_eq!(cell_width("\u{200D}"), 0);
+        let row = clip_frame("e\u{0301}e\u{0301}e\u{0301}\n", 3, 5);
+        assert_eq!(row.lines().next().unwrap(), "e\u{0301}e\u{0301}e\u{0301}");
+        assert_eq!(clip_width("e\u{0301}", 2), "e\u{0301} ");
     }
 
     #[test]
