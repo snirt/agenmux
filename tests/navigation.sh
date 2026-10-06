@@ -269,6 +269,25 @@ windows_after="$(tmux -S "$sock" list-windows -a -F '#{window_id}' | wc -l | tr 
   echo "FAIL navigation-key-table: cancelling dd deleted a window"
   exit 1
 }
+# `yy` copies the selected agent's pane ID into the tmux buffer and leaves the
+# selection and key table where they were.
+selection_before="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '/❯/p')"
+printf 'yy' >&9
+copied=''
+for _ in $(seq 1 40); do
+  copied="$(tmux -S "$sock" show-buffer 2>/dev/null || true)"
+  [ -n "$copied" ] && break
+  sleep 0.05
+done
+copied_pane="${copied#tmux pane }"
+[[ $copied =~ ^tmux\ pane\ %[0-9]+$ ]] &&
+  [ "$copied_pane" != "$sidebar" ] &&
+  [ "$(tmux -S "$sock" display-message -p -t "$copied_pane" '#{pane_id}')" = "$copied_pane" ] &&
+  [ "$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '/❯/p')" = "$selection_before" ] &&
+  [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ] || {
+  echo "FAIL navigation-key-table: yy copied '$copied' or moved the selection"
+  exit 1
+}
 printf '[display]\nshow_all_panes = false\n[tmux_management]\nenabled = false\n[keys.normal]\nup = ["K"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" config reload >/dev/null
