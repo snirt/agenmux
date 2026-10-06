@@ -18,7 +18,7 @@ when an agent needs you.
 
 ## Demo
 
-Try the interactive demo on the [agenmux website](https://snirt.github.io/agenmux/).
+[![agenmux intro video](https://img.youtube.com/vi/iRlmKR6Y9aE/maxresdefault.jpg)](https://youtu.be/iRlmKR6Y9aE)
 
 ## Quick start
 
