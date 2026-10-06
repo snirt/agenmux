@@ -428,7 +428,7 @@ fn new_sidebar(
     sb
 }
 
-pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
+pub fn run(plugin_dir: PathBuf) -> i32 {
     // Catch termination during startup validation too; no terminal or tmux
     // mutation happens until configuration has passed validation.
     unsafe {
@@ -443,6 +443,8 @@ pub fn run(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
             return e.exit_code();
         }
     };
+    // Runtime paths query tmux, so resolve them only after the handlers exist.
+    let cache_file = crate::scan_cache_path();
     let self_pane = std::env::var("TMUX_PANE").unwrap_or_default();
     let pin = crate::compat_env("AGENMUX_PIN", "AGENTS_MON_PIN").filter(|p| !p.is_empty());
     let rows_file = crate::tmux::runtime_dir().join(format!(

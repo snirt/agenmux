@@ -56,7 +56,7 @@ fn main() {
         },
         ["scan"] | ["list"] => cmd_scan(),
         ["status"] => cmd_status(),
-        ["sidebar"] => sidebar::run(plugin_dir(), scan_cache_path()),
+        ["sidebar"] => sidebar::run(plugin_dir()),
         ["daemon"] => sidebar::run_daemon(plugin_dir(), scan_cache_path()),
         ["sidebar-pane"] => pane_writers::run_pane(),
         ["key", key] => sidebar::send_key(key, None),
