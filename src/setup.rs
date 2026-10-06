@@ -461,7 +461,7 @@ fn install_hooks(_bin: &str) -> Result<(), TmuxError> {
     }
 
     let add = format!(
-        "if -F '#{{!=:#{{@agenmux-on}},}}' {{ run-shell -b \"{bin} pane-add #{{window_id}}\" }}"
+        "if -F '#{{!=:#{{@agenmux-on}},}}' {{ run-shell -b \"{bin} pane-add #{{window_id}} #{{q:hook_client}}\" }}"
     );
     for hook in [
         "after-select-window[43]",

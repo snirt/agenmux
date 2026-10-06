@@ -45,7 +45,7 @@ Commands:
 Internal (called by the tmux integration):
   sidebar, daemon, setup [--if-needed], toggle [split|popup] [client],
   key <name> [client], click <pane> <row> <client>, wheel <pane> <up|down>,
-  pane-add [window], pane-orphan, pane-pin, teardown,
+  pane-add [window [client]], pane-orphan, pane-pin, teardown,
   notification-open <socket> <pane> <bundle>
 ";
 
@@ -92,7 +92,7 @@ fn main() {
             }
         },
         ["status"] => cmd_status(),
-        ["sidebar"] => sidebar::run(plugin_dir(), scan_cache_path()),
+        ["sidebar"] => sidebar::run(plugin_dir()),
         ["daemon"] => sidebar::run_daemon(plugin_dir(), scan_cache_path()),
         ["sidebar-pane"] => pane_writers::run_pane(),
         ["key", key] => sidebar::send_key(key, None),
@@ -102,6 +102,7 @@ fn main() {
         ["wheel", pane, "down"] => input::wheel(pane, input::Direction::Down),
         ["pane-add"] => panes::pane_add(None),
         ["pane-add", window] => panes::pane_add(Some(window)),
+        ["pane-add", window, client] => panes::pane_add_for_client(window, client),
         ["pane-orphan"] => panes::pane_orphan(),
         ["pane-pin"] => panes::pane_pin(),
         ["teardown"] => match panes::lifecycle_lock() {
@@ -154,7 +155,7 @@ fn plugin_dir() -> PathBuf {
 }
 
 fn scan_cache_path() -> PathBuf {
-    std::env::temp_dir().join("agenmux-scan-cache")
+    tmux::runtime_dir().join("agenmux-scan-cache")
 }
 
 fn self_pane() -> Option<String> {

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::io::Read;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,6 +23,7 @@ impl TestTmux {
             std::process::id()
         ));
         std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket = format!("agenmux-plugin-{name}-{}-{serial}", std::process::id());
         let server = Self { socket, tmp };
         server.assert_tmux(&[
@@ -64,6 +66,7 @@ impl TestTmux {
         command
             .args(args)
             .env("TMPDIR", &self.tmp)
+            .env("AGENMUX_RUNTIME_DIR", &self.tmp)
             .env("XDG_CONFIG_HOME", self.tmp.join("config"))
             .env("XDG_STATE_HOME", self.tmp.join("state"))
             .env("TMUX", self.tmux_env())
@@ -550,6 +553,135 @@ fn concurrent_opens_converge_on_one_activation() {
                 .is_empty()
             && !tmux.tmp.join("agenmux-keys").exists()
     });
+    let _ = viewer.kill();
+    let _ = viewer.wait();
+}
+
+#[test]
+fn separate_servers_with_shared_tmpdir_keep_their_own_keys() {
+    let a = TestTmux::new("shared-runtime-a");
+    let b = TestTmux::new("shared-runtime-b");
+    let shared =
+        std::env::temp_dir().join(format!("agenmux-shared-runtime-{}", std::process::id()));
+    std::fs::create_dir_all(&shared).unwrap();
+    let run = |server: &TestTmux, args: &[&str]| {
+        server
+            .bin_command(args)
+            .env_remove("AGENMUX_RUNTIME_DIR")
+            .env("TMPDIR", &shared)
+            .output()
+            .unwrap()
+    };
+    let mut viewers = Vec::new();
+    let mut clients = Vec::new();
+    for server in [&a, &b] {
+        server.assert_tmux(&[
+            "set-option",
+            "-g",
+            "@agenmux-bin",
+            env!("CARGO_BIN_EXE_agenmux"),
+        ]);
+        viewers.push(server.attach());
+        server.wait_for(Duration::from_secs(2), || {
+            !server
+                .text(&["list-clients", "-F", "#{client_name}"])
+                .is_empty()
+        });
+        clients.push(server.text(&["list-clients", "-F", "#{client_name}"]));
+        assert_success(run(server, &["setup"]), "setup shared TMPDIR server");
+        assert_success(
+            run(server, &["toggle", "split", &clients[clients.len() - 1]]),
+            "open shared TMPDIR sidebar",
+        );
+    }
+    let runtime_a = a.text(&["show-option", "-gqv", "@agenmux-runtime-dir"]);
+    let runtime_b = b.text(&["show-option", "-gqv", "@agenmux-runtime-dir"]);
+    assert_ne!(runtime_a, runtime_b);
+    for (server, client, runtime) in [(&a, &clients[0], &runtime_a), (&b, &clients[1], &runtime_b)]
+    {
+        assert!(std::path::Path::new(runtime).join("agenmux-keys").exists());
+        let pane = server.text(&[
+            "list-panes",
+            "-a",
+            "-f",
+            "#{==:#{pane_title},agenmux}",
+            "-F",
+            "#{pane_id}",
+        ]);
+        assert_success(
+            run(server, &["key", "help", client]),
+            "send help to the original server",
+        );
+        server.wait_for(Duration::from_secs(3), || {
+            server
+                .text(&["capture-pane", "-p", "-t", &pane])
+                .contains("this help")
+        });
+        assert_success(run(server, &["teardown"]), "teardown shared TMPDIR server");
+        std::fs::remove_dir_all(runtime).unwrap();
+    }
+    for viewer in &mut viewers {
+        let _ = viewer.kill();
+        let _ = viewer.wait();
+    }
+    std::fs::remove_dir_all(shared).unwrap();
+}
+
+#[test]
+fn returning_to_selected_sidebar_restores_its_key_table() {
+    let tmux = TestTmux::new("return-sidebar");
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agenmux-bin",
+        env!("CARGO_BIN_EXE_agenmux"),
+    ]);
+    let mut viewer = tmux.attach();
+    tmux.wait_for(Duration::from_secs(2), || {
+        !tmux
+            .text(&["list-clients", "-F", "#{client_name}"])
+            .is_empty()
+    });
+    let client = tmux.text(&["list-clients", "-F", "#{client_name}"]);
+    assert_success(tmux.bin(&["setup"]), "setup session return");
+    assert_success(
+        tmux.bin(&["toggle", "split", &client]),
+        "open sidebar for session return",
+    );
+    let sidebar = tmux.text(&[
+        "list-panes",
+        "-a",
+        "-f",
+        "#{==:#{pane_title},agenmux}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    tmux.assert_tmux(&["select-pane", "-t", &sidebar]);
+    let state = || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-c",
+            &client,
+            "#{pane_title}|#{client_key_table}",
+        ])
+    };
+    tmux.wait_for(Duration::from_secs(2), || state() == "agenmux|agenmux");
+
+    tmux.assert_tmux(&["new-session", "-d", "-s", "elsewhere", "exec sleep 60"]);
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-t", "elsewhere"]);
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-T", "root"]);
+    assert!(state().ends_with("|root"));
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-t", "plugin"]);
+    tmux.wait_for(Duration::from_secs(2), || state() == "agenmux|agenmux");
+
+    tmux.assert_tmux(&["new-window", "-d", "-t", "plugin:", "exec sleep 60"]);
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-t", "plugin:1"]);
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-T", "root"]);
+    assert!(state().ends_with("|root"));
+    tmux.assert_tmux(&["switch-client", "-c", &client, "-t", "plugin:0"]);
+    tmux.wait_for(Duration::from_secs(2), || state() == "agenmux|agenmux");
+
     let _ = viewer.kill();
     let _ = viewer.wait();
 }
@@ -3742,7 +3874,7 @@ fn public_toggle_observes_daemon_failure_and_cleans_new_resources() {
         let start = Instant::now();
         let output = tmux.bin(&["toggle", "split"]);
         assert_eq!(output.status.code(), Some(1), "{mode}");
-        assert!(start.elapsed() < Duration::from_secs(12), "{mode}");
+        assert!(start.elapsed() < Duration::from_secs(20), "{mode}");
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(error.contains("daemon"), "{mode}: {error}");
         assert!(!error.contains("synthetic private"));

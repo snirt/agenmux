@@ -2,6 +2,7 @@
 // responses out. Replaces one fork per tmux command with a write+read.
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -129,9 +130,8 @@ pub fn command(args: &[&str]) -> Result<String, TmuxError> {
     String::from_utf8(output.stdout).map_err(|e| TmuxError::Error(e.to_string()))
 }
 
-/// Where the daemon keeps its key FIFO and row map. The daemon publishes its
-/// own temp dir as @agenmux-runtime-dir so key/click/wheel senders find it even
-/// when tmux spawns them with a different TMPDIR than the daemon inherited.
+/// Where this tmux server keeps its key FIFO, row map, and pane frames. The
+/// published option lets tmux-spawned helpers find it with a different TMPDIR.
 pub fn runtime_dir() -> PathBuf {
     std::env::var_os("AGENMUX_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -142,7 +142,42 @@ pub fn runtime_dir() -> PathBuf {
                 .map(|dir| PathBuf::from(dir.trim_end()))
                 .filter(|dir| dir.is_absolute())
         })
+        .or_else(|| {
+            let socket = std::env::var("TMUX")
+                .ok()
+                .and_then(|value| value.split(',').next().map(str::to_owned))
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    command(&["display-message", "-p", "#{socket_path}"])
+                        .ok()
+                        .map(|value| value.trim_end().to_owned())
+                })?;
+            let socket = PathBuf::from(socket);
+            if !socket.is_absolute() {
+                return None;
+            }
+            let mut path = socket.into_os_string();
+            path.push(".agenmux");
+            Some(PathBuf::from(path))
+        })
         .unwrap_or_else(std::env::temp_dir)
+}
+
+pub fn prepare_runtime_dir() -> std::io::Result<PathBuf> {
+    let path = runtime_dir();
+    match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(std::io::Error::other("unsafe runtime directory"));
+    }
+    Ok(path)
 }
 
 pub fn command_status(args: &[&str]) -> Result<(), TmuxError> {
@@ -231,6 +266,8 @@ impl Tmux {
 
     fn connect_with_output(output: bool) -> Result<Tmux, TmuxError> {
         let mut cmd = Command::new("tmux");
+        // A stale $TMUX socket must not start a new server while attaching.
+        cmd.arg("-N");
         // stay on the pane's server even on a non-default socket ($TMUX is
         // "socket_path,pid,session"); the var itself must go — a control
         // client is not a nested session

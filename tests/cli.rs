@@ -5,11 +5,18 @@ fn run_without_server(command: &str) -> Output {
         "agenmux-no-server-{}-{command}",
         std::process::id()
     ));
-    Command::new(env!("CARGO_BIN_EXE_agenmux"))
+    assert!(
+        !socket.exists(),
+        "test socket already exists: {}",
+        socket.display()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_agenmux"))
         .arg(command)
         .env("TMUX", format!("{},0,0", socket.display()))
         .output()
-        .unwrap()
+        .unwrap();
+    assert!(!socket.exists(), "{command} started a tmux server");
+    output
 }
 
 #[test]
@@ -50,7 +57,11 @@ fn scan_is_an_exact_alias_for_list_without_a_server() {
     let scan = run_without_server("scan");
     let list = run_without_server("list");
 
-    assert_ne!(scan.status.code(), Some(2), "scan fell through to usage");
+    assert_eq!(
+        scan.status.code(),
+        Some(1),
+        "scan should reject a dead socket"
+    );
     assert_eq!(scan.status.code(), list.status.code());
     assert_eq!(scan.stdout, list.stdout);
     assert_eq!(scan.stderr, list.stderr);

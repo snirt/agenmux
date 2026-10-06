@@ -211,6 +211,25 @@ pub fn pane_add(window: Option<&str>) -> i32 {
     }
 }
 
+/// A session/window hook names the client that moved. Its selected pane can
+/// already be a sidebar, so after-select-pane will not fire on this transition.
+/// This runs after the hook, so tmux checks the client's current pane and
+/// switches in one command: a jump away in between must keep its table.
+pub fn pane_add_for_client(window: &str, client: &str) -> i32 {
+    if !client.is_empty() {
+        let restore = format!("switch-client -c {} -T agenmux", tmux::quote(client));
+        let _ = tmux::command_status(&[
+            "if-shell",
+            "-F",
+            "-t",
+            client,
+            "#{==:#{pane_title},agenmux}",
+            &restore,
+        ]);
+    }
+    pane_add(Some(window))
+}
+
 pub fn pane_add_config(window: Option<&str>, config: &crate::app_config::AppConfig) -> i32 {
     pane_add_record(window, config, &mut Vec::new())
 }
@@ -293,7 +312,10 @@ pub(crate) fn pane_add_record(
         Ok(bin) => bin,
         Err(_) => return 1,
     };
-    let runtime = format!("AGENMUX_RUNTIME_DIR={}", tmux::runtime_dir().display());
+    let runtime = match tmux::prepare_runtime_dir() {
+        Ok(dir) => format!("AGENMUX_RUNTIME_DIR={}", dir.display()),
+        Err(_) => return 1,
+    };
     let output = Command::new("tmux")
         .args([
             "split-window",

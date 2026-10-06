@@ -7,6 +7,8 @@ config_home="$(mktemp -d)"
 export XDG_CONFIG_HOME="$config_home"
 export XDG_STATE_HOME="$config_home/state"
 trap 'rm -rf "$config_home"' EXIT
+# Stubbed checks must not resolve runtime files through the developer's server.
+unset TMUX TMUX_PANE
 
 if [ -z "${AGENMUX_BIN:-}" ]; then
   BIN="$DIR/target/release/agenmux"

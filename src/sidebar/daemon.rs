@@ -121,7 +121,13 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
     }
-    let tmp = std::env::temp_dir();
+    let tmp = match crate::tmux::prepare_runtime_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("agenmux: cannot prepare runtime directory: {error}");
+            return 1;
+        }
+    };
     let keys_path = tmp.join("agenmux-keys");
     // A previous mirror-based daemon used this as its liveness heartbeat.
     let _ = std::fs::remove_file(tmp.join("agenmux-frame"));
