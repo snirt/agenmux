@@ -99,13 +99,14 @@ impl ScanSchedule {
 #[allow(unused_imports)]
 pub use crate::input::send_key;
 use crate::input::{
-    key_pending, poll_inputs, protocol_keys, read_key_with_config, read_search_key, settings_keys,
+    key_pending, poll_inputs, protocol_keys, read_key_in_sequence, read_search_key, settings_keys,
     Key, KeySequence, RawMode, SequenceAction, SequenceResult,
 };
 
 mod daemon;
 pub use daemon::run_daemon;
 use daemon::Daemon;
+mod extensions;
 mod filter;
 mod overlay;
 mod render;
@@ -204,7 +205,9 @@ fn mutation_owner(overlay: &Overlay) -> Option<&str> {
         Overlay::Create { target, .. }
         | Overlay::Rename { target, .. }
         | Overlay::Confirm(target) => Some(target.client.as_str()),
-        Overlay::Help | Overlay::Versions { .. } | Overlay::Settings(_) => None,
+        Overlay::Help | Overlay::Versions { .. } | Overlay::Settings(_) | Overlay::List { .. } => {
+            None
+        }
     }
 }
 
@@ -261,6 +264,7 @@ pub struct Sidebar {
     update: Option<String>, // newer release to advertise in the header
     daemon: Option<Daemon>,
     overlay: Option<Overlay>,
+    ext: Option<extensions::ExtRuntime>,
 }
 
 fn tmux_style_color(style: &str, role: &str) -> Option<Color> {
@@ -372,6 +376,7 @@ fn new_sidebar(
     // read once: the check behind it runs at most daily, and switching version
     // restarts the engine anyway
     let update = update_available(&plugin_dir);
+    let ext = extensions::ExtRuntime::load(&plugin_dir);
     let adopted_show_all_panes = settings.show_all_panes;
     let config_show_all = settings.show_all_panes;
     let tmux_active_border_fg = inherit_tmux_header(&mut settings);
@@ -435,6 +440,7 @@ fn new_sidebar(
         update,
         daemon: None,
         overlay: None,
+        ext,
     };
     // Agent-only mode can show the whole cached projection immediately.
     if !sb.settings.settings.show_all_panes {
@@ -632,6 +638,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 trace!("event loop exit: runtime keys path vanished");
                 break;
             }
+            sb.ext_sync(periodic);
             sb.render(geometry_changed);
             // a scan takes tens of ms — with the pre-scan `now`, a tick due
             // mid-scan is missed and the poll sleeps its full stale remainder
@@ -661,6 +668,9 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         }
         if let Some(deadline) = sb.key_sequence.deadline(sequence_timeout) {
             wake = wake.min(deadline.saturating_duration_since(now));
+        }
+        if sb.ext.as_ref().is_some_and(|ext| ext.jobs_pending()) {
+            wake = wake.min(extensions::JOB_WAKE);
         }
         let (key_ready, pipe_ready) = poll_inputs(key_fd, sb.tmux.fd(), sb.tmux.buffered(), wake);
         if pipe_ready {
@@ -707,7 +717,14 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 let key = if text_input && sb.daemon.is_none() {
                     read_search_key(key_fd, keys)
                 } else {
-                    read_key_with_config(key_fd, keys, &sb.settings.settings)
+                    // Split mode gets continuations from tmux's sequence
+                    // table as framed packets; only tty input needs this.
+                    let pending = if sb.daemon.is_none() {
+                        sb.key_sequence.pending()
+                    } else {
+                        ""
+                    };
+                    read_key_in_sequence(key_fd, keys, &sb.settings.settings, pending)
                 };
                 trace!("key {key:?}");
                 let navigation_step = if !editing_settings && sb.overlay.is_none() {
@@ -746,6 +763,9 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             if std::mem::take(&mut sb.refresh_requested) {
                 scans.request_immediate();
             }
+            sb.ext_sync(false);
+            sb.render(false);
+        } else if sb.ext.as_ref().is_some_and(|ext| ext.jobs_pending()) && sb.ext_sync(false) {
             sb.render(false);
         }
         if sb.daemon.is_none() && WINCH.swap(false, Ordering::Relaxed) {
@@ -832,6 +852,10 @@ impl Sidebar {
                     crate::input::SequenceDispatch::QuickLauncher(id),
                     client,
                 ) => self.begin_quick_launcher(&id, client),
+                SequenceResult::Match(
+                    crate::input::SequenceDispatch::Extension(sequence),
+                    client,
+                ) => self.ext_key(&sequence, client),
                 SequenceResult::Pending | SequenceResult::Miss => DispatchResult::Continue,
             };
         }

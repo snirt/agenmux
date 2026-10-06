@@ -4,6 +4,7 @@ mod app_config;
 mod attention;
 mod conf;
 mod detect;
+mod ext;
 mod focus;
 mod input;
 mod notifications;
@@ -37,6 +38,7 @@ Commands:
   config reload            Validate and apply config.toml to running sidebars
   detect <conf> <screen-file> [title]
                            Run an agent's detection rules against a saved screen
+  extensions               List Lua extension sources, keys, and load errors
   update [latest|vX.Y.Z]   Install a release
   releases refresh         Refresh the cached release list
   -V, --version            Print the version
@@ -92,6 +94,7 @@ fn main() {
             }
         },
         ["status"] => cmd_status(),
+        ["extensions"] => cmd_extensions(),
         ["sidebar"] => sidebar::run(plugin_dir()),
         ["daemon"] => sidebar::run_daemon(plugin_dir(), scan_cache_path()),
         ["sidebar-pane"] => pane_writers::run_pane(),
@@ -138,9 +141,32 @@ fn main() {
     std::process::exit(code);
 }
 
+/// Extension diagnostics: what would load, which keys bind, what failed.
+fn cmd_extensions() -> i32 {
+    let (files, dirs) = ext::source_layout(&plugin_dir());
+    if !ext::enabled() {
+        println!(
+            "extensions disabled (set {}=1 in the tmux global environment)",
+            ext::ENV
+        );
+    }
+    for file in files.iter().filter(|file| file.exists()) {
+        println!("source  {}", file.display());
+    }
+    let host = ext::Extensions::load(&files, dirs, false);
+    for key in host.key_decls() {
+        println!("key     {:<3} {}", key.sequence, key.label);
+    }
+    let errors = host.take_errors();
+    for error in &errors {
+        println!("error   {error}");
+    }
+    i32::from(!errors.is_empty())
+}
+
 /// Repo root: the ancestor of the binary that contains agents/ (works from
 /// target/release and target/debug); AGENMUX_DIR overrides.
-fn plugin_dir() -> PathBuf {
+pub(crate) fn plugin_dir() -> PathBuf {
     if let Some(d) = compat_env("AGENMUX_DIR", "AGENTS_MON_DIR") {
         return d.into();
     }

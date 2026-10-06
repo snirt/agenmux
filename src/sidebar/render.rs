@@ -297,7 +297,11 @@ mod pane_frame_tests {
         for emoji in ["\u{1F7E2}", "\u{1F004}", "\u{1F236}", "\u{2764}\u{FE0F}"] {
             assert_eq!(cell_width(emoji), 2, "{emoji:?}");
         }
-        assert_eq!(cell_width("\u{2764}"), 1, "text presentation heart is narrow");
+        assert_eq!(
+            cell_width("\u{2764}"),
+            1,
+            "text presentation heart is narrow"
+        );
         // The sequence moves as one unit: it never fits a single free cell.
         let row = clip_frame("ab\u{2764}\u{FE0F}cd\n", 3, 5);
         assert_eq!(row.lines().next().unwrap(), "ab ");
@@ -755,15 +759,37 @@ impl Sidebar {
             } else {
                 &pane.command
             };
+            let badges = self.ext_badges(&pane.pane);
             let field = match edit {
                 Some(edit) => {
                     // Keep insertion cursor visible when the name exceeds pane width.
                     let room = cols.saturating_sub(width_of(&lead)).max(1);
                     format!("{accent}{}{E}[0m", edit.display_clipped("▏", room))
                 }
-                None => format!("{muted}{name}{E}[0m"),
+                None => match &badges {
+                    // Plugin badges keep their cells; the name yields first.
+                    Some((_, badge_width)) => {
+                        let room = cols.saturating_sub(width_of(&lead) + badge_width);
+                        let name: String = if name.chars().count() > room {
+                            let mut clipped: String =
+                                name.chars().take(room.saturating_sub(1)).collect();
+                            if room > 0 {
+                                clipped.push('…');
+                            }
+                            clipped
+                        } else {
+                            name.clone()
+                        };
+                        format!("{muted}{name}{E}[0m")
+                    }
+                    None => format!("{muted}{name}{E}[0m"),
+                },
             };
-            let row = format!("{lead}{field}");
+            let badge_text = match (&badges, edit) {
+                (Some((text, _)), None) => text.as_str(),
+                _ => "",
+            };
+            let row = format!("{lead}{field}{badge_text}");
             let row_bg = match (agent, selected) {
                 (Some(_), true) => self.palette.state_bg(state, self.plugin_selected),
                 (None, true) => self.palette.pane_bg.bg(),

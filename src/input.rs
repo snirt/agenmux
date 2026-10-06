@@ -212,6 +212,7 @@ pub(crate) fn available_sequences(
 pub(crate) enum SequenceDispatch {
     Builtin(SequenceAction),
     QuickLauncher(String),
+    Extension(String),
 }
 
 #[derive(Clone, Debug)]
@@ -242,7 +243,36 @@ pub(crate) fn sequence_bindings(config: &crate::app_config::AppConfig) -> Vec<Se
                 }),
         );
     }
+    add_extension_bindings(&mut bindings, config, crate::ext::declared_keys());
     bindings
+}
+
+/// Plugin keys come last and never shadow a built-in or launcher sequence or a
+/// configured single-key action: an equal or prefix-overlapping one is dropped.
+fn add_extension_bindings(
+    bindings: &mut Vec<SequenceBinding>,
+    config: &crate::app_config::AppConfig,
+    keys: &[crate::ext::KeyDecl],
+) {
+    for key in keys {
+        let overlaps = bindings.iter().any(|binding| {
+            binding.sequence.starts_with(&key.sequence)
+                || key.sequence.starts_with(&binding.sequence)
+        });
+        let prefix_claimed = crate::app_config::action_for(
+            &config.normal,
+            crate::app_config::KeyChord::Printable(key.sequence.as_bytes()[0]),
+        )
+        .is_some();
+        if overlaps || prefix_claimed {
+            continue;
+        }
+        bindings.push(SequenceBinding {
+            sequence: key.sequence.clone(),
+            action: SequenceDispatch::Extension(key.sequence.clone()),
+            label: key.label.clone(),
+        });
+    }
 }
 
 #[derive(Default)]
@@ -332,6 +362,10 @@ impl KeySequence {
             self.clear();
         }
         expired
+    }
+
+    pub(crate) fn pending(&self) -> &str {
+        &self.pending
     }
 
     pub(crate) fn pending_prefix(&self) -> Option<char> {
@@ -505,18 +539,43 @@ pub(crate) fn read_key(fd: libc::c_int, keys: &Keymap) -> Key {
     read_key_with_config(fd, keys, config)
 }
 
+#[cfg(test)]
 pub(crate) fn read_key_with_config(
     fd: libc::c_int,
     keys: &Keymap,
     config: &crate::app_config::AppConfig,
 ) -> Key {
+    read_key_in_sequence(fd, keys, config, "")
+}
+
+/// Like `read_key_with_config`, but a byte that continues the `pending`
+/// sequence stays part of it even when it is also an action key or not a
+/// sequence prefix; tmux's sequence table does the same in split mode.
+pub(crate) fn read_key_in_sequence(
+    fd: libc::c_int,
+    keys: &Keymap,
+    config: &crate::app_config::AppConfig,
+    pending: &str,
+) -> Key {
     let Some(b) = read_byte(fd) else {
         return Key::Quit;
     }; // EOF: explicit close
-       // Every byte of the tail goes through the same polling reader. In mirror
-       // mode keys arrive over a non-blocking FIFO that the key sender feeds one
-       // byte at a time, so the tail is routinely still in flight; reading it
-       // without polling hit EAGAIN and dropped every other arrow.
+    if !pending.is_empty()
+        && (0x21..=0x7e).contains(&b)
+        && sequence_bindings(config).iter().any(|binding| {
+            binding
+                .sequence
+                .strip_prefix(pending)
+                .and_then(|rest| rest.bytes().next())
+                == Some(b)
+        })
+    {
+        return Key::Sequence(char::from(b), None);
+    }
+    // Every byte of the tail goes through the same polling reader. In mirror
+    // mode keys arrive over a non-blocking FIFO that the key sender feeds one
+    // byte at a time, so the tail is routinely still in flight; reading it
+    // without polling hit EAGAIN and dropped every other arrow.
     let next = || {
         poll_fd(fd, Some(Duration::from_millis(50)))
             .then(|| read_byte(fd))
@@ -1150,6 +1209,18 @@ mod tests {
             read_key_with_config(fds[0], &disabled.normal, &disabled),
             Key::Other
         ));
+        // Mid-sequence, a continuation byte stays in the sequence even when it
+        // is not a prefix itself; other bytes keep their usual meaning.
+        feed(b"e");
+        assert!(matches!(
+            read_key_in_sequence(fds[0], &enabled.normal, &enabled, "o"),
+            Key::Sequence('e', None)
+        ));
+        feed(b"l");
+        assert!(matches!(
+            read_key_in_sequence(fds[0], &enabled.normal, &enabled, "o"),
+            Key::Jump
+        ));
         unsafe {
             libc::close(fds[0]);
             libc::close(fds[1]);
@@ -1308,6 +1379,32 @@ mod tests {
             )
                 if client == "client-b"
         ));
+    }
+
+    #[test]
+    fn extension_keys_never_shadow_builtin_sequences_or_actions() {
+        let config = crate::app_config::resolve(
+            &crate::app_config::FileConfig::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        let decl = |sequence: &str| crate::ext::KeyDecl {
+            sequence: sequence.into(),
+            label: sequence.into(),
+        };
+        let mut bindings = sequence_bindings(&config);
+        let builtin = bindings.len();
+        // "g" overlaps "gg", "gg" is taken, "/" is the search action.
+        let keys = [decl("gl"), decl("g"), decl("gg"), decl("/")];
+        add_extension_bindings(&mut bindings, &config, &keys);
+        let added: Vec<_> = bindings[builtin..]
+            .iter()
+            .map(|binding| (binding.sequence.as_str(), &binding.action))
+            .collect();
+        assert_eq!(
+            added,
+            vec![("gl", &SequenceDispatch::Extension("gl".into()))]
+        );
     }
 
     #[test]

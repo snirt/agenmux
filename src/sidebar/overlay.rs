@@ -24,6 +24,11 @@ pub(super) enum Overlay {
         name: TextEdit,
     },
     Confirm(MutationTarget),
+    /// Picker opened by a Lua extension.
+    List {
+        view: crate::ext::ListView,
+        sel: usize,
+    },
 }
 
 pub(super) struct Settings {
@@ -130,7 +135,10 @@ impl Overlay {
                 };
                 (format!("{kind} name: {}", name.display("▏")), false)
             }
-            Overlay::Help | Overlay::Versions { .. } | Overlay::Settings(_) => return None,
+            Overlay::Help
+            | Overlay::Versions { .. }
+            | Overlay::Settings(_)
+            | Overlay::List { .. } => return None,
         })
     }
 }
@@ -776,6 +784,27 @@ impl Sidebar {
                 }
                 text
             }
+            Some(Overlay::List { view, sel }) => {
+                let mut text = format!("{E}[2J{E}[H{header}{title} — {}{E}[0m\n\n", view.title);
+                let room = rows.saturating_sub(4).max(1);
+                *sel = (*sel).min(view.items.len().saturating_sub(1));
+                let first = sel.saturating_sub(room - 1);
+                if view.items.is_empty() {
+                    text.push_str(&format!(" {muted}nothing to show{E}[0m\n"));
+                }
+                for (i, item) in view.items.iter().enumerate().skip(first).take(room) {
+                    let mark = cursor_mark(&self.palette, i == *sel, true, "idle");
+                    let item: String = item.chars().take(cols.saturating_sub(3)).collect();
+                    text.push_str(&format!("{mark}{item}\n"));
+                }
+                let hint = join(&[
+                    self.hint(&self.normal_keys, Action::Jump, "select"),
+                    self.nav_label(true, true),
+                    self.back_hint(),
+                ]);
+                text.push_str(&format!("\n{muted}{hint}{E}[0m"));
+                text
+            }
             Some(Overlay::Settings(settings)) => {
                 let (text, targets) = render_settings(
                     settings,
@@ -809,10 +838,10 @@ impl Sidebar {
                 .strip_prefix(&format!("{E}[2J{E}[H"))
                 .unwrap_or(header);
             let width = title.chars().count()
-                + if matches!(self.overlay, Some(Overlay::Help)) {
-                    7
-                } else {
-                    11
+                + match &self.overlay {
+                    Some(Overlay::Help) => 7,
+                    Some(Overlay::List { view, .. }) => 3 + view.title.chars().count(),
+                    _ => 11,
                 };
             format!(
                 "{E}[2J{E}[H{}\n{body}",
@@ -885,6 +914,24 @@ impl Sidebar {
                 }
                 chosen = tags.get(sel).cloned();
                 self.overlay = Some(Overlay::Versions { sel, chosen });
+            }
+            Overlay::List { view, mut sel } => {
+                match key {
+                    Key::Down if !view.items.is_empty() => {
+                        sel = (sel + 1).min(view.items.len() - 1)
+                    }
+                    Key::Up => sel = sel.saturating_sub(1),
+                    Key::Jump => {
+                        self.close_overlay();
+                        return self.ext_select(view, sel);
+                    }
+                    Key::AllStates | Key::Quit | Key::Close => {
+                        self.close_overlay();
+                        return super::DispatchResult::Continue;
+                    }
+                    _ => {}
+                }
+                self.overlay = Some(Overlay::List { view, sel });
             }
             Overlay::Create { target, mut name } => {
                 if name.handle(&key) {

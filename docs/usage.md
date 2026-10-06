@@ -205,6 +205,7 @@ agenmux list -a, --agent <name>     # only that agent, e.g. claude
 agenmux list -c, --command <name>   # panes running that command, e.g. zsh
 agenmux config [--help | check [--effective] | reload]
 agenmux detect <conf> <screen-file> [title]
+agenmux extensions                  # experimental Lua extensions: sources, keys, errors
 agenmux update [latest | vX.Y.Z]
 agenmux releases refresh
 ```
