@@ -77,10 +77,10 @@ Runtime shell is limited to five entrypoints: `agenmux.tmux` is TPM/pre-binary b
 `scripts/container-entrypoint.sh` drives the OCI test harness. The other `scripts/` files are
 release and dev tooling. All plugin runtime behavior lives in Rust.
 
-Fixtures in `tests/fixtures/` are real `tmux capture-pane -p` dumps where
-possible (`claude-*`, `codex-idle`, `pi-idle`) and synthetic reconstructions for
-hard-to-trigger states (`*-blocked`, `oh-my-pi-blocked`, `opencode-*`,
-`pi-working`). To improve accuracy, re-capture a real screen into a fixture:
+Fixtures in `tests/fixtures/` are named `<agent>-<state>[-N].txt`, with an
+optional matching `.title`. Most are sanitized real `tmux capture-pane -p` dumps;
+hard-to-trigger states (some `*-blocked` and `opencode-*`) are synthetic
+reconstructions. To improve accuracy, re-capture a real screen into a fixture:
 
 ```sh
 tmux capture-pane -p -t <pane> > tests/fixtures/claude-blocked.txt
