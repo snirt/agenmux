@@ -25,9 +25,11 @@ const USAGE: &str = "\
 Usage: agenmux <command> [args]
 
 Commands:
-  list [session] [--type <name>]
-                           List agent panes (TSV), or every pane in a session;
-                           --type keeps one agent or command. scan is an alias
+  list [-s <session>] [-a <agent>] [-c <command>]
+                           List agent panes (TSV); scan is an alias.
+                           -s, --session  every pane in that session
+                           -a, --agent    only that agent (claude)
+                           -c, --command  panes running that command (zsh)
   status                   Print the tmux status-line segment
   config                   Show every configuration option
   config check [--effective [--all]]
@@ -83,7 +85,7 @@ fn main() {
             }
         },
         ["scan" | "list", rest @ ..] => match parse_list_args(rest) {
-            Some((session, kind)) => cmd_list(session, kind),
+            Some(filter) => cmd_list(filter),
             None => {
                 eprint!("{USAGE}");
                 2
@@ -173,24 +175,34 @@ fn run_scan() -> Result<scan::ScanSnapshot, tmux::TmuxError> {
     )
 }
 
-/// `[session] [--type <name>]`, in either order.
-fn parse_list_args<'a>(args: &[&'a str]) -> Option<(Option<&'a str>, Option<&'a str>)> {
-    let (mut session, mut kind) = (None, None);
-    let mut args = args.iter();
-    while let Some(&arg) = args.next() {
-        match arg {
-            "--type" if kind.is_none() => kind = Some(*args.next()?),
-            _ if session.is_none() && !arg.starts_with('-') => session = Some(arg),
-            _ => return None,
-        }
-    }
-    Some((session, kind))
+#[derive(Debug, Default, PartialEq)]
+struct ListFilter<'a> {
+    session: Option<&'a str>,
+    agent: Option<&'a str>,
+    command: Option<&'a str>,
 }
 
-/// Without a session: every agent pane. With one: every pane in that session,
-/// agent columns `-` for non-agent panes. `--type` matches the agent name, or
-/// the running command for a non-agent pane.
-fn cmd_list(session: Option<&str>, kind: Option<&str>) -> i32 {
+/// `[-s <session>] [-a <agent>] [-c <command>]`, long or short, in any order.
+fn parse_list_args<'a>(args: &[&'a str]) -> Option<ListFilter<'a>> {
+    let mut out = ListFilter::default();
+    let mut args = args.iter();
+    while let Some(&flag) = args.next() {
+        let slot = match flag {
+            "-s" | "--session" => &mut out.session,
+            "-a" | "--agent" => &mut out.agent,
+            "-c" | "--command" => &mut out.command,
+            _ => return None,
+        };
+        if slot.replace(*args.next()?).is_some() {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// Plain `list` keeps its agent-only output. `--session` or `--command` widens
+/// it to every pane, with `-` in the agent and state columns of non-agent panes.
+fn cmd_list(filter: ListFilter) -> i32 {
     let snapshot = match run_scan() {
         Ok(snapshot) => snapshot,
         Err(e) => {
@@ -198,42 +210,31 @@ fn cmd_list(session: Option<&str>, kind: Option<&str>) -> i32 {
             return 1;
         }
     };
-    let rows: Vec<scan::PaneRow> = match session {
-        None => snapshot.agents,
-        Some(name) => {
-            if !snapshot.panes.iter().any(|p| p.session_name == name) {
-                eprintln!("agenmux: no session named {name}");
-                return 1;
-            }
-            snapshot
-                .panes
-                .iter()
-                .filter(|p| p.session_name == name)
-                .map(|p| match p.agent_index {
-                    Some(i) => snapshot.agents[i].clone(),
-                    None => scan::PaneRow {
-                        pane: p.pane.clone(),
-                        loc: format!("{}:{}.{}", p.session_name, p.window_index, p.pane_index),
-                        agent: "-".into(),
-                        state: "-".into(),
-                        cwd: p.path.rsplit('/').next().unwrap_or(&p.path).to_string(),
-                        title: p.command.clone(),
-                    },
-                })
-                .collect()
+    if let Some(name) = filter.session {
+        if !snapshot.panes.iter().any(|p| p.session_name == name) {
+            eprintln!("agenmux: no session named {name}");
+            return 1;
         }
-    };
-    let rows: Vec<scan::PaneRow> = rows
-        .into_iter()
-        .filter(|r| {
-            kind.is_none_or(|k| {
-                if r.agent == "-" {
-                    r.title == k
-                } else {
-                    r.agent == k
-                }
-            })
+    }
+    let every_pane = filter.session.is_some() || filter.command.is_some();
+    let rows: Vec<scan::PaneRow> = snapshot
+        .panes
+        .iter()
+        .filter(|p| every_pane || p.agent_index.is_some())
+        .filter(|p| filter.session.is_none_or(|s| p.session_name == s))
+        .filter(|p| filter.command.is_none_or(|c| p.command == c))
+        .map(|p| match p.agent_index {
+            Some(i) => snapshot.agents[i].clone(),
+            None => scan::PaneRow {
+                pane: p.pane.clone(),
+                loc: format!("{}:{}.{}", p.session_name, p.window_index, p.pane_index),
+                agent: "-".into(),
+                state: "-".into(),
+                cwd: p.path.rsplit('/').next().unwrap_or(&p.path).to_string(),
+                title: p.command.clone(),
+            },
         })
+        .filter(|r| filter.agent.is_none_or(|a| r.agent == a))
         .collect();
     print!("{}", scan::to_tsv(&rows));
     0
@@ -280,21 +281,24 @@ fn cmd_detect(conf_path: &str, screen_file: &str, title: &str) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_list_args;
+    use super::{parse_list_args, ListFilter};
 
     #[test]
-    fn list_takes_an_optional_session_and_type_in_any_order() {
-        assert_eq!(parse_list_args(&[]), Some((None, None)));
-        assert_eq!(parse_list_args(&["work"]), Some((Some("work"), None)));
+    fn list_filters_are_optional_flags_in_any_order() {
+        assert_eq!(parse_list_args(&[]), Some(ListFilter::default()));
         assert_eq!(
-            parse_list_args(&["--type", "claude", "work"]),
-            Some((Some("work"), Some("claude")))
+            parse_list_args(&["-c", "zsh", "--session", "work", "-a", "claude"]),
+            Some(ListFilter {
+                session: Some("work"),
+                agent: Some("claude"),
+                command: Some("zsh"),
+            })
         );
         for bad in [
-            &["--type"][..],
-            &["a", "b"],
-            &["--bogus"],
-            &["--type", "x", "--type", "y"],
+            &["--agent"][..],
+            &["work"],
+            &["--type", "x"],
+            &["--agent", "x", "--agent", "y"],
         ] {
             assert_eq!(parse_list_args(bad), None, "{bad:?}");
         }

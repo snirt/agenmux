@@ -185,8 +185,9 @@ Commands for shell use:
 ```text
 agenmux --version
 agenmux scan | list | status        # scan is an alias for list
-agenmux list <session>              # every pane in one session
-agenmux list [session] --type <name> # one agent (claude) or command (zsh)
+agenmux list -s, --session <name>   # every pane in one session
+agenmux list -a, --agent <name>     # only that agent, e.g. claude
+agenmux list -c, --command <name>   # panes running that command, e.g. zsh
 agenmux config [--help | check [--effective] | reload]
 agenmux detect <conf> <screen-file> [title]
 agenmux update [latest | vX.Y.Z]
