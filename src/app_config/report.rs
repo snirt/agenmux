@@ -19,77 +19,91 @@ fn columns(names: &[&str], per_row: usize, indent: &str) -> String {
 /// Every configurable field, printed from one place so `--help` cannot drift
 /// from the file the loader accepts.
 pub fn help() -> i32 {
-    let normal = |mode| {
+    // One `action  default chords` row per binding, so the defaults are visible
+    // without opening the example file.
+    let bindings = |mode| {
         resolved_keys(mode, None)
             .unwrap_or_default()
-            .into_keys()
-            .map(|action| format!("{action:?}").to_lowercase())
+            .into_iter()
+            .map(|(action, chords)| {
+                let action = format!("{action:?}").to_lowercase();
+                let chords: Vec<String> = chords.iter().map(|chord| chord.tmux_name()).collect();
+                format!("  {action:<20} ({})", chords.join(", "))
+            })
             .collect::<Vec<_>>()
-            .join(", ")
+            .join("\n")
     };
     println!(
-        r##"agenmux application configuration
+        r##"Usage: agenmux config [check [--effective [--all]] | reload]
 
-  file      $XDG_CONFIG_HOME/agenmux/config.toml
-            otherwise $HOME/.config/agenmux/config.toml
-  commands  agenmux config check [--effective]   validate, and report sources
-            agenmux config reload                apply an edited file
+  agenmux config                     Show this reference
+  agenmux config check               Validate the config file
+  agenmux config check --effective   List changed settings and their source
+                                     (--all lists every setting)
+  agenmux config reload              Apply an edited file to running sidebars
 
-Every key is optional and omitting one keeps its default. A present @agenmux-*
-tmux option still wins over the file.
+File:  $XDG_CONFIG_HOME/agenmux/config.toml
+       or $HOME/.config/agenmux/config.toml
+
+Every key is optional; a missing key keeps its default (shown in parentheses).
+A @agenmux-* tmux option, when set, overrides the file.
 
 [display]
-  mode            split | popup                       (split)
-  show_all_panes  true | false                        (true)
-  show_frame      true | false                        (true)
-  sidebar_width   1..=10000 cells                     (30)
-  popup_width     1..=10000 cells                     (40)
-  popup_height    "auto" or 1..=10000 cells           (auto)
-  agent_label     icon-text | icon | text             (icon-text)
+  mode                 split | popup                      (split)
+  show_all_panes       true | false                       (true)
+  show_frame           true | false                       (true)
+  sidebar_width        1..=10000 cells                    (30)
+  popup_width          1..=10000 cells                    (40)
+  popup_height         "auto" or 1..=10000 cells          (auto)
+  agent_label          icon-text | icon | text            (icon-text)
 
 [behavior]
-  notifications   true | false                        (true)
-  hide_windows    glob for the prefix+w picker        (unset: picker untouched)
+  notifications        true | false                       (true)
+  hide_windows         glob filtering the prefix+w picker (unset)
 
 [tmux_management]
-  enabled         true | false                        (true)
-  confirm_delete  true | false                        (true)
+  enabled              true | false                       (true)
+  confirm_delete       true | false                       (true)
 
 [quick_launchers.<id>]
-  sequence        one or two ASCII letters or digits
-  label           printable help text                  (required for custom IDs)
-  command         executable name or path               (required for custom IDs)
-  args             array of arguments                   ([])
-  working_directory selected | tmux session default    (selected)
-  enabled         true | false                         (true)
-  Defaults: nvim uses e; lazygit uses og. Entries with those IDs override
-  their defaults. Set enabled = false to remove a binding. Custom launchers
-  require sequence, label, and command. All launchers require tmux management.
-  Conflicting active keys are rejected. These are independent of the tmux
-  options that open Agenmux itself (@agenmux-key and @agenmux-popup-key).
+  sequence             1-2 ASCII letters or digits        (required)
+  label                help text                          (required)
+  command              executable name or path            (required)
+  args                 array of strings                   ([])
+  working_directory    selected | tmux                    (selected)
+  enabled              true | false                       (true)
+
+  - Built in: nvim (oe) and lazygit (og). Reusing their ID changes only the
+    fields you set; a new ID needs sequence, label and command.
+  - enabled = false removes a launcher.
+  - Launchers need [tmux_management] enabled; clashing sequences are rejected.
 
 [theme]
-  base            dark | light | terminal             (dark)
+  base                 dark | light | terminal            (dark)
 
-[theme.colors]    "default", 0..=255, or "#RRGGBB"; the base fills the rest
+[theme.colors]
+  Each role takes "default", 0..=255, or "#RRGGBB"; unset roles follow base.
 {}
 
 [keys]
-  sequence_timeout_ms  positive integer milliseconds             (1000)
+  sequence_timeout_ms  positive integer milliseconds      (1000)
 
-[keys.normal]     {}
-[keys.search]     {}
-  gg and G jump to the first and last visible agent. They are not configurable;
-  binding one of those keys to an action replaces that jump.
-  Each value replaces that action's default list, and [] unbinds it. Chords are
-  one printable ASCII character, Space, Up/Down/Left/Right, Home/End,
-  PageUp/PageDown, Enter, Escape, Tab, BSpace, or a C- chord. Reserved:
-  C-c and C-d always exit, C-@/C-a/C-b/C-l carry the sidebar's own key
-  packets, and C-h/C-j cannot be told apart from BSpace and Enter.
-  Printable chords cannot be bound in search mode, where typing owns them."##,
-        columns(&Palette::default().roles().map(|(name, _)| name), 3, "  ",),
-        normal(KeyMode::Normal),
-        normal(KeyMode::Search),
+[keys.normal]
+{}
+
+[keys.search]
+{}
+
+  - Each value is a list that replaces the default; [] unbinds the action.
+  - Chords: a printable ASCII character, Space, Up, Down, Left, Right, Home,
+    End, PageUp, PageDown, Enter, Escape, Tab, BSpace, or C-<key>.
+  - Reserved: C-c and C-d always exit; C-@, C-a, C-b and C-l are used
+    internally; C-h and C-j are the same as BSpace and Enter.
+  - Search mode cannot bind printable characters; they type the query.
+  - gg and G jump to the first and last agent; binding g or G replaces them."##,
+        columns(&Palette::default().roles().map(|(name, _)| name), 3, "  "),
+        bindings(KeyMode::Normal),
+        bindings(KeyMode::Search),
     );
     0
 }

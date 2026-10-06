@@ -34,6 +34,25 @@ fn version_comes_from_cargo_manifest() {
 }
 
 #[test]
+fn help_goes_to_stdout_and_unknown_commands_to_stderr() {
+    for flag in ["-h", "--help", "help"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agenmux"))
+            .arg(flag)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{flag}");
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with("Usage: agenmux"));
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_agenmux"))
+        .arg("no-such-command")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("Usage: agenmux"));
+}
+
+#[test]
 fn scan_is_an_exact_alias_for_list_without_a_server() {
     let scan = run_without_server("scan");
     let list = run_without_server("list");
@@ -82,7 +101,8 @@ fn config_help_lists_every_configurable_key_without_a_server() {
             .lines()
             .filter_map(|line| line.split_once(" = "))
             .map(|(key, _)| key.trim().trim_start_matches("# "))
-            .filter(|key| *key != "version")
+            // Prose comments such as "# Set enabled = false ..." are not keys.
+            .filter(|key| *key != "version" && !key.contains(' '))
         {
             assert!(text.contains(key), "help omits {key}");
         }
