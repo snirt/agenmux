@@ -18,7 +18,7 @@ when an agent needs you.
 
 ## Demo
 
-[![agenmux intro video](https://img.youtube.com/vi/iRlmKR6Y9aE/maxresdefault.jpg)](https://youtu.be/iRlmKR6Y9aE)
+[![agenmux intro video](site/demo-video.jpg)](https://youtu.be/iRlmKR6Y9aE)
 
 ## Quick start
 
