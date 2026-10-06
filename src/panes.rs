@@ -213,12 +213,19 @@ pub fn pane_add(window: Option<&str>) -> i32 {
 
 /// A session/window hook names the client that moved. Its selected pane can
 /// already be a sidebar, so after-select-pane will not fire on this transition.
+/// This runs after the hook, so tmux checks the client's current pane and
+/// switches in one command: a jump away in between must keep its table.
 pub fn pane_add_for_client(window: &str, client: &str) -> i32 {
-    if !client.is_empty()
-        && tmux::command(&["display-message", "-p", "-c", client, "#{pane_title}"])
-            .is_ok_and(|title| title.trim_end() == "agenmux")
-    {
-        let _ = tmux::command_status(&["switch-client", "-c", client, "-T", "agenmux"]);
+    if !client.is_empty() {
+        let restore = format!("switch-client -c {} -T agenmux", tmux::quote(client));
+        let _ = tmux::command_status(&[
+            "if-shell",
+            "-F",
+            "-t",
+            client,
+            "#{==:#{pane_title},agenmux}",
+            &restore,
+        ]);
     }
     pane_add(Some(window))
 }
