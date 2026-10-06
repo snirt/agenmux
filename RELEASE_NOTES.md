@@ -24,6 +24,7 @@ offers to put `agenmux` on your PATH.
 ### Documentation
 
 - The README is now a short landing page; the full reference moved to `docs/` ([#156](https://github.com/snirt/agenmux/pull/156), [#163](https://github.com/snirt/agenmux/pull/163)).
+- The website and README show the [agenmux intro video](https://youtu.be/iRlmKR6Y9aE) in place of the animated demo ([#171](https://github.com/snirt/agenmux/pull/171), [#172](https://github.com/snirt/agenmux/pull/172)).
 
 ### Assets
 
