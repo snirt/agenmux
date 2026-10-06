@@ -20,6 +20,7 @@ open. It lists every tmux session, window, and pane, with agent state inline.
 | `cc` / `cs` | Create a window / session ([tmux management](#tmux-management)) |
 | `r` | Rename the selected record |
 | `dd` | Delete the selected record (asks first) |
+| `yy` | Copy the selected record's tmux reference ([copying references](#copying-references)) |
 | `oe` / `og` | Open nvim / lazygit in a new window ([quick launchers](#quick-launchers)) |
 | `s` | Settings |
 | `u` | Version picker |
@@ -153,8 +154,22 @@ enabled = true
 confirm_delete = true      # false deletes without asking
 
 [keys]
-sequence_timeout_ms = 1000 # time allowed between keys of gg/cc/cs/dd
+sequence_timeout_ms = 1000 # time allowed between keys of gg/cc/cs/dd/yy
 ```
+
+## Copying references
+
+`yy` copies the selected record as `tmux session $3`, `tmux window @7`, or
+`tmux pane %12`, ready to paste into an agent prompt. tmux IDs stay unique when
+names repeat, and any tmux command accepts them with `-t`. Agent rows and
+single-pane window rows copy their pane.
+
+- The reference goes to the tmux paste buffer (`prefix ]`) and, through OSC 52,
+  to the system clipboard of the terminal that pressed `yy`. That needs a
+  terminal with OSC 52 support and tmux `set-clipboard` set to `on` or
+  `external` (the default).
+- A brief message confirms the copy; the selection does not move.
+- Works with tmux management disabled.
 
 ## Quick launchers
 

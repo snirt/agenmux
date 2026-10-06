@@ -149,6 +149,8 @@ pub(crate) enum SequenceAction {
     RenamePane,
     RenameWindow,
     RenameSession,
+    /// `yy`: copy the selected record's tmux reference.
+    Copy,
 }
 
 #[derive(Clone, Copy)]
@@ -189,6 +191,12 @@ pub(crate) const BUILTIN_SEQUENCES: &[BuiltinSequence] = &[
         action: SequenceAction::Rename,
         label: "rename pane/window/session",
         mutation: true,
+    },
+    BuiltinSequence {
+        sequence: "yy",
+        action: SequenceAction::Copy,
+        label: "copy selected item reference",
+        mutation: false,
     },
 ];
 
@@ -1250,6 +1258,26 @@ mod tests {
         assert!(matches!(
             sequence.push('g', None, start + timeout, timeout, &disabled),
             SequenceResult::Pending
+        ));
+    }
+
+    #[test]
+    fn copy_sequence_works_without_tmux_management() {
+        let start = Instant::now();
+        let timeout = Duration::from_secs(1);
+        let mut sequence = KeySequence::default();
+        let disabled = config(false);
+
+        assert!(matches!(
+            sequence.push('y', Some("client-a".into()), start, timeout, &disabled),
+            SequenceResult::Pending
+        ));
+        assert!(matches!(
+            sequence.push('y', Some("client-a".into()), start, timeout, &disabled),
+            SequenceResult::Match(
+                SequenceDispatch::Builtin(SequenceAction::Copy),
+                Some(client)
+            ) if client == "client-a"
         ));
     }
 

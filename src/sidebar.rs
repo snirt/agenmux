@@ -172,6 +172,23 @@ enum VisiblePane {
     Window(usize),
 }
 
+/// Agent and pane rows name the pane; a single-pane window has no row of its own.
+fn item_reference(selected: VisiblePane, pane: &PaneMeta) -> String {
+    match selected {
+        VisiblePane::Session(_) => format!("tmux session {}", pane.session_id),
+        VisiblePane::Window(_) => format!("tmux window {}", pane.window_id),
+        VisiblePane::Agent(_) | VisiblePane::Inventory(_) => format!("tmux pane {}", pane.pane),
+    }
+}
+
+/// display-message expands formats and strftime, which would eat `%12`.
+fn client_message(client: &str, message: &str) {
+    let message = format!("agenmux: {message}")
+        .replace('%', "%%")
+        .replace('#', "##");
+    let _ = command_status(&["display-message", "-c", client, "-d", "3000", &message]);
+}
+
 fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMode {
     if overlay.is_some() {
         DispatchMode::Overlay
@@ -801,6 +818,13 @@ impl Sidebar {
                     crate::input::SequenceDispatch::Builtin(SequenceAction::First),
                     _,
                 ) => self.dispatch_key(Key::First),
+                SequenceResult::Match(
+                    crate::input::SequenceDispatch::Builtin(SequenceAction::Copy),
+                    client,
+                ) => {
+                    self.copy_reference(client);
+                    DispatchResult::Continue
+                }
                 SequenceResult::Match(crate::input::SequenceDispatch::Builtin(action), client) => {
                     self.begin_mutation(action, client)
                 }
@@ -980,9 +1004,38 @@ impl Sidebar {
                     self.execute_mutation(&target, "")
                 }
             }
-            SequenceAction::First | SequenceAction::Delete | SequenceAction::Rename => {
-                DispatchResult::Continue
+            SequenceAction::First
+            | SequenceAction::Delete
+            | SequenceAction::Rename
+            | SequenceAction::Copy => DispatchResult::Continue,
+        }
+    }
+
+    /// `yy`: put the selected record's tmux ID on the invoking client's
+    /// clipboard (OSC 52) and in the tmux paste buffer. IDs stay unique when
+    /// display names repeat, and the selection does not move.
+    fn copy_reference(&mut self, client: Option<String>) {
+        let client = client
+            .filter(|value| !value.is_empty())
+            .or_else(|| (!self.popup_client.is_empty()).then(|| self.popup_client.clone()));
+        let Some((selected, pane)) = self.selected_pane() else {
+            if let Some(client) = &client {
+                self.mutation_error(client, "selected pane no longer exists");
             }
+            return;
+        };
+        let reference = item_reference(selected, &pane);
+        let mut args = vec!["set-buffer", "-w"];
+        if let Some(client) = &client {
+            args.extend(["-t", client]);
+        }
+        args.extend(["--", &reference]);
+        let message = match command_status(&args) {
+            Ok(()) => format!("copied {reference}"),
+            Err(error) => format!("copy failed: {error}"),
+        };
+        if let Some(client) = &client {
+            client_message(client, &message);
         }
     }
 
@@ -1050,14 +1103,7 @@ impl Sidebar {
 
     fn mutation_error(&mut self, client: &str, message: &str) {
         self.refresh_requested = true;
-        let _ = crate::tmux::command_status(&[
-            "display-message",
-            "-c",
-            client,
-            "-d",
-            "3000",
-            &format!("agenmux: {message}"),
-        ]);
+        client_message(client, message);
     }
 
     fn revalidated_launcher_cwd(target: &LauncherTarget) -> Result<String, TmuxError> {
@@ -1218,7 +1264,7 @@ impl Sidebar {
                 "#{session_id}",
                 target.session_id.clone(),
             ),
-            SequenceAction::First | SequenceAction::Delete => return false,
+            SequenceAction::First | SequenceAction::Delete | SequenceAction::Copy => return false,
         };
         crate::tmux::command(&["display-message", "-p", "-t", tmux_target, format])
             .is_ok_and(|actual| actual.trim() == expected)
@@ -1430,7 +1476,10 @@ impl Sidebar {
                 }
                 crate::tmux::command(&["kill-session", "-t", &target.session_id])
             })(),
-            SequenceAction::First | SequenceAction::Rename | SequenceAction::Delete => {
+            SequenceAction::First
+            | SequenceAction::Rename
+            | SequenceAction::Delete
+            | SequenceAction::Copy => {
                 return DispatchResult::Continue;
             }
         };
@@ -1747,6 +1796,40 @@ impl Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_reference_names_the_selected_record_by_tmux_id() {
+        // Same session/window names in two sessions: only the IDs tell them apart.
+        let pane = |pane: &str, window: &str, session: &str| PaneMeta {
+            pane: pane.into(),
+            pane_index: 0,
+            pane_title: "agent".into(),
+            command: "claude".into(),
+            path: "/work".into(),
+            window_id: window.into(),
+            window_index: 1,
+            window_name: "editor".into(),
+            session_id: session.into(),
+            session_name: "work".into(),
+            agent_index: None,
+        };
+        let a = pane("%12", "@7", "$3");
+        let b = pane("%40", "@9", "$5");
+        assert_eq!(
+            item_reference(VisiblePane::Session(0), &a),
+            "tmux session $3"
+        );
+        assert_eq!(item_reference(VisiblePane::Window(0), &a), "tmux window @7");
+        assert_eq!(
+            item_reference(VisiblePane::Inventory(0), &a),
+            "tmux pane %12"
+        );
+        assert_eq!(item_reference(VisiblePane::Agent(0), &b), "tmux pane %40");
+        assert_ne!(
+            item_reference(VisiblePane::Window(0), &a),
+            item_reference(VisiblePane::Window(0), &b)
+        );
+    }
 
     #[test]
     fn navigation_runs_coalesce_only_same_target_and_direction() {
