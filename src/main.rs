@@ -19,6 +19,32 @@ mod toggle;
 
 use std::path::{Path, PathBuf};
 
+/// Mirrors the CLI section of docs/usage.md: shell commands first, then the
+/// internal ones the tmux integration calls.
+const USAGE: &str = "\
+Usage: agenmux <command> [args]
+
+Commands:
+  list                     List monitored agent panes (TSV); scan is an alias
+  status                   Print the tmux status-line segment
+  config                   Show every configuration option
+  config check [--effective [--all]]
+                           Validate config.toml; --effective also reads tmux overrides
+  config reload            Validate and apply config.toml to running sidebars
+  detect <conf> <screen-file> [title]
+                           Run an agent's detection rules against a saved screen
+  update [latest|vX.Y.Z]   Install a release
+  releases refresh         Refresh the cached release list
+  -V, --version            Print the version
+  -h, --help               Print this help
+
+Internal (called by the tmux integration):
+  sidebar, daemon, setup [--if-needed], toggle [split|popup] [client],
+  key <name> [client], click <pane> <row> <client>, wheel <pane> <up|down>,
+  pane-add [window], pane-orphan, pane-pin, teardown,
+  notification-open <socket> <pane> <bundle>
+";
+
 pub(crate) fn compat_env(name: &str, legacy: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -89,10 +115,12 @@ fn main() {
         ["notification-open", socket, pane, bundle] => {
             notifications::open_pane(socket, pane, bundle)
         }
+        ["-h" | "--help" | "help"] => {
+            print!("{USAGE}");
+            0
+        }
         _ => {
-            eprintln!(
-                "usage: agenmux [--version|config [--help|check [--effective]|reload]|scan|list|status|sidebar|daemon|key <name>|click <pane> <row> <client>|wheel <pane> <up|down>|pane-add [window]|pane-orphan|pane-pin|teardown|setup|toggle [split|popup] [client]|releases refresh|update [latest|vX.Y.Z]|detect <conf> <screen-file> [title]|notification-open <socket> <pane> <bundle>]"
-            );
+            eprint!("{USAGE}");
             2
         }
     };
