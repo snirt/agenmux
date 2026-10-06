@@ -6,7 +6,11 @@ Website: <https://snirt.github.io/agenmux/>
 
 A tmux manager in a sidebar that also follows your AI coding agents. Every
 session, window, and pane appears in tmux order; jump, create, rename, and
-delete from the keyboard or mouse. Each agent shows its state inline:
+delete from the keyboard or mouse.
+
+[![agenmux intro video](site/demo-video.jpg)](https://youtu.be/iRlmKR6Y9aE)
+
+Each agent shows its state inline:
 
 <img src="site/states.svg" width="680" alt="Agent states: red blinking ⣿ blocked, waiting for your input (permission prompt, menu); yellow spinner working, actively running; green blinking ⣿ done, finished while you were elsewhere, clears when you view it; green ⣿ idle, waiting at the prompt">
 
@@ -15,10 +19,6 @@ Pi**. Adding an agent is one small config file — no code. Detection reads each
 pane's process tree, screen, and title; no hooks to install, nothing runs
 inside your agents. A status-line segment and desktop notifications tell you
 when an agent needs you.
-
-## Demo
-
-[![agenmux intro video](site/demo-video.jpg)](https://youtu.be/iRlmKR6Y9aE)
 
 ## Quick start
 
