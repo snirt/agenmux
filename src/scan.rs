@@ -118,6 +118,7 @@ fn force_capture(policy: &ScanPolicy<'_>, pane: &str, session: &str) -> bool {
         || (policy.periodic && !covered)
 }
 
+#[derive(Clone)]
 pub struct PaneRow {
     pub pane: String,
     pub loc: String,
