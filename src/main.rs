@@ -25,7 +25,11 @@ const USAGE: &str = "\
 Usage: agenmux <command> [args]
 
 Commands:
-  list                     List monitored agent panes (TSV); scan is an alias
+  list [-s <session>] [-a <agent>] [-c <command>]
+                           List agent panes (TSV); scan is an alias.
+                           -s, --session  every pane in that session
+                           -a, --agent    only that agent (claude)
+                           -c, --command  panes running that command (zsh)
   status                   Print the tmux status-line segment
   config                   Show every configuration option
   config check [--effective [--all]]
@@ -80,7 +84,13 @@ fn main() {
                 e.exit_code()
             }
         },
-        ["scan"] | ["list"] => cmd_scan(),
+        ["scan" | "list", rest @ ..] => match parse_list_args(rest) {
+            Some(filter) => cmd_list(filter),
+            None => {
+                eprint!("{USAGE}");
+                2
+            }
+        },
         ["status"] => cmd_status(),
         ["sidebar"] => sidebar::run(plugin_dir(), scan_cache_path()),
         ["daemon"] => sidebar::run_daemon(plugin_dir(), scan_cache_path()),
@@ -151,7 +161,7 @@ fn self_pane() -> Option<String> {
     compat_env("AGENMUX_SELF", "AGENTS_MON_SELF").filter(|s| !s.is_empty())
 }
 
-fn run_scan() -> Result<Vec<scan::PaneRow>, tmux::TmuxError> {
+fn run_scan() -> Result<scan::ScanSnapshot, tmux::TmuxError> {
     let confs = conf::load_all(&plugin_dir());
     let mut t = tmux::Tmux::connect()?;
     let mut cache = procs::IdentCache::new();
@@ -163,20 +173,71 @@ fn run_scan() -> Result<Vec<scan::PaneRow>, tmux::TmuxError> {
         &mut subj,
         self_pane().as_deref(),
     )
-    .map(|snapshot| snapshot.agents)
 }
 
-fn cmd_scan() -> i32 {
-    match run_scan() {
-        Ok(rows) => {
-            print!("{}", scan::to_tsv(&rows));
-            0
-        }
-        Err(e) => {
-            eprintln!("agenmux: {e}");
-            1
+#[derive(Debug, Default, PartialEq)]
+struct ListFilter<'a> {
+    session: Option<&'a str>,
+    agent: Option<&'a str>,
+    command: Option<&'a str>,
+}
+
+/// `[-s <session>] [-a <agent>] [-c <command>]`, long or short, in any order.
+fn parse_list_args<'a>(args: &[&'a str]) -> Option<ListFilter<'a>> {
+    let mut out = ListFilter::default();
+    let mut args = args.iter();
+    while let Some(&flag) = args.next() {
+        let slot = match flag {
+            "-s" | "--session" => &mut out.session,
+            "-a" | "--agent" => &mut out.agent,
+            "-c" | "--command" => &mut out.command,
+            _ => return None,
+        };
+        if slot.replace(*args.next()?).is_some() {
+            return None;
         }
     }
+    Some(out)
+}
+
+/// Plain `list` keeps its agent-only output. `--session` or `--command` widens
+/// it to every pane, with `-` in the agent and state columns of non-agent panes.
+fn cmd_list(filter: ListFilter) -> i32 {
+    let snapshot = match run_scan() {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            eprintln!("agenmux: {e}");
+            return 1;
+        }
+    };
+    if let Some(name) = filter.session {
+        if !snapshot.panes.iter().any(|p| p.session_name == name) {
+            eprintln!("agenmux: no session named {name}");
+            return 1;
+        }
+    }
+    let every_pane = filter.session.is_some() || filter.command.is_some();
+    let rows: Vec<scan::PaneRow> = snapshot
+        .panes
+        .iter()
+        .filter(|p| every_pane || p.agent_index.is_some())
+        .filter(|p| filter.session.is_none_or(|s| p.session_name == s))
+        .filter(|p| filter.command.is_none_or(|c| p.command == c))
+        .map(|p| match p.agent_index {
+            Some(i) => snapshot.agents[i].clone(),
+            None => scan::PaneRow {
+                pane: p.pane.clone(),
+                loc: format!("{}:{}.{}", p.session_name, p.window_index, p.pane_index),
+                agent: "-".into(),
+                state: "-".into(),
+                cwd: p.path.rsplit('/').next().unwrap_or(&p.path).to_string(),
+                title: p.command.clone(),
+            },
+        })
+        .filter(|r| filter.agent.is_none_or(|a| r.agent == a))
+        .collect();
+    print!("{}", scan::to_tsv(&rows));
+    0
 }
 
 fn cmd_status() -> i32 {
@@ -191,7 +252,7 @@ fn cmd_status() -> i32 {
         scan::from_tsv(&std::fs::read_to_string(&cache).unwrap_or_default())
     } else {
         match run_scan() {
-            Ok(rows) => rows,
+            Ok(snapshot) => snapshot.agents,
             Err(_) => return 0, // no server -> empty segment, like bash
         }
     };
@@ -216,4 +277,30 @@ fn cmd_detect(conf_path: &str, screen_file: &str, title: &str) -> i32 {
     };
     println!("{}", detect::detect_state(&c, title, &screen));
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_list_args, ListFilter};
+
+    #[test]
+    fn list_filters_are_optional_flags_in_any_order() {
+        assert_eq!(parse_list_args(&[]), Some(ListFilter::default()));
+        assert_eq!(
+            parse_list_args(&["-c", "zsh", "--session", "work", "-a", "claude"]),
+            Some(ListFilter {
+                session: Some("work"),
+                agent: Some("claude"),
+                command: Some("zsh"),
+            })
+        );
+        for bad in [
+            &["--agent"][..],
+            &["work"],
+            &["--type", "x"],
+            &["--agent", "x", "--agent", "y"],
+        ] {
+            assert_eq!(parse_list_args(bad), None, "{bad:?}");
+        }
+    }
 }
