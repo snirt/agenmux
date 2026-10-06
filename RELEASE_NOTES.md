@@ -1,30 +1,21 @@
-# agenmux v0.7.1
+# agenmux v0.7.2
 
 ## What's changed
 
-v0.7.1 smooths sidebar navigation, keeps wide characters from breaking rows,
-makes the command-line help readable, lists every pane in a session, and
-offers to put `agenmux` on your PATH.
+v0.7.2 stops agenmux from starting a stray tmux server when `$TMUX` points at
+a dead socket, keeps two tmux servers from sharing runtime files, and shows a
+play button on the README video.
 
-### Sidebar
+### Fixes
 
-- Holding `j`/`k` no longer makes the cursor jump: split sidebars hide the terminal cursor, frames use synchronized output so tmux never draws one half-finished, and scans wait while a key is held ([#154](https://github.com/snirt/agenmux/pull/154)).
-- Rows containing East Asian wide characters or emoji are clipped by terminal cells, so they no longer wrap and push the rows below down ([#159](https://github.com/snirt/agenmux/pull/159)).
-
-### Command line
-
-- `agenmux -h`, `--help` and `help` print grouped help with a description for each command; internal commands are listed separately ([#166](https://github.com/snirt/agenmux/pull/166)).
-- `agenmux config` lines every key up in key / values / default columns and lists each key action with its default bindings ([#166](https://github.com/snirt/agenmux/pull/166)).
-- `agenmux list` filters by session (`-s`), agent (`-a`) or running command (`-c`); a session filter lists every pane in it, not just agents ([#168](https://github.com/snirt/agenmux/pull/168)).
-
-### Installer
-
-- The installer offers to link `~/.local/bin/agenmux` to the engine, and if `~/.local/bin` is not on PATH it prints the line to add ([#153](https://github.com/snirt/agenmux/pull/153)).
+- `agenmux list` and `scan` with `$TMUX` pointing at a dead socket now exit 1 instead of starting a new tmux server ([#164](https://github.com/snirt/agenmux/pull/164), [#135](https://github.com/snirt/agenmux/issues/135)).
+- Runtime files live in a private directory per tmux server, so two servers sharing `TMPDIR` no longer take each other's sidebar keys; `AGENMUX_RUNTIME_DIR` still overrides it ([#164](https://github.com/snirt/agenmux/pull/164), [#161](https://github.com/snirt/agenmux/issues/161)).
+- Returning to a window or session whose sidebar is selected restores the sidebar's key table ([#164](https://github.com/snirt/agenmux/pull/164)).
+- The sidebar waits up to 15 seconds instead of 5 for its first scan, so large tmux servers start reliably ([#164](https://github.com/snirt/agenmux/pull/164)).
 
 ### Documentation
 
-- The README is now a short landing page; the full reference moved to `docs/` ([#156](https://github.com/snirt/agenmux/pull/156), [#163](https://github.com/snirt/agenmux/pull/163)).
-- The website and README show the [agenmux intro video](https://youtu.be/iRlmKR6Y9aE) in place of the animated demo ([#171](https://github.com/snirt/agenmux/pull/171), [#172](https://github.com/snirt/agenmux/pull/172)).
+- The README video thumbnail shows a play button ([#172](https://github.com/snirt/agenmux/pull/172)).
 
 ### Assets
 
