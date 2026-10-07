@@ -65,6 +65,7 @@ A @agenmux-* tmux option, when set, overrides the file.
   enabled              true | false                       (true)
   confirm_delete       true | false                       (true)
   resume_agents        true | false                       (false)
+  undo_history         0..=100 closed branches kept       (20)
 
 [quick_launchers.<id>]
   sequence             1-2 ASCII letters or digits        (required)
@@ -187,6 +188,10 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
         (
             "tmux_management.resume_agents".into(),
             config.tmux_management_resume_agents.to_string(),
+        ),
+        (
+            "tmux_management.undo_history".into(),
+            config.tmux_management_undo_history.to_string(),
         ),
         (
             "theme.base".into(),

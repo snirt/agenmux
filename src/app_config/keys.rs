@@ -204,7 +204,7 @@ pub fn resolved_keys(
             (Filter, &["f"]),
             (Reset, &["Escape"]),
             (Help, &["?"]),
-            (Versions, &["u"]),
+            (Versions, &["U"]),
             (Settings, &["s"]),
             (Close, &["q", "Q"]),
         ],

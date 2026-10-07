@@ -14,6 +14,11 @@ pub(super) enum Overlay {
         sel: usize,
         chosen: Option<String>,
     },
+    /// Recently closed sessions and windows, newest first.
+    Undo {
+        sel: usize,
+        entries: Vec<crate::snapshot::Closed>,
+    },
     Settings(Settings),
     Create {
         target: MutationTarget,
@@ -130,7 +135,10 @@ impl Overlay {
                 };
                 (format!("{kind} name: {}", name.display("▏")), false)
             }
-            Overlay::Help | Overlay::Versions { .. } | Overlay::Settings(_) => return None,
+            Overlay::Help
+            | Overlay::Versions { .. }
+            | Overlay::Undo { .. }
+            | Overlay::Settings(_) => return None,
         })
     }
 }
@@ -357,6 +365,15 @@ fn setting_value(name: &str, buffer: &str) -> Result<String, String> {
             "true" | "false" => Ok(value.into()),
             _ => Err("expected true or false".into()),
         };
+    }
+    if name == "tmux_management.undo_history" {
+        let max = crate::app_config::MAX_UNDO_HISTORY;
+        return value
+            .parse::<u16>()
+            .ok()
+            .filter(|entries| *entries <= max)
+            .map(|entries| entries.to_string())
+            .ok_or_else(|| format!("expected 0..={max}"));
     }
     if matches!(name, "display.sidebar_width" | "display.popup_width")
         || (name == "display.popup_height" && value != "auto")
@@ -726,6 +743,7 @@ impl Sidebar {
                         "fold branch (h/← fold, l/→ open)",
                     ),
                     ("z/Z", KeyChord::Printable(b'z'), "fold / open all branches"),
+                    ("u", KeyChord::Printable(b'u'), "recently closed (undo)"),
                 ] {
                     if action_for(&self.normal_keys, chord).is_none() {
                         keys.push((label.into(), what.into()));
@@ -777,6 +795,59 @@ impl Sidebar {
                 }
                 text
             }
+            Some(Overlay::Undo { sel, entries }) => {
+                let (sel, entries) = (*sel, entries.clone());
+                let mut text = format!("{E}[2J{E}[H{header}{title} — recently closed{E}[0m\n\n");
+                // ponytail: dims from the last scan; restore re-checks tmux.
+                let mut live = crate::snapshot::Live::default();
+                for pane in &self.panes {
+                    live.windows
+                        .insert((pane.session_name.clone(), pane.window_index));
+                    live.ids.insert(pane.window_id.clone());
+                }
+                let width = entries.iter().map(|e| undo_label(e).chars().count()).max();
+                for (i, entry) in entries.iter().enumerate() {
+                    let mark = cursor_mark(&self.palette, i == sel, true, "idle");
+                    let (dim, end) = if entry.blocked(&live) {
+                        (muted.as_str(), format!("{E}[0m"))
+                    } else {
+                        ("", String::new())
+                    };
+                    text.push_str(&format!(
+                        "{mark}{dim}{}  {:<7}  {:<w$}  {}{end}\n",
+                        clock(entry.time),
+                        if entry.is_session() {
+                            "session"
+                        } else if entry.is_pane() {
+                            "pane"
+                        } else {
+                            "window"
+                        },
+                        undo_label(entry),
+                        undo_summary(entry),
+                        w = width.unwrap_or(0),
+                    ));
+                }
+                if entries.is_empty() {
+                    let empty = if self.settings.settings.tmux_management_undo_history == 0 {
+                        "off: tmux_management.undo_history = 0"
+                    } else {
+                        "nothing closed yet"
+                    };
+                    text.push_str(&format!(" {muted}{empty}{E}[0m\n"));
+                }
+                let hint = if self.settings.settings.tmux_management_enabled {
+                    join(&[
+                        self.hint(&self.normal_keys, Action::Jump, "restore"),
+                        "d forget".into(),
+                        self.back_hint(),
+                    ])
+                } else {
+                    join(&["restore needs tmux management".into(), self.back_hint()])
+                };
+                text.push_str(&format!("\n{muted}{hint}{E}[0m"));
+                text
+            }
             Some(Overlay::Settings(settings)) => {
                 let (text, targets) = render_settings(
                     settings,
@@ -810,10 +881,10 @@ impl Sidebar {
                 .strip_prefix(&format!("{E}[2J{E}[H"))
                 .unwrap_or(header);
             let width = title.chars().count()
-                + if matches!(self.overlay, Some(Overlay::Help)) {
-                    7
-                } else {
-                    11
+                + match self.overlay {
+                    Some(Overlay::Help) => 7,
+                    Some(Overlay::Undo { .. }) => 18,
+                    _ => 11,
                 };
             format!(
                 "{E}[2J{E}[H{}\n{body}",
@@ -886,6 +957,43 @@ impl Sidebar {
                 }
                 chosen = tags.get(sel).cloned();
                 self.overlay = Some(Overlay::Versions { sel, chosen });
+            }
+            Overlay::Undo {
+                mut sel,
+                mut entries,
+            } => {
+                match key {
+                    Key::Down => sel = (sel + 1).min(entries.len().saturating_sub(1)),
+                    Key::Up => sel = sel.saturating_sub(1),
+                    // A blocked entry keeps the list open; Enter's binding has
+                    // left the sidebar key table, so take it back.
+                    Key::Jump
+                        if entries
+                            .get(sel)
+                            .is_some_and(|entry| !self.restore_closed(entry)) =>
+                    {
+                        self.reclaim_key_table()
+                    }
+                    Key::Jump => {
+                        self.close_overlay();
+                        return super::DispatchResult::Continue;
+                    }
+                    // `d` reaches the sidebar as the `dd` sequence prefix, which
+                    // exists only with tmux management on.
+                    Key::Sequence('d', _) if sel < entries.len() => {
+                        let entry = entries.remove(sel);
+                        if let Some(store) = self.snapshot.as_mut() {
+                            store.forget(&entry.id);
+                        }
+                        sel = sel.min(entries.len().saturating_sub(1));
+                    }
+                    Key::AllStates | Key::Quit | Key::Close => {
+                        self.close_overlay();
+                        return super::DispatchResult::Continue;
+                    }
+                    _ => {}
+                }
+                self.overlay = Some(Overlay::Undo { sel, entries });
             }
             Overlay::Create { target, mut name } => {
                 if name.handle(&key) {
@@ -1295,11 +1403,126 @@ impl Sidebar {
         self.overlay = Some(Overlay::Help);
         self.last_frame.clear();
     }
+
+    /// `u`: recently closed sessions and windows, newest preselected.
+    pub(super) fn undo(&mut self) {
+        // A lowered limit shows at once; the file trims on the next close.
+        let limit = self.settings.settings.tmux_management_undo_history;
+        let mut entries = self
+            .snapshot
+            .as_ref()
+            .map(|store| store.closed())
+            .unwrap_or_default();
+        entries.truncate(limit);
+        self.overlay = Some(Overlay::Undo { sel: 0, entries });
+        self.last_frame.clear();
+    }
+}
+
+/// `work` for a session, `work:2` for a window or a pane in it.
+fn undo_label(entry: &crate::snapshot::Closed) -> String {
+    match &entry.session.windows[..] {
+        [window] if !entry.is_session() => {
+            crate::snapshot::window_key(&entry.session.name, window.index)
+        }
+        _ => entry.session.name.clone(),
+    }
+}
+
+/// `3 windows, 4 panes, 2 agents` for a session, `2 panes` for a window, and the agent
+/// (or `shell`) and directory name for a pane: `claude · repo`.
+fn undo_summary(entry: &crate::snapshot::Closed) -> String {
+    if let Some(pane) = entry.pane() {
+        let dir = Path::new(&pane.path)
+            .file_name()
+            .map_or(pane.path.clone(), |name| name.to_string_lossy().into());
+        return format!("{} · {dir}", pane.agent.as_deref().unwrap_or("shell"));
+    }
+    let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+    let windows = &entry.session.windows;
+    let panes = plural(windows.iter().map(|w| w.panes.len()).sum(), "pane");
+    let mut summary = if entry.is_session() {
+        format!("{}, {panes}", plural(windows.len(), "window"))
+    } else {
+        panes
+    };
+    let agents = crate::snapshot::agents(std::slice::from_ref(&entry.session));
+    if agents > 0 {
+        summary.push_str(&format!(", {}", plural(agents, "agent")));
+    }
+    summary
+}
+
+/// Local `HH:MM`.
+fn clock(time: u64) -> String {
+    let secs = time as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        return "--:--".into();
+    }
+    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undo_rows_name_the_branch_and_summarize_it() {
+        use crate::snapshot::{Closed, Pane, Session, Window};
+        let window = |index, agents: &[Option<&str>]| Window {
+            index,
+            panes: agents
+                .iter()
+                .map(|agent| Pane {
+                    agent: agent.map(str::to_string),
+                    ..Pane::default()
+                })
+                .collect(),
+            ..Window::default()
+        };
+        let session = Closed {
+            id: "$3".into(),
+            session: Session {
+                name: "work".into(),
+                windows: vec![
+                    window(0, &[Some("claude"), None]),
+                    window(1, &[Some("codex")]),
+                    window(2, &[None]),
+                ],
+                ..Session::default()
+            },
+            ..Closed::default()
+        };
+        assert_eq!(undo_label(&session), "work");
+        assert_eq!(undo_summary(&session), "3 windows, 4 panes, 2 agents");
+        let closed_window = Closed {
+            id: "@7".into(),
+            session: Session {
+                name: "play".into(),
+                windows: vec![window(2, &[None, None])],
+                ..Session::default()
+            },
+            ..Closed::default()
+        };
+        assert_eq!(undo_label(&closed_window), "play:2");
+        assert_eq!(undo_summary(&closed_window), "2 panes");
+        let mut pane_window = window(2, &[Some("claude")]);
+        pane_window.panes[0].id = "%4".into();
+        pane_window.panes[0].path = "/src/repo".into();
+        let closed_pane = Closed {
+            id: "%4".into(),
+            session: Session {
+                name: "play".into(),
+                windows: vec![pane_window],
+                ..Session::default()
+            },
+            ..Closed::default()
+        };
+        assert_eq!(undo_label(&closed_pane), "play:2");
+        assert_eq!(undo_summary(&closed_pane), "claude · repo");
+        assert_eq!(clock(0).len(), 5);
+    }
 
     #[test]
     fn tags_compare_numerically_not_as_strings() {
@@ -1517,6 +1740,18 @@ mod tests {
             assert_eq!(
                 setting_value("keys.sequence_timeout_ms", invalid).unwrap_err(),
                 "expected a positive integer"
+            );
+        }
+        for (value, saved) in [(" 0 ", "0"), ("100", "100")] {
+            assert_eq!(
+                setting_value("tmux_management.undo_history", value).unwrap(),
+                saved
+            );
+        }
+        for invalid in ["101", "-1", "x", ""] {
+            assert_eq!(
+                setting_value("tmux_management.undo_history", invalid).unwrap_err(),
+                "expected 0..=100"
             );
         }
         let effective =

@@ -24,6 +24,7 @@ notifications = true
 enabled = true
 confirm_delete = true  # keep the inline y/n prompt before dd deletes
 resume_agents = false  # true: R after a tmux restart relaunches agents via AGENT_RESUME
+undo_history = 20      # closed sessions/windows/panes u can restore (0..=100, 0: off)
 
 # Quick launchers are available only when tmux management is enabled.
 # These entries show the built-in defaults and can be omitted when unchanged.
@@ -71,7 +72,7 @@ search = ["/"]
 filter = ["f"]
 reset = ["Escape"]
 help = ["?"]
-versions = ["u"]
+versions = ["U"]
 settings = ["s"]
 close = ["q", "Q"]
 

@@ -382,10 +382,10 @@ working_directory = "tmux"
 
         // Conflicts are checked only when the management gate makes the
         // sequence active. The same file remains valid while launchers are off.
-        let colliding = "[tmux_management]\nenabled=false\n[quick_launchers.nvim]\nsequence='u'\n";
+        let colliding = "[tmux_management]\nenabled=false\n[quick_launchers.nvim]\nsequence='U'\n";
         assert!(parse(colliding).is_ok());
         for source in [
-            "[quick_launchers.nvim]\nsequence='u'",
+            "[quick_launchers.nvim]\nsequence='U'",
             "[tmux_management]\nenabled=true\n[quick_launchers.nvim]\nsequence='G'",
             "[tmux_management]\nenabled=true\n[quick_launchers.nvim]\nsequence='gg'",
             "[tmux_management]\nenabled=true\n[quick_launchers.nvim]\nsequence='e'\n[quick_launchers.lazygit]\nsequence='et'",
@@ -394,7 +394,7 @@ working_directory = "tmux"
             assert!(parse(source).is_err(), "accepted active conflict: {source}");
         }
         let disabled = parse(
-            "[tmux_management]\nenabled=true\n[quick_launchers.nvim]\nenabled=false\nsequence='u'",
+            "[tmux_management]\nenabled=true\n[quick_launchers.nvim]\nenabled=false\nsequence='U'",
         )
         .unwrap();
         assert!(resolve(&disabled, &BTreeMap::new()).is_ok());

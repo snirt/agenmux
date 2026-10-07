@@ -14,6 +14,7 @@ open. It lists every tmux session, window, and pane, with agent state inline.
 | `h` / `←`, `→` | Collapse / expand (`h` on a pane steps to its header) |
 | `z` / `Z` | Collapse / expand everything |
 | `R` / `x` | Restore / dismiss the previous tmux server's layout, when offered |
+| `u` | Recently closed sessions, windows and panes ([undo](#undoing-a-close)) |
 | `/` | Search |
 | `f` | Toggle **User attention**: show done, working, and blocked; hide idle |
 | `.` | Toggle between all panes and agents only |
@@ -24,7 +25,7 @@ open. It lists every tmux session, window, and pane, with agent state inline.
 | `yy` | Copy the selected record's tmux reference ([copying references](#copying-references)) |
 | `oe` / `og` | Open nvim / lazygit in a new window ([quick launchers](#quick-launchers)) |
 | `s` | Settings |
-| `u` | Version picker |
+| `U` | Version picker |
 | `?` | Help |
 | `q` / `Q` | Close the sidebar |
 
@@ -92,6 +93,33 @@ Previous layout: 3 sessions, 5 agents · R restore · x dismiss
   default. Most agents continue their latest session in that directory, so two
   agents sharing a directory continue the same one.
 - `R` needs `tmux_management.enabled`.
+
+### Undoing a close
+
+The same snapshot logs the last 20 sessions, windows and panes closed while the
+sidebar runs; set `tmux_management.undo_history` (0–100, `0` turns it off) in
+the config or the settings view (`s`) to keep more or fewer. Renaming or moving
+one is not a close. Press `u` to list them, newest first:
+
+```text
+❯ 10:42  session  work    3 windows, 5 panes, 2 agents
+  10:35  pane     play:1  claude · repo
+  10:31  window   play:2  2 panes
+↵ restore · d forget · q/esc back
+```
+
+- `Enter` restores the selected entry like `R` does: saved layout, a shell in
+  each saved directory, and `AGENT_RESUME` with `resume_agents` on. `u` `Enter`
+  undoes the last close.
+- A pane is split back into its window next to its old neighbour, and the
+  window gets its saved layout back when its pane count matches again.
+- Entries restore in any order; a restored entry leaves the list. `d` forgets
+  one.
+- An entry whose session name, or `session:index` for a window, is in use again
+  is dimmed and cannot be restored. A pane entry leaves the list when its window
+  closes; restore the window instead.
+- The log belongs to the running tmux server and starts empty after a restart.
+- Restoring and `d` need `tmux_management.enabled`.
 
 ### Agent icons
 

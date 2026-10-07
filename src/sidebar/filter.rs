@@ -542,6 +542,7 @@ impl Sidebar {
             | Key::CollapseAll
             | Key::ExpandAll
             | Key::RestoreLayout
+            | Key::Undo
             | Key::DismissLayout
             | Key::Other => {}
         }

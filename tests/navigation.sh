@@ -692,7 +692,7 @@ done
   exit 1
 }
 picker_before="$picker_reset"
-printf 'u' >&9
+printf 'U' >&9
 picker_open=0
 for _ in $(seq 1 40); do
   picker_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
