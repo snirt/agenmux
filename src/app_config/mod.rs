@@ -7,6 +7,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub const MAX_BYTES: usize = 65_536;
+/// Closed sessions, windows and panes the undo list may keep; each holds a
+/// layout copy in the snapshot file.
+pub const MAX_UNDO_HISTORY: u16 = 100;
 
 #[derive(Debug, Clone)]
 pub struct ConfigError {
@@ -119,6 +122,7 @@ pub struct TmuxManagementConfig {
     pub enabled: Option<bool>,
     pub confirm_delete: Option<bool>,
     pub resume_agents: Option<bool>,
+    pub undo_history: Option<u16>,
 }
 
 // Deserialize through String so TOML's externally tagged enum tables cannot
@@ -249,6 +253,17 @@ fn validate(config: &FileConfig) -> Result<(), ConfigError> {
             ));
         }
     }
+    if config
+        .tmux_management
+        .as_ref()
+        .and_then(|management| management.undo_history)
+        .is_some_and(|entries| entries > MAX_UNDO_HISTORY)
+    {
+        return Err(ConfigError::invalid(
+            "tmux_management.undo_history",
+            "must be 0..=100",
+        ));
+    }
     let k = config.keys.as_ref();
     if config
         .keys
@@ -323,7 +338,7 @@ search = ["/"]
 filter = ["f"]
 reset = ["Escape"]
 help = ["?"]
-versions = ["u"]
+versions = ["U"]
 close = ["q", "Q"]
 [keys.search]
 up = ["Up", "C-p"]

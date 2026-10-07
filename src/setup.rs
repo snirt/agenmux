@@ -591,6 +591,7 @@ fn key_bindings(config: &crate::app_config::AppConfig) -> Vec<(&'static str, Str
         ("z", "collapse-all"),
         ("Z", "expand-all"),
         ("R", "restore-layout"),
+        ("u", "undo"),
         ("x", "dismiss-layout"),
     ] {
         out.push((
@@ -959,6 +960,7 @@ mod tests {
             ("z", "collapse-all"),
             ("Z", "expand-all"),
             ("R", "restore-layout"),
+            ("u", "undo"),
             ("x", "dismiss-layout"),
         ] {
             assert_eq!(
@@ -1066,6 +1068,16 @@ mod tests {
             space.last().map(|(_, _, command)| command.as_str()),
             Some(key_command("versions", NORMAL_TABLE, true).as_str())
         );
+        // A versions chord kept on the old default replaces the fixed undo key.
+        let kept = key_bindings(&config("[keys.normal]\nversions = ['u']\n"));
+        let u: Vec<_> = kept
+            .iter()
+            .filter(|(t, k, _)| *t == NORMAL_TABLE && k == "u")
+            .collect();
+        assert_eq!(
+            u.last().map(|(_, _, command)| command.as_str()),
+            Some(key_command("versions", NORMAL_TABLE, true).as_str())
+        );
 
         assert_ne!(nav_version(&enabled), nav_version(&custom));
         assert_eq!(nav_version(&enabled), nav_version(&config("version = 1")));
@@ -1087,7 +1099,7 @@ mod tests {
         assert_eq!(find(&disabled, NORMAL_TABLE, "e"), None);
         assert_eq!(find(&disabled, NORMAL_TABLE, "o"), None);
         assert!(
-            find(&disabled, NORMAL_TABLE, "u").is_some_and(|command| command.contains("versions"))
+            find(&disabled, NORMAL_TABLE, "U").is_some_and(|command| command.contains("versions"))
         );
         assert_eq!(
             find(&disabled, NORMAL_TABLE, "G"),
@@ -1120,8 +1132,8 @@ mod tests {
             Some(key_command("sequence-74", NORMAL_TABLE, false).as_str())
         );
         assert_eq!(
-            find(&keys, NORMAL_TABLE, "u"),
-            find(&disabled, NORMAL_TABLE, "u")
+            find(&keys, NORMAL_TABLE, "U"),
+            find(&disabled, NORMAL_TABLE, "U")
         );
         assert_eq!(
             find(&keys, NORMAL_TABLE, "G"),
@@ -1143,8 +1155,8 @@ mod tests {
             find(&disabled, NORMAL_TABLE, "G")
         );
         assert_eq!(
-            find(&removed, NORMAL_TABLE, "u"),
-            find(&disabled, NORMAL_TABLE, "u")
+            find(&removed, NORMAL_TABLE, "U"),
+            find(&disabled, NORMAL_TABLE, "U")
         );
     }
 }

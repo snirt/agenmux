@@ -189,6 +189,13 @@ fn client_message(client: &str, message: &str) {
     let _ = command_status(&["display-message", "-c", client, "-d", "3000", &message]);
 }
 
+/// Restore's tmux runner. Plain tmux forks, like jump: their hooks' output
+/// must not reach the control pipe.
+fn run_tmux(args: &[String]) -> Option<String> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    command(&args).ok().map(|out| out.trim().to_string())
+}
+
 fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMode {
     if overlay.is_some() {
         DispatchMode::Overlay
@@ -204,7 +211,9 @@ fn mutation_owner(overlay: &Overlay) -> Option<&str> {
         Overlay::Create { target, .. }
         | Overlay::Rename { target, .. }
         | Overlay::Confirm(target) => Some(target.client.as_str()),
-        Overlay::Help | Overlay::Versions { .. } | Overlay::Settings(_) => None,
+        Overlay::Help | Overlay::Versions { .. } | Overlay::Undo { .. } | Overlay::Settings(_) => {
+            None
+        }
     }
 }
 
@@ -886,6 +895,7 @@ impl Sidebar {
             Key::CollapseAll => self.set_all_collapsed(true),
             Key::ExpandAll => self.set_all_collapsed(false),
             Key::RestoreLayout => self.restore_layout(),
+            Key::Undo => self.undo(),
             Key::DismissLayout => {
                 if let Some(store) = self.snapshot.as_mut() {
                     store.dismiss();
@@ -1678,11 +1688,18 @@ impl Sidebar {
         self.rows = update.rows;
         self.panes = panes;
         if let Some(store) = self.snapshot.as_mut() {
+            store.limit = self.settings.settings.tmux_management_undo_history;
             store.adopt(&mut self.collapsed, &self.panes);
-            // window layouts change without pane output; the 2s scan catches them
-            if periodic || changes.full {
+            // window layouts change without pane output; the 2s scan catches
+            // them. Close notifications force a full scan, which logs the close;
+            // a split's layout notification keeps a soon-closed window current.
+            if periodic || changes.full || changes.layout {
                 if let Ok(windows) = self.tmux.run(crate::snapshot::WINDOWS_FMT) {
-                    store.set_layout(&self.panes, &self.rows, &windows);
+                    store.set_layout(&self.panes, &self.rows, &windows, || {
+                        self.tmux
+                            .run("list-panes -a -F '#{pane_id}'")
+                            .unwrap_or_default()
+                    });
                 }
             }
             store.save(&self.collapsed, &self.panes);
@@ -1721,32 +1738,66 @@ impl Sidebar {
         let Some(prev) = self.snapshot.as_mut().and_then(|store| store.dismiss()) else {
             return;
         };
-        let live = self
-            .tmux
-            .run("list-windows -a -F '#{window_index}|#{session_name}'")
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| {
-                let (index, session) = line.split_once('|')?;
-                Some((session.to_string(), index.parse().ok()?))
-            })
-            .collect();
-        let resume = self.settings.settings.tmux_management_resume_agents;
-        let confs = &self.confs;
-        crate::snapshot::replay(
-            &prev,
-            &live,
-            |agent| {
-                resume
-                    .then(|| confs.iter().find(|c| c.name == agent)?.resume.clone())
-                    .flatten()
-            },
-            &mut |args: &[String]| {
-                let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                command(&args).ok().map(|out| out.trim().to_string())
-            },
-        );
+        let live = self.live();
+        crate::snapshot::replay(&prev, &live.windows, self.resume(), &mut run_tmux);
         self.refresh_requested = true;
+    }
+
+    /// `u` `Enter`: rebuild one closed session, window or pane unless it is
+    /// blocked. A restored entry leaves the list. Returns whether it ran.
+    pub(super) fn restore_closed(&mut self, entry: &crate::snapshot::Closed) -> bool {
+        if !self.settings.settings.tmux_management_enabled {
+            return false;
+        }
+        let live = self.live();
+        if entry.blocked(&live) {
+            return false;
+        }
+        if entry.is_pane() {
+            crate::snapshot::replay_pane(entry, &live, self.resume(), &mut run_tmux);
+        } else {
+            let snap = crate::snapshot::Snapshot {
+                sessions: vec![entry.session.clone()],
+                ..Default::default()
+            };
+            crate::snapshot::replay(&snap, &live.windows, self.resume(), &mut run_tmux);
+        }
+        self.refresh_requested = true;
+        if let Some(store) = self.snapshot.as_mut() {
+            store.forget(&entry.id);
+        }
+        true
+    }
+
+    /// Every live session name and window index, window id and pane id.
+    fn live(&mut self) -> crate::snapshot::Live {
+        let mut live = crate::snapshot::Live::default();
+        let panes = self
+            .tmux
+            .run("list-panes -a -F '#{window_index}|#{window_id}|#{pane_id}|#{session_name}'")
+            .unwrap_or_default();
+        for line in panes.lines() {
+            let fields: Vec<&str> = line.splitn(4, '|').collect();
+            let [index, window, pane, session] = fields[..] else {
+                continue;
+            };
+            if let Ok(index) = index.parse() {
+                live.windows.insert((session.to_string(), index));
+            }
+            live.ids.insert(window.to_string());
+            live.ids.insert(pane.to_string());
+        }
+        live
+    }
+
+    /// The command typed into a restored agent's shell, when resuming is on.
+    fn resume(&self) -> impl Fn(&str) -> Option<String> + '_ {
+        let resume = self.settings.settings.tmux_management_resume_agents;
+        move |agent| {
+            resume
+                .then(|| self.confs.iter().find(|c| c.name == agent)?.resume.clone())
+                .flatten()
+        }
     }
 
     fn has_relevant_output(&self) -> bool {

@@ -132,6 +132,7 @@ pub(crate) enum Key {
     CollapseAll,
     ExpandAll,
     RestoreLayout,
+    Undo,
     DismissLayout,
     Text(String),
     Other,
@@ -486,6 +487,7 @@ fn decode_protocol_payload(
                     b'z' => Key::CollapseAll,
                     b'Z' => Key::ExpandAll,
                     b'R' => Key::RestoreLayout,
+                    b'u' => Key::Undo,
                     b'x' => Key::DismissLayout,
                     0x03 | 0x04 => Key::Quit,
                     0x1b if chord == Some(KeyChord::Left) => Key::Left,
@@ -836,7 +838,8 @@ fn send_key_inner(name: &str, client: Option<&str>) -> i32 {
             "q" => vec![0x03],
             "close" => b"Q".to_vec(),
             "help" => b"?".to_vec(),
-            "versions" => b"u".to_vec(),
+            "versions" => b"U".to_vec(),
+            "undo" => b"u".to_vec(),
             "settings" => b"s".to_vec(),
             "toggle-panes" => b".".to_vec(),
             _ => return 2,
@@ -1089,6 +1092,7 @@ mod tests {
             (b"z", "collapse-all"),
             (b"Z", "expand-all"),
             (b"R", "restore-layout"),
+            (b"u", "undo"),
             (b"x", "dismiss-layout"),
             (&[0x0b], "other"),
         ] {
@@ -1103,6 +1107,7 @@ mod tests {
                         | (Key::CollapseAll, "collapse-all")
                         | (Key::ExpandAll, "expand-all")
                         | (Key::RestoreLayout, "restore-layout")
+                        | (Key::Undo, "undo")
                         | (Key::DismissLayout, "dismiss-layout")
                         | (Key::Other, "other")
                 ),
@@ -1113,7 +1118,7 @@ mod tests {
         assert!(matches!(read_key(fds[0], &keys), Key::WheelUp));
         feed(&[0x02]);
         assert!(matches!(read_key(fds[0], &keys), Key::WheelDown));
-        feed(b"u");
+        feed(b"U");
         assert!(matches!(read_key(fds[0], &keys), Key::Versions));
         feed(&[0, b'q']);
         assert!(matches!(read_key(fds[0], &keys), Key::Text(s) if s == "q"));

@@ -23,10 +23,16 @@ pub struct Snapshot {
     pub collapsed: Vec<String>,
     #[serde(default)]
     pub sessions: Vec<Session>,
+    /// Sessions and windows closed on this server, newest first.
+    #[serde(default)]
+    pub closed: Vec<Closed>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Session {
+    /// `$n`: tells a close from a rename. Meaningless on another server.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub name: String,
     #[serde(default)]
     pub windows: Vec<Window>,
@@ -34,6 +40,9 @@ pub struct Session {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Window {
+    /// `@n`, like `Session::id`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub index: u32,
     pub name: String,
     pub automatic_rename: bool,
@@ -46,21 +55,88 @@ pub struct Window {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Pane {
+    /// `%n`, like `Session::id`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub path: String,
     /// Agent conf name; absent for ordinary panes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Closed {
+    /// Unix seconds.
+    pub time: u64,
+    /// The closed session's `$n`, window's `@n` or pane's `%n`.
+    pub id: String,
+    /// The closed session, or the closed window inside its session. A pane
+    /// entry holds its whole window as it was, for its neighbours and layout.
+    pub session: Session,
+}
+
+/// What restore checks entries against.
+#[derive(Default)]
+pub struct Live {
+    /// Every `(session name, window index)`.
+    pub windows: HashSet<(String, u32)>,
+    /// Every window `@n` and pane `%n`.
+    pub ids: HashSet<String>,
+}
+
+impl Closed {
+    pub fn is_session(&self) -> bool {
+        self.id.starts_with('$')
+    }
+
+    pub fn is_pane(&self) -> bool {
+        self.id.starts_with('%')
+    }
+
+    /// The closed pane of a pane entry.
+    pub fn pane(&self) -> Option<&Pane> {
+        let window = self.session.windows.first()?;
+        window
+            .panes
+            .iter()
+            .find(|p| self.is_pane() && p.id == self.id)
+    }
+
+    /// Restore never replaces a live branch: a session or window entry is
+    /// blocked while its session name or `session:index` is in use; a pane
+    /// entry needs its window still open (the window's own entry covers it
+    /// otherwise).
+    pub fn blocked(&self, live: &Live) -> bool {
+        let name = &self.session.name;
+        if self.is_session() {
+            live.windows.iter().any(|(session, _)| session == name)
+        } else if self.is_pane() {
+            self.session
+                .windows
+                .iter()
+                .all(|w| !live.ids.contains(&w.id))
+        } else {
+            self.session
+                .windows
+                .iter()
+                .any(|w| live.windows.contains(&(name.clone(), w.index)))
+        }
+    }
+}
+
 impl Snapshot {
     pub fn agents(&self) -> usize {
-        self.sessions
-            .iter()
-            .flat_map(|s| &s.windows)
-            .flat_map(|w| &w.panes)
-            .filter(|p| p.agent.is_some())
-            .count()
+        agents(&self.sessions)
     }
+}
+
+pub fn agents(sessions: &[Session]) -> usize {
+    sessions
+        .iter()
+        .flat_map(|s| &s.windows)
+        .flat_map(|w| &w.panes)
+        .filter(|p| p.agent.is_some())
+        .count()
 }
 
 /// `<state dir>/snapshot-<socket name>`: one file per tmux server socket.
@@ -100,7 +176,7 @@ pub fn open(path: &Path, server: &str) -> (Vec<String>, Option<Snapshot>) {
 
 /// Atomic: a reader never sees a half-written file. An empty snapshot removes it.
 pub fn write(path: &Path, snap: &Snapshot) -> std::io::Result<()> {
-    if snap.collapsed.is_empty() && snap.sessions.is_empty() {
+    if snap.collapsed.is_empty() && snap.sessions.is_empty() && snap.closed.is_empty() {
         return match std::fs::remove_file(path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -130,6 +206,8 @@ pub struct Store {
     saved: Option<Snapshot>,
     /// A previous server's layout, offered until restored or dismissed.
     pub prev: Option<Snapshot>,
+    /// Closed entries kept: `tmux_management.undo_history`; 0 logs nothing.
+    pub limit: usize,
 }
 
 impl Store {
@@ -156,6 +234,7 @@ impl Store {
             sessions: Vec::new(),
             saved: None,
             prev,
+            limit: 20,
         })
     }
 
@@ -165,23 +244,84 @@ impl Store {
 
     // ponytail: an empty scan keeps the last layout; a desynced read or a
     // dying server lists nothing, and that must not erase the restore offer.
-    pub fn set_layout(&mut self, panes: &[PaneMeta], agents: &[PaneRow], windows: &str) {
-        if !panes.is_empty() {
-            self.sessions = layout(panes, agents, windows);
+    // A branch gone since the last capture was closed. The first capture
+    // after open has nothing to compare with: closes while no sidebar ran are
+    // not logged. A pane also leaves the scan when it becomes a sidebar pane,
+    // so `open` (every live `%n`, queried only then) confirms pane closes.
+    // Windows and sessions trust the scan: one left holding only a sidebar
+    // pane is closing.
+    pub fn set_layout(
+        &mut self,
+        panes: &[PaneMeta],
+        agents: &[PaneRow],
+        windows: &str,
+        open: impl FnOnce() -> String,
+    ) {
+        if panes.is_empty() {
+            return;
+        }
+        let sessions = layout(panes, agents, windows);
+        let mut closed = closed_between(&self.sessions, &sessions, now());
+        self.sessions = sessions;
+        if closed.iter().any(Closed::is_pane) {
+            let open = open();
+            let open: HashSet<&str> = open.split_whitespace().collect();
+            closed.retain(|entry| !entry.is_pane() || !open.contains(entry.id.as_str()));
+        }
+        if !closed.is_empty() {
+            let limit = self.limit;
+            self.edit_closed(|log| record(log, closed, limit));
         }
     }
 
-    /// Write when the content changed since the last write.
+    /// Write when collapse state or layout changed since the last write. The
+    /// closed log is taken from the file: another sidebar may have edited it.
     // ponytail: last writer wins when a popup and a split sidebar both run.
     pub fn save(&mut self, collapsed: &HashSet<String>, panes: &[PaneMeta]) {
+        let collapsed = collapsed_keys(collapsed, &self.pending, panes);
+        if self
+            .saved
+            .as_ref()
+            .is_some_and(|saved| saved.collapsed == collapsed && saved.sessions == self.sessions)
+        {
+            return;
+        }
         let snap = Snapshot {
             server: self.server.clone(),
-            collapsed: collapsed_keys(collapsed, &self.pending, panes),
+            collapsed,
             sessions: self.sessions.clone(),
+            closed: self.closed(),
         };
-        if self.saved.as_ref() != Some(&snap) && write(&self.path, &snap).is_ok() {
+        if write(&self.path, &snap).is_ok() {
             self.saved = Some(snap);
         }
+    }
+
+    /// This server's recently closed sessions and windows, newest first.
+    pub fn closed(&self) -> Vec<Closed> {
+        read(&self.path)
+            .filter(|snap| snap.server == self.server)
+            .map(|snap| snap.closed)
+            .unwrap_or_default()
+    }
+
+    pub fn forget(&mut self, id: &str) {
+        self.edit_closed(|log| log.retain(|entry| entry.id != id));
+    }
+
+    /// Read-modify-write of the file's log alone, so two sidebars logging the
+    /// same close, or one forgetting an entry, do not undo each other.
+    // ponytail: no file lock; two edits racing between read and rename lose one.
+    fn edit_closed(&mut self, edit: impl FnOnce(&mut Vec<Closed>)) {
+        let mut snap = read(&self.path)
+            .filter(|snap| snap.server == self.server)
+            .or_else(|| self.saved.clone())
+            .unwrap_or_else(|| Snapshot {
+                server: self.server.clone(),
+                ..Snapshot::default()
+            });
+        edit(&mut snap.closed);
+        let _ = write(&self.path, &snap);
     }
 
     /// Forget the previous server's layout, after a restore or on `x`.
@@ -189,6 +329,122 @@ impl Store {
         let _ = std::fs::remove_file(prev_path(&self.path));
         self.prev.take()
     }
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Branches of `old` whose id is gone from `new`. A closed session is one
+/// entry, not one per window or pane; a renamed or moved branch keeps its id.
+pub fn closed_between(old: &[Session], new: &[Session], time: u64) -> Vec<Closed> {
+    let live: HashSet<&str> = new
+        .iter()
+        .flat_map(|s| {
+            std::iter::once(&s.id).chain(
+                s.windows
+                    .iter()
+                    .flat_map(|w| std::iter::once(&w.id).chain(w.panes.iter().map(|p| &p.id))),
+            )
+        })
+        .map(String::as_str)
+        .collect();
+    let mut closed = Vec::new();
+    for session in old {
+        if !live.contains(session.id.as_str()) {
+            closed.push(Closed {
+                time,
+                id: session.id.clone(),
+                session: session.clone(),
+            });
+            continue;
+        }
+        for window in &session.windows {
+            let gone: Vec<&String> = if live.contains(window.id.as_str()) {
+                let panes = window.panes.iter().map(|p| &p.id);
+                panes.filter(|id| !live.contains(id.as_str())).collect()
+            } else {
+                vec![&window.id]
+            };
+            for id in gone {
+                closed.push(Closed {
+                    time,
+                    id: id.clone(),
+                    session: Session {
+                        windows: vec![window.clone()],
+                        ..session.clone()
+                    },
+                });
+            }
+        }
+    }
+    closed
+}
+
+/// Split a closed pane back into its live window: after the nearest saved
+/// neighbour still open (before the next one when it was first), then the
+/// window's saved layout. tmux rejects that layout unless the window has its
+/// saved pane count again, which leaves tmux's own split in place.
+pub fn replay_pane(
+    entry: &Closed,
+    live: &Live,
+    resume: impl Fn(&str) -> Option<String>,
+    run: &mut impl FnMut(&[String]) -> Option<String>,
+) {
+    let (Some(window), Some(pane)) = (entry.session.windows.first(), entry.pane()) else {
+        return;
+    };
+    let at = window
+        .panes
+        .iter()
+        .position(|p| p.id == pane.id)
+        .unwrap_or(0);
+    let open = |p: &&Pane| live.ids.contains(&p.id);
+    let (before, target) = match window.panes[..at].iter().rev().find(open) {
+        Some(prev) => (false, prev.id.as_str()),
+        None => match window.panes[at + 1..].iter().find(open) {
+            Some(next) => (true, next.id.as_str()),
+            None => (false, window.id.as_str()),
+        },
+    };
+    let mut split = vec!["split-window", "-d"];
+    if before {
+        split.push("-b");
+    }
+    split.extend(["-t", target, "-c", &pane.path, "-P", "-F", "#{pane_id}"]);
+    let Some(id) = run(&split.iter().map(|s| s.to_string()).collect::<Vec<_>>()) else {
+        return;
+    };
+    if !window.layout.is_empty() {
+        run(&["select-layout", "-t", &window.id, &window.layout].map(String::from));
+    }
+    if let Some(command) = pane.agent.as_deref().and_then(resume) {
+        run(&["send-keys", "-t", &id, "-l", &command].map(String::from));
+        run(&["send-keys", "-t", &id, "Enter"].map(String::from));
+    }
+}
+
+/// Newest first, each close once (every running sidebar sees it), capped. A
+/// pane entry goes once its window closes: it can never be restored again.
+pub fn record(log: &mut Vec<Closed>, closed: Vec<Closed>, limit: usize) {
+    let windows: HashSet<&str> = closed
+        .iter()
+        .filter(|new| !new.is_pane())
+        .flat_map(|new| new.session.windows.iter().map(|w| w.id.as_str()))
+        .collect();
+    log.retain(|entry| {
+        closed.iter().all(|new| new.id != entry.id)
+            && !(entry.is_pane()
+                && entry
+                    .session
+                    .windows
+                    .iter()
+                    .any(|w| windows.contains(w.id.as_str())))
+    });
+    log.splice(0..0, closed);
+    log.truncate(limit);
 }
 
 pub fn window_key(session: &str, index: u32) -> String {
@@ -259,6 +515,7 @@ pub fn layout(panes: &[PaneMeta], agents: &[PaneRow], windows: &str) -> Vec<Sess
     for pane in panes {
         if sessions.last().is_none_or(|s| s.name != pane.session_name) {
             sessions.push(Session {
+                id: pane.session_id.clone(),
                 name: pane.session_name.clone(),
                 windows: Vec::new(),
             });
@@ -272,6 +529,7 @@ pub fn layout(panes: &[PaneMeta], agents: &[PaneRow], windows: &str) -> Vec<Sess
             let info = windows.get(pane.window_id.as_str());
             let field = |i: usize| info.map_or("", |f| f[i]);
             session.windows.push(Window {
+                id: pane.window_id.clone(),
                 index: pane.window_index,
                 name: pane.window_name.clone(),
                 automatic_rename: field(2) != "0",
@@ -284,6 +542,7 @@ pub fn layout(panes: &[PaneMeta], agents: &[PaneRow], windows: &str) -> Vec<Sess
         }
         let window = session.windows.last_mut().unwrap();
         window.panes.push(Pane {
+            id: pane.pane.clone(),
             path: pane.path.clone(),
             agent: pane
                 .agent_index
@@ -432,6 +691,7 @@ mod tests {
             sessions: vec![Session {
                 name: "work".into(),
                 windows: vec![Window {
+                    id: "@4".into(),
                     index: 2,
                     name: "editor".into(),
                     automatic_rename: false,
@@ -439,16 +699,20 @@ mod tests {
                     sidebar: true,
                     panes: vec![
                         Pane {
+                            id: "%1".into(),
                             path: "/repo".into(),
                             agent: Some("claude".into()),
                         },
                         Pane {
+                            id: "%2".into(),
                             path: "/tmp".into(),
                             agent: None,
                         },
                     ],
                 }],
+                ..Session::default()
             }],
+            ..Snapshot::default()
         }
     }
 
@@ -564,6 +828,7 @@ mod tests {
         assert_eq!(
             w2.panes[1],
             Pane {
+                id: "%2".into(),
                 path: "/work/%2".into(),
                 agent: None
             }
@@ -582,14 +847,17 @@ mod tests {
             sidebar: false,
             panes: vec![
                 Pane {
+                    id: String::new(),
                     path: "/a".into(),
                     agent: Some("codex".into()),
                 },
                 Pane {
+                    id: String::new(),
                     path: "/b".into(),
                     agent: None,
                 },
             ],
+            ..Window::default()
         });
         prev.sessions.push(Session {
             name: "keep".into(),
@@ -598,6 +866,7 @@ mod tests {
                 panes: vec![Pane::default()],
                 ..Window::default()
             }],
+            ..Session::default()
         });
         let live = HashSet::from([("keep".to_string(), 0)]);
         let mut log = Vec::new();
@@ -631,6 +900,276 @@ mod tests {
                 "split-window -t %19 -c /b -P -F #{pane_id}",
                 "select-layout -t %19 efgh,80x24,0,0,9",
             ]
+        );
+    }
+
+    fn store(name: &str) -> Store {
+        Store {
+            path: temp(name),
+            server: "1|1".into(),
+            pending: HashSet::new(),
+            sessions: Vec::new(),
+            saved: None,
+            prev: None,
+            limit: 20,
+        }
+    }
+
+    const WINDOWS: &str = "@4|1|1|L4|w2\n@6|2|1|L6|w3\n@7|1|1|L7|w0\n";
+
+    fn ids(log: &[Closed]) -> Vec<&str> {
+        log.iter().map(|entry| entry.id.as_str()).collect()
+    }
+
+    #[test]
+    fn closes_are_logged_by_id_and_renames_are_not() {
+        let all = [
+            meta(("$1", "work"), ("@4", 2), "%1", None),
+            meta(("$1", "work"), ("@6", 3), "%2", None),
+            meta(("$1", "work"), ("@6", 3), "%3", None),
+            meta(("$2", "play"), ("@7", 0), "%4", None),
+        ];
+        let mut a = store("closes");
+        let mut b = store("closes");
+        a.set_layout(&all, &[], WINDOWS, String::new);
+        b.set_layout(&all, &[], WINDOWS, String::new);
+        assert!(a.closed().is_empty(), "the first capture logs nothing");
+
+        // renamed session and window keep their ids: not a close
+        let mut renamed = all.clone();
+        for pane in &mut renamed {
+            pane.session_name = pane.session_name.replace("work", "job");
+            pane.window_name = "renamed".into();
+        }
+        a.set_layout(&renamed, &[], WINDOWS, String::new);
+        assert!(a.closed().is_empty());
+
+        // close window @6, then session $2; an empty scan logs nothing
+        a.set_layout(
+            &[renamed[0].clone(), renamed[3].clone()],
+            &[],
+            WINDOWS,
+            String::new,
+        );
+        a.set_layout(&renamed[..1], &[], WINDOWS, String::new);
+        a.set_layout(&[], &[], WINDOWS, String::new);
+        let log = a.closed();
+        assert_eq!(ids(&log), ["$2", "@6"], "newest first");
+        let window = &log[1];
+        assert!(!window.is_session());
+        assert_eq!(window.session.name, "job");
+        let [w] = &window.session.windows[..] else {
+            panic!()
+        };
+        assert_eq!((w.index, w.panes.len(), w.layout.as_str()), (3, 2, "L6"));
+        assert!(log[0].is_session());
+        assert_eq!(log[0].session.windows[0].index, 0);
+
+        // a second sidebar seeing the same closes adds nothing
+        b.set_layout(&all[..1], &[], WINDOWS, String::new);
+        assert_eq!(b.closed().len(), 2);
+
+        // a save keeps the log; forget removes an entry for every sidebar
+        a.save(&HashSet::new(), &renamed[..1]);
+        assert_eq!(b.closed().len(), 2);
+        b.forget("@6");
+        a.save(&HashSet::from(["$1".to_string()]), &renamed[..1]);
+        assert_eq!(ids(&a.closed()), ["$2"]);
+        let _ = std::fs::remove_dir_all(a.path.parent().unwrap());
+    }
+
+    #[test]
+    fn log_is_newest_first_capped_and_keeps_its_file() {
+        let entry = |id: usize| Closed {
+            time: id as u64,
+            id: format!("@{id}"),
+            session: Session::default(),
+        };
+        let mut log = Vec::new();
+        for id in 0..25 {
+            record(&mut log, vec![entry(id)], 20);
+        }
+        record(&mut log, vec![entry(24)], 20);
+        assert_eq!(log.len(), 20);
+        assert_eq!((log[0].id.as_str(), log[19].id.as_str()), ("@24", "@5"));
+        // a lowered limit trims on the next close; 0 keeps nothing
+        let mut short = log.clone();
+        record(&mut short, vec![entry(25)], 3);
+        assert_eq!(ids(&short), ["@25", "@24", "@23"]);
+        record(&mut short, vec![entry(26)], 0);
+        assert!(short.is_empty());
+
+        let path = temp("closed-only");
+        let snap = Snapshot {
+            server: "1|1".into(),
+            closed: log,
+            ..Snapshot::default()
+        };
+        write(&path, &snap).unwrap();
+        assert_eq!(read(&path), Some(snap));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn restore_is_blocked_while_the_name_is_in_use() {
+        let mut session = sample("1|1").sessions.remove(0);
+        let closed_session = Closed {
+            time: 0,
+            id: "$1".into(),
+            session: session.clone(),
+        };
+        session.windows[0].index = 3;
+        let closed_window = Closed {
+            time: 0,
+            id: "@6".into(),
+            session,
+        };
+        let closed_pane = Closed {
+            id: "%2".into(),
+            ..closed_window.clone()
+        };
+        let live = |windows: &[(&str, u32)], ids: &[&str]| Live {
+            windows: windows.iter().map(|(s, i)| (s.to_string(), *i)).collect(),
+            ids: ids.iter().map(|id| id.to_string()).collect(),
+        };
+        let work2 = live(&[("work", 2)], &["@9"]);
+        assert!(closed_session.blocked(&work2));
+        assert!(!closed_window.blocked(&work2), "work:3 is free");
+        assert!(closed_window.blocked(&live(&[("work", 3)], &[])));
+        assert!(!closed_session.blocked(&Live::default()));
+        assert!(closed_pane.blocked(&work2), "its window @4 is gone");
+        assert!(!closed_pane.blocked(&live(&[], &["@4"])));
+    }
+
+    #[test]
+    fn pane_close_is_its_own_entry_holding_its_window() {
+        let old = [
+            meta(("$1", "work"), ("@4", 2), "%1", None),
+            meta(("$1", "work"), ("@4", 2), "%2", None),
+            meta(("$1", "work"), ("@4", 2), "%3", None),
+        ];
+        let before = layout(&old, &[], "@4|3|1|L|w\n");
+        let after = layout(&old[..1], &[], "@4|1|1|L|w\n");
+        let log = closed_between(&before, &after, 7);
+        assert_eq!(ids(&log), ["%2", "%3"]);
+        let entry = &log[0];
+        assert!(entry.is_pane() && !entry.is_session());
+        assert_eq!(entry.pane().map(|p| p.path.as_str()), Some("/work/%2"));
+        assert_eq!(entry.session.windows[0].panes.len(), 3);
+        // a pane moved to another window keeps its id: not a close
+        let mut moved = old.to_vec();
+        moved[2].window_id = "@5".into();
+        moved[2].window_index = 3;
+        assert!(closed_between(&before, &layout(&moved, &[], ""), 7).is_empty());
+
+        // a pane that became a sidebar pane left the scan but is still open
+        let mut store = store("sidebar-pane");
+        store.set_layout(&old, &[], "", String::new);
+        store.set_layout(&old[..2], &[], "", || "%1 %2 %3".into());
+        assert!(store.closed().is_empty());
+        store.set_layout(&old[..1], &[], "", || "%1 %3".into());
+        assert_eq!(ids(&store.closed()), ["%2"]);
+        // once its window closes, the pane entry can never be restored
+        store.set_layout(
+            &[meta(("$1", "work"), ("@5", 3), "%4", None)],
+            &[],
+            "",
+            String::new,
+        );
+        assert_eq!(ids(&store.closed()), ["@4"]);
+        let _ = std::fs::remove_dir_all(store.path.parent().unwrap());
+    }
+
+    #[test]
+    fn pane_restore_splits_next_to_its_nearest_open_neighbour() {
+        let window = Window {
+            id: "@4".into(),
+            layout: "L".into(),
+            panes: ["%1", "%2", "%3"]
+                .map(|id| Pane {
+                    id: id.into(),
+                    path: format!("/p{id}"),
+                    agent: (id == "%2").then(|| "claude".into()),
+                })
+                .into(),
+            ..Window::default()
+        };
+        let restore = |id: &str, open: &[&str]| {
+            let entry = Closed {
+                id: id.into(),
+                session: Session {
+                    windows: vec![window.clone()],
+                    ..Session::default()
+                },
+                ..Closed::default()
+            };
+            let live = Live {
+                ids: open.iter().map(|id| id.to_string()).collect(),
+                ..Live::default()
+            };
+            let mut log = Vec::new();
+            replay_pane(&entry, &live, |_| Some("claude -c".into()), &mut |cmd| {
+                log.push(cmd.join(" "));
+                Some("%9".into())
+            });
+            log
+        };
+        assert_eq!(
+            restore("%2", &["@4", "%1", "%3"]),
+            [
+                "split-window -d -t %1 -c /p%2 -P -F #{pane_id}",
+                "select-layout -t @4 L",
+                "send-keys -t %9 -l claude -c",
+                "send-keys -t %9 Enter",
+            ]
+        );
+        assert_eq!(
+            restore("%1", &["@4", "%3"])[0],
+            "split-window -d -b -t %3 -c /p%1 -P -F #{pane_id}",
+            "first pane goes before the next open one"
+        );
+        assert_eq!(
+            restore("%3", &["@4"])[0],
+            "split-window -d -t @4 -c /p%3 -P -F #{pane_id}",
+            "no saved neighbour left: split the window"
+        );
+    }
+
+    #[test]
+    fn restore_replays_a_session_or_a_window_into_its_live_session() {
+        let replayed = |session: &Session, live: &HashSet<(String, u32)>| {
+            let mut log = Vec::new();
+            let snap = Snapshot {
+                sessions: vec![session.clone()],
+                ..Snapshot::default()
+            };
+            replay(&snap, live, |_| None, &mut |cmd: &[String]| {
+                log.push(cmd.join(" "));
+                Some(
+                    if cmd[0] == "split-window" {
+                        "%9"
+                    } else {
+                        "3 %8"
+                    }
+                    .into(),
+                )
+            });
+            log
+        };
+        let mut session = sample("1|1").sessions.remove(0);
+        session.windows[0].index = 3;
+        session.windows[0].sidebar = false;
+        assert_eq!(
+            replayed(&session, &HashSet::from([("work".to_string(), 0)])),
+            [
+                "new-window -d -t =work:3 -c /repo -P -F #{window_index} #{pane_id} -n editor",
+                "split-window -t %8 -c /tmp -P -F #{pane_id}",
+                "select-layout -t %8 abcd,80x24,0,0,1",
+            ]
+        );
+        assert_eq!(
+            replayed(&session, &HashSet::new())[0],
+            "new-session -d -s work -c /repo -P -F #{window_index} #{pane_id} -n editor"
         );
     }
 }

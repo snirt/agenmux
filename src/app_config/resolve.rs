@@ -10,6 +10,7 @@ pub struct AppConfig {
     pub tmux_management_enabled: bool,
     pub tmux_management_confirm_delete: bool,
     pub tmux_management_resume_agents: bool,
+    pub tmux_management_undo_history: usize,
     pub mode: DisplayMode,
     pub show_all_panes: bool,
     pub show_frame: bool,
@@ -124,6 +125,7 @@ pub fn resolve_cli(
             ("tmux_management.enabled", "default"),
             ("tmux_management.confirm_delete", "default"),
             ("tmux_management.resume_agents", "default"),
+            ("tmux_management.undo_history", "default"),
             ("keys.sequence_timeout_ms", "default"),
         ]
         .into_iter()
@@ -134,6 +136,7 @@ pub fn resolve_cli(
         tmux_management_enabled: true,
         tmux_management_confirm_delete: true,
         tmux_management_resume_agents: false,
+        tmux_management_undo_history: 20,
         mode: DisplayMode::Split,
         show_all_panes: true,
         show_frame: true,
@@ -196,6 +199,11 @@ pub fn resolve_cli(
                 tmux_management_resume_agents,
                 management.resume_agents,
                 "tmux_management.resume_agents"
+            );
+            set!(
+                tmux_management_undo_history,
+                management.undo_history.map(usize::from),
+                "tmux_management.undo_history"
             );
         }
         if let Some(k) = &f.keys {
@@ -544,11 +552,19 @@ mod tests {
         assert!(default.tmux_management_enabled);
         assert!(default.tmux_management_confirm_delete);
         assert!(!default.tmux_management_resume_agents);
+        assert_eq!(default.tmux_management_undo_history, 20);
         let management = parse(
-            "[tmux_management]\nenabled = true\nconfirm_delete = false\nresume_agents = true",
+            "[tmux_management]\nenabled = true\nconfirm_delete = false\nresume_agents = true\nundo_history = 0",
         )
         .unwrap();
         let management = resolve(&management, &BTreeMap::new()).unwrap();
+        assert_eq!(management.tmux_management_undo_history, 0);
+        for value in ["101", "-1", "'5'"] {
+            assert!(
+                parse(&format!("[tmux_management]\nundo_history = {value}")).is_err(),
+                "accepted undo_history {value}"
+            );
+        }
         assert!(management.tmux_management_enabled);
         assert!(!management.tmux_management_confirm_delete);
         assert!(management.tmux_management_resume_agents);
@@ -570,6 +586,7 @@ mod tests {
             ("tmux_management.enabled", "true"),
             ("tmux_management.confirm_delete", "true"),
             ("tmux_management.resume_agents", "false"),
+            ("tmux_management.undo_history", "20"),
             ("keys.sequence_timeout_ms", "1000"),
         ] {
             let row = effective.iter().find(|row| row.name == name).unwrap();

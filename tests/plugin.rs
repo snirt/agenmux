@@ -1605,7 +1605,8 @@ fn quick_launchers_open_selected_panes_safely_and_reload_transactionally() {
         .binding("agenmux-sequence", "v")
         .contains("sequence-76"));
     assert!(tmux.binding("agenmux", "G").contains("last"));
-    assert!(tmux.binding("agenmux", "u").contains("versions"));
+    assert!(tmux.binding("agenmux", "U").contains("versions"));
+    assert!(tmux.binding("agenmux", "u").contains("undo"));
 
     // The first target is a real detected agent in all-pane mode. Its path,
     // the executable path, and each argument contain spaces or shell syntax.
@@ -1665,7 +1666,7 @@ fn quick_launchers_open_selected_panes_safely_and_reload_transactionally() {
 
     // An invalid conflicting reload keeps the currently installed tables and
     // resolved generation intact.
-    app_file(&tmux, &config("u", true, false));
+    app_file(&tmux, &config("U", true, false));
     let invalid = tmux.bin(&["config", "reload"]);
     assert_eq!(invalid.status.code(), Some(2));
     assert_eq!(
@@ -1685,7 +1686,8 @@ fn quick_launchers_open_selected_panes_safely_and_reload_transactionally() {
     assert!(tmux.binding("agenmux", "c").is_empty());
     assert!(tmux.binding("agenmux", "g").contains("sequence-67"));
     assert!(tmux.binding("agenmux", "G").contains("last"));
-    assert!(tmux.binding("agenmux", "u").contains("versions"));
+    assert!(tmux.binding("agenmux", "U").contains("versions"));
+    assert!(tmux.binding("agenmux", "u").contains("undo"));
     return_to_sidebar();
     assert_success(
         tmux.bin(&["key", "help", &client]),

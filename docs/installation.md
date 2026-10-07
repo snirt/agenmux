@@ -73,10 +73,10 @@ When a newer release exists, the sidebar header says so, and says what to do:
 
 ```text
 agenmux v0.7.0 ↑0.7.1
-u update · / search
+U update · / search
 ```
 
-Press `u` to open the version picker, choose a release, and press `Enter`.
+Press `U` to open the version picker, choose a release, and press `Enter`.
 The plugin switches its source *and* its native engine to that release and
 reopens itself — so the same key rolls **back** to an older release just as
 easily. The check that feeds the notice runs in the background, at most once a

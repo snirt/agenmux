@@ -67,6 +67,7 @@ notifications = true
 enabled = true            # false: read-only sidebar
 confirm_delete = true
 resume_agents = false     # true: restore relaunches agents via AGENT_RESUME
+undo_history = 20         # closed branches u can restore; 0: off
 ```
 
 - `agenmux config --help` lists every key, its values, and its default.
