@@ -91,6 +91,7 @@ jobs:
             binary: target/aarch64-apple-darwin/release/agenmux
 
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
@@ -98,9 +99,13 @@ jobs:
 
       - name: Install Linux build and test tools
         if: runner.os == 'Linux'
+        # A dead package mirror must fail fast, not hang the job: apt has no
+        # timeout of its own once it falls back to another archive.
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes musl-tools tmux expect
+          apt_opts="-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3"
+          sudo apt-get $apt_opts update
+          sudo apt-get $apt_opts install --yes musl-tools tmux expect
           rustup target add "${{ matrix.target }}"
 
       - name: Install macOS test tools
