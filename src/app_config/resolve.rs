@@ -9,6 +9,7 @@ pub struct AppConfig {
     pub sequence_timeout_ms: u64,
     pub tmux_management_enabled: bool,
     pub tmux_management_confirm_delete: bool,
+    pub tmux_management_resume_agents: bool,
     pub mode: DisplayMode,
     pub show_all_panes: bool,
     pub show_frame: bool,
@@ -122,6 +123,7 @@ pub fn resolve_cli(
             ("behavior.hide_windows", "default"),
             ("tmux_management.enabled", "default"),
             ("tmux_management.confirm_delete", "default"),
+            ("tmux_management.resume_agents", "default"),
             ("keys.sequence_timeout_ms", "default"),
         ]
         .into_iter()
@@ -131,6 +133,7 @@ pub fn resolve_cli(
         sequence_timeout_ms: 1000,
         tmux_management_enabled: true,
         tmux_management_confirm_delete: true,
+        tmux_management_resume_agents: false,
         mode: DisplayMode::Split,
         show_all_panes: true,
         show_frame: true,
@@ -188,6 +191,11 @@ pub fn resolve_cli(
                 tmux_management_confirm_delete,
                 management.confirm_delete,
                 "tmux_management.confirm_delete"
+            );
+            set!(
+                tmux_management_resume_agents,
+                management.resume_agents,
+                "tmux_management.resume_agents"
             );
         }
         if let Some(k) = &f.keys {
@@ -535,11 +543,15 @@ mod tests {
         assert_eq!(default.sequence_timeout_ms, 1000);
         assert!(default.tmux_management_enabled);
         assert!(default.tmux_management_confirm_delete);
-        let management =
-            parse("[tmux_management]\nenabled = true\nconfirm_delete = false").unwrap();
+        assert!(!default.tmux_management_resume_agents);
+        let management = parse(
+            "[tmux_management]\nenabled = true\nconfirm_delete = false\nresume_agents = true",
+        )
+        .unwrap();
         let management = resolve(&management, &BTreeMap::new()).unwrap();
         assert!(management.tmux_management_enabled);
         assert!(!management.tmux_management_confirm_delete);
+        assert!(management.tmux_management_resume_agents);
         // Each opt-out is independent, and disabling management keeps the
         // delete confirmation default.
         let read_only = parse("[tmux_management]\nenabled = false").unwrap();
@@ -557,6 +569,7 @@ mod tests {
             ("display.show_all_panes", "true"),
             ("tmux_management.enabled", "true"),
             ("tmux_management.confirm_delete", "true"),
+            ("tmux_management.resume_agents", "false"),
             ("keys.sequence_timeout_ms", "1000"),
         ] {
             let row = effective.iter().find(|row| row.name == name).unwrap();

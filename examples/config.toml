@@ -23,6 +23,7 @@ notifications = true
 # Set enabled = false for a read-only sidebar.
 enabled = true
 confirm_delete = true  # keep the inline y/n prompt before dd deletes
+resume_agents = false  # true: R after a tmux restart relaunches agents via AGENT_RESUME
 
 # Quick launchers are available only when tmux management is enabled.
 # These entries show the built-in defaults and can be omitted when unchanged.

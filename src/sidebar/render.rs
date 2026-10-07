@@ -297,7 +297,11 @@ mod pane_frame_tests {
         for emoji in ["\u{1F7E2}", "\u{1F004}", "\u{1F236}", "\u{2764}\u{FE0F}"] {
             assert_eq!(cell_width(emoji), 2, "{emoji:?}");
         }
-        assert_eq!(cell_width("\u{2764}"), 1, "text presentation heart is narrow");
+        assert_eq!(
+            cell_width("\u{2764}"),
+            1,
+            "text presentation heart is narrow"
+        );
         // The sequence moves as one unit: it never fits a single free cell.
         let row = clip_frame("ab\u{2764}\u{FE0F}cd\n", 3, 5);
         assert_eq!(row.lines().next().unwrap(), "ab ");
@@ -382,7 +386,43 @@ pub(super) fn app_title() -> String {
     }
 }
 
+/// Footer offer for a previous server's layout: the widest form that fits.
+fn layout_banner(sessions: usize, agents: usize, restore: bool, width: usize) -> String {
+    let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+    let keys = if restore {
+        "R restore · x dismiss"
+    } else {
+        "x dismiss"
+    };
+    [
+        format!(
+            "Previous layout: {}, {} · {keys}",
+            plural(sessions, "session"),
+            plural(agents, "agent")
+        ),
+        if restore {
+            "R restore layout · x dismiss".into()
+        } else {
+            "x dismiss layout".into()
+        },
+        keys.to_string(),
+    ]
+    .into_iter()
+    .find(|text| text.chars().count() <= width)
+    .unwrap_or_else(|| keys.chars().take(width).collect())
+}
+
 impl Sidebar {
+    fn layout_banner(&self, width: usize) -> Option<String> {
+        let prev = self.snapshot.as_ref()?.prev.as_ref()?;
+        Some(layout_banner(
+            prev.sessions.len(),
+            prev.agents(),
+            self.settings.settings.tmux_management_enabled,
+            width,
+        ))
+    }
+
     fn frame_size(&self, cols: usize, height: usize) -> Option<(usize, usize)> {
         self.settings
             .settings
@@ -991,6 +1031,8 @@ impl Sidebar {
                 self.hint(&self.normal_keys, Action::Jump, "open"),
                 self.hint(&self.normal_keys, Action::Reset, "clear"),
             ])
+        } else if let Some(banner) = self.layout_banner(cols.saturating_sub(2)) {
+            banner
         } else {
             default_hint
         };
@@ -1255,6 +1297,20 @@ mod tests {
 
     use super::super::{new_sidebar, Daemon, MutationTarget, Overlay};
     use crate::input::{Key, SequenceAction};
+
+    #[test]
+    fn layout_banner_keeps_its_keys_at_sidebar_width() {
+        assert_eq!(
+            layout_banner(3, 1, true, 80),
+            "Previous layout: 3 sessions, 1 agent · R restore · x dismiss"
+        );
+        assert_eq!(
+            layout_banner(3, 5, true, 28),
+            "R restore layout · x dismiss"
+        );
+        assert_eq!(layout_banner(3, 5, true, 24), "R restore · x dismiss");
+        assert_eq!(layout_banner(1, 0, false, 28), "x dismiss layout");
+    }
 
     fn row(pane: &str) -> PaneRow {
         PaneRow {

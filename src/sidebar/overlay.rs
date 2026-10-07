@@ -307,6 +307,7 @@ fn is_bool_setting(name: &str) -> bool {
             | "behavior.notifications"
             | "tmux_management.enabled"
             | "tmux_management.confirm_delete"
+            | "tmux_management.resume_agents"
     ) || name
         .strip_prefix("quick_launchers.")
         .and_then(|name| name.split_once('.'))

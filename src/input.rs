@@ -131,6 +131,8 @@ pub(crate) enum Key {
     ToggleBranch,
     CollapseAll,
     ExpandAll,
+    RestoreLayout,
+    DismissLayout,
     Text(String),
     Other,
 }
@@ -475,6 +477,8 @@ fn decode_protocol_payload(
                     b'h' => Key::Left,
                     b'z' => Key::CollapseAll,
                     b'Z' => Key::ExpandAll,
+                    b'R' => Key::RestoreLayout,
+                    b'x' => Key::DismissLayout,
                     0x03 | 0x04 => Key::Quit,
                     0x1b if chord == Some(KeyChord::Left) => Key::Left,
                     0x1b if chord == Some(KeyChord::Right) => Key::Right,
@@ -812,6 +816,8 @@ fn send_key_inner(name: &str, client: Option<&str>) -> i32 {
             "h" => b"h".to_vec(),
             "collapse-all" => b"z".to_vec(),
             "expand-all" => b"Z".to_vec(),
+            "restore-layout" => b"R".to_vec(),
+            "dismiss-layout" => b"x".to_vec(),
             "j" => b"j".to_vec(),
             "k" => b"k".to_vec(),
             "wheel-up" => vec![0x01],
@@ -1074,6 +1080,8 @@ mod tests {
             (b"\x1b[C", "right"),
             (b"z", "collapse-all"),
             (b"Z", "expand-all"),
+            (b"R", "restore-layout"),
+            (b"x", "dismiss-layout"),
             (&[0x0b], "other"),
         ] {
             feed(bytes);
@@ -1086,6 +1094,8 @@ mod tests {
                         | (Key::Right, "right")
                         | (Key::CollapseAll, "collapse-all")
                         | (Key::ExpandAll, "expand-all")
+                        | (Key::RestoreLayout, "restore-layout")
+                        | (Key::DismissLayout, "dismiss-layout")
                         | (Key::Other, "other")
                 ),
                 "{bytes:?}: {key:?}"

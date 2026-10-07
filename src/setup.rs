@@ -590,6 +590,8 @@ fn key_bindings(config: &crate::app_config::AppConfig) -> Vec<(&'static str, Str
         ("Right", "right"),
         ("z", "collapse-all"),
         ("Z", "expand-all"),
+        ("R", "restore-layout"),
+        ("x", "dismiss-layout"),
     ] {
         out.push((
             NORMAL_TABLE,
@@ -956,6 +958,8 @@ mod tests {
             ("Right", "right"),
             ("z", "collapse-all"),
             ("Z", "expand-all"),
+            ("R", "restore-layout"),
+            ("x", "dismiss-layout"),
         ] {
             assert_eq!(
                 find(NORMAL_TABLE, key),

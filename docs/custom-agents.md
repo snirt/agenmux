@@ -26,6 +26,7 @@ TITLE_STRIP='^aider: '              # optional regex removed from the pane title
 SUBJECT_SCREEN=''                   # optional sed -E capture used as the subject line
 SUBJECT_CMD=''                      # optional shell snippet used as a final subject fallback
 AGENT_ICON=""                       # optional glyph or short string shown before the agent name
+AGENT_RESUME=''                     # optional command typed into restored panes (tmux_management.resume_agents)
 ```
 
 `AGENT_ICON` width is counted per character, like other sidebar text: Nerd Font
