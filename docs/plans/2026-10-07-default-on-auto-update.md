@@ -94,6 +94,29 @@ and the transaction handoff to the target entrypoint (`AGENMUX_INSTALL_LOCK_FD`)
 6. **Manual pause and docs:** pause/cancel on manual switch with rollback of the
    preference; docs for default, opt-out, next-start meaning, skips, recovery.
 
+## Hardening (review follow-up)
+
+- Removal order: the transaction marker goes before the backup, so a crash
+  mid-cleanup never pairs a marker with a partial backup.
+- Tarball swap uses an atomic directory exchange (`renamex_np(RENAME_SWAP)`,
+  `renameat2(RENAME_EXCHANGE)`), so the plugin path never goes missing.
+- A launch that recovers an unconfirmed activation while running the target
+  engine re-enters the restored release instead of continuing as the target.
+- Target setup is bounded (60 s). The daemon downgrades an inherited exclusive
+  hold to shared once it is up. Lock conversion never blocks.
+- A launch that waited on the lock re-enters the installed release if the
+  engine changed meanwhile.
+- Popups confirm the activation when the target sidebar draws its first frame
+  (`AGENMUX_READY`), not before.
+- Only readiness failures mark a target `failed`; local switch errors keep
+  the package for the next fresh start.
+- Branch checkouts are skipped (they belong to `git pull`/TPM).
+- Manual switches download before closing anything or taking the lock, wait up
+  to 20 s for their own daemon to exit, and clear a dangling transaction.
+- `install-bin.sh` re-checks the source version and revision before writing
+  an engine or state, so a switch during its download wins.
+- The worker runs in its own session (no tty prompts) with an ssh timeout.
+
 ## Verification
 
 Extend `tests/release.rs` (fake curl/git/tmux on PATH), `tests/run.sh` and

@@ -115,6 +115,10 @@ case "$url" in
     file="${url##*/}"; rest="${url%/*}"; tag="${rest##*/}"
     [ -f "$DOWNLOADS/$tag/$file" ] || exit 22   # no such release asset
     cp "$DOWNLOADS/$tag/$file" "$out"
+    # a version switch landing while the archive downloads
+    [ -z "${SWITCH_TO:-}" ] || case "$file" in *.tar.gz)
+      printf '[package]\nname = "agenmux"\nversion = "%s"\n' "$SWITCH_TO" >"$SWITCH_MANIFEST" ;;
+    esac
     ;;
 esac
 SH
@@ -278,6 +282,19 @@ t.close()' "$unsafe/$package.tar.gz" "$package"
     echo "ok   native-fetch-rejects-escaping-members"
   else
     echo "FAIL native-fetch-rejects-escaping-members"
+    fail=1
+  fi
+
+  # 5c. a version switch that lands during the download wins: the installer
+  #     neither replaces the engine nor writes state for the old source.
+  set_version 0.1.0
+  printf 'switched-engine\n' >"$tmp/plugin/target/release/agenmux"
+  SWITCH_TO=0.1.1 SWITCH_MANIFEST="$tmp/plugin/Cargo.toml" install_bin v0.1.1 >/dev/null 2>&1
+  if [ "$(cat "$tmp/plugin/target/release/agenmux")" = switched-engine ] &&
+    [ "$(marker)" = v0.0.0 ]; then
+    echo "ok   native-engine-yields-to-concurrent-switch"
+  else
+    echo "FAIL native-engine-yields-to-concurrent-switch: marker=$(marker)"
     fail=1
   fi
 

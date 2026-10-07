@@ -108,6 +108,8 @@ if [ "${{1:-}}" = fetch ]; then
   pkg="$3/agenmux-test"
   mkdir -p "$pkg/target/release"
   write_bin "$pkg/target/release/agenmux"
+  sed -i.bak "s/agenmux {version}/agenmux ${{2#v}}/" "$pkg/target/release/agenmux"
+  rm -f "$pkg/target/release/agenmux.bak"
   printf '%s\n' "$pkg"
   exit 0
 fi
@@ -144,8 +146,8 @@ fn make_git_releases(repo: &Path) {
     git_ok(repo, &["tag", "v0.1.1"]);
 }
 
-fn make_wrong_engine_release(repo: &Path) {
-    git_ok(repo, &["checkout", "-q", "v0.1.0"]);
+/// The checked-out tree's installer fetches an engine reporting 9.9.9.
+fn make_wrong_engine_fetch(repo: &Path) {
     script(
         &repo.join("scripts/install-bin.sh"),
         r#"if [ "${1:-}" = fetch ]; then
@@ -162,8 +164,7 @@ fi
 exit 1"#,
     );
     git_ok(repo, &["add", "scripts/install-bin.sh"]);
-    git_ok(repo, &["commit", "--amend", "-qm", "old wrong engine"]);
-    git_ok(repo, &["tag", "-f", "v0.1.0"]);
+    git_ok(repo, &["commit", "-qm", "wrong engine fetch"]);
 }
 
 fn no_server_tmux(bin_dir: &Path) {
@@ -327,7 +328,7 @@ exec "$REAL_GIT" "$@""#,
 }
 
 #[test]
-fn wrong_target_engine_restores_the_previous_git_source() {
+fn wrong_target_engine_leaves_the_git_source_untouched() {
     let tmp = TempDir::new("wrong-engine");
     let repo = tmp.path().join("repo");
     let bin = tmp.path().join("bin");
@@ -335,17 +336,13 @@ fn wrong_target_engine_restores_the_previous_git_source() {
     make_git_releases(&repo);
     no_server_tmux(&bin);
 
-    make_wrong_engine_release(&repo);
-    git_ok(&repo, &["checkout", "-q", "v0.1.1"]);
+    make_wrong_engine_fetch(&repo);
+    let head = git(&repo, &["rev-parse", "HEAD"]).stdout;
 
     let out = run(&repo, &bin, &["update", "v0.1.0"]);
 
     assert!(!out.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&git(&repo, &["describe", "--tags", "--exact-match"]).stdout)
-            .trim(),
-        "v0.1.1"
-    );
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]).stdout, head);
     assert_eq!(
         fs::read_to_string(repo.join("Cargo.toml")).unwrap(),
         "[package]\nname = \"agenmux\"\nversion = \"0.1.1\"\n"
@@ -353,7 +350,7 @@ fn wrong_target_engine_restores_the_previous_git_source() {
 }
 
 #[test]
-fn failed_git_update_restores_the_previous_branch() {
+fn failed_git_update_keeps_the_previous_branch() {
     let tmp = TempDir::new("restore-branch");
     let repo = tmp.path().join("repo");
     let bin = tmp.path().join("bin");
@@ -365,11 +362,10 @@ fn failed_git_update_restores_the_previous_branch() {
     )
     .trim()
     .to_string();
+    make_wrong_engine_fetch(&repo);
     let revision = String::from_utf8_lossy(&git(&repo, &["rev-parse", "HEAD"]).stdout)
         .trim()
         .to_string();
-    make_wrong_engine_release(&repo);
-    git_ok(&repo, &["checkout", "-q", &branch]);
 
     let out = run(&repo, &bin, &["update", "v0.1.0"]);
 
@@ -766,6 +762,7 @@ fn auto_fixture(name: &str, git_install: bool) -> Auto {
         git_ok(&plugin, &["commit", "-qam", "next"]);
         git_ok(&plugin, &["tag", "v99.0.0"]);
         git_ok(&plugin, &["reset", "-q", "--hard", &format!("v{VERSION}")]);
+        git_ok(&plugin, &["checkout", "-q", "--detach"]);
         revision = String::from_utf8(git(&plugin, &["rev-parse", "HEAD"]).stdout)
             .unwrap()
             .trim()
@@ -781,7 +778,17 @@ fn auto_fixture(name: &str, git_install: bool) -> Auto {
         r#"[ -n "${LATEST_TAG:-}" ] || exit 6
 printf 'https://example.invalid/repo/releases/tag/%s' "$LATEST_TAG""#,
     );
-    no_server_tmux(&bin);
+    // No server; a popup's sidebar "draws" its first frame unless told not to.
+    script(
+        &bin.join("tmux"),
+        r#"[ "$1" = info ] && exit 1
+if [ "$1" = display-popup ] && [ -z "${POPUP_NEVER_READY:-}" ]; then
+  for arg in "$@"; do
+    case "$arg" in AGENMUX_READY=*) : > "${arg#AGENMUX_READY=}" ;; esac
+  done
+fi
+exit 0"#,
+    );
     Auto { tmp, plugin, bin }
 }
 
@@ -958,6 +965,14 @@ fn auto_update_skips_dirty_development_and_modified_installs() {
         "agenmux: skipped: development checkout (not on a release tag)"
     );
     assert!(!auto.state().exists());
+
+    // A branch at the release tag belongs to git pull/TPM.
+    let branch = auto_fixture("auto-branch", true);
+    git_ok(&branch.plugin, &["checkout", "-q", "-B", "main"]);
+    assert_eq!(
+        branch.prepare("v99.0.0"),
+        "agenmux: skipped: branch checkout (updated by git pull or TPM)"
+    );
 
     let tarball = auto_fixture("auto-modified-tarball", false);
     fs::write(tarball.plugin.join("agents/test.conf"), "AGENT_NAME=mine\n").unwrap();
@@ -1148,12 +1163,30 @@ fn activation_faults_leave_a_complete_old_install() {
             assert_eq!(auto.snapshot(), before, "{step} git={git_install}");
             assert_eq!(auto.head(), head, "{step}");
             assert!(auto.plugin.join("agents/test.conf").is_file(), "{step}");
-            assert_eq!(
-                fs::read_to_string(auto.state().join("failed")).unwrap(),
-                "v99.0.0\n"
-            );
-            auto.assert_clean_state();
             assert!(!auto.log().contains("activate"), "{step}: {}", auto.log());
+            assert!(!auto.state().join("transaction").exists(), "{step}");
+            assert!(!auto.state().join("backup").exists(), "{step}");
+            if step == "setup" {
+                // The target's own setup failed: never retried automatically.
+                assert_eq!(
+                    fs::read_to_string(auto.state().join("failed")).unwrap(),
+                    "v99.0.0\n"
+                );
+                auto.assert_clean_state();
+            } else {
+                // A local error while switching: the prepared release stays
+                // and the next fresh start retries it.
+                assert!(!auto.state().join("failed").exists(), "{step}");
+                assert!(
+                    fs::read_to_string(auto.state().join("status"))
+                        .unwrap()
+                        .contains("could not switch to v99.0.0"),
+                    "{step}"
+                );
+                let out = auto.toggle("popup", true);
+                assert!(out.status.success(), "{step} retry");
+                assert_eq!(auto.installed(), "v99.0.0", "{step} retry");
+            }
         }
     }
 }
@@ -1272,4 +1305,77 @@ fn failed_manual_switch_keeps_the_auto_update_preference() {
     let out = auto.command("", &["update", "v99.0.0"]).output().unwrap();
     assert!(!out.status.success());
     assert_eq!(auto.snapshot(), before);
+}
+
+#[test]
+fn popup_that_never_draws_keeps_the_old_release() {
+    let auto = activation_fixture("activate-popup-not-ready", true);
+    let before = auto.snapshot();
+    let out = auto
+        .command("", &["toggle", "popup", "client-1"])
+        .env("TMUX", format!("{}/socket,1,0", auto.tmp.path().display()))
+        .env("AGENMUX_RUNTIME_DIR", auto.tmp.path().join("runtime"))
+        .env("AGENMUX_REAL", env!("CARGO_BIN_EXE_agenmux"))
+        .env("POPUP_NEVER_READY", "1")
+        .output()
+        .unwrap();
+    // The old release reopened in its place.
+    assert!(out.status.success());
+    assert_eq!(
+        auto.log()
+            .matches("entrypoint activate popup client-1")
+            .count(),
+        2
+    );
+    assert_eq!(auto.snapshot(), before);
+    assert_eq!(
+        fs::read_to_string(auto.state().join("failed")).unwrap(),
+        "v99.0.0\n"
+    );
+    auto.assert_clean_state();
+    assert!(!auto.tmp.path().join("runtime/agenmux-pin").exists());
+}
+
+#[test]
+fn launch_that_waited_out_a_switch_hands_over_to_the_installed_release() {
+    use std::os::fd::AsRawFd;
+    let auto = activation_fixture("activate-waited", true);
+    // Another launch is mid-switch: it holds the installation exclusively.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(auto.state().join("install.lock"))
+        .unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let runtime = auto.tmp.path().join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let launch = auto
+        .command("", &["toggle", "popup", "client-1"])
+        .env("TMUX", format!("{}/socket,1,0", auto.tmp.path().display()))
+        .env("AGENMUX_RUNTIME_DIR", &runtime)
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    // The switch replaces the engine (by rename, as installs do), then ends.
+    let engine = auto.plugin.join("target/release/agenmux");
+    let staged = auto.tmp.path().join("new-engine");
+    fs::copy(
+        auto.state().join("pkg-v99.0.0/target/release/agenmux"),
+        &staged,
+    )
+    .unwrap();
+    fs::rename(&staged, &engine).unwrap();
+    drop(lock);
+    let out = launch.wait_with_output().unwrap();
+    // The waiting launch, still the old engine, re-entered the installed
+    // bootstrap instead of starting a view of its own.
+    assert!(
+        auto.log().contains("entrypoint activate popup client-1"),
+        "{} / {}",
+        auto.log(),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

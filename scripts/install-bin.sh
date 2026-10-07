@@ -81,7 +81,16 @@ installed_rev="$(sed -n '2p' "$state_read" 2>/dev/null)"
 # extra state to track
 want="$(bash "$DIR/scripts/version.sh" tag 2>/dev/null)"
 
+# A version switch (auto-update or manual) can land while this runs. Never
+# install an engine or state for source that is no longer checked out.
+# ponytail: check-then-mv, not a lock; the window is the mv itself.
+source_unchanged() {
+  [ "$(bash "$DIR/scripts/version.sh" tag 2>/dev/null)" = "$want" ] &&
+    [ "$(git -C "$DIR" rev-parse HEAD 2>/dev/null || printf -)" = "$current_rev" ]
+}
+
 write_state() {
+  source_unchanged || return 1
   local staged="$STATE.$$"
   mkdir -p "$(dirname "$STATE")"
   printf '%s\n%s\n' "$1" "$current_rev" >"$staged" && mv -f "$staged" "$STATE"
@@ -147,7 +156,7 @@ download_bin() {
     if cp "$source" "$staged"; then
       chmod +x "$staged"
       if binary_matches "$staged" "$tag"; then
-        mv -f "$staged" "$BIN" && write_state "$tag" && rc=0
+        source_unchanged && mv -f "$staged" "$BIN" && write_state "$tag" && rc=0
       fi
     fi
     [ "$rc" -eq 0 ] || rm -f "$staged"

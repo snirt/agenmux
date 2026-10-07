@@ -325,13 +325,6 @@ pub(crate) fn git_checkout_tag(plugin_dir: &Path, target: &str) -> Result<(), &'
         .ok_or("checkout")
 }
 
-fn git_install(plugin_dir: &Path, target: &str) -> Result<String, &'static str> {
-    let previous = git_previous(plugin_dir)?;
-    let _ = git_success(plugin_dir, &["fetch", "--tags", "--quiet", "origin"]);
-    git_checkout_tag(plugin_dir, target)?;
-    Ok(previous)
-}
-
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -462,12 +455,6 @@ fn replace_engine_and_state(
     Ok(())
 }
 
-fn install_exact_engine(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
-    let scratch = Scratch::new("agenmux-engine").map_err(|_| "scratch")?;
-    let package = fetch_package(plugin_dir, target, &scratch.0)?;
-    install_engine_from(plugin_dir, &package, target, &scratch.0)
-}
-
 /// Install a verified package's engine and notifier into the plugin; the
 /// previous engine and version state are snapshotted into `backup_dir`.
 pub(crate) fn install_engine_from(
@@ -538,10 +525,8 @@ fn synchronize_tarball_source(plugin_dir: &Path, package: &Path) -> std::io::Res
     Ok(())
 }
 
-fn tarball_install(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
-    let scratch = Scratch::new("agenmux-up").map_err(|_| "scratch")?;
-    let package = fetch_package(plugin_dir, target, &scratch.0)?;
-    synchronize_tarball_source(plugin_dir, &package).map_err(|_| "copy")?;
+fn tarball_install(plugin_dir: &Path, target: &str, package: &Path) -> Result<(), &'static str> {
+    synchronize_tarball_source(plugin_dir, package).map_err(|_| "copy")?;
     if !engine_matches(&engine_path(plugin_dir), target) {
         return Err("engine");
     }
@@ -640,16 +625,31 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
         }
     }
 
+    note(&format!("switching to {target}…"));
+    // Everything that needs the network happens first, with this tree's own
+    // verified installer, before anything closes or the install is locked.
+    let Ok(scratch) = Scratch::new("agenmux-up") else {
+        return refuse("scratch");
+    };
+    if git_install_dir {
+        let _ = git_success(plugin_dir, &["fetch", "--tags", "--quiet", "origin"]);
+        if git_tag_commit(plugin_dir, &target).is_none() {
+            return refuse("unknown");
+        }
+    }
+    let package = match fetch_package(plugin_dir, &target, &scratch.0) {
+        Ok(package) => package,
+        Err(reason) => return refuse(reason),
+    };
+
     let pause = match crate::autoupdate::pause(plugin_dir) {
         Ok(pause) => pause,
         Err(error) => return fail(&error),
     };
-
     let was_open = tmux_option("@agenmux-on") == "1"
         || !tmux_value(&["show-option", "-gqv", "@agenmux-sidebar"]).is_empty()
         || !tmux_value(&["show-option", "-gqv", "@agents-mon-sidebar"]).is_empty();
     let old_control = tmux_option("@agenmux-control-client");
-    note(&format!("switching to {target}…"));
 
     // This server's view releases its installation lease first; a lease still
     // held afterwards belongs to another tmux server or an open popup.
@@ -657,19 +657,21 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
     if running {
         teardown_runtime(&old_control);
     }
-    let result = crate::autoupdate::exclusive(plugin_dir, Duration::from_secs(5))
+    // A closed daemon takes seconds to exit and release its lease.
+    let result = crate::autoupdate::exclusive(plugin_dir, Duration::from_secs(20))
         .map_err(|()| "busy")
         .and_then(|_lock| {
             if git_install_dir {
-                git_install(plugin_dir, &target).and_then(|previous| {
-                    if let Err(reason) = install_exact_engine(plugin_dir, &target) {
-                        let _ = git_success(plugin_dir, &["checkout", "--quiet", &previous]);
-                        return Err(reason);
-                    }
-                    Ok(())
-                })
+                let previous = git_previous(plugin_dir)?;
+                git_checkout_tag(plugin_dir, &target)?;
+                if let Err(reason) = install_engine_from(plugin_dir, &package, &target, &scratch.0)
+                {
+                    let _ = git_success(plugin_dir, &["checkout", "--quiet", &previous]);
+                    return Err(reason);
+                }
+                Ok(())
             } else {
-                tarball_install(plugin_dir, &target)
+                tarball_install(plugin_dir, &target, &package)
             }
         });
     // Reopen whichever release is installed now: the target, or the old one.

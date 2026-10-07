@@ -75,6 +75,13 @@ pub fn run(plugin_dir: &Path, requested_mode: Option<&str>, requested_client: Op
             client: requested_client.unwrap_or("").into(),
         },
     );
+    let entry = crate::autoupdate::Entry::Toggle {
+        mode: requested_mode.unwrap_or("").into(),
+        client: requested_client.unwrap_or("").into(),
+    };
+    if let crate::autoupdate::Gate::Exit(code) = gate {
+        return code;
+    }
     let config = match crate::app_config::current(requested_mode) {
         Ok(config) => config,
         Err(e) => {
@@ -90,8 +97,12 @@ pub fn run(plugin_dir: &Path, requested_mode: Option<&str>, requested_client: Op
     let (lease, txn) = match gate {
         crate::autoupdate::Gate::Lease(lease) => (Some(lease), None),
         crate::autoupdate::Gate::Txn(txn) => (None, Some(txn)),
+        crate::autoupdate::Gate::Exit(code) => return code,
         crate::autoupdate::Gate::Open => match crate::autoupdate::lease(plugin_dir) {
             Ok(lease) => (lease, None),
+            Err(crate::autoupdate::LeaseError::Updated) => {
+                return crate::autoupdate::restart_installed(plugin_dir, entry);
+            }
             Err(error) => {
                 eprintln!("agenmux: {error}");
                 return 1;
@@ -103,10 +114,13 @@ pub fn run(plugin_dir: &Path, requested_mode: Option<&str>, requested_client: Op
         .map(str::to_string)
         .or_else(|| panes::newest_real_client("#{client_name}").ok().flatten());
     if config.mode == crate::app_config::DisplayMode::Popup {
-        // A popup blocks until it closes; the target is ready once its setup
-        // ran and this launch reached it.
-        let _lease = txn.map(crate::autoupdate::Txn::commit).or(lease);
-        popup(plugin_dir, client, &config)
+        let (mut txn, mut held) = (txn, lease);
+        let code = popup(plugin_dir, client, &config, &mut txn, &mut held);
+        // The target's sidebar never drew a frame: keep the old release.
+        match txn {
+            Some(txn) => txn.rollback(),
+            None => code,
+        }
     } else {
         let held = txn
             .as_ref()
@@ -411,7 +425,15 @@ fn select_sidebar(client: Option<&str>) {
     let _ = tmux::command_status(&["switch-client", "-c", client, "-T", "agenmux"]);
 }
 
-fn popup(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::AppConfig) -> i32 {
+/// `txn` is an activation to confirm once the first popup's sidebar has drawn
+/// its first frame; confirming moves its lock into `held`, this launch's lease.
+fn popup(
+    plugin_dir: &Path,
+    client: Option<String>,
+    config: &crate::app_config::AppConfig,
+    txn: &mut Option<crate::autoupdate::Txn>,
+    held: &mut Option<crate::autoupdate::Lock>,
+) -> i32 {
     let runtime = match tmux::prepare_runtime_dir() {
         Ok(dir) => dir,
         Err(error) => {
@@ -488,10 +510,54 @@ fn popup(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
         if let Some(trace) = trace_file() {
             args.extend(["-e".to_string(), format!("AGENMUX_DEBUG={trace}")]);
         }
+        let ready = runtime.join("agenmux-ready");
+        if txn.is_some() {
+            let _ = std::fs::remove_file(&ready);
+            args.extend([
+                "-e".to_string(),
+                format!("AGENMUX_READY={}", ready.to_string_lossy()),
+            ]);
+        }
         args.push(bin.to_string_lossy().into_owned());
         args.push("sidebar".to_owned());
         let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-        if tmux::command_status(&refs).is_err() {
+        let launched = match txn.take() {
+            None => tmux::command_status(&refs).is_ok(),
+            // display-popup blocks until the popup closes; confirm the
+            // activation as soon as the sidebar inside reports its first frame.
+            Some(pending) => match Command::new("tmux")
+                .args(&refs)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Err(_) => {
+                    *txn = Some(pending);
+                    false
+                }
+                Ok(mut child) => {
+                    let mut pending = Some(pending);
+                    let status = loop {
+                        if pending.is_some() && ready.exists() {
+                            *held = pending.take().map(crate::autoupdate::Txn::commit);
+                        }
+                        match child.try_wait() {
+                            Ok(Some(status)) => break status.success(),
+                            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                            Err(_) => break false,
+                        }
+                    };
+                    if pending.is_some() && ready.exists() {
+                        *held = pending.take().map(crate::autoupdate::Txn::commit);
+                    }
+                    let _ = std::fs::remove_file(&ready);
+                    *txn = pending;
+                    status && txn.is_none()
+                }
+            },
+        };
+        if !launched {
             let _ = std::fs::remove_file(&jump);
             let _ = std::fs::remove_file(&pin);
             eprintln!("agenmux: popup launch failed; check executable and target client");

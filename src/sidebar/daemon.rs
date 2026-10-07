@@ -105,7 +105,7 @@ pub(super) struct Daemon {
 pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     // The launching toggle hands down its installation lease; a daemon started
     // directly takes its own. Either way it lives as long as this process.
-    let _lease = match crate::autoupdate::Lock::inherited("AGENMUX_LEASE_FD") {
+    let lease = match crate::autoupdate::Lock::inherited("AGENMUX_LEASE_FD") {
         Some(lease) => Some(lease),
         None => match crate::autoupdate::lease(&plugin_dir) {
             Ok(lease) => lease,
@@ -259,6 +259,12 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
             sb.quiet_exit();
             return 1;
         }
+    }
+    // An activating launch hands down its exclusive hold. Once this daemon is
+    // up it only needs a shared one, so a launcher that dies before
+    // confirming cannot leave the installation locked for the daemon's life.
+    if let Some(lease) = &lease {
+        lease.share();
     }
     if event_loop(&mut sb) {
         sb.quiet_exit();

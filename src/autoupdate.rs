@@ -16,6 +16,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DAY: u64 = 24 * 60 * 60;
 
+/// Within the daily throttle. A stamp from the future (the clock moved back)
+/// does not count, or checks would stop until the clock caught up.
+fn checked_recently(last: u64) -> bool {
+    let now = now();
+    last <= now && now - last < DAY
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -116,6 +123,11 @@ impl Lock {
         })
     }
 
+    /// Downgrade to shared in place (for every holder of this descriptor).
+    pub(crate) fn share(&self) {
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_SH) };
+    }
+
     /// Let `command`'s child keep this lock across exec, announced in `var`.
     pub(crate) fn hand_down(&self, command: &mut Command, var: &str) {
         use std::os::unix::process::CommandExt;
@@ -134,9 +146,14 @@ impl Lock {
 
 /// Whether this process is the plugin's own installed engine. Development and
 /// custom builds neither coordinate through nor mutate the installation.
+/// Decided once, at the first call (process start): after a switch replaces
+/// the engine file, a still-running old engine must keep its identity.
 fn coordinated(plugin_dir: &Path) -> bool {
-    let running = std::env::current_exe().and_then(fs::canonicalize).ok();
-    running.is_some() && running == fs::canonicalize(release::engine_path(plugin_dir)).ok()
+    static COORDINATED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *COORDINATED.get_or_init(|| {
+        let running = std::env::current_exe().and_then(fs::canonicalize).ok();
+        running.is_some() && running == fs::canonicalize(release::engine_path(plugin_dir)).ok()
+    })
 }
 
 fn install_lock(plugin_dir: &Path, operation: i32, wait: Duration) -> Result<Option<Lock>, ()> {
@@ -153,11 +170,35 @@ fn install_lock(plugin_dir: &Path, operation: i32, wait: Duration) -> Result<Opt
         .map_err(|_| ())
 }
 
+pub(crate) enum LeaseError {
+    /// A version switch held the installation for too long.
+    Busy,
+    /// A version switch finished while this launch waited: this process is
+    /// the previous release and must hand over to the installed one.
+    Updated,
+}
+
+impl std::fmt::Display for LeaseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Busy => "agenmux is switching versions; try again",
+            Self::Updated => "agenmux was updated while starting; open it again",
+        })
+    }
+}
+
 /// A runtime's shared hold on the installation: toggle for its whole run
 /// (popups included), the daemon for its lifetime, a direct sidebar.
-pub(crate) fn lease(plugin_dir: &Path) -> Result<Option<Lock>, String> {
-    install_lock(plugin_dir, libc::LOCK_SH, Duration::from_secs(30))
-        .map_err(|()| "agenmux is switching versions; try again".into())
+pub(crate) fn lease(plugin_dir: &Path) -> Result<Option<Lock>, LeaseError> {
+    if let Ok(lease) = install_lock(plugin_dir, libc::LOCK_SH, Duration::ZERO) {
+        return Ok(lease);
+    }
+    let lease = install_lock(plugin_dir, libc::LOCK_SH, Duration::from_secs(30))
+        .map_err(|()| LeaseError::Busy)?;
+    if !release::engine_matches(&release::engine_path(plugin_dir), &running_release()) {
+        return Err(LeaseError::Updated);
+    }
+    Ok(lease)
 }
 
 /// Exclusive hold for a manual version switch, once this server's own view
@@ -447,6 +488,11 @@ pub(crate) fn eligibility(plugin_dir: &Path) -> Result<(String, Install), String
     let mut state = state.lines();
     let (installed, installed_rev) = (state.next().unwrap_or(""), state.next().unwrap_or(""));
     let install = if plugin_dir.join(".git").exists() {
+        // A branch checkout belongs to `git pull`/TPM; switching it to a
+        // detached tag would break their updates.
+        if git_line(plugin_dir, &["symbolic-ref", "-q", "HEAD"]).is_some() {
+            return Err("branch checkout (updated by git pull or TPM)".into());
+        }
         match release::git_previous(plugin_dir) {
             Err("dirty") => return Err("uncommitted changes".into()),
             Err(_) => return Err("cannot inspect the git checkout".into()),
@@ -543,7 +589,7 @@ pub(crate) fn prepare(plugin_dir: &Path) -> String {
     let last = fs::read_to_string(dir.join("last-attempt"))
         .ok()
         .and_then(|text| text.trim().parse::<u64>().ok());
-    if last.is_some_and(|last| now().saturating_sub(last) < DAY) {
+    if last.is_some_and(checked_recently) {
         return "checked within the last day".into();
     }
     // Recorded before any network work, so failures throttle too.
@@ -624,6 +670,12 @@ fn prepare_locked(
                 .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
                 .env("GIT_HTTP_LOW_SPEED_TIME", "20")
                 .env("GIT_TERMINAL_PROMPT", "0")
+                .env(
+                    "GIT_SSH_COMMAND",
+                    std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| {
+                        "ssh -oBatchMode=yes -oConnectTimeout=20 -oServerAliveInterval=20".into()
+                    }),
+                )
                 .stdin(Stdio::null())
                 .output();
             let commit = release::git_tag_commit(plugin_dir, &latest)
@@ -684,6 +736,8 @@ pub(crate) enum Gate {
     Open,
     /// This process is the target release of an activation it must confirm.
     Txn(Txn),
+    /// The launch was handed to the installed release; exit with this code.
+    Exit(i32),
 }
 
 /// An activation the target release confirms after readiness, or undoes.
@@ -718,13 +772,55 @@ fn restore_file(saved: &Path, path: &Path) -> io::Result<()> {
     fs::rename(staged, path)
 }
 
-/// Put back the installation a transaction replaced, record the target as
-/// failed so it is never retried automatically, and drop the transaction.
-fn recover(plugin_dir: &Path, dir: &Path) {
+/// Atomically swap two directories, so the plugin path never goes missing.
+/// Falls back to two renames where the filesystem cannot exchange.
+fn exchange(a: &Path, b: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let (from, to) = (
+        std::ffi::CString::new(a.as_os_str().as_bytes())?,
+        std::ffi::CString::new(b.as_os_str().as_bytes())?,
+    );
+    #[cfg(target_os = "macos")]
+    let swapped = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_SWAP) } == 0;
+    #[cfg(target_os = "linux")]
+    let swapped = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    } == 0;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let swapped = {
+        let _ = (&from, &to);
+        false
+    };
+    if swapped {
+        return Ok(());
+    }
+    // ponytail: non-atomic fallback; a crash between the renames leaves `b`
+    // missing until the next start's recovery renames it back.
+    let parked = b.with_extension(format!("swap-{}", std::process::id()));
+    fs::rename(b, &parked)?;
+    if let Err(error) = fs::rename(a, b) {
+        let _ = fs::rename(&parked, b);
+        return Err(error);
+    }
+    fs::rename(parked, a)
+}
+
+/// Put back the installation a transaction replaced and drop the transaction.
+/// `failed` records the target so it is never retried automatically: set for
+/// a target that did not become ready, not for a local error while switching.
+/// Returns whether the previous files are in place.
+fn recover(plugin_dir: &Path, dir: &Path, failed: bool) -> bool {
     let Some(txn) = read_kv(&dir.join("transaction")) else {
-        return;
+        return true;
     };
     let get = |key: &str| txn.get(key).cloned().unwrap_or_default();
+    let (base, target) = (get("base"), get("target"));
     let backup = dir.join("backup");
     let restored = match get("kind").as_str() {
         "git" => {
@@ -742,40 +838,51 @@ fn recover(plugin_dir: &Path, dir: &Path) {
             checkout && files
         }
         "tarball" => {
-            let tree = backup.join("tree");
-            if tree.exists() {
-                let discard = dir.join(format!("discard-{}", std::process::id()));
-                if plugin_dir.exists() {
-                    let _ = fs::rename(plugin_dir, &discard);
-                }
-                let back = fs::rename(&tree, plugin_dir).is_ok();
-                remove(&discard);
-                back
-            } else {
-                true // the swap never started
+            // The old tree is in the backup, or still where the package was
+            // if the switch stopped between its two steps.
+            let is_base =
+                |path: &Path| release::manifest_tag(path).as_deref() == Some(base.as_str());
+            let package = dir.join(format!("pkg-{target}"));
+            let old = [backup.join("tree"), package.clone()]
+                .into_iter()
+                .find(|path| is_base(path));
+            let back = match &old {
+                _ if is_base(plugin_dir) => true,
+                Some(old) if plugin_dir.exists() => exchange(old, plugin_dir).is_ok(),
+                Some(old) => fs::rename(old, plugin_dir).is_ok(),
+                None => false,
+            };
+            // The new tree is where the old one was; keep it as the package
+            // so a retry needs no download.
+            if back && old.is_some_and(|old| old != package) {
+                let _ = fs::rename(backup.join("tree"), &package);
             }
+            // The switch may already have written the version state into it.
+            let _ = fs::remove_file(release::state_path(&package));
+            back
         }
         _ => true,
     };
-    let target = get("target");
-    if release::valid_tag(&target) {
+    if failed && release::valid_tag(&target) {
         let _ = release::atomic_write(&dir.join("failed"), &format!("{target}\n"));
     }
-    discard_pending(dir);
     if restored {
-        remove(&backup);
+        // Marker first: a backup without a marker is ignored; a marker with
+        // a half-deleted backup would restore a broken tree.
         remove(&dir.join("transaction"));
-        set_status(
-            dir,
-            &format!("auto-update: {target} did not start; kept {}", get("base")),
-        );
+        remove(&backup);
+        if failed {
+            discard_pending(dir);
+            set_status(
+                dir,
+                &format!("auto-update: {target} did not start; kept {base}"),
+            );
+        }
     } else {
         // Keep the backup and marker: the next start tries the restore again.
-        set_status(
-            dir,
-            &format!("auto-update: could not restore {}", get("base")),
-        );
+        set_status(dir, &format!("auto-update: could not restore {base}"));
     }
+    restored
 }
 
 enum Check {
@@ -784,11 +891,14 @@ enum Check {
     Discard(String),
 }
 
-fn check(plugin_dir: &Path, dir: &Path, started: u64) -> Check {
+// "Prepared before this invocation" holds by construction: the gate runs
+// before this process can start a worker. No timestamp compare, so clock
+// changes cannot strand a prepared release.
+fn check(plugin_dir: &Path, dir: &Path) -> Check {
     let Some(pending) = Pending::read(dir) else {
         return Check::Keep;
     };
-    if pending.prepared > started || !enabled() {
+    if !enabled() {
         return Check::Keep;
     }
     let Ok((current, install)) = eligibility(plugin_dir) else {
@@ -875,9 +985,9 @@ fn apply(plugin_dir: &Path, dir: &Path, pending: &Pending, install: &Install) ->
                 ],
             )?;
             fault("source")?;
-            fs::rename(plugin_dir, backup.join("tree"))?;
-            fs::rename(&package, plugin_dir)?;
+            exchange(&package, plugin_dir)?;
             fault("engine")?;
+            fs::rename(&package, backup.join("tree"))?;
             release::write_engine_state(plugin_dir, target)?;
         }
     }
@@ -890,19 +1000,38 @@ fn apply(plugin_dir: &Path, dir: &Path, pending: &Pending, install: &Install) ->
 
 /// Load the installed release's tmux integration (launchers and setup), the
 /// way sourcing the plugin does. Outside tmux there is nothing to set up.
+/// Bounded: a hung setup must not hold the installation lock forever.
 fn load_plugin(plugin_dir: &Path) -> bool {
     if std::env::var_os("TMUX").is_none_or(|tmux| tmux.is_empty()) {
         return true;
     }
-    fault("setup").is_ok()
-        && Command::new("bash")
-            .arg(plugin_dir.join(format!("{}.tmux", release::runtime_name(plugin_dir))))
-            .env("AGENMUX_INSTALL_REFRESH", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
+    if fault("setup").is_err() {
+        return false;
+    }
+    let Ok(mut child) = Command::new("bash")
+        .arg(plugin_dir.join(format!("{}.tmux", release::runtime_name(plugin_dir))))
+        .env("AGENMUX_INSTALL_REFRESH", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 /// macOS: refresh the notification helper app from the new engine, as
@@ -955,6 +1084,17 @@ fn reenter(plugin_dir: &Path, entry: &Entry, lock: Option<&Lock>) -> io::Error {
     command.exec()
 }
 
+/// This process's engine is no longer the installed one: hand the launch to
+/// the installed release. Returns only if that is impossible.
+pub(crate) fn restart_installed(plugin_dir: &Path, entry: Entry) -> i32 {
+    eprintln!("agenmux: {}", reenter(plugin_dir, &entry, None));
+    1
+}
+
+fn running_release() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
 /// The common launch gate. A fresh start (no runtime holds a lease) recovers
 /// an interrupted activation, then activates a package prepared earlier and
 /// re-enters the target; anything else leaves the update pending.
@@ -972,7 +1112,6 @@ pub(crate) fn gate(plugin_dir: &Path, entry: Entry) -> Gate {
         }
         return Gate::Open;
     }
-    let started = now();
     let Some(dir) = state_dir(plugin_dir).filter(|dir| dir.is_dir()) else {
         return Gate::Open;
     };
@@ -983,13 +1122,20 @@ pub(crate) fn gate(plugin_dir: &Path, entry: Entry) -> Gate {
         return Gate::Open;
     };
     let plugin_dir = plugin_dir.as_path();
-    if dir.join("transaction").exists() {
-        recover(plugin_dir, &dir);
+    // A target that never confirmed (crashed, killed, hung): restore the
+    // previous release and, if this process is that target, start the
+    // previous release's own entry point instead of continuing as the target.
+    if dir.join("transaction").exists()
+        && recover(plugin_dir, &dir, true)
+        && release::manifest_tag(plugin_dir).is_some_and(|tag| tag != running_release())
+    {
+        drop(lock);
+        return Gate::Exit(restart_installed(plugin_dir, entry));
     }
     let into_lease = |lock: Lock| {
-        // ponytail: flock conversion is not atomic; a second fresh start in
-        // that instant activates first and this launch waits on its lease.
-        if unsafe { libc::flock(lock.file.as_raw_fd(), libc::LOCK_SH) } == 0 {
+        // flock conversion is not atomic; never block in it. Losing the
+        // instant to another launch falls back to an ordinary lease wait.
+        if unsafe { libc::flock(lock.file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
             Gate::Lease(lock)
         } else {
             Gate::Open
@@ -1001,7 +1147,7 @@ pub(crate) fn gate(plugin_dir: &Path, entry: Entry) -> Gate {
     let Ok(state) = state_lock(&dir) else {
         return into_lease(lock);
     };
-    let (pending, install) = match check(plugin_dir, &dir, started) {
+    let (pending, install) = match check(plugin_dir, &dir) {
         Check::Apply(pending, install) => (pending, install),
         Check::Keep => return into_lease(lock),
         Check::Discard(reason) => {
@@ -1010,20 +1156,28 @@ pub(crate) fn gate(plugin_dir: &Path, entry: Entry) -> Gate {
             return into_lease(lock);
         }
     };
-    if apply(plugin_dir, &dir, &pending, &install).is_err() {
-        recover(plugin_dir, &dir);
+    if let Err(error) = apply(plugin_dir, &dir, &pending, &install) {
+        // A local failure (busy git index, full disk): retried next start.
+        recover(plugin_dir, &dir, false);
+        set_status(
+            &dir,
+            &format!(
+                "auto-update: could not switch to {}: {error}",
+                pending.target
+            ),
+        );
         return into_lease(lock);
     }
     drop(state);
     if !load_plugin(plugin_dir) {
-        recover(plugin_dir, &dir);
+        recover(plugin_dir, &dir, true);
         load_plugin(plugin_dir);
         return into_lease(lock);
     }
     sync_notifier(plugin_dir);
     let _ = reenter(plugin_dir, &entry, Some(&lock));
     // exec failed: the old engine keeps running on the old files.
-    recover(plugin_dir, &dir);
+    recover(plugin_dir, &dir, false);
     load_plugin(plugin_dir);
     into_lease(lock)
 }
@@ -1046,18 +1200,19 @@ impl Txn {
                 let _ = record_baseline(&self.dir, target, &manifest);
             }
         }
-        discard_pending(&self.dir);
-        remove(&self.dir.join("backup"));
+        // Marker first, as in `recover`.
         remove(&self.dir.join("transaction"));
+        remove(&self.dir.join("backup"));
+        discard_pending(&self.dir);
         remove(&self.dir.join("status"));
-        unsafe { libc::flock(self.lock.file.as_raw_fd(), libc::LOCK_SH) };
+        self.lock.share();
         self.lock
     }
 
     /// The target failed to become ready: restore the previous release and
     /// start it once through its own entry point. Returns only if that fails.
     pub(crate) fn rollback(self) -> i32 {
-        recover(&self.plugin_dir, &self.dir);
+        recover(&self.plugin_dir, &self.dir, true);
         load_plugin(&self.plugin_dir);
         let Txn {
             lock,
@@ -1066,8 +1221,7 @@ impl Txn {
             ..
         } = self;
         drop(lock);
-        let _ = reenter(&plugin_dir, &entry, None);
-        1
+        restart_installed(&plugin_dir, entry)
     }
 }
 
@@ -1077,6 +1231,7 @@ pub(crate) fn gate_direct(plugin_dir: &Path) -> Option<Lock> {
     match gate(plugin_dir, Entry::Direct) {
         Gate::Lease(lock) => Some(lock),
         Gate::Open => None,
+        Gate::Exit(code) => std::process::exit(code),
         Gate::Txn(txn) => {
             if crate::app_config::current_process().is_ok() {
                 Some(txn.commit())
@@ -1145,6 +1300,10 @@ pub(crate) fn switched(plugin_dir: &Path) {
         return;
     };
     if let Ok(_state) = state_lock(&dir) {
+        // An unconfirmed activation this switch replaced must not be "recovered"
+        // over it at the next start.
+        remove(&dir.join("transaction"));
+        remove(&dir.join("backup"));
         discard_pending(&dir);
         remove(&dir.join("failed"));
         remove(&dir.join("status"));
@@ -1173,7 +1332,7 @@ pub(crate) fn kick(plugin_dir: &Path) {
     let due = state_dir(plugin_dir)
         .and_then(|dir| fs::read_to_string(dir.join("last-attempt")).ok())
         .and_then(|text| text.trim().parse::<u64>().ok())
-        .is_none_or(|last| now().saturating_sub(last) >= DAY);
+        .is_none_or(|last| !checked_recently(last));
     if !due {
         return;
     }
@@ -1181,14 +1340,21 @@ pub(crate) fn kick(plugin_dir: &Path) {
         return;
     };
     use std::os::unix::process::CommandExt;
-    if let Ok(mut child) = Command::new(exe)
+    let mut command = Command::new(exe);
+    // Own session: closing the view's pane must not kill a download, and no
+    // controlling terminal means nothing (ssh, git) can prompt.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    if let Ok(mut child) = command
         .args(["internal", "auto-update"])
         .env("AGENMUX_DIR", plugin_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // Own process group: closing the view's pane must not kill a download.
-        .process_group(0)
         .spawn()
     {
         std::thread::spawn(move || {
@@ -1344,6 +1510,13 @@ mod tests {
         drop(plain.stdin.take());
         plain.wait().unwrap();
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn throttle_ignores_stamps_from_the_future() {
+        assert!(checked_recently(now() - 60));
+        assert!(!checked_recently(now() - DAY - 1));
+        assert!(!checked_recently(now() + DAY * 30));
     }
 
     #[test]

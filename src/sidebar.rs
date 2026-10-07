@@ -528,6 +528,10 @@ pub fn run(plugin_dir: PathBuf) -> i32 {
     // tty mode is the popup: while it is visible it owns input.
     sb.plugin_selected = true;
     sb.render(true);
+    // A launch activating this release confirms it on the first frame.
+    if let Some(ready) = std::env::var_os("AGENMUX_READY") {
+        let _ = std::fs::write(ready, "");
+    }
     event_loop(&mut sb);
     cleanup(&sb.rows_file, &sb.pin);
     0
