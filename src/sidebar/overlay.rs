@@ -317,6 +317,7 @@ fn is_bool_setting(name: &str) -> bool {
         "display.show_all_panes"
             | "display.show_frame"
             | "behavior.notifications"
+            | "behavior.auto_update"
             | "tmux_management.enabled"
             | "tmux_management.confirm_delete"
             | "tmux_management.resume_agents"

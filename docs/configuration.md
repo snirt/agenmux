@@ -62,6 +62,7 @@ popup_height = "auto"
 agent_label = "icon-text" # icon-text | icon | text
 [behavior]
 notifications = true
+auto_update = true        # false: no background update preparation
 # hide_windows = "agents*" # unset: leave the window picker alone
 [tmux_management]
 enabled = true            # false: read-only sidebar

@@ -102,10 +102,34 @@ main() {
   # Linked worktrees use a .git file instead of a .git directory. In Docker the
   # file may point outside the mounted checkout, but skip-update users still have
   # all the plugin files they need and must not trigger a clone into that tree.
+  # Standard installs sit on the latest published stable tag so auto-update can
+  # follow releases; AGENMUX_REF=<branch|tag> picks a development ref instead.
+  latest_release() {
+    url="$(curl -fsSL --max-time 20 -o /dev/null -w '%{url_effective}' "$REPO/releases/latest" 2>/dev/null)" || return 1
+    tag="${url##*/}"
+    case "$tag" in v[0-9]*-* | *[!A-Za-z0-9.-]*) return 1 ;; v[0-9]*) printf '%s' "$tag" ;; *) return 1 ;; esac
+  }
+  checkout() { git -C "$DIR" checkout --quiet "$1" </dev/null || die "git checkout $1 failed in $(tilde "$DIR")"; }
   if [ -d "$DIR/.git" ] || [ -f "$DIR/.git" ]; then
     before="$(version)"
     if [ "${AGENMUX_SKIP_UPDATE:-}" != 1 ]; then
-      git -C "$DIR" pull --ff-only --quiet </dev/null || die "git pull failed in $(tilde "$DIR")"
+      on_tag="$(git -C "$DIR" describe --tags --exact-match 2>/dev/null || true)"
+      if [ -n "${AGENMUX_REF:-}" ]; then
+        git -C "$DIR" fetch --quiet --tags origin </dev/null || die "git fetch failed in $(tilde "$DIR")"
+        checkout "$AGENMUX_REF"
+        if git -C "$DIR" symbolic-ref -q HEAD >/dev/null; then
+          git -C "$DIR" pull --ff-only --quiet </dev/null || die "git pull failed in $(tilde "$DIR")"
+        fi
+      elif [ "$on_tag" = "$before" ] && ! git -C "$DIR" symbolic-ref -q HEAD >/dev/null; then
+        # A detached release checkout follows newer stable tags, never older.
+        git -C "$DIR" fetch --quiet --tags origin </dev/null || die "git fetch failed in $(tilde "$DIR")"
+        if tag="$(latest_release)" &&
+          [ "$(printf '%s\n%s\n' "$before" "$tag" | sort -V | tail -n 1)" = "$tag" ]; then
+          checkout "$tag"
+        fi
+      else
+        git -C "$DIR" pull --ff-only --quiet </dev/null || die "git pull failed in $(tilde "$DIR")"
+      fi
     fi
     after="$(version)"
     if [ "$before" = "$after" ]; then
@@ -115,6 +139,13 @@ main() {
     fi
   else
     git clone --quiet "$REPO" "$DIR" </dev/null || die "git clone failed"
+    if [ -n "${AGENMUX_REF:-}" ]; then
+      checkout "$AGENMUX_REF"
+    elif tag="$(latest_release)"; then
+      checkout "$tag"
+    else
+      warn release "latest release unknown; kept the default branch"
+    fi
     ok plugin "cloned $(version) to $(tilde "$DIR")"
   fi
 

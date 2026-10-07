@@ -114,6 +114,7 @@ pub enum AutoHeight {
 #[serde(deny_unknown_fields)]
 pub struct BehaviorConfig {
     pub notifications: Option<bool>,
+    pub auto_update: Option<bool>,
     pub hide_windows: Option<String>,
 }
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

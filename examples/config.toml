@@ -16,6 +16,7 @@ agent_label = "icon-text" # agent rows: icon-text | icon | text
 
 [behavior]
 notifications = true
+auto_update = true    # prepare newer releases; switch on the next fresh start
 # hide_windows = "agents*" # filter the prefix+w picker; omitted leaves it alone
 
 [tmux_management]

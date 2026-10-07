@@ -6,7 +6,8 @@
 curl -fsSL https://snirt.github.io/agenmux/install.sh | sh
 ```
 
-The script clones the plugin to `~/.tmux/plugins/agenmux`, creates
+The script clones the plugin to `~/.tmux/plugins/agenmux` at the latest
+stable release tag (`AGENMUX_REF=<branch|tag>` picks another ref), creates
 `~/.config/agenmux/agents/`, shows a Nerd Font sample and asks whether it
 renders (yes sets `display.agent_label = "icon"`, no sets `"text"`; an existing
 `agent_label` is kept, and `AGENMUX_AGENT_LABEL` answers without a prompt),
@@ -18,8 +19,8 @@ confirm, and reloads tmux. It also offers to symlink the `agenmux` command into
 your PATH. When tmux is running, it first installs the native
 engine with a progress indicator, so the first toggle opens at once; otherwise
 the engine installs in the background when tmux starts. Run it again to
-update; an existing agenmux entry
-is left alone.
+update: a release checkout moves to the newest stable tag, a branch checkout
+fast-forwards. An existing agenmux entry is left alone.
 
 ## TPM
 
