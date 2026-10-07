@@ -726,6 +726,21 @@ printf 'engine {version} %s\n' "$*" >> "${{RESTART_LOG:-/dev/null}}""#
     package
 }
 
+/// Linux refuses to exec a file some process still has open for writing
+/// (ETXTBSY). A process another parallel test forks while this copy is being
+/// written keeps such a handle until it execs, so wait that out once here.
+fn settle_executable(path: &Path) {
+    for _ in 0..250 {
+        match Command::new(path).arg("--version").output() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            _ => return,
+        }
+    }
+    panic!("{} stayed busy", path.display());
+}
+
 fn auto_fixture(name: &str, git_install: bool) -> Auto {
     let tmp = TempDir::new(name);
     let releases = tmp.path().join("releases");
@@ -746,6 +761,7 @@ fn auto_fixture(name: &str, git_install: bool) -> Auto {
         plugin.join("target/release/agenmux"),
     )
     .unwrap();
+    settle_executable(&plugin.join("target/release/agenmux"));
     let mut revision = "-".to_string();
     if git_install {
         git_ok(&plugin, &["init", "-q", "-b", "main"]);

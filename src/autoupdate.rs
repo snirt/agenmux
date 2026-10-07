@@ -1499,7 +1499,10 @@ mod tests {
         assert!(Lock::acquire(&path, libc::LOCK_EX, Duration::ZERO).is_err());
         drop(child.stdin.take());
         child.wait().unwrap();
-        assert!(Lock::acquire(&path, libc::LOCK_EX, Duration::ZERO).is_ok());
+        // Released, give or take a process another test is starting: it holds
+        // a copy of every descriptor between its fork and exec.
+        let released = Duration::from_secs(5);
+        assert!(Lock::acquire(&path, libc::LOCK_EX, released).is_ok());
         // An ordinary child never inherits it.
         let lease = Lock::acquire(&path, libc::LOCK_SH, Duration::ZERO).unwrap();
         let mut plain = Command::new("sh")
@@ -1508,7 +1511,7 @@ mod tests {
             .spawn()
             .unwrap();
         drop(lease);
-        assert!(Lock::acquire(&path, libc::LOCK_EX, Duration::ZERO).is_ok());
+        assert!(Lock::acquire(&path, libc::LOCK_EX, released).is_ok());
         drop(plain.stdin.take());
         plain.wait().unwrap();
         fs::remove_dir_all(dir).unwrap();
