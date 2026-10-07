@@ -782,9 +782,11 @@ fn exchange(a: &Path, b: &Path) -> io::Result<()> {
     );
     #[cfg(target_os = "macos")]
     let swapped = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_SWAP) } == 0;
+    // The raw syscall: musl release builds have no renameat2 wrapper.
     #[cfg(target_os = "linux")]
     let swapped = unsafe {
-        libc::renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             from.as_ptr(),
             libc::AT_FDCWD,
