@@ -628,6 +628,8 @@ impl Sidebar {
                 .or_insert(0usize) += 1;
         }
         let window_icon = self.palette.done_fg.fg("");
+        let marked = self.marked_set();
+        let selected_bg = self.palette.selected_bg.bg();
         let mut lines = Vec::new();
         let (mut sel_top, mut sel_bot) = (0usize, 0usize);
         // `▼` open, `▶` collapsed. A collapsed `▶` takes the colour of the most
@@ -695,6 +697,7 @@ impl Sidebar {
         };
         for (ordinal, visible) in self.visible.iter().copied().enumerate() {
             let selected = Some(ordinal) == cursor;
+            let is_marked = marked.contains(self.visible_id(visible));
             let (pane_i, header) = match visible {
                 VisiblePane::Agent(_) => continue,
                 VisiblePane::Session(i) => {
@@ -724,6 +727,8 @@ impl Sidebar {
             if !header.is_empty() {
                 let row_bg = if selected {
                     self.palette.pane_bg.bg()
+                } else if is_marked {
+                    selected_bg.clone()
                 } else {
                     String::new()
                 };
@@ -807,6 +812,7 @@ impl Sidebar {
             let row_bg = match (agent, selected) {
                 (Some(_), true) => self.palette.state_bg(state, self.plugin_selected),
                 (None, true) => self.palette.pane_bg.bg(),
+                _ if is_marked => selected_bg.clone(),
                 _ => String::new(),
             };
             lines.push((
@@ -988,6 +994,20 @@ impl Sidebar {
             }
         }
         let default_hint = join(&default_hints);
+        let marked = self.marked_ids().len();
+        let selection_hint = (marked > 0 || self.range_anchor.is_some()).then(|| {
+            let range = if self.range_anchor.is_some() {
+                "-- RANGE -- "
+            } else {
+                ""
+            };
+            let mut parts = vec![format!("{range}{marked} selected"), "yy copy".into()];
+            if self.settings.settings.tmux_management_enabled {
+                parts.push("dd delete".into());
+            }
+            parts.push(self.hint(&self.normal_keys, Action::Reset, "clear"));
+            join(&parts)
+        });
         // The tree draws create and rename in place; only agent-only mode and
         // the delete confirmation use the cursor-row prompt.
         let inline = self
@@ -1019,6 +1039,8 @@ impl Sidebar {
                 self.hint(&self.search_keys, Action::Clear, "clear"),
                 self.hint(&self.search_keys, Action::Cancel, "clear"),
             ])
+        } else if let Some(selection_hint) = selection_hint {
+            selection_hint
         } else if self.attention_filter {
             join(&[
                 self.hint(&self.normal_keys, Action::Filter, "attention"),
@@ -1098,6 +1120,7 @@ impl Sidebar {
                 (Vec::new(), 0usize, 0usize)
             };
             let mut session = "";
+            let marked = self.marked_set();
             if !inventory_mode {
                 for (n, visible) in self.visible.iter().copied().enumerate() {
                     let VisiblePane::Agent(row_i) = visible else {
@@ -1133,6 +1156,8 @@ impl Sidebar {
                     }
                     let row_bg = if selected {
                         self.palette.state_bg(&r.state, self.plugin_selected)
+                    } else if marked.contains(r.pane.as_str()) {
+                        self.palette.selected_bg.bg()
                     } else {
                         String::new()
                     };
@@ -2045,10 +2070,150 @@ mod tests {
         themed_frames(&mut sb);
         custom_key_hints(&mut sb);
         versions_close_keys(&mut sb);
+        multi_selection(&mut sb);
         if let Some(output) = std::env::var_os("AGENMUX_THEME_VISUAL_DIR") {
             visual_frames(&mut sb, &PathBuf::from(output));
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `v`/`V` over the all-panes tree: toggles, a range that follows the
+    /// cursor both ways, hidden and closed records, and bulk `dd`/`yy`.
+    fn multi_selection(sb: &mut Sidebar) {
+        sb.settings.settings.show_all_panes = true;
+        sb.settings.settings.tmux_management_enabled = true;
+        sb.overlay = None;
+        sb.query.clear();
+        sb.plugin_selected = true;
+        sb.rows = vec![row("%22")];
+        sb.panes = vec![
+            pane("$1", "work", "@1", 1, "editor", "%11", 1, "nvim", None),
+            pane("$1", "work", "@2", 2, "server", "%21", 1, "npm", None),
+            pane("$1", "work", "@2", 2, "server", "%22", 2, "node", Some(0)),
+            pane("$2", "personal", "@3", 3, "shell", "%31", 1, "zsh", None),
+        ];
+        sb.rebuild_visible(false);
+        // $1, %11, @2, %21, %22, $2, %31
+        assert_eq!(sb.visible.len(), 7);
+        let at = |sb: &mut Sidebar, row: usize, key: Key| {
+            sb.select_index(row);
+            sb.dispatch_key(key);
+        };
+        at(sb, 2, Key::Mark);
+        at(sb, 4, Key::Mark);
+        assert_eq!(
+            sb.marked_ids(),
+            ["%11", "%21"],
+            "v builds a gapped selection"
+        );
+        at(sb, 2, Key::Mark);
+        assert_eq!(sb.marked_ids(), ["%21"], "v again drops only that record");
+        sb.dispatch_key(Key::AllStates);
+        assert!(sb.marked_ids().is_empty(), "esc clears the selection");
+
+        at(sb, 7, Key::Mark);
+        at(sb, 3, Key::MarkRange);
+        assert_eq!(
+            sb.marked_ids(),
+            ["@2", "%31"],
+            "the range starts at its anchor"
+        );
+        sb.dispatch_key(Key::Down);
+        sb.dispatch_key(Key::Down);
+        assert_eq!(sb.marked_ids(), ["@2", "%21", "%22", "%31"]);
+        sb.dispatch_key(Key::Up);
+        assert_eq!(
+            sb.marked_ids(),
+            ["@2", "%21", "%31"],
+            "moving back shrinks it"
+        );
+        sb.dispatch_key(Key::Up);
+        sb.dispatch_key(Key::Up);
+        assert_eq!(
+            sb.marked_ids(),
+            ["%11", "@2", "%31"],
+            "and crosses the anchor"
+        );
+        sb.render(true);
+        assert!(sb.last_frame.contains("-- RANGE -- 3 selected"));
+        sb.dispatch_key(Key::MarkRange);
+        for _ in 0..3 {
+            sb.dispatch_key(Key::Down);
+        }
+        assert_eq!(
+            sb.marked_ids(),
+            ["%11", "@2", "%31"],
+            "V again ends the range"
+        );
+
+        sb.render(true);
+        let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap();
+        let line = |sb: &Sidebar, text: &str| {
+            sb.last_frame
+                .lines()
+                .find(|line| ansi.replace_all(line, "").contains(text))
+                .unwrap()
+                .replace(&format!("{E}[2G"), "")
+        };
+        let tint = sb.palette.selected_bg.bg();
+        assert!(
+            line(sb, "editor").starts_with(&tint),
+            "selected pane is tinted"
+        );
+        assert!(
+            line(sb, "server").starts_with(&tint),
+            "selected window is tinted"
+        );
+        assert!(
+            !line(sb, "npm").starts_with(&tint),
+            "unselected rows are not"
+        );
+        assert!(line(sb, "repo").starts_with(&sb.palette.state_bg("idle", true)));
+        assert!(sb.last_frame.contains("3 selected · yy copy · dd delete"));
+
+        sb.query = "absent".into();
+        sb.rebuild_visible(false);
+        assert_eq!(sb.marked_ids().len(), 3, "hidden records stay selected");
+        sb.query.clear();
+        sb.rebuild_visible(false);
+        let closed = sb.panes.pop().unwrap();
+        assert_eq!(sb.marked_ids(), ["%11", "@2"], "closed records drop out");
+        sb.panes.push(closed);
+
+        sb.marked = ["$1", "%21", "@2", "%31"].map(String::from).into();
+        sb.delete_marked(&sb.marked_ids(), "client".into());
+        let Some(Overlay::Confirm(targets)) = &sb.overlay else {
+            panic!("bulk dd asks first");
+        };
+        assert_eq!(
+            targets.iter().map(|t| t.action).collect::<Vec<_>>(),
+            [SequenceAction::DeleteSession, SequenceAction::DeleteWindow],
+            "children of a selected session go with it"
+        );
+        assert_eq!(
+            sb.overlay.as_ref().and_then(Overlay::inline_prompt),
+            Some(("delete 2 selected? y/N".into(), true))
+        );
+        sb.dispatch_key(Key::Other);
+        assert!(sb.overlay.is_none());
+        assert_eq!(sb.marked_ids().len(), 4, "cancel keeps the selection");
+
+        sb.marked = ["%31", "@2"].map(String::from).into();
+        sb.copy_reference(None);
+        assert_eq!(
+            crate::tmux::command(&["show-buffer"]).unwrap_or_default(),
+            "tmux window @2\ntmux pane %31",
+            "yy copies the selection in tree order"
+        );
+        assert!(sb.marked_ids().is_empty(), "a command ends the selection");
+
+        sb.settings.settings.show_all_panes = false;
+        sb.rebuild_visible(false);
+        at(sb, 1, Key::Mark);
+        sb.settings.settings.show_all_panes = true;
+        sb.rebuild_visible(false);
+        assert_eq!(sb.marked_ids(), ["%22"], "agent rows select their pane");
+        sb.clear_marks();
     }
 
     // Optional, synthetic-only private tmux screen inspection. The production

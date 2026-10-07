@@ -593,6 +593,8 @@ fn key_bindings(config: &crate::app_config::AppConfig) -> Vec<(&'static str, Str
         ("R", "restore-layout"),
         ("u", "undo"),
         ("x", "dismiss-layout"),
+        ("v", "mark"),
+        ("V", "mark-range"),
     ] {
         out.push((
             NORMAL_TABLE,
@@ -962,6 +964,8 @@ mod tests {
             ("R", "restore-layout"),
             ("u", "undo"),
             ("x", "dismiss-layout"),
+            ("v", "mark"),
+            ("V", "mark-range"),
         ] {
             assert_eq!(
                 find(NORMAL_TABLE, key),

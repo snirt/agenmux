@@ -1607,6 +1607,8 @@ fn quick_launchers_open_selected_panes_safely_and_reload_transactionally() {
     assert!(tmux.binding("agenmux", "G").contains("last"));
     assert!(tmux.binding("agenmux", "U").contains("versions"));
     assert!(tmux.binding("agenmux", "u").contains("undo"));
+    assert!(tmux.binding("agenmux", "v").contains("'mark'"));
+    assert!(tmux.binding("agenmux", "V").contains("'mark-range'"));
 
     // The first target is a real detected agent in all-pane mode. Its path,
     // the executable path, and each argument contain spaces or shell syntax.

@@ -15,14 +15,15 @@ open. It lists every tmux session, window, and pane, with agent state inline.
 | `z` / `Z` | Collapse / expand everything |
 | `R` / `x` | Restore / dismiss the previous tmux server's layout, when offered |
 | `u` | Recently closed sessions, windows and panes ([undo](#undoing-a-close)) |
+| `v` / `V` | Select the focused record / select a range ([multi-selection](#multi-selection)) |
 | `/` | Search |
 | `f` | Toggle **User attention**: show done, working, and blocked; hide idle |
 | `.` | Toggle between all panes and agents only |
-| `Esc` | Leave search and clear filters |
+| `Esc` | Clear the selection; then leave search and clear filters |
 | `cc` / `cs` | Create a window / session ([tmux management](#tmux-management)) |
 | `r` | Rename the selected record |
-| `dd` | Delete the selected record (asks first) |
-| `yy` | Copy the selected record's tmux reference ([copying references](#copying-references)) |
+| `dd` | Delete the selected record, or every selected one (asks first) |
+| `yy` | Copy the selected records' tmux references ([copying references](#copying-references)) |
 | `oe` / `og` | Open nvim / lazygit in a new window ([quick launchers](#quick-launchers)) |
 | `s` | Settings |
 | `U` | Version picker |
@@ -208,18 +209,39 @@ confirm_delete = true      # false deletes without asking
 sequence_timeout_ms = 1000 # time allowed between keys of gg/cc/cs/dd/yy
 ```
 
+## Multi-selection
+
+Select several sessions, windows, or panes, vim style. Selected rows get the
+`selected_bg` tint, and the footer shows how many are selected.
+
+- `v` selects or deselects the focused record. Move and press `v` again to add
+  more records, even ones that are not next to each other.
+- `V` starts a range at the focused record. Moving with `j`/`k` or `↓`/`↑`
+  extends it in visible order; moving back toward the start shrinks it. The
+  footer shows `-- RANGE --` while it is open; `v` or `V` closes it and keeps
+  the rows selected.
+- `yy` copies every selected reference, and `dd` deletes every selected record
+  after one confirmation. A record inside another selected record is deleted
+  with it. Either one closes the range and clears the selection; so do `r`,
+  `cc`, `cs`, and quick launchers, which act on the focused record.
+- `Esc` clears the selection. A second `Esc` clears search and filters.
+- Search, filters, folding, and `.` keep the selection: hidden records stay
+  selected. Records closed in tmux drop out.
+
 ## Copying references
 
 `yy` copies the selected record as `tmux session $3`, `tmux window @7`, or
 `tmux pane %12`, ready to paste into an agent prompt. tmux IDs stay unique when
 names repeat, and any tmux command accepts them with `-t`. Agent rows and
-single-pane window rows copy their pane.
+single-pane window rows copy their pane. With a
+[multi-selection](#multi-selection), `yy` copies every selected record, one per
+line.
 
 - The reference goes to the tmux paste buffer (`prefix ]`) and, through OSC 52,
   to the system clipboard of the terminal that pressed `yy`. That needs a
   terminal with OSC 52 support and tmux `set-clipboard` set to `on` or
   `external` (the default).
-- A brief message confirms the copy; the selection does not move.
+- A brief message confirms the copy; the cursor does not move.
 - Works with tmux management disabled.
 
 ## Quick launchers

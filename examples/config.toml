@@ -59,6 +59,7 @@ base = "dark"         # dark | light | terminal
 [theme.colors]        # semantic overrides: "default", 0..255, or "#RRGGBB"
 # working_bg = "#fff0cc"
 # pane_bg = 236       # selected ordinary pane row
+# selected_bg = 238   # rows picked with v / V
 # header_bg = "default"
 
 [keys]

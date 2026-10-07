@@ -55,6 +55,7 @@ pub struct ThemeColors {
     pub header_fg: Option<Color>,
     pub header_bg: Option<Color>,
     pub pane_bg: Option<Color>,
+    pub selected_bg: Option<Color>,
     pub text_fg: Option<Color>,
     pub muted_fg: Option<Color>,
     pub accent_fg: Option<Color>,
@@ -129,6 +130,7 @@ pub(crate) struct Palette {
     pub header_fg: Ink,
     pub header_bg: Ink,
     pub pane_bg: Ink,
+    pub selected_bg: Ink,
     pub text_fg: Ink,
     pub muted_fg: Ink,
     pub accent_fg: Ink,
@@ -150,11 +152,12 @@ impl Palette {
     /// Every overridable role paired with its resolved colour, in the order
     /// `--help` and `check --effective` list them. One list, so a new role
     /// cannot appear in the palette without appearing in both.
-    pub fn roles(&self) -> [(&'static str, Ink); 19] {
+    pub fn roles(&self) -> [(&'static str, Ink); 20] {
         [
             ("header_fg", self.header_fg),
             ("header_bg", self.header_bg),
             ("pane_bg", self.pane_bg),
+            ("selected_bg", self.selected_bg),
             ("text_fg", self.text_fg),
             ("muted_fg", self.muted_fg),
             ("accent_fg", self.accent_fg),
@@ -187,6 +190,7 @@ impl Palette {
             header_fg: Inherited,
             header_bg: Typed(Color::Indexed(236)),
             pane_bg: Typed(Color::Indexed(236)),
+            selected_bg: Typed(Color::Indexed(238)),
             text_fg: Inherited,
             muted_fg: Typed(Color::Indexed(245)),
             accent_fg: Basic(4),
@@ -210,6 +214,7 @@ impl Palette {
                 p.header_fg = rgb(32, 32, 32);
                 p.header_bg = rgb(238, 238, 238);
                 p.pane_bg = rgb(238, 238, 238);
+                p.selected_bg = rgb(218, 226, 242);
                 p.text_fg = rgb(32, 32, 32);
                 p.muted_fg = rgb(80, 80, 80);
                 p.accent_fg = rgb(32, 72, 144);
@@ -234,6 +239,9 @@ impl Palette {
                 p.muted_fg = Typed(Color::Default);
                 p.header_bg = Typed(Color::Default);
                 p.pane_bg = Typed(Color::Default);
+                // Every other fill here is the default background; the
+                // terminal's own grey keeps the selection visible.
+                p.selected_bg = Typed(Color::Indexed(8));
                 p.blocked_bg = Typed(Color::Default);
                 p.blocked_bg_unfocused = Typed(Color::Default);
                 p.working_bg = Typed(Color::Default);
@@ -250,6 +258,7 @@ impl Palette {
                 header_fg,
                 header_bg,
                 pane_bg,
+                selected_bg,
                 text_fg,
                 muted_fg,
                 accent_fg,

@@ -125,11 +125,11 @@ pane_bg = 236
 | `terminal` | Your terminal's own default background |
 
 - Colors are `"default"`, `0`–`255`, or `"#RRGGBB"`. ANSI names are not accepted.
-- Roles: `header_fg`, `header_bg`, `pane_bg`, `text_fg`, `muted_fg`,
+- Roles: `header_fg`, `header_bg`, `pane_bg`, `selected_bg`, `text_fg`, `muted_fg`,
   `accent_fg`, `error_fg`, and `_fg` / `_bg` / `_bg_unfocused` for each of
   `blocked`, `working`, `idle`, `done`.
 - `pane_bg` fills the selected ordinary-pane row; `muted_fg` colors
-  ordinary-pane cursors.
+  ordinary-pane cursors. `selected_bg` fills rows picked with `v` / `V`.
 - Colors change only color: glyphs, spinner, and blink stay the same.
 - The theme applies to the sidebar, popup, help, and version picker. Global
   tmux colors are never changed.
