@@ -267,7 +267,8 @@ fn git_success(plugin_dir: &Path, args: &[&str]) -> bool {
     git_output(plugin_dir, args).is_some_and(|output| output.status.success())
 }
 
-fn git_install(plugin_dir: &Path, target: &str) -> Result<String, &'static str> {
+/// The ref a failed switch returns to. Refuses dirty or unreadable trees.
+pub(crate) fn git_previous(plugin_dir: &Path) -> Result<String, &'static str> {
     let status = git_output(plugin_dir, &["status", "--porcelain"]).ok_or("status")?;
     if !status.status.success() {
         return Err("status");
@@ -290,14 +291,38 @@ fn git_install(plugin_dir: &Path, target: &str) -> Result<String, &'static str> 
     if previous.is_empty() {
         return Err("status");
     }
-    let _ = git_success(plugin_dir, &["fetch", "--tags", "--quiet", "origin"]);
-    let revision = format!("refs/tags/{target}^{{commit}}");
-    if !git_success(plugin_dir, &["rev-parse", "-q", "--verify", &revision]) {
-        return Err("unknown");
-    }
+    Ok(previous)
+}
+
+/// The commit a local release tag points at.
+pub(crate) fn git_tag_commit(plugin_dir: &Path, tag: &str) -> Option<String> {
+    git_output(
+        plugin_dir,
+        &[
+            "rev-parse",
+            "-q",
+            "--verify",
+            &format!("refs/tags/{tag}^{{commit}}"),
+        ],
+    )
+    .filter(|output| output.status.success())
+    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    .filter(|commit| !commit.is_empty())
+}
+
+/// Offline: move HEAD to a release tag that is already present locally.
+pub(crate) fn git_checkout_tag(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
+    git_tag_commit(plugin_dir, target).ok_or("unknown")?;
     git_success(plugin_dir, &["checkout", "--quiet", target])
-        .then_some(previous)
+        .then_some(())
         .ok_or("checkout")
+}
+
+fn git_install(plugin_dir: &Path, target: &str) -> Result<String, &'static str> {
+    let previous = git_previous(plugin_dir)?;
+    let _ = git_success(plugin_dir, &["fetch", "--tags", "--quiet", "origin"]);
+    git_checkout_tag(plugin_dir, target)?;
+    Ok(previous)
 }
 
 struct Scratch(PathBuf);
@@ -357,16 +382,18 @@ fn engine_matches(binary: &Path, target: &str) -> bool {
         })
 }
 
-fn fetch_package(
+/// Download and verify release `target` into `dest` with this tree's
+/// installer, then check the packaged engine reports that exact version.
+pub(crate) fn fetch_package(
     plugin_dir: &Path,
     target: &str,
-    scratch: &Scratch,
+    dest: &Path,
 ) -> Result<PathBuf, &'static str> {
     let output = Command::new("bash")
         .arg(plugin_dir.join("scripts/install-bin.sh"))
         .arg("fetch")
         .arg(target)
-        .arg(&scratch.0)
+        .arg(dest)
         .output()
         .map_err(|_| "fetch")?;
     if !output.status.success() {
@@ -430,8 +457,19 @@ fn replace_engine_and_state(
 
 fn install_exact_engine(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
     let scratch = Scratch::new("agenmux-engine").map_err(|_| "scratch")?;
-    let package = fetch_package(plugin_dir, target, &scratch)?;
-    let source = package_engine(&package);
+    let package = fetch_package(plugin_dir, target, &scratch.0)?;
+    install_engine_from(plugin_dir, &package, target, &scratch.0)
+}
+
+/// Install a verified package's engine and notifier into the plugin; the
+/// previous engine and version state are snapshotted into `backup_dir`.
+pub(crate) fn install_engine_from(
+    plugin_dir: &Path,
+    package: &Path,
+    target: &str,
+    backup_dir: &Path,
+) -> Result<(), &'static str> {
+    let source = package_engine(package);
     let destination = engine_path(plugin_dir);
     let state = state_path(plugin_dir);
     fs::create_dir_all(release_dir(plugin_dir)).map_err(|_| "engine")?;
@@ -443,7 +481,7 @@ fn install_exact_engine(plugin_dir: &Path, target: &str) -> Result<(), &'static 
         let _ = fs::remove_file(&staged);
         return Err("engine");
     }
-    replace_engine_and_state(&destination, &staged, &state, &scratch.0, || {
+    replace_engine_and_state(&destination, &staged, &state, backup_dir, || {
         write_engine_state(plugin_dir, target)
     })
     .map_err(|_| "engine")?;
@@ -495,7 +533,7 @@ fn synchronize_tarball_source(plugin_dir: &Path, package: &Path) -> std::io::Res
 
 fn tarball_install(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
     let scratch = Scratch::new("agenmux-up").map_err(|_| "scratch")?;
-    let package = fetch_package(plugin_dir, target, &scratch)?;
+    let package = fetch_package(plugin_dir, target, &scratch.0)?;
     synchronize_tarball_source(plugin_dir, &package).map_err(|_| "copy")?;
     if !engine_matches(&engine_path(plugin_dir), target) {
         return Err("engine");
@@ -533,14 +571,25 @@ fn wait_for_client(name: &str) {
     }
 }
 
-fn restart(plugin_dir: &Path, was_open: bool, old_control: &str) {
-    if !tmux_running() {
-        return;
-    }
+/// Close this server's view and wait for its control client to leave.
+fn teardown_runtime(old_control: &str) {
     let _ = panes::teardown();
     if !old_control.is_empty() {
         wait_for_client(old_control);
     }
+}
+
+fn restart(plugin_dir: &Path, was_open: bool, old_control: &str) {
+    if !tmux_running() {
+        return;
+    }
+    teardown_runtime(old_control);
+    reenter(plugin_dir, was_open);
+}
+
+/// Load the installed release's own entrypoint, then reopen the view if it was
+/// open, so a rollback never assumes commands that release lacks.
+fn reenter(plugin_dir: &Path, was_open: bool) {
     let entrypoint = plugin_dir.join(format!("{}.tmux", runtime_name(plugin_dir)));
     let _ = Command::new("bash").arg(entrypoint).status();
     if !was_open {
