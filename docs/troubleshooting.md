@@ -36,7 +36,7 @@ to an issue: paths, session names, and titles come from your own panes.
 
 ## Auto-update
 
-The version picker (`u`) shows what auto-update is doing: a prepared release
+The version picker (`U`) shows what auto-update is doing: a prepared release
 (`v0.7.1 ready · next start`), why it skips this install, or the last failure.
 
 - **Ready but never applied:** a release switches only when no agenmux view
