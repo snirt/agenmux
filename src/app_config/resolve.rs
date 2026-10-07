@@ -232,6 +232,7 @@ pub fn resolve_cli(
         header_fg,
         header_bg,
         pane_bg,
+        selected_bg,
         text_fg,
         muted_fg,
         accent_fg,

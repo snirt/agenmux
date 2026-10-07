@@ -28,7 +28,8 @@ pub(super) enum Overlay {
         target: MutationTarget,
         name: TextEdit,
     },
-    Confirm(MutationTarget),
+    /// `dd`: one record, or every selected one.
+    Confirm(Vec<MutationTarget>),
 }
 
 pub(super) struct Settings {
@@ -112,10 +113,13 @@ impl Overlay {
     /// place (agent-only mode), with whether it is a destructive confirmation.
     pub(super) fn inline_prompt(&self) -> Option<(String, bool)> {
         Some(match self {
-            Overlay::Confirm(target) => {
-                let kind = match target.action {
-                    SequenceAction::DeleteSession => "session",
-                    SequenceAction::DeleteWindow => "window",
+            Overlay::Confirm(targets) if targets.len() > 1 => {
+                (format!("delete {} selected? y/N", targets.len()), true)
+            }
+            Overlay::Confirm(targets) => {
+                let kind = match targets.first().map(|target| target.action) {
+                    Some(SequenceAction::DeleteSession) => "session",
+                    Some(SequenceAction::DeleteWindow) => "window",
                     _ => "pane",
                 };
                 (format!("delete {kind}? y/N"), true)
@@ -744,6 +748,7 @@ impl Sidebar {
                     ),
                     ("z/Z", KeyChord::Printable(b'z'), "fold / open all branches"),
                     ("u", KeyChord::Printable(b'u'), "recently closed (undo)"),
+                    ("v/V", KeyChord::Printable(b'v'), "select / select a range"),
                 ] {
                     if action_for(&self.normal_keys, chord).is_none() {
                         keys.push((label.into(), what.into()));
@@ -1024,12 +1029,14 @@ impl Sidebar {
                     }
                 }
             }
-            Overlay::Confirm(target) => {
+            Overlay::Confirm(targets) => {
                 let confirmed = matches!(key, Key::Text(ref text) if text == "y");
                 if confirmed {
-                    return self.execute_mutation(&target, "");
+                    return self.execute_deletes(&targets);
                 }
-                self.restore_mutation_input(&target.client);
+                if let Some(target) = targets.first() {
+                    self.restore_mutation_input(&target.client);
+                }
             }
         }
         self.follow_selection = true;

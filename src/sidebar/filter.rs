@@ -149,6 +149,84 @@ impl Sidebar {
         }
     }
 
+    /// The tmux record a row stands for: `$n` session, `@n` window, `%n` pane.
+    pub(super) fn visible_id(&self, pane: VisiblePane) -> &str {
+        match pane {
+            VisiblePane::Session(i) => &self.panes[i].session_id,
+            VisiblePane::Window(i) => &self.panes[i].window_id,
+            VisiblePane::Agent(_) | VisiblePane::Inventory(_) => self.visible_pane_id(pane),
+        }
+    }
+
+    pub(super) fn cursor_id(&self) -> Option<String> {
+        let row = self.visible.get(self.cursor_row()?)?;
+        Some(self.visible_id(*row).to_string())
+    }
+
+    /// Selected ids, the open range included: anchor through cursor in
+    /// visible order. A hidden anchor leaves the range empty.
+    pub(super) fn marked_set(&self) -> HashSet<&str> {
+        let mut set: HashSet<&str> = self.marked.iter().map(String::as_str).collect();
+        let anchor = self.range_anchor.as_deref().and_then(|anchor| {
+            self.visible
+                .iter()
+                .position(|&row| self.visible_id(row) == anchor)
+        });
+        if let (Some(anchor), Some(cursor)) = (anchor, self.cursor_row()) {
+            let rows = &self.visible[anchor.min(cursor)..=anchor.max(cursor)];
+            set.extend(rows.iter().map(|&row| self.visible_id(row)));
+        }
+        set
+    }
+
+    /// Selected records still in tmux, in tree order. Closed ones drop out
+    /// here, so the set never needs pruning.
+    pub(super) fn marked_ids(&self) -> Vec<String> {
+        let set = self.marked_set();
+        let mut out: Vec<String> = Vec::new();
+        for pane in &self.panes {
+            for id in [&pane.session_id, &pane.window_id, &pane.pane] {
+                if set.contains(id.as_str()) && !out.contains(id) {
+                    out.push(id.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// `v`: toggle the cursor row; in range mode, keep the range and end it.
+    pub(super) fn toggle_mark(&mut self) {
+        if self.range_anchor.is_some() {
+            self.end_range();
+        } else if let Some(id) = self.cursor_id() {
+            if !self.marked.remove(&id) {
+                self.marked.insert(id);
+            }
+        }
+    }
+
+    /// `V`: anchor a range at the cursor row; again, keep it and end it.
+    pub(super) fn toggle_range(&mut self) {
+        if self.range_anchor.is_some() {
+            self.end_range();
+        } else {
+            self.range_anchor = self.cursor_id();
+        }
+    }
+
+    fn end_range(&mut self) {
+        self.marked = self.marked_ids().into_iter().collect();
+        self.range_anchor = None;
+    }
+
+    /// Drop the selection and any open range; false when there was none.
+    pub(super) fn clear_marks(&mut self) -> bool {
+        let had = self.range_anchor.is_some() || !self.marked_ids().is_empty();
+        self.marked.clear();
+        self.range_anchor = None;
+        had
+    }
+
     pub(super) fn visible_occurrence(&self, pane: VisiblePane) -> Option<PaneOccurrence> {
         let (i, window, pane_id) = match pane {
             VisiblePane::Agent(_) => return None,
@@ -544,6 +622,8 @@ impl Sidebar {
             | Key::RestoreLayout
             | Key::Undo
             | Key::DismissLayout
+            | Key::Mark
+            | Key::MarkRange
             | Key::Other => {}
         }
     }

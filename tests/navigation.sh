@@ -291,6 +291,35 @@ copied_pane="${copied#tmux pane }"
   echo "FAIL navigation-key-table: yy copied '$copied' or moved the selection"
   exit 1
 }
+# `V` + `j` through the client key table selects two agents; `yy` copies both
+# and ends the selection. `v` then Escape selects and clears one.
+wait_hint() {
+  local hint=''
+  for _ in $(seq 1 40); do
+    hint="$(bottom_hint "$sidebar")"
+    if [ -z "${2:-}" ]; then has "$hint" "$1" && return 0; else ! has "$hint" "$1" && return 0; fi
+    sleep 0.05
+  done
+  echo "FAIL navigation-key-table: footer '$hint' ${2:+still }shows '$1'"
+  exit 1
+}
+printf 'gg' >&9
+sleep 0.3
+printf 'V' >&9
+wait_hint '-- RANGE -- 1 selected'
+printf 'j' >&9
+wait_hint '-- RANGE -- 2 selected'
+printf 'yy' >&9
+wait_hint 'selected' gone
+copied="$(tmux -S "$sock" show-buffer)"
+[[ $copied =~ ^tmux\ pane\ %[0-9]+$'\n'tmux\ pane\ %[0-9]+$ ]] || {
+  echo "FAIL navigation-key-table: V j yy copied '$copied'"
+  exit 1
+}
+printf 'v' >&9
+wait_hint '1 selected'
+printf '\033' >&9
+wait_hint 'selected' gone
 printf '[display]\nshow_all_panes = false\n[tmux_management]\nenabled = false\n[keys.normal]\nup = ["K"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" config reload >/dev/null

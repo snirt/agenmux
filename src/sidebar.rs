@@ -172,13 +172,14 @@ enum VisiblePane {
     Window(usize),
 }
 
-/// Agent and pane rows name the pane; a single-pane window has no row of its own.
-fn item_reference(selected: VisiblePane, pane: &PaneMeta) -> String {
-    match selected {
-        VisiblePane::Session(_) => format!("tmux session {}", pane.session_id),
-        VisiblePane::Window(_) => format!("tmux window {}", pane.window_id),
-        VisiblePane::Agent(_) | VisiblePane::Inventory(_) => format!("tmux pane {}", pane.pane),
-    }
+/// `$n`/`@n`/`%n` (see `visible_id`) as `tmux session $3` and so on.
+fn item_reference(id: &str) -> String {
+    let kind = match id.as_bytes().first() {
+        Some(b'$') => "session",
+        Some(b'@') => "window",
+        _ => "pane",
+    };
+    format!("tmux {kind} {id}")
 }
 
 /// display-message expands formats and strftime, which would eat `%12`.
@@ -208,9 +209,10 @@ fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMod
 
 fn mutation_owner(overlay: &Overlay) -> Option<&str> {
     match overlay {
-        Overlay::Create { target, .. }
-        | Overlay::Rename { target, .. }
-        | Overlay::Confirm(target) => Some(target.client.as_str()),
+        Overlay::Create { target, .. } | Overlay::Rename { target, .. } => {
+            Some(target.client.as_str())
+        }
+        Overlay::Confirm(targets) => targets.first().map(|target| target.client.as_str()),
         Overlay::Help | Overlay::Versions { .. } | Overlay::Undo { .. } | Overlay::Settings(_) => {
             None
         }
@@ -244,6 +246,10 @@ pub struct Sidebar {
     attention_filter: bool,
     // Collapsed session and window ids ("$n"/"@n"): stable across rescans.
     collapsed: HashSet<String>,
+    /// `v`/`V` selection by tmux id ("$n"/"@n"/"%n"), apart from the cursor.
+    marked: HashSet<String>,
+    /// `V` range start; the range runs from it to the cursor in visible order.
+    range_anchor: Option<String>,
     /// Persisted collapse state and layout; opened only by the runtime entry
     /// points, so tests never touch the user's state dir.
     snapshot: Option<crate::snapshot::Store>,
@@ -422,6 +428,8 @@ fn new_sidebar(
         query: ui::TextEdit::from(""),
         attention_filter: false,
         collapsed: HashSet::new(),
+        marked: HashSet::new(),
+        range_anchor: None,
         snapshot: None,
         search_focused: false,
         key_sequence: KeySequence::default(),
@@ -845,7 +853,10 @@ impl Sidebar {
                 SequenceResult::Match(
                     crate::input::SequenceDispatch::QuickLauncher(id),
                     client,
-                ) => self.begin_quick_launcher(&id, client),
+                ) => {
+                    self.clear_marks();
+                    self.begin_quick_launcher(&id, client)
+                }
                 SequenceResult::Pending | SequenceResult::Miss => DispatchResult::Continue,
             };
         }
@@ -887,7 +898,12 @@ impl Sidebar {
             Key::Settings => self.settings(),
             Key::Search => self.focus_search(),
             Key::ToggleAttention => self.toggle_attention_filter(),
-            Key::AllStates => self.clear_filter(),
+            // Esc drops a selection before it clears filters.
+            Key::AllStates => {
+                if !self.clear_marks() {
+                    self.clear_filter()
+                }
+            }
             Key::TogglePanes => self.toggle_all_panes(),
             Key::ToggleBranch => self.toggle_branch(),
             Key::Left => self.collapse_branch(),
@@ -896,6 +912,8 @@ impl Sidebar {
             Key::ExpandAll => self.set_all_collapsed(false),
             Key::RestoreLayout => self.restore_layout(),
             Key::Undo => self.undo(),
+            Key::Mark => self.toggle_mark(),
+            Key::MarkRange => self.toggle_range(),
             Key::DismissLayout => {
                 if let Some(store) = self.snapshot.as_mut() {
                     store.dismiss();
@@ -959,14 +977,55 @@ impl Sidebar {
             trace!("mutation ignored: invoking tmux client is unknown");
             return DispatchResult::Continue;
         };
+        let marked = self.marked_ids();
+        if action == SequenceAction::Delete && !marked.is_empty() {
+            return self.delete_marked(&marked, client);
+        }
+        // Every other command acts on the cursor row and ends the selection.
+        self.clear_marks();
         // The row the user sees: with the client elsewhere, the cursor
         // follows the active pane while `sel` may lag one scan behind.
         let Some((selected, pane)) = self.selected_pane() else {
             self.mutation_error(&client, "selected pane no longer exists");
             return DispatchResult::Continue;
         };
-        // dd and r act on whatever record the cursor is on; a collapsed
-        // window row is its only pane, so it means the window.
+        let target = self.mutation_target(action, selected, pane, client);
+        match target.action {
+            SequenceAction::CreateWindow | SequenceAction::CreateSession => {
+                self.enter_mutation_input(&target.client);
+                self.overlay = Some(Overlay::Create {
+                    target,
+                    name: ui::TextEdit::with_limit(String::new(), 128),
+                });
+                DispatchResult::Continue
+            }
+            SequenceAction::RenamePane
+            | SequenceAction::RenameWindow
+            | SequenceAction::RenameSession => {
+                self.enter_mutation_input(&target.client);
+                let action = target.action;
+                self.open_rename_input(target, action);
+                DispatchResult::Continue
+            }
+            SequenceAction::DeletePane
+            | SequenceAction::DeleteWindow
+            | SequenceAction::DeleteSession => self.confirm_delete(vec![target]),
+            SequenceAction::First
+            | SequenceAction::Delete
+            | SequenceAction::Rename
+            | SequenceAction::Copy => DispatchResult::Continue,
+        }
+    }
+
+    /// dd and r act on whatever record the row is; a collapsed window row
+    /// is its only pane, so it means the window.
+    fn mutation_target(
+        &self,
+        action: SequenceAction,
+        selected: VisiblePane,
+        pane: PaneMeta,
+        client: String,
+    ) -> MutationTarget {
         let split_window = self
             .panes
             .iter()
@@ -990,68 +1049,95 @@ impl Sidebar {
             pane.window_id,
             pane.session_id
         );
-        let target = MutationTarget {
+        MutationTarget {
             action,
             pane_id: pane.pane,
             window_id: pane.window_id,
             session_id: pane.session_id,
             cwd: pane.path,
             client,
-        };
-        match action {
-            SequenceAction::CreateWindow | SequenceAction::CreateSession => {
-                self.enter_mutation_input(&target.client);
-                self.overlay = Some(Overlay::Create {
-                    target,
-                    name: ui::TextEdit::with_limit(String::new(), 128),
-                });
-                DispatchResult::Continue
-            }
-            SequenceAction::RenamePane
-            | SequenceAction::RenameWindow
-            | SequenceAction::RenameSession => {
-                self.enter_mutation_input(&target.client);
-                self.open_rename_input(target, action);
-                DispatchResult::Continue
-            }
-            SequenceAction::DeletePane
-            | SequenceAction::DeleteWindow
-            | SequenceAction::DeleteSession => {
-                if self.settings.settings.tmux_management_confirm_delete {
-                    self.enter_mutation_input(&target.client);
-                    self.overlay = Some(Overlay::Confirm(target));
-                    DispatchResult::Continue
-                } else {
-                    self.execute_mutation(&target, "")
-                }
-            }
-            SequenceAction::First
-            | SequenceAction::Delete
-            | SequenceAction::Rename
-            | SequenceAction::Copy => DispatchResult::Continue,
         }
     }
 
-    /// `yy`: put the selected record's tmux ID on the invoking client's
-    /// clipboard (OSC 52) and in the tmux paste buffer. IDs stay unique when
-    /// display names repeat, and the selection does not move.
+    /// `dd` over the selection. A record inside another selected one goes
+    /// with its parent, so it is skipped rather than reported as changed.
+    fn delete_marked(&mut self, marked: &[String], client: String) -> DispatchResult {
+        let picked = |id: &str| marked.iter().any(|other| other == id);
+        let targets = marked
+            .iter()
+            .filter_map(|id| {
+                let i = self.panes.iter().position(|pane| {
+                    [&pane.session_id, &pane.window_id, &pane.pane].contains(&id)
+                })?;
+                let pane = &self.panes[i];
+                let (row, covered) = if *id == pane.session_id {
+                    (VisiblePane::Session(i), false)
+                } else if *id == pane.window_id {
+                    (VisiblePane::Window(i), picked(&pane.session_id))
+                } else {
+                    let parent = picked(&pane.session_id) || picked(&pane.window_id);
+                    (VisiblePane::Inventory(i), parent)
+                };
+                let target =
+                    self.mutation_target(SequenceAction::Delete, row, pane.clone(), client.clone());
+                (!covered).then_some(target)
+            })
+            .collect();
+        self.confirm_delete(targets)
+    }
+
+    fn confirm_delete(&mut self, targets: Vec<MutationTarget>) -> DispatchResult {
+        let Some(first) = targets.first() else {
+            return DispatchResult::Continue;
+        };
+        if self.settings.settings.tmux_management_confirm_delete {
+            self.enter_mutation_input(&first.client);
+            self.overlay = Some(Overlay::Confirm(targets));
+            DispatchResult::Continue
+        } else {
+            self.execute_deletes(&targets)
+        }
+    }
+
+    fn execute_deletes(&mut self, targets: &[MutationTarget]) -> DispatchResult {
+        self.clear_marks();
+        for target in targets {
+            self.execute_mutation(target, "");
+        }
+        DispatchResult::Continue
+    }
+
+    /// `yy`: put the selected records' tmux IDs, one per line, on the invoking
+    /// client's clipboard (OSC 52) and in the tmux paste buffer; with nothing
+    /// selected, the cursor row's. IDs stay unique when display names repeat,
+    /// and the cursor does not move.
     fn copy_reference(&mut self, client: Option<String>) {
         let client = client
             .filter(|value| !value.is_empty())
             .or_else(|| (!self.popup_client.is_empty()).then(|| self.popup_client.clone()));
-        let Some((selected, pane)) = self.selected_pane() else {
+        let mut ids = self.marked_ids();
+        self.clear_marks();
+        if ids.is_empty() {
+            ids.extend(self.cursor_id());
+        }
+        if ids.is_empty() {
             if let Some(client) = &client {
                 self.mutation_error(client, "selected pane no longer exists");
             }
             return;
-        };
-        let reference = item_reference(selected, &pane);
+        }
+        let reference = ids
+            .iter()
+            .map(|id| item_reference(id))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut args = vec!["set-buffer", "-w"];
         if let Some(client) = &client {
             args.extend(["-t", client]);
         }
         args.extend(["--", &reference]);
         let message = match command_status(&args) {
+            Ok(()) if ids.len() > 1 => format!("copied {} references", ids.len()),
             Ok(()) => format!("copied {reference}"),
             Err(error) => format!("copy failed: {error}"),
         };
@@ -1555,14 +1641,11 @@ impl Sidebar {
         self.search_keys = self.settings.settings.search.clone();
         let management_enabled = self.settings.settings.tmux_management_enabled;
         if !management_enabled {
-            let mutation_client = match self.overlay.as_ref() {
-                Some(
-                    Overlay::Create { target, .. }
-                    | Overlay::Rename { target, .. }
-                    | Overlay::Confirm(target),
-                ) => Some(target.client.clone()),
-                _ => None,
-            };
+            let mutation_client = self
+                .overlay
+                .as_ref()
+                .and_then(mutation_owner)
+                .map(str::to_string);
             if let Some(client) = mutation_client {
                 self.restore_mutation_input(&client);
                 self.overlay = None;
@@ -1909,36 +1992,9 @@ mod tests {
 
     #[test]
     fn item_reference_names_the_selected_record_by_tmux_id() {
-        // Same session/window names in two sessions: only the IDs tell them apart.
-        let pane = |pane: &str, window: &str, session: &str| PaneMeta {
-            pane: pane.into(),
-            pane_index: 0,
-            pane_title: "agent".into(),
-            command: "claude".into(),
-            path: "/work".into(),
-            window_id: window.into(),
-            window_index: 1,
-            window_name: "editor".into(),
-            session_id: session.into(),
-            session_name: "work".into(),
-            agent_index: None,
-        };
-        let a = pane("%12", "@7", "$3");
-        let b = pane("%40", "@9", "$5");
-        assert_eq!(
-            item_reference(VisiblePane::Session(0), &a),
-            "tmux session $3"
-        );
-        assert_eq!(item_reference(VisiblePane::Window(0), &a), "tmux window @7");
-        assert_eq!(
-            item_reference(VisiblePane::Inventory(0), &a),
-            "tmux pane %12"
-        );
-        assert_eq!(item_reference(VisiblePane::Agent(0), &b), "tmux pane %40");
-        assert_ne!(
-            item_reference(VisiblePane::Window(0), &a),
-            item_reference(VisiblePane::Window(0), &b)
-        );
+        assert_eq!(item_reference("$3"), "tmux session $3");
+        assert_eq!(item_reference("@7"), "tmux window @7");
+        assert_eq!(item_reference("%12"), "tmux pane %12");
     }
 
     #[test]

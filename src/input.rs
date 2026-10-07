@@ -134,6 +134,8 @@ pub(crate) enum Key {
     RestoreLayout,
     Undo,
     DismissLayout,
+    Mark,
+    MarkRange,
     Text(String),
     Other,
 }
@@ -489,6 +491,8 @@ fn decode_protocol_payload(
                     b'R' => Key::RestoreLayout,
                     b'u' => Key::Undo,
                     b'x' => Key::DismissLayout,
+                    b'v' => Key::Mark,
+                    b'V' => Key::MarkRange,
                     0x03 | 0x04 => Key::Quit,
                     0x1b if chord == Some(KeyChord::Left) => Key::Left,
                     0x1b if chord == Some(KeyChord::Right) => Key::Right,
@@ -828,6 +832,8 @@ fn send_key_inner(name: &str, client: Option<&str>) -> i32 {
             "expand-all" => b"Z".to_vec(),
             "restore-layout" => b"R".to_vec(),
             "dismiss-layout" => b"x".to_vec(),
+            "mark" => b"v".to_vec(),
+            "mark-range" => b"V".to_vec(),
             "j" => b"j".to_vec(),
             "k" => b"k".to_vec(),
             "wheel-up" => vec![0x01],
@@ -1094,6 +1100,8 @@ mod tests {
             (b"R", "restore-layout"),
             (b"u", "undo"),
             (b"x", "dismiss-layout"),
+            (b"v", "mark"),
+            (b"V", "mark-range"),
             (&[0x0b], "other"),
         ] {
             feed(bytes);
@@ -1109,6 +1117,8 @@ mod tests {
                         | (Key::RestoreLayout, "restore-layout")
                         | (Key::Undo, "undo")
                         | (Key::DismissLayout, "dismiss-layout")
+                        | (Key::Mark, "mark")
+                        | (Key::MarkRange, "mark-range")
                         | (Key::Other, "other")
                 ),
                 "{bytes:?}: {key:?}"
