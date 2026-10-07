@@ -910,9 +910,10 @@ impl Sidebar {
         // one row; vis records it so mouse coordinates stay exact.
         let (notice, notice_len, update_hint) = match &self.update {
             Some(t) => {
-                let plain = format!(" ↑{}", t.trim_start_matches('v'));
+                let ready = if self.update_ready { " ready" } else { "" };
+                let plain = format!(" ↑{}{ready}", t.trim_start_matches('v'));
                 (
-                    format!(" {muted}↑{}{E}[0m", t.trim_start_matches('v')),
+                    format!(" {muted}↑{}{ready}{E}[0m", t.trim_start_matches('v')),
                     plain.chars().count(),
                     self.hints(&[(Action::Versions, "update"), (Action::Search, "search")]),
                 )

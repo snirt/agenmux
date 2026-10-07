@@ -155,4 +155,42 @@ check label-kept "$(grep -c agent_label "$app") $(grep agent_label "$app")" '1 a
 check label-no-tmp "$(find "$home/labels" -name '*.agenmux.tmp' | wc -l | tr -d ' ')" 0
 check label-invalid "$(XDG_CONFIG_HOME="$home/labels" AGENMUX_AGENT_LABEL=big sh "$DIR/install.sh" >/dev/null 2>&1 || echo refused)" refused
 
+# Fresh installs land on the latest published stable tag; a detached release
+# checkout follows newer tags on re-run; AGENMUX_REF keeps a development branch.
+git_fixture() { git -C "$home/src" -c user.name=fixture -c user.email=fixture@example.invalid "$@"; }
+version_now="$(bash "$DIR/scripts/version.sh" tag)"
+git_fixture tag "$version_now"
+sed -i.bak 's/^version = .*/version = "99.0.0"/' "$home/src/Cargo.toml" && rm "$home/src/Cargo.toml.bak"
+git_fixture commit -q -am "next release"
+git_fixture tag v99.0.0-rc1
+git_fixture commit -q --allow-empty -m "development"
+mkdir -p "$home/fake-bin"
+cat >"$home/fake-bin/curl" <<'EOF'
+#!/bin/sh
+printf '%s/releases/tag/%s' "$AGENMUX_REPO" "$LATEST_TAG"
+EOF
+chmod +x "$home/fake-bin/curl"
+tagged="$home/tagged/agenmux"
+PATH="$home/fake-bin:$PATH" LATEST_TAG="$version_now" AGENMUX_DIR="$tagged" \
+  AGENMUX_TMUX_CONF="$home/tagged.conf" sh "$DIR/install.sh" >/dev/null
+check fresh-on-release-tag "$(git -C "$tagged" describe --tags --exact-match)" "$version_now"
+# a prerelease is never "latest stable": the checkout stays put
+PATH="$home/fake-bin:$PATH" LATEST_TAG=v99.0.0-rc1 AGENMUX_DIR="$tagged" \
+  AGENMUX_TMUX_CONF="$home/tagged.conf" sh "$DIR/install.sh" >/dev/null
+check rerun-ignores-prerelease "$(git -C "$tagged" describe --tags --exact-match)" "$version_now"
+git_fixture tag v99.0.0 HEAD~1
+PATH="$home/fake-bin:$PATH" LATEST_TAG=v99.0.0 AGENMUX_DIR="$tagged" \
+  AGENMUX_TMUX_CONF="$home/tagged.conf" sh "$DIR/install.sh" >/dev/null
+check rerun-follows-newer-tag "$(git -C "$tagged" describe --tags --exact-match)" v99.0.0
+PATH="$home/fake-bin:$PATH" LATEST_TAG="$version_now" AGENMUX_DIR="$tagged" \
+  AGENMUX_TMUX_CONF="$home/tagged.conf" sh "$DIR/install.sh" >/dev/null
+check rerun-never-downgrades "$(git -C "$tagged" describe --tags --exact-match)" v99.0.0
+dev="$home/dev/agenmux"
+PATH="$home/fake-bin:$PATH" LATEST_TAG=v99.0.0 AGENMUX_REF=main AGENMUX_DIR="$dev" \
+  AGENMUX_TMUX_CONF="$home/dev-ref.conf" sh "$DIR/install.sh" >/dev/null
+check ref-keeps-branch "$(git -C "$dev" symbolic-ref --short HEAD)" main
+PATH="$home/fake-bin:$PATH" LATEST_TAG=v99.0.0 AGENMUX_DIR="$dev" \
+  AGENMUX_TMUX_CONF="$home/dev-ref.conf" sh "$DIR/install.sh" >/dev/null
+check branch-rerun-pulls "$(git -C "$dev" rev-parse HEAD)" "$(git -C "$home/src" rev-parse HEAD)"
+
 exit "$fail"

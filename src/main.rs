@@ -2,6 +2,7 @@
 mod diag;
 mod app_config;
 mod attention;
+mod autoupdate;
 mod conf;
 mod detect;
 mod focus;
@@ -85,6 +86,7 @@ fn main() {
                 e.exit_code()
             }
         },
+        ["internal", "auto-update"] => autoupdate::run(&plugin_dir()),
         ["scan" | "list", rest @ ..] => match parse_list_args(rest) {
             Some(filter) => cmd_list(filter),
             None => {
@@ -93,8 +95,18 @@ fn main() {
             }
         },
         ["status"] => cmd_status(),
-        ["sidebar"] => sidebar::run(plugin_dir()),
-        ["daemon"] => sidebar::run_daemon(plugin_dir(), scan_cache_path()),
+        ["sidebar"] => {
+            // Popup children run inside a launch that already passed the gate.
+            let direct = std::env::var_os("AGENMUX_PIN").is_none_or(|p| p.is_empty());
+            let _lease = direct.then(|| autoupdate::gate_direct(&plugin_dir()));
+            sidebar::run(plugin_dir())
+        }
+        ["daemon"] => {
+            let direct = std::env::var_os("AGENMUX_LEASE_FD").is_none()
+                && std::env::var_os("AGENMUX_GENERATION").is_none();
+            let _lease = direct.then(|| autoupdate::gate_direct(&plugin_dir()));
+            sidebar::run_daemon(plugin_dir(), scan_cache_path())
+        }
         ["sidebar-pane"] => pane_writers::run_pane(),
         ["key", key] => sidebar::send_key(key, None),
         ["key", key, client] => sidebar::send_key(key, Some(client)),

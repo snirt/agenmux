@@ -6,7 +6,8 @@
 curl -fsSL https://snirt.github.io/agenmux/install.sh | sh
 ```
 
-The script clones the plugin to `~/.tmux/plugins/agenmux`, creates
+The script clones the plugin to `~/.tmux/plugins/agenmux` at the latest
+stable release tag (`AGENMUX_REF=<branch|tag>` picks another ref), creates
 `~/.config/agenmux/agents/`, shows a Nerd Font sample and asks whether it
 renders (yes sets `display.agent_label = "icon"`, no sets `"text"`; an existing
 `agent_label` is kept, and `AGENMUX_AGENT_LABEL` answers without a prompt),
@@ -18,8 +19,8 @@ confirm, and reloads tmux. It also offers to symlink the `agenmux` command into
 your PATH. When tmux is running, it first installs the native
 engine with a progress indicator, so the first toggle opens at once; otherwise
 the engine installs in the background when tmux starts. Run it again to
-update; an existing agenmux entry
-is left alone.
+update: a release checkout moves to the newest stable tag, a branch checkout
+fast-forwards. An existing agenmux entry is left alone.
 
 ## TPM
 
@@ -76,11 +77,48 @@ agenmux v0.7.0 ↑0.7.1
 U update · / search
 ```
 
+### Automatic updates
+
+Auto-update is on by default (`[behavior] auto_update = true`). At most once a
+day, while a sidebar or popup is open, agenmux downloads and verifies the
+newest stable release in the background. Nothing running changes: the header
+shows `↑0.7.1 ready`, and the version picker says `v0.7.1 ready · next start`.
+
+The prepared release is switched to on the **next fresh start**: the next
+sidebar or popup launch while no agenmux view is running from this install on
+any tmux server. Adding a sidebar to a running view, moving within a popup,
+`config reload`, `list`, `status` and closing the view never switch. The switch
+is local (no network) and swaps source, engine and notification helper
+together. If the new release fails to start, the previous one is restored and
+opened instead, and that release is not retried automatically until a newer
+one appears or auto-update is turned back on.
+
+Auto-update skips, with the reason shown in the version picker:
+
+- development checkouts (not exactly on a release tag), dirty git trees, and a
+  custom `@agenmux-bin` or debug engine;
+- tarball installs whose files differ from the installed release (checked
+  against that release's verified archive once, then against the recorded
+  baseline).
+
+Set `auto_update = false` in `config.toml` or in the settings view (`s`) to
+turn it off; a release already prepared is then not applied. Choosing a version
+by hand in the picker pauses auto-update the same way (written to
+`config.toml`), so a rollback sticks; turn it back on in settings.
+
+Preparation state lives beside the plugin in
+`<plugins dir>/.agenmux-state/<plugin dir name>/`. Deleting that directory
+while agenmux is closed discards a prepared release; an interrupted switch is
+recovered from it on the next start.
+
+### Choosing a version
+
 Press `U` to open the version picker, choose a release, and press `Enter`.
 The plugin switches its source *and* its native engine to that release and
 reopens itself — so the same key rolls **back** to an older release just as
-easily. The check that feeds the notice runs in the background, at most once a
-day; nothing is downloaded or changed until you pick a version.
+easily. A manual switch first closes this tmux server's view; if another tmux
+server or popup still runs agenmux from the same install, it reopens the view
+and asks you to close the other one first.
 
 Details worth knowing:
 

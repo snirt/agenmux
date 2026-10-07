@@ -39,11 +39,11 @@ fetch_pkg() {
   # No trap here: bash EXIT traps are global, so installing one would silently
   # drop whatever the caller registered. Callers own cleanup of $tmp.
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/agenmux.XXXXXX")" || return 1
-  curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || return 1
+  curl -fsSL --connect-timeout 20 --max-time 60 "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || return 1
 
   for package in "agenmux-$platform" "tmux-agents-mon-$platform"; do
     archive="$package.tar.gz"
-    curl -fsSL "$base/$archive" -o "$tmp/$archive" || continue
+    curl -fsSL --connect-timeout 20 --max-time 600 "$base/$archive" -o "$tmp/$archive" || continue
     expected="$(awk -v file="$archive" '$2 == file || $2 == "./" file { print $1 }' "$tmp/SHA256SUMS")"
     [ "${#expected}" -eq 64 ] || continue
     if command -v sha256sum >/dev/null; then
@@ -52,6 +52,8 @@ fetch_pkg() {
       actual="$(shasum -a 256 "$tmp/$archive" | awk '{ print $1 }')"
     fi
     [ "$actual" = "$expected" ] || continue
+    # Members must stay inside $dest: no absolute or parent-relative names.
+    tar -tzf "$tmp/$archive" | grep -Eq '^/|(^|/)\.\.(/|$)' && return 1
     mkdir -p "$dest" || return 1
     tar -xzf "$tmp/$archive" -C "$dest" || return 1
     [ -d "$dest/$package" ] || return 1
@@ -79,7 +81,16 @@ installed_rev="$(sed -n '2p' "$state_read" 2>/dev/null)"
 # extra state to track
 want="$(bash "$DIR/scripts/version.sh" tag 2>/dev/null)"
 
+# A version switch (auto-update or manual) can land while this runs. Never
+# install an engine or state for source that is no longer checked out.
+# ponytail: check-then-mv, not a lock; the window is the mv itself.
+source_unchanged() {
+  [ "$(bash "$DIR/scripts/version.sh" tag 2>/dev/null)" = "$want" ] &&
+    [ "$(git -C "$DIR" rev-parse HEAD 2>/dev/null || printf -)" = "$current_rev" ]
+}
+
 write_state() {
+  source_unchanged || return 1
   local staged="$STATE.$$"
   mkdir -p "$(dirname "$STATE")"
   printf '%s\n%s\n' "$1" "$current_rev" >"$staged" && mv -f "$staged" "$STATE"
@@ -145,7 +156,7 @@ download_bin() {
     if cp "$source" "$staged"; then
       chmod +x "$staged"
       if binary_matches "$staged" "$tag"; then
-        mv -f "$staged" "$BIN" && write_state "$tag" && rc=0
+        source_unchanged && mv -f "$staged" "$BIN" && write_state "$tag" && rc=0
       fi
     fi
     [ "$rc" -eq 0 ] || rm -f "$staged"

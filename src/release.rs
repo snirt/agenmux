@@ -8,15 +8,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_REPO: &str = "https://github.com/snirt/agenmux";
 
-fn repo() -> String {
+pub(crate) fn repo() -> String {
     crate::compat_env("AGENMUX_REPO", "AGENTS_MON_REPO").unwrap_or_else(|| DEFAULT_REPO.to_string())
 }
 
-fn release_dir(plugin_dir: &Path) -> PathBuf {
+pub(crate) fn release_dir(plugin_dir: &Path) -> PathBuf {
     plugin_dir.join("target/release")
 }
 
-fn runtime_name(plugin_dir: &Path) -> &'static str {
+pub(crate) fn runtime_name(plugin_dir: &Path) -> &'static str {
     if plugin_dir.join("agenmux.tmux").is_file() {
         "agenmux"
     } else {
@@ -24,15 +24,15 @@ fn runtime_name(plugin_dir: &Path) -> &'static str {
     }
 }
 
-fn engine_path(plugin_dir: &Path) -> PathBuf {
+pub(crate) fn engine_path(plugin_dir: &Path) -> PathBuf {
     release_dir(plugin_dir).join(runtime_name(plugin_dir))
 }
 
-fn state_path(plugin_dir: &Path) -> PathBuf {
+pub(crate) fn state_path(plugin_dir: &Path) -> PathBuf {
     release_dir(plugin_dir).join(format!(".{}-version", runtime_name(plugin_dir)))
 }
 
-fn package_engine(package: &Path) -> PathBuf {
+pub(crate) fn package_engine(package: &Path) -> PathBuf {
     let canonical = package.join("target/release/agenmux");
     if canonical.is_file() {
         canonical
@@ -41,7 +41,7 @@ fn package_engine(package: &Path) -> PathBuf {
     }
 }
 
-fn latest_file(plugin_dir: &Path) -> PathBuf {
+pub(crate) fn latest_file(plugin_dir: &Path) -> PathBuf {
     release_dir(plugin_dir).join(".agenmux-latest")
 }
 
@@ -61,7 +61,7 @@ fn success(program: impl AsRef<OsStr>, args: &[&str]) -> bool {
     run(program, args).is_ok_and(|output| output.status.success())
 }
 
-fn atomic_write(path: &Path, value: &str) -> std::io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, value: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -74,11 +74,13 @@ fn atomic_write(path: &Path, value: &str) -> std::io::Result<()> {
     fs::rename(staged, path)
 }
 
-fn latest_remote_tag(repo: &str) -> Option<String> {
+pub(crate) fn latest_remote_tag(repo: &str) -> Option<String> {
     let output = run(
         "curl",
         &[
             "-fsSL",
+            "--max-time",
+            "20",
             "-o",
             "/dev/null",
             "-w",
@@ -135,7 +137,7 @@ fn natural_cmp(left: &str, right: &str) -> Ordering {
     (left.len() - l).cmp(&(right.len() - r))
 }
 
-fn compare_tags(left: &str, right: &str) -> Ordering {
+pub(crate) fn compare_tags(left: &str, right: &str) -> Ordering {
     let (left_version, left_pre) = left
         .split_once('-')
         .map_or((left, None), |(v, p)| (v, Some(p)));
@@ -163,7 +165,12 @@ fn compare_tags(left: &str, right: &str) -> Ordering {
 }
 
 fn remote_tags(repo: &str, latest: &str) -> Vec<String> {
-    let Ok(output) = run("git", &["ls-remote", "--tags", "--refs", repo]) else {
+    let Ok(output) = Command::new("git")
+        .args(["ls-remote", "--tags", "--refs", repo])
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "20")
+        .output()
+    else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -199,7 +206,7 @@ pub fn refresh(plugin_dir: &Path) -> i32 {
     0
 }
 
-fn valid_tag(tag: &str) -> bool {
+pub(crate) fn valid_tag(tag: &str) -> bool {
     let Some(rest) = tag.strip_prefix('v') else {
         return false;
     };
@@ -209,7 +216,7 @@ fn valid_tag(tag: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
 }
 
-fn manifest_tag(plugin_dir: &Path) -> Option<String> {
+pub(crate) fn manifest_tag(plugin_dir: &Path) -> Option<String> {
     fs::read_to_string(plugin_dir.join("Cargo.toml"))
         .ok()?
         .lines()
@@ -225,7 +232,7 @@ fn manifest_tag(plugin_dir: &Path) -> Option<String> {
         })
 }
 
-fn note(message: &str) {
+pub(crate) fn note(message: &str) {
     if !success("tmux", &["display-message", &format!("agenmux: {message}")]) {
         println!("agenmux: {message}");
     }
@@ -236,7 +243,7 @@ fn fail(message: &str) -> i32 {
     1
 }
 
-fn first_line(path: &Path) -> Option<String> {
+pub(crate) fn first_line(path: &Path) -> Option<String> {
     fs::read_to_string(path)
         .ok()?
         .lines()
@@ -254,7 +261,7 @@ fn resolve_target(plugin_dir: &Path, requested: &str) -> Option<String> {
         .or_else(|| latest_remote_tag(&repo()))
 }
 
-fn git_output(plugin_dir: &Path, args: &[&str]) -> Option<Output> {
+pub(crate) fn git_output(plugin_dir: &Path, args: &[&str]) -> Option<Output> {
     Command::new("git")
         .arg("-C")
         .arg(plugin_dir)
@@ -267,7 +274,8 @@ fn git_success(plugin_dir: &Path, args: &[&str]) -> bool {
     git_output(plugin_dir, args).is_some_and(|output| output.status.success())
 }
 
-fn git_install(plugin_dir: &Path, target: &str) -> Result<String, &'static str> {
+/// The ref a failed switch returns to. Refuses dirty or unreadable trees.
+pub(crate) fn git_previous(plugin_dir: &Path) -> Result<String, &'static str> {
     let status = git_output(plugin_dir, &["status", "--porcelain"]).ok_or("status")?;
     if !status.status.success() {
         return Err("status");
@@ -290,13 +298,30 @@ fn git_install(plugin_dir: &Path, target: &str) -> Result<String, &'static str> 
     if previous.is_empty() {
         return Err("status");
     }
-    let _ = git_success(plugin_dir, &["fetch", "--tags", "--quiet", "origin"]);
-    let revision = format!("refs/tags/{target}^{{commit}}");
-    if !git_success(plugin_dir, &["rev-parse", "-q", "--verify", &revision]) {
-        return Err("unknown");
-    }
+    Ok(previous)
+}
+
+/// The commit a local release tag points at.
+pub(crate) fn git_tag_commit(plugin_dir: &Path, tag: &str) -> Option<String> {
+    git_output(
+        plugin_dir,
+        &[
+            "rev-parse",
+            "-q",
+            "--verify",
+            &format!("refs/tags/{tag}^{{commit}}"),
+        ],
+    )
+    .filter(|output| output.status.success())
+    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    .filter(|commit| !commit.is_empty())
+}
+
+/// Offline: move HEAD to a release tag that is already present locally.
+pub(crate) fn git_checkout_tag(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
+    git_tag_commit(plugin_dir, target).ok_or("unknown")?;
     git_success(plugin_dir, &["checkout", "--quiet", target])
-        .then_some(previous)
+        .then_some(())
         .ok_or("checkout")
 }
 
@@ -340,7 +365,7 @@ fn expected_version(tag: &str) -> &str {
     tag.strip_prefix('v').unwrap_or(tag)
 }
 
-fn engine_matches(binary: &Path, target: &str) -> bool {
+pub(crate) fn engine_matches(binary: &Path, target: &str) -> bool {
     Command::new(binary)
         .arg("--version")
         .output()
@@ -357,16 +382,18 @@ fn engine_matches(binary: &Path, target: &str) -> bool {
         })
 }
 
-fn fetch_package(
+/// Download and verify release `target` into `dest` with this tree's
+/// installer, then check the packaged engine reports that exact version.
+pub(crate) fn fetch_package(
     plugin_dir: &Path,
     target: &str,
-    scratch: &Scratch,
+    dest: &Path,
 ) -> Result<PathBuf, &'static str> {
     let output = Command::new("bash")
         .arg(plugin_dir.join("scripts/install-bin.sh"))
         .arg("fetch")
         .arg(target)
-        .arg(&scratch.0)
+        .arg(dest)
         .output()
         .map_err(|_| "fetch")?;
     if !output.status.success() {
@@ -380,7 +407,7 @@ fn fetch_package(
     Ok(package)
 }
 
-fn write_engine_state(plugin_dir: &Path, target: &str) -> std::io::Result<()> {
+pub(crate) fn write_engine_state(plugin_dir: &Path, target: &str) -> std::io::Result<()> {
     let revision = git_output(plugin_dir, &["rev-parse", "HEAD"])
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -428,10 +455,15 @@ fn replace_engine_and_state(
     Ok(())
 }
 
-fn install_exact_engine(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
-    let scratch = Scratch::new("agenmux-engine").map_err(|_| "scratch")?;
-    let package = fetch_package(plugin_dir, target, &scratch)?;
-    let source = package_engine(&package);
+/// Install a verified package's engine and notifier into the plugin; the
+/// previous engine and version state are snapshotted into `backup_dir`.
+pub(crate) fn install_engine_from(
+    plugin_dir: &Path,
+    package: &Path,
+    target: &str,
+    backup_dir: &Path,
+) -> Result<(), &'static str> {
+    let source = package_engine(package);
     let destination = engine_path(plugin_dir);
     let state = state_path(plugin_dir);
     fs::create_dir_all(release_dir(plugin_dir)).map_err(|_| "engine")?;
@@ -443,7 +475,7 @@ fn install_exact_engine(plugin_dir: &Path, target: &str) -> Result<(), &'static 
         let _ = fs::remove_file(&staged);
         return Err("engine");
     }
-    replace_engine_and_state(&destination, &staged, &state, &scratch.0, || {
+    replace_engine_and_state(&destination, &staged, &state, backup_dir, || {
         write_engine_state(plugin_dir, target)
     })
     .map_err(|_| "engine")?;
@@ -493,10 +525,8 @@ fn synchronize_tarball_source(plugin_dir: &Path, package: &Path) -> std::io::Res
     Ok(())
 }
 
-fn tarball_install(plugin_dir: &Path, target: &str) -> Result<(), &'static str> {
-    let scratch = Scratch::new("agenmux-up").map_err(|_| "scratch")?;
-    let package = fetch_package(plugin_dir, target, &scratch)?;
-    synchronize_tarball_source(plugin_dir, &package).map_err(|_| "copy")?;
+fn tarball_install(plugin_dir: &Path, target: &str, package: &Path) -> Result<(), &'static str> {
+    synchronize_tarball_source(plugin_dir, package).map_err(|_| "copy")?;
     if !engine_matches(&engine_path(plugin_dir), target) {
         return Err("engine");
     }
@@ -533,14 +563,17 @@ fn wait_for_client(name: &str) {
     }
 }
 
-fn restart(plugin_dir: &Path, was_open: bool, old_control: &str) {
-    if !tmux_running() {
-        return;
-    }
+/// Close this server's view and wait for its control client to leave.
+fn teardown_runtime(old_control: &str) {
     let _ = panes::teardown();
     if !old_control.is_empty() {
         wait_for_client(old_control);
     }
+}
+
+/// Load the installed release's own entrypoint, then reopen the view if it was
+/// open, so a rollback never assumes commands that release lacks.
+fn reenter(plugin_dir: &Path, was_open: bool) {
     let entrypoint = plugin_dir.join(format!("{}.tmux", runtime_name(plugin_dir)));
     let _ = Command::new("bash").arg(entrypoint).status();
     if !was_open {
@@ -568,41 +601,90 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
         return 0;
     }
 
+    let refuse = |reason: &str| match reason {
+        "dirty" => fail(&format!(
+            "uncommitted changes in {} — commit or stash first",
+            plugin_dir.display()
+        )),
+        "status" => fail(&format!(
+            "could not inspect working tree in {}",
+            plugin_dir.display()
+        )),
+        "unknown" => fail(&format!("unknown release {target}")),
+        "checkout" => fail(&format!("could not check out {target}")),
+        "fetch" => fail(&format!("could not download {target}")),
+        "engine" => fail(&format!("could not install engine for {target}")),
+        "busy" => fail("another tmux server or popup is using agenmux; close it and retry"),
+        _ => fail(&format!("could not write to {}", plugin_dir.display())),
+    };
+    let git_install_dir = plugin_dir.join(".git").exists();
+    // Refuse a dirty checkout before closing anything.
+    if git_install_dir {
+        if let Err(reason) = git_previous(plugin_dir) {
+            return refuse(reason);
+        }
+    }
+
+    note(&format!("switching to {target}…"));
+    // Everything that needs the network happens first, with this tree's own
+    // verified installer, before anything closes or the install is locked.
+    let Ok(scratch) = Scratch::new("agenmux-up") else {
+        return refuse("scratch");
+    };
+    if git_install_dir {
+        let _ = git_success(plugin_dir, &["fetch", "--tags", "--quiet", "origin"]);
+        if git_tag_commit(plugin_dir, &target).is_none() {
+            return refuse("unknown");
+        }
+    }
+    let package = match fetch_package(plugin_dir, &target, &scratch.0) {
+        Ok(package) => package,
+        Err(reason) => return refuse(reason),
+    };
+
+    let pause = match crate::autoupdate::pause(plugin_dir) {
+        Ok(pause) => pause,
+        Err(error) => return fail(&error),
+    };
     let was_open = tmux_option("@agenmux-on") == "1"
         || !tmux_value(&["show-option", "-gqv", "@agenmux-sidebar"]).is_empty()
         || !tmux_value(&["show-option", "-gqv", "@agents-mon-sidebar"]).is_empty();
     let old_control = tmux_option("@agenmux-control-client");
-    note(&format!("switching to {target}…"));
 
-    let result = if plugin_dir.join(".git").exists() {
-        git_install(plugin_dir, &target).and_then(|previous| {
-            if let Err(reason) = install_exact_engine(plugin_dir, &target) {
-                let _ = git_success(plugin_dir, &["checkout", "--quiet", &previous]);
-                return Err(reason);
-            }
-            Ok(())
-        })
-    } else {
-        tarball_install(plugin_dir, &target)
-    };
-    if let Err(reason) = result {
-        return match reason {
-            "dirty" => fail(&format!(
-                "uncommitted changes in {} — commit or stash first",
-                plugin_dir.display()
-            )),
-            "status" => fail(&format!(
-                "could not inspect working tree in {}",
-                plugin_dir.display()
-            )),
-            "unknown" => fail(&format!("unknown release {target}")),
-            "checkout" => fail(&format!("could not check out {target}")),
-            "fetch" => fail(&format!("could not download {target}")),
-            "engine" => fail(&format!("could not install engine for {target}")),
-            _ => fail(&format!("could not write to {}", plugin_dir.display())),
-        };
+    // This server's view releases its installation lease first; a lease still
+    // held afterwards belongs to another tmux server or an open popup.
+    let running = tmux_running();
+    if running {
+        teardown_runtime(&old_control);
     }
-    restart(plugin_dir, was_open, &old_control);
+    // A closed daemon takes seconds to exit and release its lease.
+    let result = crate::autoupdate::exclusive(plugin_dir, Duration::from_secs(20))
+        .map_err(|()| "busy")
+        .and_then(|_lock| {
+            if git_install_dir {
+                let previous = git_previous(plugin_dir)?;
+                git_checkout_tag(plugin_dir, &target)?;
+                if let Err(reason) = install_engine_from(plugin_dir, &package, &target, &scratch.0)
+                {
+                    let _ = git_success(plugin_dir, &["checkout", "--quiet", &previous]);
+                    return Err(reason);
+                }
+                Ok(())
+            } else {
+                tarball_install(plugin_dir, &target, &package)
+            }
+        });
+    // Reopen whichever release is installed now: the target, or the old one.
+    if running {
+        reenter(plugin_dir, was_open);
+    }
+    if let Err(reason) = result {
+        if let Some(pause) = pause {
+            pause.undo();
+        }
+        return refuse(reason);
+    }
+    crate::autoupdate::switched(plugin_dir);
     note(&format!("now on {target}"));
     0
 }

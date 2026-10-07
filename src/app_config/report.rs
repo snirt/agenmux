@@ -59,6 +59,7 @@ A @agenmux-* tmux option, when set, overrides the file.
 
 [behavior]
   notifications        true | false                       (true)
+  auto_update          true | false                       (true)
   hide_windows         glob filtering the prefix+w picker (unset)
 
 [tmux_management]
@@ -168,6 +169,10 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
         (
             "behavior.notifications".into(),
             config.notifications.to_string(),
+        ),
+        (
+            "behavior.auto_update".into(),
+            config.auto_update.to_string(),
         ),
         (
             "behavior.hide_windows".into(),

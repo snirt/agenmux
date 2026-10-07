@@ -34,6 +34,24 @@ pane title and the last two screen lines, which is what tuning an
 `agents/*.conf` rule needs. Review and sanitize either file before attaching it
 to an issue: paths, session names, and titles come from your own panes.
 
+## Auto-update
+
+The version picker (`U`) shows what auto-update is doing: a prepared release
+(`v0.7.1 ready · next start`), why it skips this install, or the last failure.
+
+- **Ready but never applied:** a release switches only when no agenmux view
+  from this install is running on any tmux server. Close every sidebar and
+  popup (including on other tmux servers), then open one.
+- **Run a check now:** `target/release/agenmux internal auto-update` from the
+  plugin directory (the daily throttle still applies; it prints the outcome).
+- **A release failed to start:** the previous release was restored and kept.
+  That release is not retried until a newer one appears; turning auto-update
+  off and on in settings retries it.
+- **Start over:** with agenmux closed, delete
+  `<plugins dir>/.agenmux-state/<plugin dir name>/`. An interrupted switch is
+  recovered from that directory on the next start, so delete it only after a
+  start has opened normally.
+
 ## Known limits
 
 - After a tmux server restart through a session-restore tool, restored sidebar

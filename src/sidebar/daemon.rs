@@ -103,6 +103,18 @@ pub(super) struct Daemon {
 /// reads keys from a FIFO, and sizes itself from the preserved panes. Exits
 /// (with full teardown) when the last pane disappears.
 pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
+    // The launching toggle hands down its installation lease; a daemon started
+    // directly takes its own. Either way it lives as long as this process.
+    let lease = match crate::autoupdate::Lock::inherited("AGENMUX_LEASE_FD") {
+        Some(lease) => Some(lease),
+        None => match crate::autoupdate::lease(&plugin_dir) {
+            Ok(lease) => lease,
+            Err(error) => {
+                eprintln!("agenmux: {error}");
+                return 1;
+            }
+        },
+    };
     let settings = match crate::app_config::current_process() {
         Ok(config) => config,
         Err(e) => {
@@ -233,6 +245,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         sb.quiet_exit();
         return 1;
     }
+    crate::autoupdate::spawn_scheduler(sb.plugin_dir.clone());
     sb.render(true);
     if std::env::var_os("AGENMUX_STARTUP_ACK").is_some() {
         use std::io::Write;
@@ -246,6 +259,12 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
             sb.quiet_exit();
             return 1;
         }
+    }
+    // An activating launch hands down its exclusive hold. Once this daemon is
+    // up it only needs a shared one, so a launcher that dies before
+    // confirming cannot leave the installation locked for the daemon's life.
+    if let Some(lease) = &lease {
+        lease.share();
     }
     if event_loop(&mut sb) {
         sb.quiet_exit();

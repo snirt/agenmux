@@ -45,6 +45,12 @@ engine_current() {
 # beat the eager installer, so serialize with it before handing runtime control
 # to Rust. This is bootstrap, not a second sidebar/toggle implementation.
 if [ "${1:-}" = activate ]; then
+  # Re-entry from an activating launch, which verified this release's engine
+  # and holds the installation lock on the inherited descriptor: start the
+  # engine directly, with no installer or other child that could keep it.
+  if [ -n "${AGENMUX_UPDATE_TXN_FD:-}" ]; then
+    exec env AGENMUX_DIR="$CURRENT_DIR" "$DEFAULT_BIN" toggle "${2:-}" "${3:-}"
+  fi
   if [ "$BIN" != "$DEFAULT_BIN" ] && [ ! -x "$BIN" ]; then
     tmux set-option -gu @agenmux-bin 2>/dev/null || true
     tmux set-option -gu @agents-mon-bin 2>/dev/null || true

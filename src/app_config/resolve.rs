@@ -19,6 +19,7 @@ pub struct AppConfig {
     pub popup_width: u16,
     pub popup_height: PopupHeight,
     pub notifications: bool,
+    pub auto_update: bool,
     pub hide_windows: Option<String>,
     pub theme: ThemeConfig,
     pub normal: BTreeMap<Action, Vec<KeyChord>>,
@@ -121,6 +122,7 @@ pub fn resolve_cli(
             ("display.popup_width", "default"),
             ("display.popup_height", "default"),
             ("behavior.notifications", "default"),
+            ("behavior.auto_update", "default"),
             ("behavior.hide_windows", "default"),
             ("tmux_management.enabled", "default"),
             ("tmux_management.confirm_delete", "default"),
@@ -145,6 +147,7 @@ pub fn resolve_cli(
         popup_width: 40,
         popup_height: PopupHeight::Auto(AutoHeight::Auto),
         notifications: true,
+        auto_update: true,
         hide_windows: None,
         theme: file.theme.clone().unwrap_or_default(),
         normal: resolved_keys(
@@ -178,6 +181,7 @@ pub fn resolve_cli(
         }
         if let Some(b) = &f.behavior {
             set!(notifications, b.notifications, "behavior.notifications");
+            set!(auto_update, b.auto_update, "behavior.auto_update");
             if let Some(glob) = &b.hide_windows {
                 r.hide_windows = Some(glob.clone());
                 r.sources
@@ -588,6 +592,7 @@ mod tests {
             ("tmux_management.confirm_delete", "true"),
             ("tmux_management.resume_agents", "false"),
             ("tmux_management.undo_history", "20"),
+            ("behavior.auto_update", "true"),
             ("keys.sequence_timeout_ms", "1000"),
         ] {
             let row = effective.iter().find(|row| row.name == name).unwrap();
@@ -605,6 +610,14 @@ mod tests {
         assert_eq!(framed.sources["display.show_frame"], "file");
         assert!(parse("[display]\nshow_all_panes = 'true'").is_err());
         assert!(parse("[display]\nshow_frame = 'false'").is_err());
+        let paused = resolve(
+            &parse("[behavior]\nauto_update = false").unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(default.auto_update && !paused.auto_update);
+        assert_eq!(paused.sources["behavior.auto_update"], "file");
+        assert!(parse("[behavior]\nauto_update = 'on'").is_err());
         assert_eq!((default.sidebar_width, default.popup_width), (30, 40));
         assert_eq!(default.hide_windows, None);
         let file = parse("[display]\nmode='popup'\nsidebar_width=22\npopup_width=24\npopup_height=18\n[behavior]\nnotifications=false\nhide_windows='hidden*'").unwrap();
@@ -627,6 +640,7 @@ mod tests {
                 **field != "display.show_all_panes"
                     && **field != "display.show_frame"
                     && **field != "display.agent_label"
+                    && **field != "behavior.auto_update"
             })
             .filter(|(field, _)| field.starts_with("display.") || field.starts_with("behavior."))
             .all(|(_, source)| source.starts_with("tmux @agenmux-")));
