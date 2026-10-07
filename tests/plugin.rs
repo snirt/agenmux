@@ -10,6 +10,12 @@ use std::time::{Duration, Instant};
 
 static NEXT_SERVER: AtomicUsize = AtomicUsize::new(0);
 
+/// Least time any wait gets. Call sites keep the budget that is enough on a
+/// developer machine; a loaded CI runner has needed up to ten seconds for a
+/// daemon pass. A wait returns as soon as its condition holds, so the floor
+/// only lengthens real failures.
+const WAIT_FLOOR: Duration = Duration::from_secs(15);
+
 struct TestTmux {
     socket: String,
     tmp: PathBuf,
@@ -109,7 +115,7 @@ impl TestTmux {
     /// stays different.
     #[track_caller]
     fn assert_keys_unchanged(&self, before: &str) {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + WAIT_FLOOR;
         let mut keys = self.text(&["list-keys"]);
         while keys != before && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(50));
@@ -129,6 +135,7 @@ impl TestTmux {
 
     #[track_caller]
     fn wait_for(&self, timeout: Duration, mut condition: impl FnMut() -> bool) {
+        let timeout = timeout.max(WAIT_FLOOR);
         let deadline = Instant::now() + timeout;
         while !condition() {
             assert!(
@@ -2385,10 +2392,10 @@ fn tmux_management_creates_and_deletes_stable_targets() {
             "#{pane_id}",
         ])
     };
-    // Prompts render on the daemon's next pass; a loaded runner has needed
-    // several seconds. Name the needle and show the frame on failure.
+    // Prompts render on the daemon's next pass. Name the needle and show the
+    // frame on failure.
     let sidebar_shows = |needle: &str| {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + WAIT_FLOOR;
         let mut frame = String::new();
         while Instant::now() < deadline {
             frame = tmux.text(&["capture-pane", "-p", "-t", &sidebar]);

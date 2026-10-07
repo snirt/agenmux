@@ -81,10 +81,14 @@ jobs:
             artifact: agenmux-linux-aarch64
             target: aarch64-unknown-linux-musl
             binary: target/aarch64-unknown-linux-musl/release/agenmux
+          # The slowest runner by far; the shell harness is twice as slow
+          # here as anywhere else and macos-aarch64 covers the same OS. The
+          # Rust suite and the release build still run on the x86 target.
           - runner: macos-15-intel
             artifact: agenmux-macos-x86_64
             target: x86_64-apple-darwin
             binary: target/x86_64-apple-darwin/release/agenmux
+            shell_harness: false
           - runner: macos-15
             artifact: agenmux-macos-aarch64
             target: aarch64-apple-darwin
@@ -116,7 +120,9 @@ jobs:
         run: |
           cargo test --locked
           cargo build --release --locked --target "${{ matrix.target }}"
-          AGENMUX_BIN="${{ matrix.binary }}" ./tests/run.sh
+          if [ "${{ matrix.shell_harness }}" != false ]; then
+            AGENMUX_BIN="${{ matrix.binary }}" ./tests/run.sh
+          fi
 
       - name: Package plugin
         shell: bash

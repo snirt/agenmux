@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shell/integration checks; Rust fixture detection is owned by tests/parity.rs.
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/tests/helpers/poll.sh"
 fail=0
 # Never let a developer's application file affect isolated harness fixtures.
 config_home="$(mktemp -d)"
@@ -714,7 +715,7 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
     control_ok=1
   # Warm the hidden window once; its lazy split is the only expected reflow.
   $T last-window -t t
-  for _ in $(seq 1 40); do
+  for _ in $(tries 40); do
     [ "$($T list-panes -a -F '#{pane_title}' | grep -cx agenmux)" -eq 2 ] && break
     sleep 0.05
   done
@@ -726,7 +727,7 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   live_sidebar="$($T list-panes -t t: -F '#{pane_id}	#{pane_title}' |
     awk -F'\t' '$2 == "agenmux" { print $1; exit }')"
   live_frame=""
-  for _ in $(seq 1 40); do
+  for _ in $(tries 40); do
     live_frame="$($T capture-pane -p -t "$live_sidebar")"
     printf '%s\n' "$live_frame" | grep -Fq agenmux && break
     sleep 0.1
@@ -735,7 +736,7 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   neww="$($T display-message -p -t t: '#{window_id}')"
   new_ok=0
   delayed_frame=""
-  for _ in $(seq 1 50); do
+  for _ in $(tries 50); do
     delayed_sidebar="$($T list-panes -t "$neww" -F '#{pane_id}	#{pane_title}' |
       awk -F'\t' '$2 == "agenmux" { print $1; exit }')"
     if [ -n "$delayed_sidebar" ]; then
@@ -767,10 +768,13 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   $T resize-pane -t "$mir" -x 45
   # the drag guard needs two same-window-size measures (2s scan apart) when
   # the resized mirror lives in a window created moments ago
-  sleep 4
-  widths="$($T list-panes -a -F '#{pane_title}	#{pane_width}' |
-    awk -F'\t' '$1 == "agenmux" { print $2 }' | sort -u | tr -d '\n')"
-  optw="$($T show-option -gqv @agenmux-width)"
+  for _ in $(tries 40); do
+    widths="$($T list-panes -a -F '#{pane_title}	#{pane_width}' |
+      awk -F'\t' '$1 == "agenmux" { print $2 }' | sort -u | tr -d '\n')"
+    optw="$($T show-option -gqv @agenmux-width)"
+    [ "$widths" = 45 ] && [ "$optw" = 45 ] && break
+    sleep 0.1
+  done
   # closing the last real pane hands all its columns to the mirror without
   # changing the window size — that must NOT read as a border drag (the pane
   # count changed), or the full window width gets adopted globally
@@ -788,7 +792,7 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key close
   # Teardown of every mirror can outlast a fixed pause on a slow runner; wait
   # for the panes and the frame file to go instead.
-  for _ in $(seq 1 100); do
+  for _ in $(tries 100); do
     left="$($T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agenmux)"
     [ "$left" -eq 0 ] && [ -z "$(find "$tmp" -name 'agenmux-frame-%*' -type p -print -quit)" ] && break
     sleep 0.1

@@ -870,7 +870,15 @@ pub(crate) fn buffer_key_bytes(action: &str) -> Option<&'static [u8]> {
 }
 
 fn send_bytes(bytes: &[u8]) -> i32 {
-    send_bytes_to(&crate::tmux::runtime_dir(), bytes)
+    match write_fifo(&crate::tmux::runtime_dir(), bytes) {
+        Ok(()) => 0,
+        // Named so a dropped key is diagnosable: ENXIO/ENOENT mean no daemon
+        // reads the FIFO, EAGAIN that it has not drained it
+        Err(error) => {
+            eprintln!("agenmux: cannot deliver key: {error}");
+            1
+        }
+    }
 }
 
 /// Relay terminal paste to the daemon without interpreting its bytes as keys.
@@ -897,17 +905,24 @@ pub(crate) fn send_text_to(runtime: &std::path::Path, text: &str) -> i32 {
 }
 
 fn send_bytes_to(runtime: &std::path::Path, bytes: &[u8]) -> i32 {
+    write_fifo(runtime, bytes).is_err() as i32
+}
+
+fn write_fifo(runtime: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let path = runtime.join("agenmux-keys");
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
-        return 1;
-    };
+    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
     if fd < 0 {
-        return 1;
+        return Err(std::io::Error::last_os_error());
     }
     let wrote = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+    let error = std::io::Error::last_os_error();
     unsafe { libc::close(fd) };
-    (wrote != bytes.len() as isize) as i32
+    if wrote != bytes.len() as isize {
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub enum Direction {

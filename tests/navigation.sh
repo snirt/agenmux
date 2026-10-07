@@ -39,6 +39,7 @@ viewport_line() {
 export TERM=xterm
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/tests/helpers/poll.sh"
 BIN="${AGENMUX_BIN:-$DIR/target/release/agenmux}"
 [ -x "$BIN" ] || exit 0
 command -v tmux >/dev/null || exit 0
@@ -136,7 +137,7 @@ exec 9>"$input"
 input_open=1
 
 client=''
-for _ in $(seq 1 30); do
+for _ in $(tries 30); do
   client="$(tmux -S "$sock" list-clients \
     -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' \
     -F '#{client_name}' 2>/dev/null | head -n 1)"
@@ -178,7 +179,7 @@ has_re "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" '^16\.[0-9a-f]
 
 sidebar=''
 first=''
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   sidebar="$(tmux -S "$sock" list-panes -t navigation: \
     -F '#{pane_id}	#{pane_title}' |
     awk -F'\t' '$2 == "agenmux" { print $1; exit }')"
@@ -194,12 +195,21 @@ done
   exit 1
 }
 
+pre_reload_hint="$(bottom_hint "$sidebar")"
 printf '[display]\nshow_all_panes = false\n[tmux_management]\nenabled = true\n[keys.normal]\nup = ["K"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" config reload >/dev/null
-sleep 2.2
-normal_keys="$(tmux -S "$sock" list-keys -T agenmux)"
-sequence_keys="$(tmux -S "$sock" list-keys -T agenmux-sequence)"
+# The reload reinstalls the key tables itself (the client drops to root until
+# the reclaim) and the daemon adopts the settings on its next pass, which the
+# hint line shows. Keys sent before all three land in the wrong place.
+for _ in $(tries 44); do
+  normal_keys="$(tmux -S "$sock" list-keys -T agenmux)"
+  sequence_keys="$(tmux -S "$sock" list-keys -T agenmux-sequence)"
+  has "$sequence_keys" " key 'sequence-64'" &&
+    [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ] &&
+    [ "$(bottom_hint "$sidebar")" != "$pre_reload_hint" ] && break
+  sleep 0.05
+done
 has "$normal_keys" " key 'sequence-64'" &&
   has "$normal_keys" " key 'sequence-72'" &&
   has "$normal_keys" 'switch-client -T agenmux-sequence' &&
@@ -210,7 +220,7 @@ has "$normal_keys" " key 'sequence-64'" &&
 rename_window="$(tmux -S "$sock" display-message -p -t "$sidebar" '#{window_name}')"
 printf 'r' >&9
 rename_input=''
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   rename_input="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
   has "$rename_input" "${rename_window}▏" && break
   sleep 0.05
@@ -221,7 +231,7 @@ has "$rename_input" "${rename_window}▏" || {
 }
 printf 'x\177' >&9
 rename_input=''
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   rename_input="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
   has "$rename_input" "${rename_window}▏" && break
   sleep 0.05
@@ -248,7 +258,7 @@ invalid_sequence_table="$(tmux -S "$sock" display-message -p -c "$client" '#{cli
 windows_before="$(tmux -S "$sock" list-windows -a -F '#{window_id}' | wc -l | tr -d ' ')"
 printf 'dd' >&9
 delete_prompt=''
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   delete_prompt="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
   has_re "$delete_prompt" 'delete (window|pane)\? y/N' && break
   sleep 0.05
@@ -260,7 +270,7 @@ has_re "$delete_prompt" 'delete (window|pane)\? y/N' || {
 printf '\033' >&9
 # A lone Escape sits in tmux for escape-time (500ms before tmux 3.5); wait for
 # the cancel to land before touching the key tables again.
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   if [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ] &&
     ! has_re "$(tmux -S "$sock" capture-pane -p -t "$sidebar")" 'delete (window|pane)\? y/N'; then
     break
@@ -277,7 +287,7 @@ windows_after="$(tmux -S "$sock" list-windows -a -F '#{window_id}' | wc -l | tr 
 selection_before="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '/❯/p')"
 printf 'yy' >&9
 copied=''
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   copied="$(tmux -S "$sock" show-buffer 2>/dev/null || true)"
   [ -n "$copied" ] && break
   sleep 0.05
@@ -314,7 +324,7 @@ fi
 # width by the daemon's border-drag detector.
 printf '\033aw' >&9
 chooser_open_unzoomed=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   chooser_state="$(tmux -S "$sock" display-message -p -t "$sidebar" \
     '#{pane_in_mode}/#{window_zoomed_flag}')"
   if [ "$chooser_state" = 1/0 ]; then
@@ -325,7 +335,7 @@ for _ in $(seq 1 20); do
 done
 sleep 2.5
 printf 'q' >&9
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   chooser_state="$(tmux -S "$sock" display-message -p -t "$sidebar" \
     '#{pane_in_mode}/#{window_zoomed_flag}')"
   [ "$chooser_state" = 0/0 ] && break
@@ -338,7 +348,7 @@ chooser_width="$(tmux -S "$sock" show-option -gqv @agenmux-width)"
 # table, leaves the client in the normal root table.
 printf '\014' >&9
 ctrl_l_works=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   ctrl_l_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   ctrl_l_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -354,7 +364,7 @@ done
 # table after tmux resets the repeating client to root once repeat-time expires.
 sidebar_focus_works() {
   local focus_table focus_title
-  for _ in $(seq 1 40); do
+  for _ in $(tries 40); do
     focus_table="$(tmux -S "$sock" display-message -p -c "$client" \
       '#{client_key_table}')"
     focus_title="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -367,7 +377,7 @@ sidebar_focus_works() {
 }
 back_to_work() {
   printf '\014' >&9
-  for _ in $(seq 1 20); do
+  for _ in $(tries 20); do
     [ "$(tmux -S "$sock" display-message -p -c "$client" '#{pane_title}')" != agenmux ] &&
       [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = root ] &&
       return 0
@@ -397,7 +407,7 @@ expect -i $spawn_id eof
 EXPECT
 secondary_pid=$!
 secondary=''
-for _ in $(seq 1 30); do
+for _ in $(tries 30); do
   secondary="$(tmux -S "$sock" list-clients \
     -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' \
     -F '#{client_name}' 2>/dev/null |
@@ -442,7 +452,7 @@ env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
   "$BIN" click "$sidebar" "$empty_click_y" "$client"
 empty_click_works=0
 empty_click_green=0
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   empty_click_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   empty_click_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -478,7 +488,7 @@ env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
   "$BIN" click "$sidebar" 1 "$client"
 mv "$rows_own.saved" "$rows_own"
 stale_click_works=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   stale_click_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   stale_click_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -500,7 +510,7 @@ for non_agent_y in 0 1; do
   env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
     "$BIN" click "$sidebar" "$non_agent_y" "$client"
   location_works=0
-  for _ in $(seq 1 20); do
+  for _ in $(tries 20); do
     location_table="$(tmux -S "$sock" display-message -p -c "$client" \
       '#{client_key_table}')"
     location_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -522,7 +532,7 @@ done
 # missing row.
 valid_row=''
 valid_target=''
-for _ in $(seq 1 60); do
+for _ in $(tries 60); do
   valid_row="$(awk -v work="$work" \
     '$1 ~ /^%/ && $1 != work { print NR; exit }' "$tmp/agenmux-rows")"
   valid_target="$(awk -v work="$work" \
@@ -588,7 +598,7 @@ if [ -n "$valid_row" ] && [ -n "$valid_target" ]; then
   env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
     "$BIN" click "$sidebar" "$valid_row" "$client"
   first_click_selects=0
-  for _ in $(seq 1 40); do
+  for _ in $(tries 40); do
     valid_click_table="$(tmux -S "$sock" display-message -p -c "$client" \
       '#{client_key_table}')"
     valid_click_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -608,7 +618,7 @@ if [ -n "$valid_row" ] && [ -n "$valid_target" ]; then
   if [ "$first_click_selects" -eq 1 ]; then
     env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
       "$BIN" click "$sidebar" "$selected_row" "$client"
-    for _ in $(seq 1 20); do
+    for _ in $(tries 20); do
       valid_click_table="$(tmux -S "$sock" display-message -p -c "$client" \
         '#{client_key_table}')"
       valid_click_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -629,7 +639,7 @@ valid_location="$(tmux -S "$sock" display-message -p -t "$valid_target" \
   '#{window_index}.#{pane_index}')"
 tmux -S "$sock" switch-client -c "$client" -t "$sidebar"
 tmux -S "$sock" switch-client -c "$client" -T agenmux
-for _ in $(seq 1 60); do
+for _ in $(tries 60); do
   table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   restored_cursor="$(tmux -S "$sock" capture-pane -p -t "$sidebar" | sed -n '/❯/p' | head -n 1)"
@@ -639,7 +649,7 @@ done
 
 control=''
 control_flags=''
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   control="$(tmux -S "$sock" show-option -gqv @agenmux-control-client)"
   control_flags="$(tmux -S "$sock" list-clients \
     -f "#{==:#{client_name},$control}" -F '#{client_flags}' 2>/dev/null)"
@@ -652,7 +662,7 @@ done
 # the click focused. It samples focus on its own schedule instead of queueing
 # it, so wait for the snap rather than assuming it has already landed.
 cursor_snapped=0
-for _ in $(seq 1 60); do
+for _ in $(tries 60); do
   cursor_row="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     awk '/❯/ { print NR; exit }')"
   if [ -n "$cursor_row" ] && [ "$cursor_row" -gt 1 ]; then
@@ -681,7 +691,7 @@ picker_start="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
   sed -n '/❯/p' | head -n 1)"
 printf 'K' >&9
 picker_reset="$picker_start"
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   picker_reset="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
   [ -n "$picker_reset" ] && [ "$picker_reset" != "$picker_start" ] && break
@@ -694,7 +704,7 @@ done
 picker_before="$picker_reset"
 printf 'u' >&9
 picker_open=0
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   picker_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
   has_re "$picker_frame" 'no releases found|↵ switch' &&
     {
@@ -711,7 +721,7 @@ tmux -S "$sock" select-pane -t "$work"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
   "$BIN" click "$sidebar" "$valid_row" "$client"
 picker_click_works=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   picker_click_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   picker_click_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -734,7 +744,7 @@ fi
 printf 'q' >&9
 picker_reclaimed=0
 picker_return=''
-for _ in $(seq 1 60); do
+for _ in $(tries 60); do
   picker_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   picker_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
@@ -748,7 +758,7 @@ for _ in $(seq 1 60); do
 done
 printf 'j' >&9
 second="$picker_return"
-for _ in $(seq 1 30); do
+for _ in $(tries 30); do
   second="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
   [ -n "$second" ] && [ "$second" != "$picker_return" ] && break
@@ -758,7 +768,7 @@ table_after_j="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_t
 
 printf 'K' >&9
 third="$second"
-for _ in $(seq 1 30); do
+for _ in $(tries 30); do
   third="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
   [ "$third" = "$picker_return" ] && break
@@ -771,7 +781,7 @@ done
 kill "$secondary_pid" 2>/dev/null || true
 wait "$secondary_pid" 2>/dev/null || true
 secondary_pid=''
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   real_clients="$(tmux -S "$sock" list-clients \
     -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_name}' | wc -l)"
   [ "$real_clients" -eq 1 ] && break
@@ -780,7 +790,7 @@ done
 for i in $(seq 1 40); do
   tmux -S "$sock" new-window -d -t navigation: -n "overflow-$i" "$tmp/codex"
 done
-for _ in $(seq 1 80); do
+for _ in $(tries 80); do
   overflow_agents="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { print length(seen) }' \
     "$tmp/agenmux-scan-cache")"
   [ "$overflow_agents" -gt 32 ] && break
@@ -800,7 +810,7 @@ edge_first="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
 edge_top="$(top_row)"
 printf 'G' >&9
 edge_long_list_works=0
-for _ in $(seq 1 30); do
+for _ in $(tries 30); do
   edge_last="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
   edge_last_top="$(top_row)"
   [ -n "$edge_last" ] && [ "$edge_last" != "$edge_first" ] &&
@@ -808,7 +818,7 @@ for _ in $(seq 1 30); do
   sleep 0.05
 done
 printf 'gg' >&9
-for _ in $(seq 1 30); do
+for _ in $(tries 30); do
   edge_restored="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
   edge_restored_top="$(top_row)"
   if [ -n "$edge_first" ] && [ "$edge_restored" = "$edge_first" ] &&
@@ -828,14 +838,14 @@ held_start="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
 ) &
 held_pid=$!
 held_mid="$held_start"
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   held_mid="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
   [ -n "$held_mid" ] && [ "$held_mid" != "$held_start" ] && break
   sleep 0.01
 done
 wait "$held_pid"
 printf 'G' >&9
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   held_boundary="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
   [ -n "$held_boundary" ] && [ "$held_boundary" = "$edge_last" ] && break
   sleep 0.02
@@ -850,14 +860,14 @@ held_stable="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
 ) &
 held_pid=$!
 held_up_mid="$held_boundary"
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   held_up_mid="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
   [ -n "$held_up_mid" ] && [ "$held_up_mid" != "$held_boundary" ] && break
   sleep 0.01
 done
 wait "$held_pid"
 printf 'gg' >&9
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   held_reset="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
   [ "$held_reset" = "$edge_first" ] && break
   sleep 0.02
@@ -883,14 +893,14 @@ wheel_burst_top="$(top_row)"
 ) &
 wheel_pid=$!
 wheel_burst_mid="$wheel_burst_top"
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   wheel_burst_mid="$(top_row)"
   [ "$wheel_burst_mid" != "$wheel_burst_top" ] && break
   sleep 0.01
 done
 wait "$wheel_pid"
 printf 'gg' >&9
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   wheel_burst_reset="$(top_row)"
   [ "$wheel_burst_reset" = "$wheel_burst_top" ] && break
   sleep 0.02
@@ -904,7 +914,7 @@ if [ "$wheel_burst_mid" != "$wheel_burst_top" ] &&
   [ "$wheel_burst_selected_after" = "$wheel_burst_selected" ]; then
   wheel_burst_works=1
 fi
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   wheel_up="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
   [ -n "$wheel_up" ] && break
@@ -916,7 +926,7 @@ tmux -S "$sock" set-option -g @agenmux-wheel-jump 0.05
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
   "$BIN" wheel "$sidebar" down
 wheel_top_after="$wheel_top_before"
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   wheel_top_after="$(viewport_line)"
   [ "$wheel_top_after" != "$wheel_top_before" ] && break
   sleep 0.05
@@ -927,7 +937,7 @@ wheel_down="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
 wheel_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" \
   "$BIN" wheel "$sidebar" up
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   wheel_top_restored="$(viewport_line)"
   wheel_up="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
@@ -944,7 +954,7 @@ if [ "$overflow_agents" -gt 32 ] &&
   wheel_delay_works=1
 fi
 printf 'j' >&9
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   slow_gg_before="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
   [ -n "$slow_gg_before" ] && [ "$slow_gg_before" != "$edge_first" ] && break
   sleep 0.05
@@ -960,7 +970,7 @@ tmux -S "$sock" set-option -gu @agenmux-wheel-jump
 tmux -S "$sock" list-windows -t navigation -F '#{window_id}	#{window_name}' |
   awk -F '\t' '$2 ~ /^overflow-/ { print $1 }' |
   while IFS= read -r window; do tmux -S "$sock" kill-window -t "$window"; done
-for _ in $(seq 1 80); do
+for _ in $(tries 80); do
   remaining_agents="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { print length(seen) }' \
     "$tmp/agenmux-rows")"
   [ "$remaining_agents" -eq 2 ] && break
@@ -979,7 +989,7 @@ return_focus="$(tmux -S "$sock" display-message -p -c "$client" \
   '#{pane_title}')"
 printf 'j' >&9
 fourth="$third"
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   fourth="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
   [ -n "$fourth" ] && [ "$fourth" != "$third" ] && break
@@ -994,7 +1004,7 @@ search_works=0
 search_targets=0
 search_table=''
 search_frame=''
-for _ in $(seq 1 60); do
+for _ in $(tries 60); do
   search_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
     "$tmp/agenmux-rows")"
   search_frame="$(pane_header "$sidebar")"
@@ -1014,13 +1024,13 @@ done
 # tmux's client-side bracketed-paste decoding).
 client_paste_works=0
 printf '\025' >&9
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   client_paste_clear="$(pane_header "$sidebar")"
   ! has "$client_paste_clear" '/navigation' && break
   sleep 0.05
 done
 printf '\033[200~navigation\033[201~' >&9
-for _ in $(seq 1 60); do
+for _ in $(tries 60); do
   client_paste_frame="$(pane_header "$sidebar")"
   if has "$client_paste_frame" '/navigation' &&
     [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux-search ]; then
@@ -1031,7 +1041,7 @@ for _ in $(seq 1 60); do
 done
 printf '\r' >&9
 search_accept_works=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   accept_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   accept_frame="$(pane_header "$sidebar")"
@@ -1048,14 +1058,14 @@ accepted_cursor="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
   sed -n '/❯/p' | head -n 1)"
 printf 'G' >&9
 search_edges_work=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   search_last="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
   [ -n "$search_last" ] && [ "$search_last" != "$accepted_cursor" ] && break
   sleep 0.05
 done
 printf 'gg' >&9
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   search_first="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
   if [ -n "$accepted_cursor" ] && [ "$search_first" = "$accepted_cursor" ]; then
@@ -1066,7 +1076,7 @@ for _ in $(seq 1 20); do
 done
 printf 'j' >&9
 search_jk_works=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   filtered_cursor="$(tmux -S "$sock" capture-pane -p -t "$sidebar" |
     sed -n '/❯/p' | head -n 1)"
   if [ -n "$filtered_cursor" ] && [ "$filtered_cursor" != "$accepted_cursor" ]; then
@@ -1077,7 +1087,7 @@ for _ in $(seq 1 20); do
 done
 printf '\033' >&9
 search_blur_works=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   blur_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   blur_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
@@ -1095,7 +1105,7 @@ done
 # synchronous so fast presses cannot reorder; j/k still navigate results.
 printf 'f' >&9
 attention_filter_works=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   attention_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
     "$tmp/agenmux-rows")"
   attention_frame="$(pane_header "$sidebar")"
@@ -1111,7 +1121,7 @@ for _ in $(seq 1 20); do
 done
 printf 'f' >&9
 all_filter_works=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   all_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { for (p in seen) n++; print n+0 }' \
     "$tmp/agenmux-rows")"
   all_frame="$(pane_header "$sidebar")"
@@ -1131,7 +1141,7 @@ reload_hint_follows=0
 printf '[display]\nshow_all_panes = true\n[tmux_management]\nenabled = false\n[keys.normal]\nup = ["Z"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" config reload >/dev/null 2>&1 || true
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   reload_hint="$(bottom_hint "$sidebar")"
   reload_key="$(tmux -S "$sock" list-keys -T agenmux |
     awk '$4 == "Z" { print $4; exit }')"
@@ -1143,7 +1153,7 @@ for _ in $(seq 1 40); do
 done
 # Reinstalling the tables briefly drops the client to root; wait for the
 # reclaim before sending more keys, or they land in the wrong table.
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   reload_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   [ "$reload_table" = agenmux ] && break
@@ -1152,7 +1162,7 @@ done
 printf '\033' >&9
 # Let the filter clear and the client settle before proving that ordinary
 # inventory rows use the same real keyboard and mouse navigation paths.
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   reload_cleared="$(pane_header "$sidebar")"
   reload_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
@@ -1169,21 +1179,21 @@ ordinary_keyboard_jump=0
 ordinary_first_click=0
 ordinary_mouse_jump=0
 ordinary_restored_false=0
-for _ in $(seq 1 60); do
+for _ in $(tries 60); do
   last_target="$(awk '$1 ~ /^%/ { pane=$1 } END { print pane }' \
     "$tmp/agenmux-rows")"
   [ "$last_target" = "$ordinary_target" ] && break
   sleep 0.05
 done
 printf 'G' >&9
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   selected_target="$(awk '$1 == target && $3 == 1 { print $1; exit }' \
     target="$ordinary_target" "$tmp/agenmux-rows")"
   [ "$selected_target" = "$ordinary_target" ] && break
   sleep 0.05
 done
 printf '\r' >&9
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   ordinary_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
   ordinary_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
@@ -1199,7 +1209,7 @@ done
 tmux -S "$sock" switch-client -c "$client" -t "$sidebar"
 tmux -S "$sock" switch-client -c "$client" -T agenmux
 printf 'gg' >&9
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   selected_target="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
   [ -n "$selected_target" ] && [ "$selected_target" != "$ordinary_target" ] && break
   sleep 0.05
@@ -1216,7 +1226,7 @@ for _ in 1 2 3; do
   tmux -S "$sock" switch-client -c "$client" -t "$work"
   tmux -S "$sock" switch-client -c "$client" -T root
   printf '\033[<0;%d;%dM' "$mouse_x" "$mouse_y" >&9
-  for _ in $(seq 1 40); do
+  for _ in $(tries 40); do
     ordinary_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
     ordinary_table="$(tmux -S "$sock" display-message -p -c "$client" \
       '#{client_key_table}')"
@@ -1238,7 +1248,7 @@ ordinary_row="$(awk -v target="$ordinary_target" '$1 == target { print NR; exit 
   "$tmp/agenmux-rows")"
 mouse_y=$((sidebar_top + ordinary_row))
 printf '\033[<0;%d;%dM' "$mouse_x" "$mouse_y" >&9
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   ordinary_focus="$(tmux -S "$sock" display-message -p -c "$client" '#{pane_id}')"
   ordinary_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
@@ -1257,7 +1267,7 @@ printf '[display]\nshow_all_panes = false\n[tmux_management]\nenabled = false\n[
   >"$XDG_CONFIG_HOME/agenmux/config.toml"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" config reload >/dev/null
-for _ in $(seq 1 60); do
+for _ in $(tries 60); do
   restored_targets="$(awk '$1 ~ /^%/ { seen[$1]=1 } END { print length(seen) }' \
     "$tmp/agenmux-rows")"
   restored_table="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -1277,7 +1287,7 @@ printf 'q' >&9
 exit_table=agenmux
 q_left=0
 # teardown (kill pane + restore layout) is the slowest step: allow 5s
-for _ in $(seq 1 100); do
+for _ in $(tries 100); do
   exit_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   exit_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -1298,7 +1308,7 @@ env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" toggle split "$client"
 escape_ready=0
 escape_sidebar=''
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   escape_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   escape_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -1328,7 +1338,7 @@ settings_cancelled=0
 settings_responsive=0
 settings_returned=0
 printf 's' >&9
-for _ in $(seq 1 30); do
+for _ in $(tries 30); do
   settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
   settings_table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
   if has "$settings_frame" 'Display' && has "$settings_frame" 'mode:'; then
@@ -1338,7 +1348,7 @@ for _ in $(seq 1 30); do
   sleep 0.05
 done
 printf '/width' >&9
-for _ in $(seq 1 30); do
+for _ in $(tries 30); do
   settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
   if has "$settings_frame" '/ width_' && has "$settings_frame" 'sidebar_width' && has "$settings_frame" 'popup_width' && ! has "$settings_frame" 'mode:'; then
     settings_search=1
@@ -1347,7 +1357,7 @@ for _ in $(seq 1 30); do
   sleep 0.05
 done
 printf '\177' >&9
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
   if has "$settings_frame" '/ widt_'; then
     settings_backspace=1
@@ -1356,7 +1366,7 @@ for _ in $(seq 1 20); do
   sleep 0.05
 done
 printf 'h\r' >&9
-for _ in $(seq 1 30); do
+for _ in $(tries 30); do
   settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
   settings_table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
   if has "$settings_frame" '/ width' && ! has "$settings_frame" '/ width_' && [ "$settings_table" = agenmux ]; then
@@ -1366,7 +1376,7 @@ for _ in $(seq 1 30); do
   sleep 0.05
 done
 printf 'j' >&9
-for _ in $(seq 1 30); do
+for _ in $(tries 30); do
   settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
   if has "$settings_frame" '❯ popup_width'; then
     settings_search_navigation=1
@@ -1375,7 +1385,7 @@ for _ in $(seq 1 30); do
   sleep 0.05
 done
 printf '\033' >&9
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
   if has "$settings_frame" '/ search' && [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
     break
@@ -1383,7 +1393,7 @@ for _ in $(seq 1 20); do
   sleep 0.05
 done
 printf '\r' >&9
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   settings_table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
   [ "$settings_table" = agenmux-settings-edit ] && break
   sleep 0.05
@@ -1393,13 +1403,13 @@ has "$settings_frame" '❯ split' && has "$settings_frame" '  popup' && settings
 # "j" moves the dropdown via the keymap; ESC alone still cancels. Arrow
 # sequences (ESC [ B) race the escape-time on macOS and are covered elsewhere.
 printf 'j' >&9
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
   has "$settings_frame" '  split' && has "$settings_frame" '❯ popup' && break
   sleep 0.02
 done
 printf '\033' >&9
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   if ! grep -q '^mode = ' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
     [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
     settings_cancelled=1
@@ -1408,14 +1418,14 @@ for _ in $(seq 1 20); do
   sleep 0.05
 done
 printf '\r' >&9
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux-settings-edit ] && break
   sleep 0.05
 done
 printf 'j\r' >&9
 # Saving reinstalls the key tables through config reload; slow runners have
 # taken several seconds for that.
-for _ in $(seq 1 200); do
+for _ in $(tries 200); do
   if grep -q '^mode = "popup"' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
     [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
     settings_saved=1
@@ -1424,7 +1434,7 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 tmux -S "$sock" resize-pane -t "$escape_sidebar" -x 22
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
   settings_width="$(tmux -S "$sock" display-message -p -t "$escape_sidebar" '#{pane_width}')"
   if has "$settings_frame" 'display.mode' && [ "$settings_width" -eq 22 ]; then
@@ -1434,12 +1444,12 @@ for _ in $(seq 1 20); do
   sleep 0.05
 done
 printf '\r' >&9
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux-settings-edit ] && break
   sleep 0.05
 done
 printf 'K\r' >&9
-for _ in $(seq 1 200); do
+for _ in $(tries 200); do
   if grep -q '^mode = "split"' "$XDG_CONFIG_HOME/agenmux/config.toml" &&
     [ "$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')" = agenmux ]; then
     break
@@ -1447,7 +1457,7 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 printf '\033' >&9
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   settings_frame="$(tmux -S "$sock" capture-pane -p -t "$escape_sidebar")"
   settings_table="$(tmux -S "$sock" display-message -p -c "$client" '#{client_key_table}')"
   if [ "$settings_table" = agenmux ] && has "$settings_frame" 'codex'; then
@@ -1458,14 +1468,14 @@ for _ in $(seq 1 20); do
 done
 
 printf 'f' >&9
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   escape_frame="$(pane_header "$escape_sidebar")"
   has "$escape_frame" '[attention]' && break
   sleep 0.05
 done
 printf '\033' >&9
 escape_reset=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   escape_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   escape_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -1480,7 +1490,7 @@ for _ in $(seq 1 20); do
 done
 printf 'q' >&9
 escape_left=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   escape_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   escape_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -1499,7 +1509,7 @@ done
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" toggle split "$client"
 close_ready=0
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   close_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   close_focus="$(tmux -S "$sock" display-message -p -c "$client" \
@@ -1512,7 +1522,7 @@ for _ in $(seq 1 40); do
 done
 printf 'Q' >&9
 q_closed=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   close_table="$(tmux -S "$sock" display-message -p -c "$client" \
     '#{client_key_table}')"
   sidebar_count="$(tmux -S "$sock" list-panes -a -F '#{pane_title}' \
@@ -1529,7 +1539,7 @@ settings_popup=0
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" toggle popup "$client" &
 popup_pid=$!
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   [ "$(tmux -S "$sock" display-message -p -c "$client" '#{popup_active}')" = 1 ] && break
   sleep 0.05
 done
@@ -1540,7 +1550,7 @@ printf 's' >&9
 printf 'jjj\r\177\17733\r' >&9
 # A popup save reinstalls the key tables through config reload; a slow runner
 # has taken over five seconds for that, so wait well past it.
-for _ in $(seq 1 200); do
+for _ in $(tries 200); do
   if grep -q '^sidebar_width = 33' "$XDG_CONFIG_HOME/agenmux/config.toml"; then
     settings_popup=1
     break
@@ -1548,12 +1558,12 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 printf '\r\177\17730\r' >&9
-for _ in $(seq 1 200); do
+for _ in $(tries 200); do
   grep -q '^sidebar_width = 30' "$XDG_CONFIG_HOME/agenmux/config.toml" && break
   sleep 0.05
 done
 printf '\033q' >&9
-for _ in $(seq 1 30); do
+for _ in $(tries 30); do
   kill -0 "$popup_pid" 2>/dev/null || break
   sleep 0.05
 done
