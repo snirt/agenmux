@@ -664,6 +664,429 @@ fn prepare_locked(
     Ok(format!("{latest} ready"))
 }
 
+// ---------------------------------------------------------------------------
+// Activation on the next fresh start
+
+/// How a launch re-enters after switching (and after rolling back).
+#[derive(Clone)]
+pub(crate) enum Entry {
+    /// `agenmux.tmux activate <mode> <client>`: the tmux bootstrap.
+    Toggle { mode: String, client: String },
+    /// This engine again with the same arguments: direct sidebar or daemon.
+    Direct,
+}
+
+/// What a launch holds after the gate.
+pub(crate) enum Gate {
+    /// No runtime used the install; this shared lease keeps it that way.
+    Lease(Lock),
+    /// Another runtime holds a lease (or nothing to coordinate): take one.
+    Open,
+    /// This process is the target release of an activation it must confirm.
+    Txn(Txn),
+}
+
+/// An activation the target release confirms after readiness, or undoes.
+pub(crate) struct Txn {
+    lock: Lock,
+    dir: PathBuf,
+    plugin_dir: PathBuf,
+    entry: Entry,
+}
+
+/// Test hook: fail the named activation step. Only ever makes activation fail.
+fn fault(step: &str) -> io::Result<()> {
+    if std::env::var("AGENMUX_ACTIVATION_FAULT").as_deref() == Ok(step) {
+        return Err(io::Error::other(format!("injected fault: {step}")));
+    }
+    Ok(())
+}
+
+fn notifier_path(plugin_dir: &Path) -> PathBuf {
+    release::release_dir(plugin_dir).join(format!("{}-notifier", release::runtime_name(plugin_dir)))
+}
+
+fn restore_file(saved: &Path, path: &Path) -> io::Result<()> {
+    if !saved.exists() {
+        return match fs::remove_file(path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    let staged = path.with_extension(format!("restore-{}", std::process::id()));
+    fs::copy(saved, &staged)?;
+    fs::rename(staged, path)
+}
+
+/// Put back the installation a transaction replaced, record the target as
+/// failed so it is never retried automatically, and drop the transaction.
+fn recover(plugin_dir: &Path, dir: &Path) {
+    let Some(txn) = read_kv(&dir.join("transaction")) else {
+        return;
+    };
+    let get = |key: &str| txn.get(key).cloned().unwrap_or_default();
+    let backup = dir.join("backup");
+    let restored = match get("kind").as_str() {
+        "git" => {
+            let base_ref = get("base_ref");
+            let checkout = !base_ref.is_empty()
+                && release::git_output(plugin_dir, &["checkout", "--quiet", &base_ref])
+                    .is_some_and(|output| output.status.success());
+            let files = [
+                ("engine", release::engine_path(plugin_dir)),
+                ("notifier", notifier_path(plugin_dir)),
+                ("state", release::state_path(plugin_dir)),
+            ]
+            .iter()
+            .all(|(name, path)| restore_file(&backup.join(name), path).is_ok());
+            checkout && files
+        }
+        "tarball" => {
+            let tree = backup.join("tree");
+            if tree.exists() {
+                let discard = dir.join(format!("discard-{}", std::process::id()));
+                if plugin_dir.exists() {
+                    let _ = fs::rename(plugin_dir, &discard);
+                }
+                let back = fs::rename(&tree, plugin_dir).is_ok();
+                remove(&discard);
+                back
+            } else {
+                true // the swap never started
+            }
+        }
+        _ => true,
+    };
+    let target = get("target");
+    if release::valid_tag(&target) {
+        let _ = release::atomic_write(&dir.join("failed"), &format!("{target}\n"));
+    }
+    discard_pending(dir);
+    if restored {
+        remove(&backup);
+        remove(&dir.join("transaction"));
+        set_status(
+            dir,
+            &format!("auto-update: {target} did not start; kept {}", get("base")),
+        );
+    } else {
+        // Keep the backup and marker: the next start tries the restore again.
+        set_status(
+            dir,
+            &format!("auto-update: could not restore {}", get("base")),
+        );
+    }
+}
+
+enum Check {
+    Apply(Pending, Install),
+    Keep,
+    Discard(String),
+}
+
+fn check(plugin_dir: &Path, dir: &Path, started: u64) -> Check {
+    let Some(pending) = Pending::read(dir) else {
+        return Check::Keep;
+    };
+    if pending.prepared > started || !enabled() {
+        return Check::Keep;
+    }
+    let Ok((current, install)) = eligibility(plugin_dir) else {
+        return Check::Keep;
+    };
+    if pending.base != current
+        || release::compare_tags(&pending.target, &current) != std::cmp::Ordering::Greater
+    {
+        return Check::Discard("installed version changed since preparation".into());
+    }
+    if fs::read_to_string(dir.join("failed")).is_ok_and(|failed| failed.trim() == pending.target) {
+        return Check::Discard(format!("{} failed to start before", pending.target));
+    }
+    match &install {
+        Install::Git { head } => {
+            if pending.kind != "git"
+                || *head != pending.base_rev
+                || release::git_tag_commit(plugin_dir, &pending.target).as_deref()
+                    != Some(pending.target_rev.as_str())
+            {
+                return Check::Discard("checkout changed since preparation".into());
+            }
+        }
+        Install::Tarball => {
+            if pending.kind != "tarball" {
+                return Check::Discard("installation changed since preparation".into());
+            }
+            if baseline_matches(dir, plugin_dir, &current) != Some(true) {
+                return Check::Keep;
+            }
+        }
+    }
+    if !pending.intact(dir) {
+        return Check::Discard("prepared package changed on disk".into());
+    }
+    Check::Apply(pending, install)
+}
+
+/// Swap source, engine, notifier and version state, offline. The transaction
+/// marker is written only once the backup is complete, so a crash before it
+/// changed nothing and a crash after it is undone by `recover`.
+fn apply(plugin_dir: &Path, dir: &Path, pending: &Pending, install: &Install) -> io::Result<()> {
+    let backup = dir.join("backup");
+    remove(&backup);
+    fs::create_dir(&backup)?;
+    let package = dir.join(&pending.package);
+    let target = pending.target.as_str();
+    match install {
+        Install::Git { .. } => {
+            let base_ref = release::git_previous(plugin_dir).map_err(io::Error::other)?;
+            for (name, path) in [
+                ("engine", release::engine_path(plugin_dir)),
+                ("notifier", notifier_path(plugin_dir)),
+                ("state", release::state_path(plugin_dir)),
+            ] {
+                if path.exists() {
+                    fs::copy(&path, backup.join(name))?;
+                }
+            }
+            write_kv(
+                &dir.join("transaction"),
+                &[
+                    ("kind", "git"),
+                    ("base", &pending.base),
+                    ("base_ref", &base_ref),
+                    ("target", target),
+                ],
+            )?;
+            fault("source")?;
+            release::git_checkout_tag(plugin_dir, target).map_err(io::Error::other)?;
+            fault("engine")?;
+            let swap = backup.join("swap");
+            fs::create_dir(&swap)?;
+            release::install_engine_from(plugin_dir, &package, target, &swap)
+                .map_err(io::Error::other)?;
+        }
+        Install::Tarball => {
+            write_kv(
+                &dir.join("transaction"),
+                &[
+                    ("kind", "tarball"),
+                    ("base", &pending.base),
+                    ("target", target),
+                ],
+            )?;
+            fault("source")?;
+            fs::rename(plugin_dir, backup.join("tree"))?;
+            fs::rename(&package, plugin_dir)?;
+            fault("engine")?;
+            release::write_engine_state(plugin_dir, target)?;
+        }
+    }
+    fault("state")?;
+    if !release::engine_matches(&release::engine_path(plugin_dir), target) {
+        return Err(io::Error::other("installed engine does not match"));
+    }
+    Ok(())
+}
+
+/// Load the installed release's tmux integration (launchers and setup), the
+/// way sourcing the plugin does. Outside tmux there is nothing to set up.
+fn load_plugin(plugin_dir: &Path) -> bool {
+    if std::env::var_os("TMUX").is_none_or(|tmux| tmux.is_empty()) {
+        return true;
+    }
+    fault("setup").is_ok()
+        && Command::new("bash")
+            .arg(plugin_dir.join(format!("{}.tmux", release::runtime_name(plugin_dir))))
+            .env("AGENMUX_INSTALL_REFRESH", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
+/// macOS: refresh the notification helper app from the new engine, as
+/// install-bin.sh does after an install. Best effort.
+fn sync_notifier(plugin_dir: &Path) {
+    if !cfg!(target_os = "macos") || !notifier_path(plugin_dir).is_file() {
+        return;
+    }
+    let quiet = |command: &mut Command| {
+        command
+            .env("AGENMUX_DIR", plugin_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    if quiet(
+        Command::new(release::engine_path(plugin_dir)).args(["internal", "notification-eligible"]),
+    ) {
+        quiet(
+            Command::new("bash")
+                .arg(plugin_dir.join("scripts/install-app.sh"))
+                .arg("--quiet"),
+        );
+    }
+}
+
+/// Replace this process with the installed release's public entry point.
+fn reenter(plugin_dir: &Path, entry: &Entry, lock: Option<&Lock>) -> io::Error {
+    use std::os::unix::process::CommandExt;
+    let mut command = match entry {
+        Entry::Toggle { mode, client } => {
+            let mut command = Command::new("bash");
+            command
+                .arg(plugin_dir.join(format!("{}.tmux", release::runtime_name(plugin_dir))))
+                .args(["activate", mode, client]);
+            command
+        }
+        Entry::Direct => {
+            let mut command = Command::new(release::engine_path(plugin_dir));
+            command.args(std::env::args_os().skip(1));
+            command
+        }
+    };
+    command.env("AGENMUX_DIR", plugin_dir);
+    if let Some(lock) = lock {
+        lock.hand_down(&mut command, "AGENMUX_UPDATE_TXN_FD");
+    }
+    command.exec()
+}
+
+/// The common launch gate. A fresh start (no runtime holds a lease) recovers
+/// an interrupted activation, then activates a package prepared earlier and
+/// re-enters the target; anything else leaves the update pending.
+pub(crate) fn gate(plugin_dir: &Path, entry: Entry) -> Gate {
+    if let Some(lock) = Lock::inherited("AGENMUX_UPDATE_TXN_FD") {
+        if let Some(dir) = state_dir(plugin_dir) {
+            if dir.join("transaction").is_file() {
+                return Gate::Txn(Txn {
+                    lock,
+                    dir,
+                    plugin_dir: plugin_dir.to_path_buf(),
+                    entry,
+                });
+            }
+        }
+        return Gate::Open;
+    }
+    let started = now();
+    let Some(dir) = state_dir(plugin_dir).filter(|dir| dir.is_dir()) else {
+        return Gate::Open;
+    };
+    let Ok(lock) = Lock::acquire(&dir.join("install.lock"), libc::LOCK_EX, Duration::ZERO) else {
+        return Gate::Open;
+    };
+    let Ok(plugin_dir) = fs::canonicalize(plugin_dir) else {
+        return Gate::Open;
+    };
+    let plugin_dir = plugin_dir.as_path();
+    if dir.join("transaction").exists() {
+        recover(plugin_dir, &dir);
+    }
+    let into_lease = |lock: Lock| {
+        // ponytail: flock conversion is not atomic; a second fresh start in
+        // that instant activates first and this launch waits on its lease.
+        if unsafe { libc::flock(lock.file.as_raw_fd(), libc::LOCK_SH) } == 0 {
+            Gate::Lease(lock)
+        } else {
+            Gate::Open
+        }
+    };
+    if !coordinated(plugin_dir) {
+        return into_lease(lock);
+    }
+    let Ok(state) = state_lock(&dir) else {
+        return into_lease(lock);
+    };
+    let (pending, install) = match check(plugin_dir, &dir, started) {
+        Check::Apply(pending, install) => (pending, install),
+        Check::Keep => return into_lease(lock),
+        Check::Discard(reason) => {
+            discard_pending(&dir);
+            set_status(&dir, &format!("auto-update: {reason}"));
+            return into_lease(lock);
+        }
+    };
+    if apply(plugin_dir, &dir, &pending, &install).is_err() {
+        recover(plugin_dir, &dir);
+        return into_lease(lock);
+    }
+    drop(state);
+    if !load_plugin(plugin_dir) {
+        recover(plugin_dir, &dir);
+        load_plugin(plugin_dir);
+        return into_lease(lock);
+    }
+    sync_notifier(plugin_dir);
+    let _ = reenter(plugin_dir, &entry, Some(&lock));
+    // exec failed: the old engine keeps running on the old files.
+    recover(plugin_dir, &dir);
+    load_plugin(plugin_dir);
+    into_lease(lock)
+}
+
+impl Txn {
+    pub(crate) fn lock(&self) -> &Lock {
+        &self.lock
+    }
+
+    /// The target is up: keep it, and turn the exclusive hold into the
+    /// launch's shared lease (shared with a daemon that inherited it).
+    pub(crate) fn commit(self) -> Lock {
+        let _state = state_lock(&self.dir);
+        let txn = read_kv(&self.dir.join("transaction")).unwrap_or_default();
+        if txn.get("kind").map(String::as_str) == Some("tarball") {
+            if let (Some(target), Ok(manifest)) = (
+                txn.get("target"),
+                tree_manifest(&self.plugin_dir, &|path| path == "target" || path == ".git"),
+            ) {
+                let _ = record_baseline(&self.dir, target, &manifest);
+            }
+        }
+        discard_pending(&self.dir);
+        remove(&self.dir.join("backup"));
+        remove(&self.dir.join("transaction"));
+        remove(&self.dir.join("status"));
+        unsafe { libc::flock(self.lock.file.as_raw_fd(), libc::LOCK_SH) };
+        self.lock
+    }
+
+    /// The target failed to become ready: restore the previous release and
+    /// start it once through its own entry point. Returns only if that fails.
+    pub(crate) fn rollback(self) -> i32 {
+        recover(&self.plugin_dir, &self.dir);
+        load_plugin(&self.plugin_dir);
+        let Txn {
+            lock,
+            plugin_dir,
+            entry,
+            ..
+        } = self;
+        drop(lock);
+        let _ = reenter(&plugin_dir, &entry, None);
+        1
+    }
+}
+
+/// Gate for a sidebar or daemon started directly, not by a launch that
+/// already passed it: readiness is a valid configuration in the target.
+pub(crate) fn gate_direct(plugin_dir: &Path) -> Option<Lock> {
+    match gate(plugin_dir, Entry::Direct) {
+        Gate::Lease(lock) => Some(lock),
+        Gate::Open => None,
+        Gate::Txn(txn) => {
+            if crate::app_config::current_process().is_ok() {
+                Some(txn.commit())
+            } else {
+                std::process::exit(txn.rollback())
+            }
+        }
+    }
+}
+
 /// Start a detached worker if the daily check is due. Cheap enough to call
 /// on every start and hourly from long-running views.
 pub(crate) fn kick(plugin_dir: &Path) {

@@ -704,9 +704,14 @@ fn release_package(root: &Path, version: &str) -> PathBuf {
     .unwrap();
     fs::write(package.join(".gitignore"), "target/\n").unwrap();
     fs::write(package.join("agents/test.conf"), "AGENT_NAME=test\n").unwrap();
+    // Log, then (for `activate`, when a test asks) run the real engine the
+    // way agenmux.tmux execs the installed one.
     script(
         &package.join("agenmux.tmux"),
-        r#"printf 'entrypoint %s\n' "$*" >> "${RESTART_LOG:-/dev/null}""#,
+        r#"printf 'entrypoint %s\n' "$*" >> "${RESTART_LOG:-/dev/null}"
+if [ "${1:-}" = activate ] && [ -n "${AGENMUX_REAL:-}" ]; then
+  exec env AGENMUX_DIR="$(cd "$(dirname "$0")" && pwd)" "$AGENMUX_REAL" toggle "$2" "$3"
+fi"#,
     );
     script(&package.join("scripts/version.sh"), "exit 0");
     script(
@@ -1006,4 +1011,219 @@ fn manual_update_refuses_while_another_runtime_uses_the_install() {
             .next(),
         Some("v99.0.0")
     );
+}
+
+impl Auto {
+    /// A launch through the public toggle entry point, inside a (fake) tmux,
+    /// offline. The target's bootstrap hands back to the real engine when
+    /// `confirm` is set, so the target can confirm readiness.
+    fn toggle(&self, mode: &str, confirm: bool) -> Output {
+        let runtime = self.tmp.path().join("runtime");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut command = self.command("", &["toggle", mode, "client-1"]);
+        command
+            .env("TMUX", format!("{}/socket,1,0", self.tmp.path().display()))
+            .env("AGENMUX_RUNTIME_DIR", &runtime);
+        if confirm {
+            command.env("AGENMUX_REAL", env!("CARGO_BIN_EXE_agenmux"));
+        }
+        command.output().unwrap()
+    }
+
+    fn log(&self) -> String {
+        fs::read_to_string(self.tmp.path().join("log")).unwrap_or_default()
+    }
+
+    fn head(&self) -> String {
+        String::from_utf8(git(&self.plugin, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    fn installed(&self) -> String {
+        fs::read_to_string(self.plugin.join("target/release/.agenmux-version"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    fn assert_clean_state(&self) {
+        for leftover in ["transaction", "backup", "pending", "pkg-v99.0.0"] {
+            assert!(!self.state().join(leftover).exists(), "{leftover} left");
+        }
+    }
+}
+
+fn activation_fixture(name: &str, git_install: bool) -> Auto {
+    let auto = auto_fixture(name, git_install);
+    assert_eq!(auto.prepare("v99.0.0"), "agenmux: v99.0.0 ready");
+    let _ = fs::remove_file(auto.tmp.path().join("log"));
+    auto
+}
+
+#[test]
+fn fresh_popup_start_activates_the_prepared_release_offline() {
+    for git_install in [true, false] {
+        let auto = activation_fixture("activate-popup", git_install);
+        let out = auto.toggle("popup", true);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(auto.installed(), "v99.0.0");
+        assert!(fs::read_to_string(auto.plugin.join("Cargo.toml"))
+            .unwrap()
+            .contains("99.0.0"));
+        if git_install {
+            let tag = git(&auto.plugin, &["rev-parse", "v99.0.0^{commit}"]).stdout;
+            assert_eq!(auto.head(), String::from_utf8(tag).unwrap().trim());
+            assert!(auto.plugin.join(".git").exists());
+        } else {
+            assert!(fs::read_to_string(auto.state().join("baseline"))
+                .unwrap()
+                .starts_with("v99.0.0\n"));
+        }
+        // Target setup ran, then the target's own bootstrap with the original
+        // mode and client.
+        let log = auto.log();
+        assert!(
+            log.starts_with("entrypoint \nentrypoint activate popup client-1\n"),
+            "{log}"
+        );
+        auto.assert_clean_state();
+        assert!(!auto.state().join("failed").exists());
+    }
+}
+
+#[test]
+fn target_readiness_failure_restores_and_starts_the_old_release_once() {
+    for git_install in [true, false] {
+        let auto = activation_fixture("activate-readiness", git_install);
+        let before = auto.snapshot();
+        let head = auto.head();
+        // The fake tmux cannot start a split daemon, so the target fails.
+        let out = auto.toggle("split", true);
+        assert!(!out.status.success());
+        assert_eq!(auto.snapshot(), before);
+        assert_eq!(auto.head(), head);
+        assert_eq!(
+            fs::read_to_string(auto.state().join("failed")).unwrap(),
+            "v99.0.0\n"
+        );
+        // Target bootstrap, restored old setup, old bootstrap; no retry loop.
+        let log = auto.log();
+        assert_eq!(
+            log.matches("entrypoint activate split client-1").count(),
+            2,
+            "{log}"
+        );
+        auto.assert_clean_state();
+        // Preparation does not retry the failed target.
+        assert!(auto.prepare("v99.0.0").contains("v99.0.0 failed to start"));
+    }
+}
+
+#[test]
+fn activation_faults_leave_a_complete_old_install() {
+    for git_install in [true, false] {
+        for step in ["source", "engine", "state", "setup"] {
+            let auto = activation_fixture("activate-fault", git_install);
+            let before = auto.snapshot();
+            let head = auto.head();
+            let out = auto
+                .command("", &["toggle", "popup", "client-1"])
+                .env("TMUX", format!("{}/socket,1,0", auto.tmp.path().display()))
+                .env("AGENMUX_RUNTIME_DIR", auto.tmp.path().join("runtime"))
+                .env("AGENMUX_REAL", env!("CARGO_BIN_EXE_agenmux"))
+                .env("AGENMUX_ACTIVATION_FAULT", step)
+                .output()
+                .unwrap();
+            // The old release still opens.
+            assert!(out.status.success(), "{step}");
+            assert_eq!(auto.snapshot(), before, "{step} git={git_install}");
+            assert_eq!(auto.head(), head, "{step}");
+            assert!(auto.plugin.join("agents/test.conf").is_file(), "{step}");
+            assert_eq!(
+                fs::read_to_string(auto.state().join("failed")).unwrap(),
+                "v99.0.0\n"
+            );
+            auto.assert_clean_state();
+            assert!(!auto.log().contains("activate"), "{step}: {}", auto.log());
+        }
+    }
+}
+
+#[test]
+fn interrupted_activation_is_recovered_by_the_next_start() {
+    for git_install in [true, false] {
+        let auto = activation_fixture("activate-interrupted", git_install);
+        let before = auto.snapshot();
+        // The target never confirms: it exits after its bootstrap ran.
+        let _ = auto.toggle("popup", false);
+        assert_eq!(auto.installed(), "v99.0.0");
+        assert!(auto.state().join("transaction").is_file());
+        // Any next start recovers before doing anything else.
+        let out = Command::new(env!("CARGO_BIN_EXE_agenmux"))
+            .args(["toggle", "popup", "client-1"])
+            .env("AGENMUX_DIR", &auto.plugin)
+            .env("HOME", auto.tmp.path())
+            .env("XDG_CONFIG_HOME", auto.tmp.path().join("config"))
+            .env("TMUX", format!("{}/socket,1,0", auto.tmp.path().display()))
+            .env("AGENMUX_RUNTIME_DIR", auto.tmp.path().join("runtime"))
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    auto.bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(auto.snapshot(), before);
+        assert_eq!(
+            fs::read_to_string(auto.state().join("failed")).unwrap(),
+            "v99.0.0\n"
+        );
+        auto.assert_clean_state();
+    }
+}
+
+#[test]
+fn activation_waits_for_runtimes_policy_and_a_matching_base() {
+    let auto = activation_fixture("activate-guarded", true);
+    let before = auto.snapshot();
+    // Status, scan and config commands never activate.
+    for args in [&["status"][..], &["list"], &["config", "check"]] {
+        let _ = auto.command("", args).output().unwrap();
+    }
+    // Another server's daemon holds a lease: launch the current version.
+    let lease = hold_lease(&auto);
+    assert!(auto.toggle("popup", true).status.success());
+    assert_eq!(auto.snapshot(), before);
+    assert!(auto.state().join("pending").is_file());
+    drop(lease);
+    // Turned off: the prepared release stays pending but is not applied.
+    auto.config("[behavior]\nauto_update = false\n");
+    assert!(auto.toggle("popup", true).status.success());
+    assert_eq!(auto.snapshot(), before);
+    assert!(auto.state().join("pending").is_file());
+    auto.config("");
+    // Prepared for another base (a manual or TPM switch since): discarded.
+    let pending = fs::read_to_string(auto.state().join("pending")).unwrap();
+    fs::write(
+        auto.state().join("pending"),
+        pending.replace(&format!("base=v{VERSION}"), "base=v0.0.1"),
+    )
+    .unwrap();
+    assert!(auto.toggle("popup", true).status.success());
+    assert_eq!(auto.snapshot(), before);
+    assert!(!auto.state().join("pending").exists());
+    assert!(!auto.state().join("pkg-v99.0.0").exists());
 }

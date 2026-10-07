@@ -67,30 +67,58 @@ pub fn run(plugin_dir: &Path, requested_mode: Option<&str>, requested_client: Op
             };
         }
     }
+    // A fresh start may switch to a prepared release and re-enter it here.
+    let gate = crate::autoupdate::gate(
+        plugin_dir,
+        crate::autoupdate::Entry::Toggle {
+            mode: requested_mode.unwrap_or("").into(),
+            client: requested_client.unwrap_or("").into(),
+        },
+    );
     let config = match crate::app_config::current(requested_mode) {
         Ok(config) => config,
         Err(e) => {
             eprintln!("agenmux: {e}");
+            if let crate::autoupdate::Gate::Txn(txn) = gate {
+                return txn.rollback();
+            }
             return e.exit_code();
         }
     };
     // Held until this launch ends (a popup's whole lifetime); the daemon a
     // split launch starts inherits it.
-    let lease = match crate::autoupdate::lease(plugin_dir) {
-        Ok(lease) => lease,
-        Err(error) => {
-            eprintln!("agenmux: {error}");
-            return 1;
-        }
+    let (lease, txn) = match gate {
+        crate::autoupdate::Gate::Lease(lease) => (Some(lease), None),
+        crate::autoupdate::Gate::Txn(txn) => (None, Some(txn)),
+        crate::autoupdate::Gate::Open => match crate::autoupdate::lease(plugin_dir) {
+            Ok(lease) => (lease, None),
+            Err(error) => {
+                eprintln!("agenmux: {error}");
+                return 1;
+            }
+        },
     };
     let client = requested_client
         .filter(|client| !client.is_empty())
         .map(str::to_string)
         .or_else(|| panes::newest_real_client("#{client_name}").ok().flatten());
     if config.mode == crate::app_config::DisplayMode::Popup {
+        // A popup blocks until it closes; the target is ready once its setup
+        // ran and this launch reached it.
+        let _lease = txn.map(crate::autoupdate::Txn::commit).or(lease);
         popup(plugin_dir, client, &config)
     } else {
-        split(plugin_dir, client, &config, lease.as_ref())
+        let held = txn
+            .as_ref()
+            .map(crate::autoupdate::Txn::lock)
+            .or(lease.as_ref());
+        let code = split(plugin_dir, client, &config, held);
+        match txn {
+            Some(txn) if code == 0 => drop(txn.commit()),
+            Some(txn) => return txn.rollback(),
+            None => {}
+        }
+        code
     }
 }
 
