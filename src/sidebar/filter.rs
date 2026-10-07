@@ -418,8 +418,15 @@ impl Sidebar {
         } else {
             self.collapsed.remove(&id);
         }
+        self.save_snapshot();
         self.select_index(header + 1);
         self.rebuild_visible(false);
+    }
+
+    fn save_snapshot(&mut self) {
+        if let Some(store) = self.snapshot.as_mut() {
+            store.save(&self.collapsed, &self.panes);
+        }
     }
 
     /// Toggle the selected header, or the header of the selected pane.
@@ -487,6 +494,7 @@ impl Sidebar {
         } else {
             self.collapsed.clear();
         }
+        self.save_snapshot();
         self.rebuild_visible(false);
     }
 
@@ -533,6 +541,8 @@ impl Sidebar {
             | Key::ToggleBranch
             | Key::CollapseAll
             | Key::ExpandAll
+            | Key::RestoreLayout
+            | Key::DismissLayout
             | Key::Other => {}
         }
     }

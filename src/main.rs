@@ -14,6 +14,7 @@ mod release;
 mod scan;
 mod setup;
 mod sidebar;
+mod snapshot;
 mod tmux;
 mod toggle;
 

@@ -118,6 +118,7 @@ pub struct BehaviorConfig {
 pub struct TmuxManagementConfig {
     pub enabled: Option<bool>,
     pub confirm_delete: Option<bool>,
+    pub resume_agents: Option<bool>,
 }
 
 // Deserialize through String so TOML's externally tagged enum tables cannot

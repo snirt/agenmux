@@ -235,6 +235,9 @@ pub struct Sidebar {
     attention_filter: bool,
     // Collapsed session and window ids ("$n"/"@n"): stable across rescans.
     collapsed: HashSet<String>,
+    /// Persisted collapse state and layout; opened only by the runtime entry
+    /// points, so tests never touch the user's state dir.
+    snapshot: Option<crate::snapshot::Store>,
     search_focused: bool,
     key_sequence: KeySequence,
     refresh_requested: bool,
@@ -410,6 +413,7 @@ fn new_sidebar(
         query: ui::TextEdit::from(""),
         attention_filter: false,
         collapsed: HashSet::new(),
+        snapshot: None,
         search_focused: false,
         key_sequence: KeySequence::default(),
         refresh_requested: false,
@@ -485,6 +489,7 @@ pub fn run(plugin_dir: PathBuf) -> i32 {
         }
     };
     let mut sb = new_sidebar(tmux, plugin_dir, cache_file, rows_file, self_pane, settings);
+    sb.snapshot = crate::snapshot::Store::open(&mut sb.tmux);
     sb.pin = pin;
     // tty mode is the popup: while it is visible it owns input.
     sb.plugin_selected = true;
@@ -880,6 +885,12 @@ impl Sidebar {
             Key::Right => self.expand_branch(),
             Key::CollapseAll => self.set_all_collapsed(true),
             Key::ExpandAll => self.set_all_collapsed(false),
+            Key::RestoreLayout => self.restore_layout(),
+            Key::DismissLayout => {
+                if let Some(store) = self.snapshot.as_mut() {
+                    store.dismiss();
+                }
+            }
             Key::Quit => {
                 if self.daemon.is_none() {
                     // Popup/tty mode owns stdin, so q/Ctrl-C/Ctrl-D closes it.
@@ -1666,6 +1677,16 @@ impl Sidebar {
         let update = self.tracker.update(scanned, &focus.focused_panes);
         self.rows = update.rows;
         self.panes = panes;
+        if let Some(store) = self.snapshot.as_mut() {
+            store.adopt(&mut self.collapsed, &self.panes);
+            // window layouts change without pane output; the 2s scan catches them
+            if periodic || changes.full {
+                if let Ok(windows) = self.tmux.run(crate::snapshot::WINDOWS_FMT) {
+                    store.set_layout(&self.panes, &self.rows, &windows);
+                }
+            }
+            store.save(&self.collapsed, &self.panes);
+        }
         for event in &update.events {
             let _ = crate::notifications::deliver(self.settings.settings.notifications, event);
         }
@@ -1688,6 +1709,44 @@ impl Sidebar {
             }
         }
         Ok(())
+    }
+
+    /// `R`: rebuild the previous server's missing sessions and windows. Plain
+    /// tmux forks, like jump: their hooks' output must not reach the control
+    /// pipe.
+    fn restore_layout(&mut self) {
+        if !self.settings.settings.tmux_management_enabled {
+            return;
+        }
+        let Some(prev) = self.snapshot.as_mut().and_then(|store| store.dismiss()) else {
+            return;
+        };
+        let live = self
+            .tmux
+            .run("list-windows -a -F '#{window_index}|#{session_name}'")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let (index, session) = line.split_once('|')?;
+                Some((session.to_string(), index.parse().ok()?))
+            })
+            .collect();
+        let resume = self.settings.settings.tmux_management_resume_agents;
+        let confs = &self.confs;
+        crate::snapshot::replay(
+            &prev,
+            &live,
+            |agent| {
+                resume
+                    .then(|| confs.iter().find(|c| c.name == agent)?.resume.clone())
+                    .flatten()
+            },
+            &mut |args: &[String]| {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                command(&args).ok().map(|out| out.trim().to_string())
+            },
+        );
+        self.refresh_requested = true;
     }
 
     fn has_relevant_output(&self) -> bool {

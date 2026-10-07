@@ -156,6 +156,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         String::new(),
         settings,
     );
+    sb.snapshot = crate::snapshot::Store::open(&mut sb.tmux);
     // The command runs on this control connection, so it identifies the exact
     // client even when tmux forks and reports a different OS PID. It can briefly
     // be empty while a busy server finishes attaching; retry below.

@@ -27,6 +27,8 @@ pub struct AgentConf {
     pub subject_cmd: Option<String>,
     /// Sidebar glyph shown before the agent name; empty = name only.
     pub icon: String,
+    /// Typed into a restored pane's shell to continue the agent's last session.
+    pub resume: Option<String>,
 }
 
 /// Extract `KEY=value` assignments from shell-syntax conf text without
@@ -153,6 +155,7 @@ pub fn load_conf(path: &Path) -> std::io::Result<AgentConf> {
         subject_screen: None,
         subject_cmd: None,
         icon: String::new(),
+        resume: None,
     };
     apply(&mut c, &src);
     Ok(c)
@@ -178,6 +181,7 @@ fn apply(c: &mut AgentConf, src: &str) {
                 "SUBJECT_SCREEN" => c.subject_screen = None,
                 "SUBJECT_CMD" => c.subject_cmd = None,
                 "AGENT_ICON" => c.icon.clear(),
+                "AGENT_RESUME" => c.resume = None,
                 _ => {}
             }
             continue;
@@ -207,6 +211,7 @@ fn apply(c: &mut AgentConf, src: &str) {
             "SUBJECT_SCREEN" => c.subject_screen = re_sed(&name, &key, &val),
             "SUBJECT_CMD" => c.subject_cmd = Some(val),
             "AGENT_ICON" => c.icon = val,
+            "AGENT_RESUME" => c.resume = Some(val),
             _ => {}
         }
     }
@@ -284,12 +289,16 @@ mod tests {
         std::fs::create_dir_all(&user).unwrap();
         std::fs::write(
             dir.join("plugin/agents/a.conf"),
-            "AGENT_BINS=\"a\"\nWORKING_SCREEN='busy'\nTITLE_STRIP='^A '\nAGENT_ICON=\"x\"\n",
+            "AGENT_BINS=\"a\"\nWORKING_SCREEN='busy'\nTITLE_STRIP='^A '\nAGENT_ICON=\"x\"\nAGENT_RESUME=\"a --continue\"\n",
         )
         .unwrap();
-        std::fs::write(dir.join("plugin/agents/b.conf"), "AGENT_ICON=\"y\"\n").unwrap();
+        std::fs::write(
+            dir.join("plugin/agents/b.conf"),
+            "AGENT_ICON=\"y\"\nAGENT_RESUME=\"b -c\"\n",
+        )
+        .unwrap();
         std::fs::write(user.join("a.conf"), "AGENT_ICON=\"z\"\nTITLE_STRIP=\"\"\n").unwrap();
-        std::fs::write(user.join("b.conf"), "AGENT_ICON=\"\"\n").unwrap();
+        std::fs::write(user.join("b.conf"), "AGENT_ICON=\"\"\nAGENT_RESUME=\"\"\n").unwrap();
         std::fs::write(user.join("c.conf"), "AGENT_BINS=\"c\"\n").unwrap();
         let confs = load_dirs(&[dir.join("plugin/agents"), user]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -307,6 +316,8 @@ mod tests {
             confs[1].icon, "",
             "empty AGENT_ICON disables the built-in icon"
         );
+        assert_eq!(a.resume.as_deref(), Some("a --continue"));
+        assert_eq!(confs[1].resume, None, "empty AGENT_RESUME disables resume");
         assert_eq!(confs[2].bins, ["c"]);
     }
 

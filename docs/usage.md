@@ -13,6 +13,7 @@ open. It lists every tmux session, window, and pane, with agent state inline.
 | `Space` | Collapse or expand the selected header |
 | `h` / `←`, `→` | Collapse / expand (`h` on a pane steps to its header) |
 | `z` / `Z` | Collapse / expand everything |
+| `R` / `x` | Restore / dismiss the previous tmux server's layout, when offered |
 | `/` | Search |
 | `f` | Toggle **User attention**: show done, working, and blocked; hide idle |
 | `.` | Toggle between all panes and agents only |
@@ -66,9 +67,31 @@ Panes running `nvim` or `lazygit` show the Neovim or git icon.
 - `▼` is open, `▶` is collapsed.
 - A collapsed `▶` takes the color of the most urgent agent hidden under it
   (blocked, then done, then working) and blinks.
-- Collapse state lasts until the sidebar daemon exits.
+- Collapse state survives closing the sidebar and restarting tmux. After a
+  restart it applies to sessions and windows (by index) with the same names.
 - Search and User attention show every match without changing what is
   collapsed.
+
+### Restoring after a tmux restart
+
+The sidebar keeps a snapshot of each tmux server's sessions, windows, pane
+directories and agents in `$XDG_STATE_HOME/agenmux/` (else
+`~/.local/state/agenmux/`). After tmux restarts, the footer offers it:
+
+```text
+Previous layout: 3 sessions, 5 agents · R restore · x dismiss
+```
+
+- Nothing is recreated until you press `R`; `x` discards the offer.
+- `R` creates missing sessions, and missing windows inside existing sessions,
+  with their saved layout. Existing windows are never changed.
+- Panes start a shell in their saved directory; their old commands never run
+  again.
+- Agent panes also run their agent's `AGENT_RESUME` command (for example
+  `claude --continue`) when `tmux_management.resume_agents = true`. It is off by
+  default. Most agents continue their latest session in that directory, so two
+  agents sharing a directory continue the same one.
+- `R` needs `tmux_management.enabled`.
 
 ### Agent icons
 

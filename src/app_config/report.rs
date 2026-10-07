@@ -64,6 +64,7 @@ A @agenmux-* tmux option, when set, overrides the file.
 [tmux_management]
   enabled              true | false                       (true)
   confirm_delete       true | false                       (true)
+  resume_agents        true | false                       (false)
 
 [quick_launchers.<id>]
   sequence             1-2 ASCII letters or digits        (required)
@@ -182,6 +183,10 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
         (
             "tmux_management.confirm_delete".into(),
             config.tmux_management_confirm_delete.to_string(),
+        ),
+        (
+            "tmux_management.resume_agents".into(),
+            config.tmux_management_resume_agents.to_string(),
         ),
         (
             "theme.base".into(),
