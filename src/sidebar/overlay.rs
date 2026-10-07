@@ -1187,6 +1187,9 @@ impl Sidebar {
                 Err(error) => format!("could not publish settings; rollback failed: {error}"),
             });
         }
+        if next.auto_update && !old.auto_update {
+            crate::autoupdate::resumed(&self.plugin_dir);
+        }
         let width_changed = next.sidebar_width != self.settings.settings.sidebar_width;
         self.settings.replace(file, next);
         if width_changed && self.daemon.is_some() {

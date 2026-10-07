@@ -75,6 +75,9 @@ undo_history = 20         # closed branches u can restore; 0: off
 - [`examples/config.toml`](../examples/config.toml) is a complete annotated
   example.
 - Quick launchers are covered in [Usage](usage.md#quick-launchers).
+- `behavior.auto_update` is explained in
+  [Installation](installation.md#automatic-updates); a manual version switch
+  sets it to `false`.
 - The file is data only: no includes, variables, or shell commands. (Agent
   `.conf` files are different; they can run `SUBJECT_CMD`.)
 

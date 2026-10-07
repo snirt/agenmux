@@ -640,6 +640,11 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
         }
     }
 
+    let pause = match crate::autoupdate::pause(plugin_dir) {
+        Ok(pause) => pause,
+        Err(error) => return fail(&error),
+    };
+
     let was_open = tmux_option("@agenmux-on") == "1"
         || !tmux_value(&["show-option", "-gqv", "@agenmux-sidebar"]).is_empty()
         || !tmux_value(&["show-option", "-gqv", "@agents-mon-sidebar"]).is_empty();
@@ -672,8 +677,12 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
         reenter(plugin_dir, was_open);
     }
     if let Err(reason) = result {
+        if let Some(pause) = pause {
+            pause.undo();
+        }
         return refuse(reason);
     }
+    crate::autoupdate::switched(plugin_dir);
     note(&format!("now on {target}"));
     0
 }

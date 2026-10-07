@@ -1087,6 +1087,83 @@ pub(crate) fn gate_direct(plugin_dir: &Path) -> Option<Lock> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Manual version switches
+
+/// `auto_update = false`, written before a manual switch so a worker that
+/// finishes late sees it, and undone if the switch fails.
+pub(crate) struct Pause {
+    path: PathBuf,
+    previous: Option<String>,
+    written: String,
+}
+
+/// Persist the pause, or explain why it cannot be. Only the plugin's own
+/// engine is ever auto-updated, so only it records a pause.
+pub(crate) fn pause(plugin_dir: &Path) -> Result<Option<Pause>, String> {
+    if !coordinated(plugin_dir) {
+        return Ok(None);
+    }
+    let unusable = |error: crate::app_config::ConfigError| {
+        format!("cannot pause auto-update ({error}); fix config.toml and retry")
+    };
+    let (path, existed, source) = crate::app_config::document().map_err(unusable)?;
+    let file = crate::app_config::parse(&source).map_err(unusable)?;
+    if file.behavior.and_then(|behavior| behavior.auto_update) == Some(false) {
+        return Ok(None);
+    }
+    let written = crate::app_config::edit_document(&source, "behavior.auto_update", Some("false"))
+        .map_err(unusable)?;
+    crate::app_config::save_document(&path, &written).map_err(unusable)?;
+    Ok(Some(Pause {
+        path,
+        previous: existed.then_some(source),
+        written,
+    }))
+}
+
+impl Pause {
+    pub(crate) fn undo(self) {
+        match self.previous {
+            Some(source) => {
+                let _ = crate::app_config::save_document(&self.path, &source);
+            }
+            // Remove the file this switch created, unless edited since.
+            None => {
+                if fs::read_to_string(&self.path).is_ok_and(|now| now == self.written) {
+                    let _ = fs::remove_file(&self.path);
+                }
+            }
+        }
+    }
+}
+
+/// After a successful manual switch nothing prepared for, or failed on, the
+/// previous version survives.
+pub(crate) fn switched(plugin_dir: &Path) {
+    let Some(dir) = state_dir(plugin_dir).filter(|dir| dir.is_dir()) else {
+        return;
+    };
+    if let Ok(_state) = state_lock(&dir) {
+        discard_pending(&dir);
+        remove(&dir.join("failed"));
+        remove(&dir.join("status"));
+    }
+}
+
+/// Settings turned auto-update back on: allow retrying a failed target and
+/// check at the next scheduler tick instead of waiting out the day.
+pub(crate) fn resumed(plugin_dir: &Path) {
+    let Some(dir) = state_dir(plugin_dir).filter(|dir| dir.is_dir()) else {
+        return;
+    };
+    if let Ok(_state) = state_lock(&dir) {
+        remove(&dir.join("failed"));
+        remove(&dir.join("last-attempt"));
+        remove(&dir.join("status"));
+    }
+}
+
 /// Start a detached worker if the daily check is due. Cheap enough to call
 /// on every start and hourly from long-running views.
 pub(crate) fn kick(plugin_dir: &Path) {

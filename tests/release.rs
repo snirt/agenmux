@@ -1227,3 +1227,49 @@ fn activation_waits_for_runtimes_policy_and_a_matching_base() {
     assert!(!auto.state().join("pending").exists());
     assert!(!auto.state().join("pkg-v99.0.0").exists());
 }
+
+#[test]
+fn manual_switch_pauses_auto_update_and_clears_prepared_state() {
+    let auto = activation_fixture("manual-pause", true);
+    fs::write(auto.state().join("failed"), "v98.0.0\n").unwrap();
+    auto.config("# mine\nversion = 1\n[behavior]\nnotifications = false # keep\n");
+    let out = auto.command("", &["update", "v99.0.0"]).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(auto.installed(), "v99.0.0");
+    let config = fs::read_to_string(auto.tmp.path().join("config/agenmux/config.toml")).unwrap();
+    assert_eq!(
+        config,
+        "# mine\nversion = 1\n[behavior]\nnotifications = false # keep\nauto_update = false\n"
+    );
+    for gone in ["pending", "pkg-v99.0.0", "failed", "status"] {
+        assert!(!auto.state().join(gone).exists(), "{gone}");
+    }
+}
+
+#[test]
+fn failed_manual_switch_keeps_the_auto_update_preference() {
+    // No config file before: a refused switch leaves none behind.
+    let auto = auto_fixture("manual-pause-failed", true);
+    let lease = hold_lease(&auto);
+    let out = auto.command("", &["update", "v99.0.0"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(!auto.tmp.path().join("config/agenmux/config.toml").exists());
+    drop(lease);
+    // An existing file is restored byte for byte.
+    let original = "version = 1\n# comment\n[behavior]\nauto_update = true\n";
+    auto.config(original);
+    fs::remove_dir_all(auto.tmp.path().join("releases/v99.0.0")).unwrap();
+    let out = auto.command("", &["update", "v99.0.0"]).output().unwrap();
+    assert!(!out.status.success());
+    assert_eq!(
+        fs::read_to_string(auto.tmp.path().join("config/agenmux/config.toml")).unwrap(),
+        original
+    );
+    assert_eq!(auto.installed(), format!("v{VERSION}"));
+    // A configuration that cannot record the pause refuses the switch.
+    auto.config("[behavior]\nauto_update = 'maybe'\n");
+    let before = auto.snapshot();
+    let out = auto.command("", &["update", "v99.0.0"]).output().unwrap();
+    assert!(!out.status.success());
+    assert_eq!(auto.snapshot(), before);
+}
