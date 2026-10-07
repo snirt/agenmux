@@ -277,6 +277,8 @@ pub struct Sidebar {
     cache_file: PathBuf,
     last_frame: String,
     update: Option<String>, // newer release to advertise in the header
+    update_ready: bool,     // that release is prepared for the next start
+    update_note: std::sync::Arc<std::sync::Mutex<Option<String>>>, // picker's auto-update line
     daemon: Option<Daemon>,
     overlay: Option<Overlay>,
 }
@@ -390,6 +392,7 @@ fn new_sidebar(
     // read once: the check behind it runs at most daily, and switching version
     // restarts the engine anyway
     let update = update_available(&plugin_dir);
+    let update_ready = update.is_some() && update == crate::autoupdate::ready_target(&plugin_dir);
     let adopted_show_all_panes = settings.show_all_panes;
     let config_show_all = settings.show_all_panes;
     let tmux_active_border_fg = inherit_tmux_header(&mut settings);
@@ -454,6 +457,8 @@ fn new_sidebar(
         cache_file,
         last_frame: String::new(),
         update,
+        update_ready,
+        update_note: Default::default(),
         daemon: None,
         overlay: None,
     };
@@ -506,6 +511,7 @@ pub fn run(plugin_dir: PathBuf) -> i32 {
         }
     };
     let mut sb = new_sidebar(tmux, plugin_dir, cache_file, rows_file, self_pane, settings);
+    crate::autoupdate::spawn_scheduler(sb.plugin_dir.clone());
     sb.snapshot = crate::snapshot::Store::open(&mut sb.tmux);
     sb.pin = pin;
     // tty mode is the popup: while it is visible it owns input.

@@ -673,7 +673,10 @@ impl Sidebar {
         // instead of serving a list that the daily check may have left a day
         // old. It lands in the file and normal scan renders pick it up live.
         let plugin_dir = self.plugin_dir.clone();
+        let note = self.update_note.clone();
         std::thread::spawn(move || {
+            let line = crate::autoupdate::picker_note(&plugin_dir);
+            *note.lock().unwrap_or_else(|e| e.into_inner()) = line;
             release::refresh(&plugin_dir);
         });
         self.overlay = Some(Overlay::Versions {
@@ -774,6 +777,12 @@ impl Sidebar {
             Some(Overlay::Versions { sel, chosen }) => {
                 let cur = current_tag();
                 let tags = known_tags(&self.plugin_dir);
+                let ready = crate::autoupdate::ready_target(&self.plugin_dir);
+                let note = self
+                    .update_note
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 *sel = picker_sel(&tags, &cur, chosen.as_deref(), *sel);
                 let mut text = format!("{E}[2J{E}[H{header}{title} — versions{E}[0m\n\n");
                 if tags.is_empty() {
@@ -787,6 +796,8 @@ impl Sidebar {
                         let mark = cursor_mark(&self.palette, i == *sel, true, "idle");
                         let tail = if *t == cur {
                             format!(" {muted}(current){E}[0m")
+                        } else if ready.as_deref() == Some(t.as_str()) {
+                            format!(" {muted}(ready · next start){E}[0m")
                         } else {
                             String::new()
                         };
@@ -797,6 +808,9 @@ impl Sidebar {
                         self.nav_label(true, true),
                         self.back_hint(),
                     ]);
+                    if let Some(note) = note {
+                        text.push_str(&format!("\n {muted}{note}{E}[0m\n"));
+                    }
                     text.push_str(&format!("\n{muted}{hint}{E}[0m"));
                 }
                 text

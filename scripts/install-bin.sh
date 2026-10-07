@@ -39,11 +39,11 @@ fetch_pkg() {
   # No trap here: bash EXIT traps are global, so installing one would silently
   # drop whatever the caller registered. Callers own cleanup of $tmp.
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/agenmux.XXXXXX")" || return 1
-  curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || return 1
+  curl -fsSL --connect-timeout 20 --max-time 60 "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || return 1
 
   for package in "agenmux-$platform" "tmux-agents-mon-$platform"; do
     archive="$package.tar.gz"
-    curl -fsSL "$base/$archive" -o "$tmp/$archive" || continue
+    curl -fsSL --connect-timeout 20 --max-time 600 "$base/$archive" -o "$tmp/$archive" || continue
     expected="$(awk -v file="$archive" '$2 == file || $2 == "./" file { print $1 }' "$tmp/SHA256SUMS")"
     [ "${#expected}" -eq 64 ] || continue
     if command -v sha256sum >/dev/null; then
@@ -52,6 +52,8 @@ fetch_pkg() {
       actual="$(shasum -a 256 "$tmp/$archive" | awk '{ print $1 }')"
     fi
     [ "$actual" = "$expected" ] || continue
+    # Members must stay inside $dest: no absolute or parent-relative names.
+    tar -tzf "$tmp/$archive" | grep -Eq '^/|(^|/)\.\.(/|$)' && return 1
     mkdir -p "$dest" || return 1
     tar -xzf "$tmp/$archive" -C "$dest" || return 1
     [ -d "$dest/$package" ] || return 1

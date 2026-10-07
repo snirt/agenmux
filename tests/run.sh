@@ -256,6 +256,31 @@ SH
     fail=1
   fi
 
+  # 5b. a correctly checksummed archive whose members escape the destination
+  #     is refused before extraction.
+  unsafe="$tmp/downloads/v0.2.1"
+  mkdir -p "$unsafe"
+  python3 -c 'import io, sys, tarfile
+t = tarfile.open(sys.argv[1], "w:gz")
+i = tarfile.TarInfo(sys.argv[2] + "/../../escaped")
+i.size = 1
+t.addfile(i, io.BytesIO(b"x"))
+t.close()' "$unsafe/$package.tar.gz" "$package"
+  if command -v sha256sum >/dev/null; then
+    (cd "$unsafe" && sha256sum "./$package.tar.gz" >SHA256SUMS)
+  else
+    (cd "$unsafe" && shasum -a 256 "./$package.tar.gz" >SHA256SUMS)
+  fi
+  mkdir -p "$tmp/unsafe-dest/inner"
+  if ! DOWNLOADS="$tmp/downloads" PATH="$tmp/bin:$PATH" \
+    bash "$tmp/plugin/scripts/install-bin.sh" fetch v0.2.1 "$tmp/unsafe-dest/inner" >/dev/null 2>&1 &&
+    [ ! -e "$tmp/unsafe-dest/escaped" ] && [ ! -e "$tmp/escaped" ]; then
+    echo "ok   native-fetch-rejects-escaping-members"
+  else
+    echo "FAIL native-fetch-rejects-escaping-members"
+    fail=1
+  fi
+
   # 6. with no downloadable release, the same bootstrap installer builds a
   #    minimal checkout through Cargo and leaves an executable engine.
   cargo_plugin="$tmp/cargo-plugin"

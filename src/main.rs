@@ -2,6 +2,7 @@
 mod diag;
 mod app_config;
 mod attention;
+mod autoupdate;
 mod conf;
 mod detect;
 mod focus;
@@ -85,6 +86,7 @@ fn main() {
                 e.exit_code()
             }
         },
+        ["internal", "auto-update"] => autoupdate::run(&plugin_dir()),
         ["scan" | "list", rest @ ..] => match parse_list_args(rest) {
             Some(filter) => cmd_list(filter),
             None => {

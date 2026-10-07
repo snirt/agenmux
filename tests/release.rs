@@ -678,3 +678,287 @@ exit 1"#,
         "keep\n"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Default-on auto-update. The installed engine is a copy of the real binary,
+// so `current_exe` is the plugin's own engine, as in a real release install.
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+struct Auto {
+    tmp: TempDir,
+    plugin: PathBuf,
+    bin: PathBuf,
+}
+
+/// A release package tree as `install-bin.sh fetch` extracts it.
+fn release_package(root: &Path, version: &str) -> PathBuf {
+    let package = root.join(format!("v{version}/agenmux-test"));
+    fs::create_dir_all(package.join("scripts")).unwrap();
+    fs::create_dir_all(package.join("agents")).unwrap();
+    fs::create_dir_all(package.join("target/release")).unwrap();
+    fs::write(
+        package.join("Cargo.toml"),
+        format!("[package]\nname = \"agenmux\"\nversion = \"{version}\"\n"),
+    )
+    .unwrap();
+    fs::write(package.join(".gitignore"), "target/\n").unwrap();
+    fs::write(package.join("agents/test.conf"), "AGENT_NAME=test\n").unwrap();
+    script(
+        &package.join("agenmux.tmux"),
+        r#"printf 'entrypoint %s\n' "$*" >> "${RESTART_LOG:-/dev/null}""#,
+    );
+    script(&package.join("scripts/version.sh"), "exit 0");
+    script(
+        &package.join("scripts/install-bin.sh"),
+        r#"[ "${1:-}" = fetch ] || exit 0
+[ -d "$RELEASES/$2/agenmux-test" ] || exit 1
+mkdir -p "$3" && cp -R "$RELEASES/$2/agenmux-test" "$3/" && printf '%s\n' "$3/agenmux-test""#,
+    );
+    script(
+        &package.join("target/release/agenmux"),
+        &format!(
+            r#"[ "${{1:-}}" = --version ] && printf 'agenmux {version}\n' && exit 0
+printf 'engine {version} %s\n' "$*" >> "${{RESTART_LOG:-/dev/null}}""#
+        ),
+    );
+    package
+}
+
+fn auto_fixture(name: &str, git_install: bool) -> Auto {
+    let tmp = TempDir::new(name);
+    let releases = tmp.path().join("releases");
+    let plugin = tmp.path().join("plugin");
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let base = release_package(&releases, VERSION);
+    release_package(&releases, "99.0.0");
+    let copied = Command::new("cp")
+        .arg("-R")
+        .arg(&base)
+        .arg(&plugin)
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    fs::copy(
+        env!("CARGO_BIN_EXE_agenmux"),
+        plugin.join("target/release/agenmux"),
+    )
+    .unwrap();
+    let mut revision = "-".to_string();
+    if git_install {
+        git_ok(&plugin, &["init", "-q", "-b", "main"]);
+        git_ok(&plugin, &["config", "user.email", "test@example.com"]);
+        git_ok(&plugin, &["config", "user.name", "Test"]);
+        git_ok(&plugin, &["add", "-A"]);
+        git_ok(&plugin, &["commit", "-qm", "base"]);
+        git_ok(&plugin, &["tag", &format!("v{VERSION}")]);
+        fs::write(
+            plugin.join("Cargo.toml"),
+            "[package]\nname = \"agenmux\"\nversion = \"99.0.0\"\n",
+        )
+        .unwrap();
+        git_ok(&plugin, &["commit", "-qam", "next"]);
+        git_ok(&plugin, &["tag", "v99.0.0"]);
+        git_ok(&plugin, &["reset", "-q", "--hard", &format!("v{VERSION}")]);
+        revision = String::from_utf8(git(&plugin, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+    }
+    fs::write(
+        plugin.join("target/release/.agenmux-version"),
+        format!("v{VERSION}\n{revision}\n"),
+    )
+    .unwrap();
+    script(
+        &bin.join("curl"),
+        r#"[ -n "${LATEST_TAG:-}" ] || exit 6
+printf 'https://example.invalid/repo/releases/tag/%s' "$LATEST_TAG""#,
+    );
+    no_server_tmux(&bin);
+    Auto { tmp, plugin, bin }
+}
+
+impl Auto {
+    fn state(&self) -> PathBuf {
+        self.tmp.path().join(".agenmux-state/plugin")
+    }
+
+    fn config(&self, body: &str) {
+        let dir = self.tmp.path().join("config/agenmux");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.toml"), body).unwrap();
+    }
+
+    fn command(&self, latest: &str, args: &[&str]) -> Command {
+        let mut command = Command::new(self.plugin.join("target/release/agenmux"));
+        command
+            .args(args)
+            .env_remove("TMUX")
+            .env("AGENMUX_DIR", &self.plugin)
+            .env("AGENMUX_REPO", "https://example.invalid/repo")
+            .env("HOME", self.tmp.path())
+            .env("XDG_CONFIG_HOME", self.tmp.path().join("config"))
+            .env("RELEASES", self.tmp.path().join("releases"))
+            .env("RESTART_LOG", self.tmp.path().join("log"))
+            .env("LATEST_TAG", latest)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            );
+        command
+    }
+
+    /// One worker run, with the daily throttle reset first.
+    fn prepare(&self, latest: &str) -> String {
+        let _ = fs::remove_file(self.state().join("last-attempt"));
+        let out = self
+            .command(latest, &["internal", "auto-update"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn snapshot(&self) -> (Vec<u8>, String, String) {
+        (
+            fs::read(self.plugin.join("target/release/agenmux")).unwrap(),
+            fs::read_to_string(self.plugin.join("target/release/.agenmux-version")).unwrap(),
+            fs::read_to_string(self.plugin.join("Cargo.toml")).unwrap(),
+        )
+    }
+}
+
+#[test]
+fn auto_update_prepares_newer_stable_release_without_touching_the_install() {
+    for git_install in [true, false] {
+        let auto = auto_fixture("auto-prepare", git_install);
+        let before = auto.snapshot();
+        let head = git(&auto.plugin, &["rev-parse", "HEAD"]).stdout;
+
+        assert_eq!(auto.prepare("v99.0.0"), "agenmux: v99.0.0 ready");
+
+        let pending = fs::read_to_string(auto.state().join("pending")).unwrap();
+        assert!(pending.contains("target=v99.0.0\n"), "{pending}");
+        assert!(pending.contains(&format!("base=v{VERSION}\n")), "{pending}");
+        assert!(auto
+            .state()
+            .join("pkg-v99.0.0/target/release/agenmux")
+            .is_file());
+        assert_eq!(auto.snapshot(), before, "active install changed");
+        assert_eq!(git(&auto.plugin, &["rev-parse", "HEAD"]).stdout, head);
+        if !git_install {
+            assert!(fs::read_to_string(auto.state().join("baseline"))
+                .unwrap()
+                .starts_with(&format!("v{VERSION}\n")));
+        }
+        let mode = fs::metadata(auto.state()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        // The daily throttle holds even though nothing failed.
+        let throttled = auto
+            .command("v99.0.0", &["internal", "auto-update"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&throttled.stdout).trim(),
+            "agenmux: checked within the last day"
+        );
+    }
+}
+
+#[test]
+fn auto_update_ignores_prereleases_equal_and_older_releases() {
+    let auto = auto_fixture("auto-not-newer", true);
+    for latest in ["v99.0.0-rc1", &format!("v{VERSION}"), "v0.0.1"] {
+        let outcome = auto.prepare(latest);
+        assert_eq!(outcome, format!("agenmux: v{VERSION} is current"));
+        assert!(!auto.state().join("pending").exists(), "{latest}");
+    }
+}
+
+#[test]
+fn auto_update_off_or_invalid_config_never_touches_state() {
+    let auto = auto_fixture("auto-off", true);
+    for config in [
+        "[behavior]\nauto_update = false\n",
+        "[behavior]\nauto_update = 'yes'\n",
+    ] {
+        auto.config(config);
+        assert_eq!(auto.prepare("v99.0.0"), "agenmux: auto-update is off");
+        assert!(!auto.state().exists());
+    }
+}
+
+#[test]
+fn auto_update_failures_keep_install_and_publish_nothing() {
+    let auto = auto_fixture("auto-failures", true);
+    let before = auto.snapshot();
+    // Offline: the attempt is still recorded, so it throttles like success.
+    assert_eq!(auto.prepare(""), "agenmux: release check failed");
+    assert!(auto.state().join("last-attempt").is_file());
+    assert_eq!(
+        fs::read_to_string(auto.state().join("status")).unwrap(),
+        "auto-update: release check failed\n"
+    );
+    // Missing asset, then an engine reporting the wrong version.
+    fs::remove_dir_all(auto.tmp.path().join("releases/v99.0.0")).unwrap();
+    assert_eq!(
+        auto.prepare("v99.0.0"),
+        "agenmux: could not download v99.0.0"
+    );
+    let package = release_package(&auto.tmp.path().join("releases"), "99.0.0");
+    script(
+        &package.join("target/release/agenmux"),
+        "printf 'agenmux 9.9.9\\n'",
+    );
+    assert_eq!(
+        auto.prepare("v99.0.0"),
+        "agenmux: could not download v99.0.0"
+    );
+    // A link escaping the package is refused even after a good checksum.
+    let package = release_package(&auto.tmp.path().join("releases"), "99.0.0");
+    std::os::unix::fs::symlink("../../../../etc", package.join("agents/escape")).unwrap();
+    assert!(auto.prepare("v99.0.0").contains("unsafe package"));
+    assert!(!auto.state().join("pending").exists());
+    assert_eq!(auto.snapshot(), before);
+    let leftovers: Vec<_> = fs::read_dir(auto.state())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("work-") || name.starts_with("pkg-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn auto_update_skips_dirty_development_and_modified_installs() {
+    let auto = auto_fixture("auto-dirty", true);
+    fs::write(auto.plugin.join("scratch"), "local\n").unwrap();
+    assert_eq!(
+        auto.prepare("v99.0.0"),
+        "agenmux: skipped: uncommitted changes"
+    );
+    fs::remove_file(auto.plugin.join("scratch")).unwrap();
+    git_ok(
+        &auto.plugin,
+        &["commit", "-q", "--allow-empty", "-m", "dev"],
+    );
+    assert_eq!(
+        auto.prepare("v99.0.0"),
+        "agenmux: skipped: development checkout (not on a release tag)"
+    );
+    assert!(!auto.state().exists());
+
+    let tarball = auto_fixture("auto-modified-tarball", false);
+    fs::write(tarball.plugin.join("agents/test.conf"), "AGENT_NAME=mine\n").unwrap();
+    assert_eq!(
+        tarball.prepare("v99.0.0"),
+        "agenmux: local changes in the plugin directory"
+    );
+    assert!(!tarball.state().join("pending").exists());
+}

@@ -233,6 +233,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         sb.quiet_exit();
         return 1;
     }
+    crate::autoupdate::spawn_scheduler(sb.plugin_dir.clone());
     sb.render(true);
     if std::env::var_os("AGENMUX_STARTUP_ACK").is_some() {
         use std::io::Write;

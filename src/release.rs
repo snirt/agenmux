@@ -8,15 +8,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_REPO: &str = "https://github.com/snirt/agenmux";
 
-fn repo() -> String {
+pub(crate) fn repo() -> String {
     crate::compat_env("AGENMUX_REPO", "AGENTS_MON_REPO").unwrap_or_else(|| DEFAULT_REPO.to_string())
 }
 
-fn release_dir(plugin_dir: &Path) -> PathBuf {
+pub(crate) fn release_dir(plugin_dir: &Path) -> PathBuf {
     plugin_dir.join("target/release")
 }
 
-fn runtime_name(plugin_dir: &Path) -> &'static str {
+pub(crate) fn runtime_name(plugin_dir: &Path) -> &'static str {
     if plugin_dir.join("agenmux.tmux").is_file() {
         "agenmux"
     } else {
@@ -24,15 +24,15 @@ fn runtime_name(plugin_dir: &Path) -> &'static str {
     }
 }
 
-fn engine_path(plugin_dir: &Path) -> PathBuf {
+pub(crate) fn engine_path(plugin_dir: &Path) -> PathBuf {
     release_dir(plugin_dir).join(runtime_name(plugin_dir))
 }
 
-fn state_path(plugin_dir: &Path) -> PathBuf {
+pub(crate) fn state_path(plugin_dir: &Path) -> PathBuf {
     release_dir(plugin_dir).join(format!(".{}-version", runtime_name(plugin_dir)))
 }
 
-fn package_engine(package: &Path) -> PathBuf {
+pub(crate) fn package_engine(package: &Path) -> PathBuf {
     let canonical = package.join("target/release/agenmux");
     if canonical.is_file() {
         canonical
@@ -41,7 +41,7 @@ fn package_engine(package: &Path) -> PathBuf {
     }
 }
 
-fn latest_file(plugin_dir: &Path) -> PathBuf {
+pub(crate) fn latest_file(plugin_dir: &Path) -> PathBuf {
     release_dir(plugin_dir).join(".agenmux-latest")
 }
 
@@ -61,7 +61,7 @@ fn success(program: impl AsRef<OsStr>, args: &[&str]) -> bool {
     run(program, args).is_ok_and(|output| output.status.success())
 }
 
-fn atomic_write(path: &Path, value: &str) -> std::io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, value: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -74,11 +74,13 @@ fn atomic_write(path: &Path, value: &str) -> std::io::Result<()> {
     fs::rename(staged, path)
 }
 
-fn latest_remote_tag(repo: &str) -> Option<String> {
+pub(crate) fn latest_remote_tag(repo: &str) -> Option<String> {
     let output = run(
         "curl",
         &[
             "-fsSL",
+            "--max-time",
+            "20",
             "-o",
             "/dev/null",
             "-w",
@@ -135,7 +137,7 @@ fn natural_cmp(left: &str, right: &str) -> Ordering {
     (left.len() - l).cmp(&(right.len() - r))
 }
 
-fn compare_tags(left: &str, right: &str) -> Ordering {
+pub(crate) fn compare_tags(left: &str, right: &str) -> Ordering {
     let (left_version, left_pre) = left
         .split_once('-')
         .map_or((left, None), |(v, p)| (v, Some(p)));
@@ -163,7 +165,12 @@ fn compare_tags(left: &str, right: &str) -> Ordering {
 }
 
 fn remote_tags(repo: &str, latest: &str) -> Vec<String> {
-    let Ok(output) = run("git", &["ls-remote", "--tags", "--refs", repo]) else {
+    let Ok(output) = Command::new("git")
+        .args(["ls-remote", "--tags", "--refs", repo])
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "20")
+        .output()
+    else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -199,7 +206,7 @@ pub fn refresh(plugin_dir: &Path) -> i32 {
     0
 }
 
-fn valid_tag(tag: &str) -> bool {
+pub(crate) fn valid_tag(tag: &str) -> bool {
     let Some(rest) = tag.strip_prefix('v') else {
         return false;
     };
@@ -209,7 +216,7 @@ fn valid_tag(tag: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
 }
 
-fn manifest_tag(plugin_dir: &Path) -> Option<String> {
+pub(crate) fn manifest_tag(plugin_dir: &Path) -> Option<String> {
     fs::read_to_string(plugin_dir.join("Cargo.toml"))
         .ok()?
         .lines()
@@ -225,7 +232,7 @@ fn manifest_tag(plugin_dir: &Path) -> Option<String> {
         })
 }
 
-fn note(message: &str) {
+pub(crate) fn note(message: &str) {
     if !success("tmux", &["display-message", &format!("agenmux: {message}")]) {
         println!("agenmux: {message}");
     }
@@ -236,7 +243,7 @@ fn fail(message: &str) -> i32 {
     1
 }
 
-fn first_line(path: &Path) -> Option<String> {
+pub(crate) fn first_line(path: &Path) -> Option<String> {
     fs::read_to_string(path)
         .ok()?
         .lines()
@@ -254,7 +261,7 @@ fn resolve_target(plugin_dir: &Path, requested: &str) -> Option<String> {
         .or_else(|| latest_remote_tag(&repo()))
 }
 
-fn git_output(plugin_dir: &Path, args: &[&str]) -> Option<Output> {
+pub(crate) fn git_output(plugin_dir: &Path, args: &[&str]) -> Option<Output> {
     Command::new("git")
         .arg("-C")
         .arg(plugin_dir)
@@ -365,7 +372,7 @@ fn expected_version(tag: &str) -> &str {
     tag.strip_prefix('v').unwrap_or(tag)
 }
 
-fn engine_matches(binary: &Path, target: &str) -> bool {
+pub(crate) fn engine_matches(binary: &Path, target: &str) -> bool {
     Command::new(binary)
         .arg("--version")
         .output()
@@ -407,7 +414,7 @@ pub(crate) fn fetch_package(
     Ok(package)
 }
 
-fn write_engine_state(plugin_dir: &Path, target: &str) -> std::io::Result<()> {
+pub(crate) fn write_engine_state(plugin_dir: &Path, target: &str) -> std::io::Result<()> {
     let revision = git_output(plugin_dir, &["rev-parse", "HEAD"])
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
