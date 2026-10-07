@@ -74,6 +74,15 @@ pub fn run(plugin_dir: &Path, requested_mode: Option<&str>, requested_client: Op
             return e.exit_code();
         }
     };
+    // Held until this launch ends (a popup's whole lifetime); the daemon a
+    // split launch starts inherits it.
+    let lease = match crate::autoupdate::lease(plugin_dir) {
+        Ok(lease) => lease,
+        Err(error) => {
+            eprintln!("agenmux: {error}");
+            return 1;
+        }
+    };
     let client = requested_client
         .filter(|client| !client.is_empty())
         .map(str::to_string)
@@ -81,7 +90,7 @@ pub fn run(plugin_dir: &Path, requested_mode: Option<&str>, requested_client: Op
     if config.mode == crate::app_config::DisplayMode::Popup {
         popup(plugin_dir, client, &config)
     } else {
-        split(plugin_dir, client, &config)
+        split(plugin_dir, client, &config, lease.as_ref())
     }
 }
 
@@ -154,7 +163,12 @@ fn cli_mode(config: &crate::app_config::AppConfig) -> Option<&'static str> {
     })
 }
 
-fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::AppConfig) -> i32 {
+fn split(
+    plugin_dir: &Path,
+    client: Option<String>,
+    config: &crate::app_config::AppConfig,
+    lease: Option<&crate::autoupdate::Lock>,
+) -> i32 {
     let _lifecycle = match panes::lifecycle_lock() {
         Ok(lock) => lock,
         Err(error) => {
@@ -241,6 +255,9 @@ fn split(plugin_dir: &Path, client: Option<String>, config: &crate::app_config::
             }
             if let Some(mode) = cli_mode(config) {
                 command.env("AGENMUX_DISPLAY_OVERRIDE", mode);
+            }
+            if let Some(lease) = lease {
+                lease.hand_down(&mut command, "AGENMUX_LEASE_FD");
             }
             child = Some(
                 command

@@ -962,3 +962,48 @@ fn auto_update_skips_dirty_development_and_modified_installs() {
     );
     assert!(!tarball.state().join("pending").exists());
 }
+
+/// Another tmux server's daemon: a shared lease on the installation lock.
+fn hold_lease(auto: &Auto) -> fs::File {
+    use std::os::fd::AsRawFd;
+    fs::create_dir_all(auto.state()).unwrap();
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(auto.state().join("install.lock"))
+        .unwrap();
+    assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) }, 0);
+    file
+}
+
+#[test]
+fn manual_update_refuses_while_another_runtime_uses_the_install() {
+    let auto = auto_fixture("manual-busy", true);
+    let before = auto.snapshot();
+    let lease = hold_lease(&auto);
+    let out = auto
+        .command("v99.0.0", &["update", "v99.0.0"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(auto.snapshot(), before);
+    drop(lease);
+    let out = auto
+        .command("v99.0.0", &["update", "v99.0.0"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(
+        fs::read_to_string(auto.plugin.join("target/release/.agenmux-version"))
+            .unwrap()
+            .lines()
+            .next(),
+        Some("v99.0.0")
+    );
+}

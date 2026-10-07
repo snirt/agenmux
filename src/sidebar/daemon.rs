@@ -103,6 +103,18 @@ pub(super) struct Daemon {
 /// reads keys from a FIFO, and sizes itself from the preserved panes. Exits
 /// (with full teardown) when the last pane disappears.
 pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
+    // The launching toggle hands down its installation lease; a daemon started
+    // directly takes its own. Either way it lives as long as this process.
+    let _lease = match crate::autoupdate::Lock::inherited("AGENMUX_LEASE_FD") {
+        Some(lease) => Some(lease),
+        None => match crate::autoupdate::lease(&plugin_dir) {
+            Ok(lease) => lease,
+            Err(error) => {
+                eprintln!("agenmux: {error}");
+                return 1;
+            }
+        },
+    };
     let settings = match crate::app_config::current_process() {
         Ok(config) => config,
         Err(e) => {

@@ -965,6 +965,14 @@ impl Sidebar {
                     Key::Jump => {
                         if let Some(tag) = tags.get(sel).filter(|tag| **tag != cur) {
                             self.switch_version(tag);
+                            // A popup's toggle holds the installation lease
+                            // until the popup closes; close it for the switch.
+                            if self.daemon.is_none() {
+                                if let Some(pin) = &self.pin {
+                                    let _ = std::fs::remove_file(pin);
+                                }
+                                return super::DispatchResult::Break;
+                            }
                         }
                         self.close_overlay();
                         return super::DispatchResult::Continue;

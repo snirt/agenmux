@@ -586,14 +586,6 @@ fn teardown_runtime(old_control: &str) {
     }
 }
 
-fn restart(plugin_dir: &Path, was_open: bool, old_control: &str) {
-    if !tmux_running() {
-        return;
-    }
-    teardown_runtime(old_control);
-    reenter(plugin_dir, was_open);
-}
-
 /// Load the installed release's own entrypoint, then reopen the view if it was
 /// open, so a rollback never assumes commands that release lacks.
 fn reenter(plugin_dir: &Path, was_open: bool) {
@@ -624,41 +616,64 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
         return 0;
     }
 
+    let refuse = |reason: &str| match reason {
+        "dirty" => fail(&format!(
+            "uncommitted changes in {} — commit or stash first",
+            plugin_dir.display()
+        )),
+        "status" => fail(&format!(
+            "could not inspect working tree in {}",
+            plugin_dir.display()
+        )),
+        "unknown" => fail(&format!("unknown release {target}")),
+        "checkout" => fail(&format!("could not check out {target}")),
+        "fetch" => fail(&format!("could not download {target}")),
+        "engine" => fail(&format!("could not install engine for {target}")),
+        "busy" => fail("another tmux server or popup is using agenmux; close it and retry"),
+        _ => fail(&format!("could not write to {}", plugin_dir.display())),
+    };
+    let git_install_dir = plugin_dir.join(".git").exists();
+    // Refuse a dirty checkout before closing anything.
+    if git_install_dir {
+        if let Err(reason) = git_previous(plugin_dir) {
+            return refuse(reason);
+        }
+    }
+
     let was_open = tmux_option("@agenmux-on") == "1"
         || !tmux_value(&["show-option", "-gqv", "@agenmux-sidebar"]).is_empty()
         || !tmux_value(&["show-option", "-gqv", "@agents-mon-sidebar"]).is_empty();
     let old_control = tmux_option("@agenmux-control-client");
     note(&format!("switching to {target}…"));
 
-    let result = if plugin_dir.join(".git").exists() {
-        git_install(plugin_dir, &target).and_then(|previous| {
-            if let Err(reason) = install_exact_engine(plugin_dir, &target) {
-                let _ = git_success(plugin_dir, &["checkout", "--quiet", &previous]);
-                return Err(reason);
-            }
-            Ok(())
-        })
-    } else {
-        tarball_install(plugin_dir, &target)
-    };
-    if let Err(reason) = result {
-        return match reason {
-            "dirty" => fail(&format!(
-                "uncommitted changes in {} — commit or stash first",
-                plugin_dir.display()
-            )),
-            "status" => fail(&format!(
-                "could not inspect working tree in {}",
-                plugin_dir.display()
-            )),
-            "unknown" => fail(&format!("unknown release {target}")),
-            "checkout" => fail(&format!("could not check out {target}")),
-            "fetch" => fail(&format!("could not download {target}")),
-            "engine" => fail(&format!("could not install engine for {target}")),
-            _ => fail(&format!("could not write to {}", plugin_dir.display())),
-        };
+    // This server's view releases its installation lease first; a lease still
+    // held afterwards belongs to another tmux server or an open popup.
+    let running = tmux_running();
+    if running {
+        teardown_runtime(&old_control);
     }
-    restart(plugin_dir, was_open, &old_control);
+    let result = crate::autoupdate::exclusive(plugin_dir, Duration::from_secs(5))
+        .map_err(|()| "busy")
+        .and_then(|_lock| {
+            if git_install_dir {
+                git_install(plugin_dir, &target).and_then(|previous| {
+                    if let Err(reason) = install_exact_engine(plugin_dir, &target) {
+                        let _ = git_success(plugin_dir, &["checkout", "--quiet", &previous]);
+                        return Err(reason);
+                    }
+                    Ok(())
+                })
+            } else {
+                tarball_install(plugin_dir, &target)
+            }
+        });
+    // Reopen whichever release is installed now: the target, or the old one.
+    if running {
+        reenter(plugin_dir, was_open);
+    }
+    if let Err(reason) = result {
+        return refuse(reason);
+    }
     note(&format!("now on {target}"));
     0
 }

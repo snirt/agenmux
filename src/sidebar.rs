@@ -490,6 +490,17 @@ pub fn run(plugin_dir: PathBuf) -> i32 {
     let cache_file = crate::scan_cache_path();
     let self_pane = std::env::var("TMUX_PANE").unwrap_or_default();
     let pin = crate::compat_env("AGENMUX_PIN", "AGENTS_MON_PIN").filter(|p| !p.is_empty());
+    // A popup's launching toggle holds the lease; a direct sidebar takes one.
+    let _lease = match pin {
+        Some(_) => None,
+        None => match crate::autoupdate::lease(&plugin_dir) {
+            Ok(lease) => lease,
+            Err(error) => {
+                eprintln!("agenmux: {error}");
+                return 1;
+            }
+        },
+    };
     let rows_file = crate::tmux::runtime_dir().join(format!(
         "agenmux-rows-{}",
         self_pane.trim_start_matches('%')

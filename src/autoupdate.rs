@@ -67,7 +67,7 @@ fn ensure_state_dir(plugin_dir: &Path) -> io::Result<PathBuf> {
 /// last descriptor closes, so a killed holder never leaves it stale. The file
 /// is never unlinked: a waiter may already have opened the inode.
 pub(crate) struct Lock {
-    _file: File,
+    file: File,
 }
 
 impl Lock {
@@ -87,7 +87,7 @@ impl Lock {
         let deadline = std::time::Instant::now() + wait;
         loop {
             if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
-                return Ok(Self { _file: file });
+                return Ok(Self { file });
             }
             let error = io::Error::last_os_error();
             if !matches!(
@@ -102,6 +102,68 @@ impl Lock {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+
+    /// Adopt a lock descriptor handed down through exec (see `hand_down`),
+    /// close-on-exec again so this process's own children never inherit it.
+    pub(crate) fn inherited(var: &str) -> Option<Self> {
+        let fd: std::os::fd::RawFd = std::env::var(var).ok()?.parse().ok()?;
+        std::env::remove_var(var);
+        if fd <= 2 || unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+            return None;
+        }
+        Some(Self {
+            file: unsafe { std::os::fd::FromRawFd::from_raw_fd(fd) },
+        })
+    }
+
+    /// Let `command`'s child keep this lock across exec, announced in `var`.
+    pub(crate) fn hand_down(&self, command: &mut Command, var: &str) {
+        use std::os::unix::process::CommandExt;
+        let fd = self.file.as_raw_fd();
+        command.env(var, fd.to_string());
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+}
+
+/// Whether this process is the plugin's own installed engine. Development and
+/// custom builds neither coordinate through nor mutate the installation.
+fn coordinated(plugin_dir: &Path) -> bool {
+    let running = std::env::current_exe().and_then(fs::canonicalize).ok();
+    running.is_some() && running == fs::canonicalize(release::engine_path(plugin_dir)).ok()
+}
+
+fn install_lock(plugin_dir: &Path, operation: i32, wait: Duration) -> Result<Option<Lock>, ()> {
+    if !coordinated(plugin_dir) {
+        return Ok(None);
+    }
+    // No private state directory (read-only parent): nothing can activate an
+    // update here either, so there is nothing to coordinate with.
+    let Ok(dir) = ensure_state_dir(plugin_dir) else {
+        return Ok(None);
+    };
+    Lock::acquire(&dir.join("install.lock"), operation, wait)
+        .map(Some)
+        .map_err(|_| ())
+}
+
+/// A runtime's shared hold on the installation: toggle for its whole run
+/// (popups included), the daemon for its lifetime, a direct sidebar.
+pub(crate) fn lease(plugin_dir: &Path) -> Result<Option<Lock>, String> {
+    install_lock(plugin_dir, libc::LOCK_SH, Duration::from_secs(30))
+        .map_err(|()| "agenmux is switching versions; try again".into())
+}
+
+/// Exclusive hold for a manual version switch, once this server's own view
+/// has closed. Busy means another server or popup still runs this install.
+pub(crate) fn exclusive(plugin_dir: &Path, wait: Duration) -> Result<Option<Lock>, ()> {
+    install_lock(plugin_dir, libc::LOCK_EX, wait)
 }
 
 fn try_lock(dir: &Path, name: &str) -> Option<Lock> {
@@ -374,8 +436,7 @@ fn stable(tag: &str) -> bool {
 /// rules guard preparation and activation.
 pub(crate) fn eligibility(plugin_dir: &Path) -> Result<(String, Install), String> {
     let engine = release::engine_path(plugin_dir);
-    let running = std::env::current_exe().and_then(fs::canonicalize).ok();
-    if running.is_none() || running != fs::canonicalize(&engine).ok() {
+    if !coordinated(plugin_dir) {
         return Err("custom or development engine".into());
     }
     let current = release::manifest_tag(plugin_dir).ok_or("unreadable package version")?;
@@ -753,6 +814,35 @@ mod tests {
         let text = fs::read_to_string(dir.join("pending")).unwrap();
         fs::write(dir.join("pending"), text.replace("pkg-v1.2.0", "../../x")).unwrap();
         assert_eq!(Pending::read(&dir), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn handed_down_leases_outlive_the_parent_descriptor() {
+        let dir = scratch("lease");
+        let path = dir.join("install.lock");
+        let lease = Lock::acquire(&path, libc::LOCK_SH, Duration::ZERO).unwrap();
+        let mut child = Command::new("sh");
+        child.args(["-c", "read _"]).stdin(Stdio::piped());
+        lease.hand_down(&mut child, "AGENMUX_LEASE_FD");
+        let mut child = child.spawn().unwrap();
+        drop(lease);
+        // The child still shares the open file description, so the lock holds.
+        assert!(Lock::acquire(&path, libc::LOCK_EX, Duration::ZERO).is_err());
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert!(Lock::acquire(&path, libc::LOCK_EX, Duration::ZERO).is_ok());
+        // An ordinary child never inherits it.
+        let lease = Lock::acquire(&path, libc::LOCK_SH, Duration::ZERO).unwrap();
+        let mut plain = Command::new("sh")
+            .args(["-c", "read _"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(lease);
+        assert!(Lock::acquire(&path, libc::LOCK_EX, Duration::ZERO).is_ok());
+        drop(plain.stdin.take());
+        plain.wait().unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
 
