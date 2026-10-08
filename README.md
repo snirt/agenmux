@@ -8,7 +8,7 @@ A tmux manager in a sidebar that also follows your AI coding agents. Every
 session, window, and pane appears in tmux order; jump, create, rename, and
 delete from the keyboard or mouse.
 
-https://github.com/user-attachments/assets/43d7542e-b022-4418-a510-0df684d97c9e
+https://github.com/user-attachments/assets/3e27f143-3fb3-474a-8cfd-3568112fe2af
 
 Video not playing? [Watch it on YouTube](https://youtu.be/iRlmKR6Y9aE).
 
