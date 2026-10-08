@@ -10,7 +10,7 @@ delete from the keyboard or mouse.
 
 https://github.com/user-attachments/assets/3e27f143-3fb3-474a-8cfd-3568112fe2af
 
-Video not playing? [Watch it on YouTube](https://youtu.be/iRlmKR6Y9aE).
+Video not playing? [Watch it in the agenmux YouTube playlist](https://www.youtube.com/playlist?list=PLHITZpg1gd8c).
 
 Each agent shows its state inline:
 
