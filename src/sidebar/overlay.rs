@@ -864,6 +864,11 @@ impl Sidebar {
                     live.ids.insert(pane.window_id.clone());
                 }
                 let width = entries.iter().map(|e| undo_label(e).chars().count()).max();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                let stamps: Vec<String> = entries.iter().map(|e| clock(e.time, now)).collect();
+                let stamp_width = stamps.iter().map(|s| s.chars().count()).max().unwrap_or(0);
                 for (i, entry) in entries.iter().enumerate() {
                     let mark = cursor_mark(&self.palette, i == sel, true, "idle");
                     let (dim, end) = if entry.blocked(&live) {
@@ -872,8 +877,8 @@ impl Sidebar {
                         ("", String::new())
                     };
                     text.push_str(&format!(
-                        "{mark}{dim}{}  {:<7}  {:<w$}  {}{end}\n",
-                        clock(entry.time),
+                        "{mark}{dim}{:>sw$}  {:<7}  {:<w$}  {}{end}\n",
+                        stamps[i],
                         if entry.is_session() {
                             "session"
                         } else if entry.is_pane() {
@@ -884,6 +889,7 @@ impl Sidebar {
                         undo_label(entry),
                         undo_summary(entry),
                         w = width.unwrap_or(0),
+                        sw = stamp_width,
                     ));
                 }
                 if entries.is_empty() {
@@ -1528,14 +1534,22 @@ fn undo_summary(entry: &crate::snapshot::Closed) -> String {
     summary
 }
 
-/// Local `HH:MM`.
-fn clock(time: u64) -> String {
-    let secs = time as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+/// Local `HH:MM` for today, `MM-DD HH:MM` for earlier days.
+fn clock(time: u64, now: u64) -> String {
+    let local = |secs: u64| {
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let ok = !unsafe { libc::localtime_r(&(secs as libc::time_t), &mut tm) }.is_null();
+        ok.then_some(tm)
+    };
+    let (Some(tm), Some(today)) = (local(time), local(now)) else {
         return "--:--".into();
+    };
+    let hm = format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
+    if (tm.tm_year, tm.tm_yday) == (today.tm_year, today.tm_yday) {
+        hm
+    } else {
+        format!("{:02}-{:02} {hm}", tm.tm_mon + 1, tm.tm_mday)
     }
-    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
 }
 
 #[cfg(test)]
@@ -1596,7 +1610,8 @@ mod tests {
         };
         assert_eq!(undo_label(&closed_pane), "play:2");
         assert_eq!(undo_summary(&closed_pane), "claude · repo");
-        assert_eq!(clock(0).len(), 5);
+        assert_eq!(clock(0, 0).len(), 5);
+        assert_eq!(clock(0, 2 * 86_400).len(), 11);
     }
 
     #[test]
