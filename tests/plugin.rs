@@ -638,7 +638,10 @@ fn separate_servers_with_shared_tmpdir_keep_their_own_keys() {
                 .contains("this help")
         });
         assert_success(run(server, &["teardown"]), "teardown shared TMPDIR server");
-        std::fs::remove_dir_all(runtime).unwrap();
+        // The exiting daemon may still write into its runtime dir.
+        server.wait_for(Duration::from_secs(3), || {
+            std::fs::remove_dir_all(runtime).is_ok()
+        });
     }
     for viewer in &mut viewers {
         let _ = viewer.kill();
