@@ -25,6 +25,9 @@ const OUTPUT_SCAN_MIN: Duration = Duration::from_millis(500);
 /// Scans block the loop for tens to hundreds of ms. Holding j/k leaves the key
 /// FIFO empty between repeats, so scans wait for a pause this long.
 const NAVIGATION_QUIET: Duration = Duration::from_millis(250);
+/// How long a created pane may take to appear in the scan before its
+/// selection is given up: a few periodic scans on a loaded server.
+const PENDING_SELECT_PATIENCE: Duration = Duration::from_secs(10);
 
 struct ScanSchedule {
     next_periodic: Instant,
@@ -262,9 +265,11 @@ pub struct Sidebar {
     sel_pane: String,
     sel_occurrence: Option<PaneOccurrence>,
     last_active: String,
-    /// Row to select once the next scan lists it: a pane this sidebar just
-    /// created, which the focus follower cannot see because focus stays here.
-    pending_select: Option<String>,
+    /// Row to select once a scan lists it: a pane this sidebar just created,
+    /// which the focus follower cannot see because focus stays here. A loaded
+    /// server can list the pane a scan or two late, so it waits with a
+    /// deadline rather than for one scan.
+    pending_select: Option<(String, Instant)>,
     active: String,
     active_session: String,
     plugin_selected: bool,
@@ -1350,7 +1355,7 @@ impl Sidebar {
             }
         };
         self.refresh_requested = true;
-        self.pending_select = Some(pane.clone());
+        self.pending_select = Some((pane.clone(), Instant::now()));
         if let Err(error) = self.show_created_launcher(&target.client, &pane) {
             self.mutation_error(
                 &target.client,
@@ -1630,7 +1635,7 @@ impl Sidebar {
         self.refresh_requested = true;
         match target.action {
             SequenceAction::CreateWindow | SequenceAction::CreateSession => {
-                self.pending_select = Some(created_pane.clone());
+                self.pending_select = Some((created_pane.clone(), Instant::now()));
                 if self
                     .show_created_pane(&target.client, &created_pane)
                     .is_err()
@@ -1820,13 +1825,16 @@ impl Sidebar {
             }
             self.last_active = self.active.clone();
         }
-        if let Some(pane) = self.pending_select.take() {
-            if let Some(i) = self
+        if let Some((pane, since)) = self.pending_select.clone() {
+            let listed = self
                 .visible
                 .iter()
-                .position(|&row| row.is_pane() && self.visible_pane_id(row) == pane)
-            {
+                .position(|&row| row.is_pane() && self.visible_pane_id(row) == pane);
+            if let Some(i) = listed {
                 self.select_index(i + 1);
+            }
+            if listed.is_some() || since.elapsed() > PENDING_SELECT_PATIENCE {
+                self.pending_select = None;
             }
         }
         Ok(())

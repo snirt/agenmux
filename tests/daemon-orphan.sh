@@ -5,6 +5,7 @@
 set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/tests/helpers/poll.sh"
 BIN="${AGENMUX_BIN:-$DIR/target/release/agenmux}"
 [ -x "$BIN" ] || exit 0
 command -v tmux >/dev/null || exit 0
@@ -37,7 +38,7 @@ server_pid="$(tmux -S "$sock" display-message -p '#{pid}')"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" toggle split
 
-for _ in $(seq 1 60); do
+for _ in $(tries 60); do
   after="$(pgrep -f 'agenmux daemon' 2>/dev/null | sort)"
   daemon="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -n 1)"
   [ -n "$daemon" ] && break
@@ -60,7 +61,7 @@ env TMPDIR="$tmp/not-the-daemons" TMUX="$sock,$server_pid,0" "$BIN" key versions
   exit 1
 }
 picker_open=0
-for _ in $(seq 1 20); do
+for _ in $(tries 20); do
   sidebar="$(tmux -S "$sock" list-panes -a -F '#{pane_id} #{pane_title}' |
     awk '$2 == "agenmux" { print $1; exit }')"
   if [ -n "$sidebar" ] && tmux -S "$sock" capture-pane -p -t "$sidebar" |
@@ -76,7 +77,7 @@ done
 }
 tmux -S "$sock" set-option -g @agenmux-control-client client-not-ours
 exits_when_replaced=0
-for _ in $(seq 1 60); do
+for _ in $(tries 60); do
   kill -0 "$daemon" 2>/dev/null || {
     exits_when_replaced=1
     break
@@ -99,7 +100,7 @@ env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" toggle split
 runtime="$(tmux -S "$sock" show-option -gqv @agenmux-runtime-dir)"
 daemon=''
-for _ in $(seq 1 60); do
+for _ in $(tries 60); do
   after="$(pgrep -f 'agenmux daemon' 2>/dev/null | sort)"
   daemon="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -n 1)"
   [ -n "$daemon" ] && break
@@ -111,7 +112,7 @@ done
 }
 rm -f "$runtime/agenmux-keys"
 exits_without_fifo=0
-for _ in $(seq 1 40); do
+for _ in $(tries 40); do
   kill -0 "$daemon" 2>/dev/null || {
     exits_without_fifo=1
     break

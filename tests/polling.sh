@@ -4,6 +4,7 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/tests/helpers/poll.sh"
 BIN="${AGENMUX_BIN:-$DIR/target/release/agenmux}"
 [ -x "$BIN" ] || {
   echo "SKIP polling: release binary missing"
@@ -45,7 +46,7 @@ cleanup() {
   # kill one: a wrong match only costs the bounded wait.
   local pids pid alive=''
   pids="$(sed -n 's/^\[\([0-9][0-9]*\)\].*/\1/p' "$debug" 2>/dev/null | sort -u)" || pids=''
-  for _ in $(seq 1 50); do
+  for _ in $(tries 50); do
     alive=''
     for pid in $pids; do
       running "$pid" && alive="$alive $pid"
@@ -104,7 +105,7 @@ state_count() {
 
 wait_count() {
   local state="$1" expected="$2" label="$3"
-  for _ in $(seq 1 60); do
+  for _ in $(tries 60); do
     [ "$(state_count "$state")" = "$expected" ] && return 0
     sleep .1
   done
@@ -128,7 +129,7 @@ debug_since() {
 
 wait_debug_since() {
   local checkpoint="$1" pattern="$2" label="$3"
-  for _ in $(seq 1 30); do
+  for _ in $(tries 30); do
     debug_since "$checkpoint" | grep -Eq "$pattern" && return 0
     sleep .1
   done
@@ -141,11 +142,7 @@ wait_count idle 1 initial-discovery
 TMPDIR="$tmp" TMUX="$sock,$server_pid,0" "$BIN" status | grep -Fq '#[fg=green]⣿#[default]1'
 
 # Covered quiet panes should reuse their screen at periodic tracker ticks.
-sleep 3
-grep -Eq 'reason=periodic captured=0 reused=1' "$debug" || {
-  echo "FAIL polling: unchanged covered pane was not reused"
-  exit 1
-}
+wait_debug_since 0 'reason=periodic captured=0 reused=1' unchanged-covered-pane-not-reused
 
 # A constant-title, output-only change must trigger detection before the next
 # periodic reconciliation, while marker-shaped screen text stays off protocol.
@@ -163,7 +160,7 @@ wait_count working 1 output-only-working
 stream_checkpoint="$(debug_lines)"
 printf 'stream\n' >"$tmp/state-primary"
 stream_scans=0
-for _ in $(seq 1 25); do
+for _ in $(tries 25); do
   stream_scans="$(debug_since "$stream_checkpoint" |
     grep -Ec 'reason=output captured=1' || true)"
   [ "$stream_scans" -ge 2 ] && break

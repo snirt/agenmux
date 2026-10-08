@@ -10,6 +10,7 @@ has_re() { [[ $1 =~ $2 ]]; }
 has_line() { [[ $'\n'"$1"$'\n' == *$'\n'"$2"$'\n'* ]]; }
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+. "$DIR/tests/helpers/poll.sh"
 
 root="$(mktemp -d "${TMPDIR:-/tmp}/agenmux-sanity.XXXXXX")"
 plugin="$root/plugin"
@@ -53,7 +54,7 @@ run_tmux_case() {
   expect -c "log_user 0; set timeout -1; spawn tmux -L $socket attach-session -t sanity; expect eof" \
     >"$root/$name-client.log" 2>&1 &
   viewer_pid=$!
-  for _ in $(seq 1 30); do
+  for _ in $(tries 30); do
     [ -n "$(tmux -L "$socket" list-clients -F '#{client_name}' 2>/dev/null)" ] && break
     sleep 0.1
   done
@@ -223,7 +224,7 @@ SH
   expect -c "log_user 0; set timeout -1; spawn tmux -L $socket attach-session -t popup; after 50; send \\002e; expect eof" &
   expect_pid=$!
 
-  for i in $(seq 1 600); do
+  for i in $(tries 600); do
     if [ -e "$marker" ]; then
       opened=1
       break
@@ -275,7 +276,7 @@ PATH="$root/bootstrap-bin:$PATH" tmux -L "$bootstrap_socket" -f /dev/null \
 expect -c "log_user 0; set timeout -1; spawn tmux -L $bootstrap_socket attach-session -t bootstrap; expect eof" \
   >"$root/bootstrap-client.log" 2>&1 &
 bootstrap_viewer=$!
-for _ in $(seq 1 30); do
+for _ in $(tries 30); do
   [ -n "$(tmux -L "$bootstrap_socket" list-clients -F '#{client_name}' 2>/dev/null)" ] && break
   sleep 0.1
 done
@@ -294,7 +295,7 @@ if ! env PATH="$root/bootstrap-bin:$PATH" TMPDIR="$bootstrap_runtime" AGENMUX_DE
   tmux -L "$bootstrap_socket" list-panes -a -F '#{pane_id} #{pane_title} #{@agenmux}' >&2 || true
   exit 1
 fi
-for _ in $(seq 1 80); do
+for _ in $(tries 80); do
   has_line "$(tmux -L "$bootstrap_socket" list-panes -a -F '#{pane_title}')" agenmux && break
   sleep 0.1
 done

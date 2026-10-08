@@ -59,7 +59,8 @@ impl TestTmux {
         format!("{},0,0", self.socket)
     }
     fn wait_for(&self, timeout: Duration, mut condition: impl FnMut() -> bool) {
-        let deadline = Instant::now() + timeout;
+        // 15s floor: loaded CI runners; a met condition returns at once
+        let deadline = Instant::now() + timeout.max(Duration::from_secs(15));
         while !condition() {
             assert!(Instant::now() < deadline, "condition timed out");
             thread::sleep(Duration::from_millis(10));
