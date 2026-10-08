@@ -638,7 +638,10 @@ fn separate_servers_with_shared_tmpdir_keep_their_own_keys() {
                 .contains("this help")
         });
         assert_success(run(server, &["teardown"]), "teardown shared TMPDIR server");
-        std::fs::remove_dir_all(runtime).unwrap();
+        // The exiting daemon may still write into its runtime dir.
+        server.wait_for(Duration::from_secs(3), || {
+            std::fs::remove_dir_all(runtime).is_ok()
+        });
     }
     for viewer in &mut viewers {
         let _ = viewer.kill();
@@ -2262,6 +2265,29 @@ fn default_header_inherits_tmux_active_border_contrast() {
             .is_some_and(|line| line.contains("s settings")),
         "unframed footer should occupy the bottom row: {unframed:?}"
     );
+
+    // The version picker's first row toggles auto-update through the same
+    // config writer; the cursor may start on the current release.
+    let text = || tmux.text(&["capture-pane", "-p", "-t", &pane]);
+    assert_success(tmux.bin(&["key", "versions", &client]), "open versions");
+    tmux.wait_for(Duration::from_secs(3), || text().contains("auto-update on"));
+    for expected in ["auto_update = false", "auto_update = true"] {
+        for key in ["up", "up", "up", "enter"] {
+            assert_success(tmux.bin(&["key", key, &client]), "toggle auto-update");
+        }
+        tmux.wait_for(Duration::from_secs(3), || {
+            std::fs::read_to_string(&config).is_ok_and(|source| source.contains(expected))
+        });
+        let shown = if expected.ends_with("false") {
+            "off"
+        } else {
+            "on"
+        };
+        tmux.wait_for(Duration::from_secs(3), || {
+            text().contains(&format!("auto-update {shown}"))
+        });
+    }
+    assert_success(tmux.bin(&["key", "close", &client]), "close versions");
     assert_success(tmux.bin(&["key", "close"]), "close inherited header");
     let _ = viewer.kill();
     let _ = viewer.wait();

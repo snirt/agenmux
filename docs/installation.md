@@ -101,10 +101,11 @@ Auto-update skips, with the reason shown in the version picker:
   against that release's verified archive once, then against the recorded
   baseline).
 
-Set `auto_update = false` in `config.toml` or in the settings view (`s`) to
-turn it off; a release already prepared is then not applied. Choosing a version
-by hand in the picker pauses auto-update the same way (written to
-`config.toml`), so a rollback sticks; turn it back on in settings.
+Turn it off with the `auto-update` row at the top of the version picker (`U`),
+the settings view (`s`), or `auto_update = false` in `config.toml`; a release
+already prepared is then not applied. Choosing a version by hand in the picker
+pauses auto-update the same way (written to `config.toml`), so a rollback
+sticks; turn it back on from the picker's `auto-update` row or in settings.
 
 Preparation state lives beside the plugin in
 `<plugins dir>/.agenmux-state/<plugin dir name>/`. Deleting that directory

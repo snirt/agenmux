@@ -1375,8 +1375,9 @@ pub(crate) fn spawn_scheduler(plugin_dir: PathBuf) {
 
 /// One line for the version picker: what auto-update will do or why not.
 pub(crate) fn picker_note(plugin_dir: &Path) -> Option<String> {
+    // The picker's own toggle row shows "off".
     if !enabled() {
-        return Some("auto-update off · turn on in settings".into());
+        return None;
     }
     let dir = state_dir(plugin_dir);
     if let Some(pending) = dir.as_deref().and_then(Pending::read) {
