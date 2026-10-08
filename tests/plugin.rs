@@ -110,16 +110,29 @@ impl TestTmux {
             .unwrap_or_default()
     }
 
-    /// `list-keys` equals `before`. Re-read first: a loaded server sometimes
-    /// prints one line garbled or missing, and only a real binding change
+    /// `list-keys` as two consecutive reads agree on it: a loaded server
+    /// sometimes prints one line garbled or missing, and a baseline taken from
+    /// such a read fails every later comparison.
+    fn keys(&self) -> String {
+        let mut keys = self.text(&["list-keys"]);
+        loop {
+            let again = self.text(&["list-keys"]);
+            if again == keys {
+                return keys;
+            }
+            keys = again;
+        }
+    }
+
+    /// `list-keys` equals `before`. Re-read first: only a real binding change
     /// stays different.
     #[track_caller]
     fn assert_keys_unchanged(&self, before: &str) {
         let deadline = Instant::now() + WAIT_FLOOR;
-        let mut keys = self.text(&["list-keys"]);
+        let mut keys = self.keys();
         while keys != before && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(50));
-            keys = self.text(&["list-keys"]);
+            keys = self.keys();
         }
         assert_eq!(keys, before);
     }
@@ -1781,7 +1794,7 @@ fn setup_and_toggle_preserve_manual_launchers_and_old_metadata() {
 #[test]
 fn invalid_layers_do_not_mutate_and_recovery_remains_available() {
     let tmux = TestTmux::new("invalid-settings");
-    let before = tmux.text(&["list-keys"]);
+    let before = tmux.keys();
     let layout = tmux.text(&["display-message", "-p", "#{window_layout}"]);
     app_file(&tmux, "[display]\nsidebar_width=0");
     for args in [
@@ -2029,7 +2042,7 @@ esac
     assert_eq!(bootstrap().status.code(), Some(2));
     assert!(tmux.binding("prefix", "A").contains("activate ''"));
     assert!(tmux.binding("prefix", "e").contains("activate 'popup'"));
-    let before = tmux.text(&["list-keys"]);
+    let before = tmux.keys();
     let hooks = tmux.text(&["show-hooks", "-g"]);
     let layout = tmux.text(&["display-message", "-p", "#{window_layout}"]);
     let rejected = Command::new("bash")
@@ -3184,7 +3197,7 @@ fn setup_restores_touched_bindings_and_reports_rollback_failure() {
         let windows_before = tmux.text(&["show-options", "-w"]);
         let hooks_before = tmux.text(&["show-hooks", "-g"]);
         let window_hooks_before = tmux.text(&["show-hooks", "-gw"]);
-        let before = tmux.text(&["list-keys"]);
+        let before = tmux.keys();
         assert_eq!(
             tmux.text(&["show-options", "-gq", "@agenmux-prefix-owned"]),
             ""
