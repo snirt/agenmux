@@ -864,7 +864,20 @@ impl Sidebar {
                     live.ids.insert(pane.window_id.clone());
                 }
                 let width = entries.iter().map(|e| undo_label(e).chars().count()).max();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                let mut last_day = None;
                 for (i, entry) in entries.iter().enumerate() {
+                    let (day, time) = clock(entry.time, now);
+                    if last_day.as_ref() != Some(&day) {
+                        if last_day.is_some() {
+                            text.push('\n');
+                        }
+                        let accent = self.palette.accent_fg.fg("1");
+                        text.push_str(&format!("  {accent}{day}{E}[0m\n"));
+                        last_day = Some(day);
+                    }
                     let mark = cursor_mark(&self.palette, i == sel, true, "idle");
                     let (dim, end) = if entry.blocked(&live) {
                         (muted.as_str(), format!("{E}[0m"))
@@ -872,8 +885,7 @@ impl Sidebar {
                         ("", String::new())
                     };
                     text.push_str(&format!(
-                        "{mark}{dim}{}  {:<7}  {:<w$}  {}{end}\n",
-                        clock(entry.time),
+                        "{mark}{dim}{time}  {:<7}  {:<w$}  {}{end}\n",
                         if entry.is_session() {
                             "session"
                         } else if entry.is_pane() {
@@ -1528,14 +1540,22 @@ fn undo_summary(entry: &crate::snapshot::Closed) -> String {
     summary
 }
 
-/// Local `HH:MM`.
-fn clock(time: u64) -> String {
-    let secs = time as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
-        return "--:--".into();
-    }
-    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+/// Local day heading (`today` or `YYYY-MM-DD`) and `HH:MM`.
+fn clock(time: u64, now: u64) -> (String, String) {
+    let local = |secs: u64| {
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let ok = !unsafe { libc::localtime_r(&(secs as libc::time_t), &mut tm) }.is_null();
+        ok.then_some(tm)
+    };
+    let (Some(tm), Some(today)) = (local(time), local(now)) else {
+        return ("--".into(), "--:--".into());
+    };
+    let day = if (tm.tm_year, tm.tm_yday) == (today.tm_year, today.tm_yday) {
+        "today".into()
+    } else {
+        format!("{}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+    };
+    (day, format!("{:02}:{:02}", tm.tm_hour, tm.tm_min))
 }
 
 #[cfg(test)]
@@ -1596,7 +1616,9 @@ mod tests {
         };
         assert_eq!(undo_label(&closed_pane), "play:2");
         assert_eq!(undo_summary(&closed_pane), "claude · repo");
-        assert_eq!(clock(0).len(), 5);
+        assert_eq!(clock(0, 0).0, "today");
+        assert_eq!(clock(0, 0).1.len(), 5);
+        assert_eq!(clock(0, 2 * 86_400).0.len(), 10); // YYYY-MM-DD
     }
 
     #[test]
