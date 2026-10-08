@@ -36,8 +36,9 @@ to an issue: paths, session names, and titles come from your own panes.
 
 ## Auto-update
 
-The version picker (`U`) shows what auto-update is doing: a prepared release
-(`v0.7.1 ready · next start`), why it skips this install, or the last failure.
+The version picker (`U`) shows whether auto-update is on (its first row toggles
+it) and what it is doing: a prepared release (`v0.7.1 ready · next start`), why
+it skips this install, or the last failure.
 
 - **Ready but never applied:** a release switches only when no agenmux view
   from this install is running on any tmux server. Close every sidebar and
@@ -46,7 +47,7 @@ The version picker (`U`) shows what auto-update is doing: a prepared release
   plugin directory (the daily throttle still applies; it prints the outcome).
 - **A release failed to start:** the previous release was restored and kept.
   That release is not retried until a newer one appears; turning auto-update
-  off and on in settings retries it.
+  off and on (in the picker or settings) retries it.
 - **Start over:** with agenmux closed, delete
   `<plugins dir>/.agenmux-state/<plugin dir name>/`. An interrupted switch is
   recovered from that directory on the next start, so delete it only after a

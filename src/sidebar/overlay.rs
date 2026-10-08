@@ -204,7 +204,14 @@ fn known_tags(plugin_dir: &Path) -> Vec<String> {
     tags
 }
 
+/// The picker's first row toggles auto-update; release rows follow it. Not a
+/// tag (no `v`), so it never collides with one.
+const AUTO_UPDATE_ROW: &str = "auto-update";
+
 fn picker_sel(tags: &[String], cur: &str, chosen: Option<&str>, sel: usize) -> usize {
+    if chosen == Some(AUTO_UPDATE_ROW) {
+        return 0;
+    }
     let selected = chosen
         .and_then(|tag| tags.iter().position(|t| t == tag))
         .or_else(|| {
@@ -213,8 +220,8 @@ fn picker_sel(tags: &[String], cur: &str, chosen: Option<&str>, sel: usize) -> u
                 .then(|| tags.iter().position(|t| t == cur))
                 .flatten()
         })
-        .unwrap_or(sel);
-    selected.min(tags.len().saturating_sub(1))
+        .map_or(sel, |i| i + 1);
+    selected.min(tags.len())
 }
 
 /// A tag is passed to update.sh as an argument — keep it boring.
@@ -686,6 +693,30 @@ impl Sidebar {
         self.last_frame.clear();
     }
 
+    /// Flip `behavior.auto_update` through the settings writer, so turning it
+    /// on clears a failed target exactly as the settings view does.
+    fn toggle_auto_update(&mut self) {
+        let value = if self.settings.settings.auto_update {
+            "false"
+        } else {
+            "true"
+        };
+        let result = crate::app_config::document()
+            .map_err(|error| error.to_string())
+            .and_then(|(path, existed, source)| {
+                let next =
+                    crate::app_config::edit_document(&source, "behavior.auto_update", Some(value))
+                        .map_err(|error| error.to_string())?;
+                self.apply_settings_source(&path, &source, existed, &next)
+            });
+        let line = match result {
+            Ok(()) => crate::autoupdate::picker_note(&self.plugin_dir),
+            Err(error) => Some(format!("auto-update not changed: {error}")),
+        };
+        *self.update_note.lock().unwrap_or_else(|e| e.into_inner()) = line;
+        self.reclaim_key_table();
+    }
+
     pub(super) fn render_overlay(&mut self, force: bool) {
         let title = app_title();
         let (cols, rows) = self.render_size();
@@ -785,6 +816,13 @@ impl Sidebar {
                     .clone();
                 *sel = picker_sel(&tags, &cur, chosen.as_deref(), *sel);
                 let mut text = format!("{E}[2J{E}[H{header}{title} — versions{E}[0m\n\n");
+                let mark = cursor_mark(&self.palette, *sel == 0, true, "idle");
+                let state = if self.settings.settings.auto_update {
+                    "on"
+                } else {
+                    "off"
+                };
+                text.push_str(&format!("{mark}{AUTO_UPDATE_ROW} {muted}{state}{E}[0m\n\n"));
                 if tags.is_empty() {
                     text.push_str(&format!(
                         " {error}no releases found — checking…{E}[0m\n\n\
@@ -793,7 +831,7 @@ impl Sidebar {
                     ));
                 } else {
                     for (i, t) in tags.iter().enumerate() {
-                        let mark = cursor_mark(&self.palette, i == *sel, true, "idle");
+                        let mark = cursor_mark(&self.palette, i + 1 == *sel, true, "idle");
                         let tail = if *t == cur {
                             format!(" {muted}(current){E}[0m")
                         } else if ready.as_deref() == Some(t.as_str()) {
@@ -960,10 +998,11 @@ impl Sidebar {
                 let cur = current_tag();
                 sel = picker_sel(&tags, &cur, chosen.as_deref(), sel);
                 match key {
-                    Key::Down if !tags.is_empty() => sel = (sel + 1).min(tags.len() - 1),
+                    Key::Down => sel = (sel + 1).min(tags.len()),
                     Key::Up => sel = sel.saturating_sub(1),
+                    Key::Jump if sel == 0 => self.toggle_auto_update(),
                     Key::Jump => {
-                        if let Some(tag) = tags.get(sel).filter(|tag| **tag != cur) {
+                        if let Some(tag) = tags.get(sel - 1).filter(|tag| **tag != cur) {
                             self.switch_version(tag);
                             // A popup's toggle holds the installation lease
                             // until the popup closes; close it for the switch.
@@ -983,7 +1022,10 @@ impl Sidebar {
                     }
                     _ => {}
                 }
-                chosen = tags.get(sel).cloned();
+                chosen = match sel {
+                    0 => Some(AUTO_UPDATE_ROW.into()),
+                    _ => tags.get(sel - 1).cloned(),
+                };
                 self.overlay = Some(Overlay::Versions { sel, chosen });
             }
             Overlay::Undo {
@@ -1582,15 +1624,17 @@ mod tests {
 
     #[test]
     fn picker_selection_survives_refreshes() {
+        // Row 0 is the auto-update toggle; release rows start at 1.
         let tags = vec!["v3".into(), "v2".into(), "v1".into()];
-        assert_eq!(picker_sel(&tags, "v2", None, 0), 1);
+        assert_eq!(picker_sel(&tags, "v2", None, 0), 2);
+        assert_eq!(picker_sel(&tags, "v2", Some(AUTO_UPDATE_ROW), 2), 0);
 
         let reordered = vec!["v4".into(), "v3".into(), "v1".into(), "v2".into()];
-        assert_eq!(picker_sel(&reordered, "v2", Some("v1"), 2), 2);
+        assert_eq!(picker_sel(&reordered, "v2", Some("v1"), 3), 3);
         assert_eq!(picker_sel(&reordered, "v2", Some("missing"), 1), 1);
 
         let shrunk = vec!["v3".into()];
-        assert_eq!(picker_sel(&shrunk, "v2", Some("missing"), 9), 0);
+        assert_eq!(picker_sel(&shrunk, "v2", Some("missing"), 9), 1);
         assert_eq!(picker_sel(&[], "v2", None, 9), 0);
     }
 
