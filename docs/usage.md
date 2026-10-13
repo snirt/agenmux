@@ -106,12 +106,14 @@ one is not a close. Press `u` to list them, newest first:
 ❯ 10:42  session  work    3 windows, 5 panes, 2 agents
   10:35  pane     play:1  claude · repo
   10:31  window   play:2  2 panes
-↵ restore · d forget · q/esc back
+↵ restore · d forget · / search · q/esc back
 ```
 
 - `Enter` restores the selected entry like `R` does: saved layout, a shell in
   each saved directory, and `AGENT_RESUME` with `resume_agents` on. `u` `Enter`
   undoes the last close.
+- `/` filters the list as you type by label or summary (`play:2`, `claude`).
+  `Enter` keeps the filter for navigation; `Esc` clears it.
 - A pane is split back into its window next to its old neighbour, and the
   window gets its saved layout back when its pane count matches again.
 - Entries restore in any order; a restored entry leaves the list. `d` forgets

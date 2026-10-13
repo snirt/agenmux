@@ -367,13 +367,13 @@ impl Sidebar {
             let indices = inventory_filtered_indices(
                 &self.panes,
                 &self.rows,
-                &self.query,
+                &self.search.query,
                 self.attention_filter,
             );
             let collapsed = self.collapsing().then_some(&self.collapsed);
             with_record_rows(&self.panes, indices, collapsed)
         } else {
-            filtered_indices(&self.rows, &self.query, self.attention_filter)
+            filtered_indices(&self.rows, &self.search.query, self.attention_filter)
                 .into_iter()
                 .map(VisiblePane::Agent)
                 .collect()
@@ -399,21 +399,21 @@ impl Sidebar {
 
     pub(super) fn focus_search(&mut self) {
         self.attention_filter = false;
-        self.search_focused = true;
+        self.search.editing = true;
         self.rebuild_visible(false);
     }
 
     pub(super) fn toggle_attention_filter(&mut self) {
-        self.query.clear();
+        self.search.query.clear();
         self.attention_filter = !self.attention_filter;
-        self.search_focused = false;
+        self.search.editing = false;
         self.rebuild_visible(true);
     }
 
     pub(super) fn clear_filter(&mut self) {
-        self.query.clear();
+        self.search.query.clear();
         self.attention_filter = false;
-        self.search_focused = false;
+        self.search.editing = false;
         self.rebuild_visible(false);
     }
 
@@ -439,7 +439,7 @@ impl Sidebar {
     pub(super) fn collapsing(&self) -> bool {
         self.settings.settings.show_all_panes
             && !self.attention_filter
-            && self.query.trim().is_empty()
+            && self.search.query.trim().is_empty()
     }
 
     /// Whether the frame animates: a visible agent needs attention, or one is
@@ -577,11 +577,8 @@ impl Sidebar {
     }
 
     pub(super) fn search_key(&mut self, key: Key) {
-        if self.query.handle(&key) {
-            if matches!(
-                key,
-                Key::Text(_) | Key::Backspace | Key::Delete | Key::ClearSearch
-            ) {
+        if self.search.query.handle(&key) {
+            if super::ui::Search::edits(&key) {
                 self.attention_filter = false;
                 self.rebuild_visible(!matches!(key, Key::ClearSearch));
             }
@@ -591,7 +588,7 @@ impl Sidebar {
             Key::Quit | Key::Close => self.clear_filter(),
             // First Enter accepts query and hands j/k back to filtered
             // navigation. Enter in normal mode then jumps to selection.
-            Key::Jump => self.search_focused = false,
+            Key::Jump => self.search.editing = false,
             Key::Down => self.move_sel(1),
             Key::Up => self.move_sel(-1),
             Key::WheelUp => self.scroll_viewport(-1),

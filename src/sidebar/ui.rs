@@ -302,6 +302,87 @@ impl Editor {
     }
 }
 
+/// `/` live filter shared by the sidebar and list overlays: typing narrows
+/// the list, Enter keeps the query and returns to navigation, Esc clears it.
+pub(super) struct Search {
+    pub(super) query: TextEdit,
+    pub(super) editing: bool,
+}
+
+impl Default for Search {
+    fn default() -> Self {
+        Self {
+            query: TextEdit::from(""),
+            editing: false,
+        }
+    }
+}
+
+impl Search {
+    pub(super) const EDIT_HINT: &'static str = "type to filter · Enter apply · Esc clear";
+
+    pub(super) fn active(&self) -> bool {
+        self.editing || !self.query.is_empty()
+    }
+
+    /// Keys that change the query, and so the filtered list.
+    pub(super) fn edits(key: &crate::input::Key) -> bool {
+        use crate::input::Key;
+        matches!(
+            key,
+            Key::Text(_) | Key::Backspace | Key::Delete | Key::ClearSearch
+        )
+    }
+
+    pub(super) fn matches(&self, text: &str) -> bool {
+        let needle = self.query.trim().to_lowercase();
+        needle.is_empty() || text.to_lowercase().contains(&needle)
+    }
+
+    /// The query, with the cursor `mark` while typing.
+    pub(super) fn display(&self, mark: &str, width: usize) -> String {
+        if self.editing {
+            self.query.display_clipped(mark, width)
+        } else {
+            self.query.value().into()
+        }
+    }
+
+    /// Overlay search row: `/ query`, or the `/ search` prompt.
+    pub(super) fn line(&self, cols: usize) -> String {
+        if self.active() {
+            format!("/ {}", self.display("_", cols.saturating_sub(2)))
+        } else {
+            "/ search".into()
+        }
+    }
+
+    /// Overlay key handling: `start` opens or refines, typing edits, Enter
+    /// applies, Esc clears. `Some(true)` when the filtered list changed, so
+    /// the caller moves its selection back to the first match.
+    pub(super) fn key(&mut self, key: &crate::input::Key, start: bool) -> Option<bool> {
+        use crate::input::Key;
+        if self.editing {
+            if self.query.handle(key) {
+                return Some(Self::edits(key));
+            }
+            if matches!(key, Key::Jump) {
+                self.editing = false;
+                return Some(true);
+            }
+        }
+        if start {
+            self.editing = true;
+            return Some(true);
+        }
+        if self.active() && matches!(key, Key::AllStates | Key::Quit | Key::Close) {
+            *self = Self::default();
+            return Some(true);
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -245,7 +245,7 @@ pub struct Sidebar {
     rows: Vec<PaneRow>, // complete debounced view-model; never filter cache/status
     panes: Vec<PaneMeta>, // latest complete sidebar-excluded inventory
     visible: Vec<VisiblePane>, // selectable rows, including all-pane session/window headers
-    query: ui::TextEdit,
+    search: ui::Search,
     attention_filter: bool,
     // Collapsed session and window ids ("$n"/"@n"): stable across rescans.
     collapsed: HashSet<String>,
@@ -256,7 +256,6 @@ pub struct Sidebar {
     /// Persisted collapse state and layout; opened only by the runtime entry
     /// points, so tests never touch the user's state dir.
     snapshot: Option<crate::snapshot::Store>,
-    search_focused: bool,
     key_sequence: KeySequence,
     refresh_requested: bool,
     sel: usize,    // 1-based index into visible, like the bash script
@@ -433,13 +432,12 @@ fn new_sidebar(
         rows: Vec::new(),
         panes: Vec::new(),
         visible: Vec::new(),
-        query: ui::TextEdit::from(""),
+        search: ui::Search::default(),
         attention_filter: false,
         collapsed: HashSet::new(),
         marked: HashSet::new(),
         range_anchor: None,
         snapshot: None,
-        search_focused: false,
         key_sequence: KeySequence::default(),
         refresh_requested: false,
         sel: 1,
@@ -731,9 +729,9 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             let frame_deadline = Instant::now() + Duration::from_millis(16);
             let mut navigation = None;
             loop {
-                let editing_settings = sb.settings_editing();
-                let text_input = sb.search_focused
-                    || editing_settings
+                let overlay_editing = sb.overlay_editing();
+                let text_input = sb.search.editing
+                    || overlay_editing
                     || matches!(
                         sb.overlay,
                         Some(Overlay::Create { .. } | Overlay::Rename { .. } | Overlay::Confirm(_))
@@ -743,7 +741,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 } else {
                     KeyMode::Normal
                 };
-                let keys = if editing_settings {
+                let keys = if overlay_editing {
                     settings_keys()
                 } else if sb.daemon.is_some() {
                     protocol_keys(mode)
@@ -758,7 +756,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                     read_key_with_config(key_fd, keys, &sb.settings.settings)
                 };
                 trace!("key {key:?}");
-                let navigation_step = if !editing_settings && sb.overlay.is_none() {
+                let navigation_step = if !overlay_editing && sb.overlay.is_none() {
                     navigation_key(&key)
                 } else {
                     None
@@ -887,7 +885,7 @@ impl Sidebar {
             };
         }
         self.key_sequence.clear();
-        match dispatch_mode(self.overlay.as_ref(), self.search_focused) {
+        match dispatch_mode(self.overlay.as_ref(), self.search.editing) {
             DispatchMode::Overlay => return self.overlay_key(key),
             DispatchMode::Search => {
                 self.search_key(key);

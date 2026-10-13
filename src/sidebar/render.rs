@@ -920,7 +920,7 @@ impl Sidebar {
             }
             None => (String::new(), 0, String::new()),
         };
-        let filtering = self.attention_filter || !self.query.trim().is_empty();
+        let filtering = self.attention_filter || !self.search.query.trim().is_empty();
         let count = if filtering {
             let total = if self.settings.settings.show_all_panes {
                 self.panes.len()
@@ -937,16 +937,9 @@ impl Sidebar {
         };
         let mut filter = if self.attention_filter {
             " [attention]".to_string()
-        } else if self.search_focused || !self.query.is_empty() {
-            let query = if self.search_focused {
-                self.query.display_clipped(
-                    "▏",
-                    cols.saturating_sub(notice_len + count.chars().count() + 2),
-                )
-            } else {
-                self.query.value().to_string()
-            };
-            format!(" /{query}")
+        } else if self.search.active() {
+            let width = cols.saturating_sub(notice_len + count.chars().count() + 2);
+            format!(" /{}", self.search.display("▏", width))
         } else {
             String::new()
         };
@@ -1034,7 +1027,7 @@ impl Sidebar {
             inline_hint
         } else if !sequence_hint.is_empty() {
             sequence_hint
-        } else if self.search_focused {
+        } else if self.search.editing {
             join(&[
                 self.hint(&self.search_keys, Action::Accept, "nav"),
                 self.hint(&self.search_keys, Action::Clear, "clear"),
@@ -1048,7 +1041,7 @@ impl Sidebar {
                 nav,
                 self.hint(&self.normal_keys, Action::Reset, "clear"),
             ])
-        } else if !self.query.trim().is_empty() {
+        } else if !self.search.query.trim().is_empty() {
             join(&[
                 nav,
                 self.hint(&self.normal_keys, Action::Jump, "open"),
@@ -1487,15 +1480,15 @@ mod tests {
             }
         }
         for mode in 0..7 {
-            sb.query.clear();
+            sb.search.query.clear();
             sb.attention_filter = false;
-            sb.search_focused = false;
+            sb.search.editing = false;
             sb.overlay = None;
             sb.update = None;
             match mode {
                 0 => {
-                    sb.query = "repo".into();
-                    sb.search_focused = true;
+                    sb.search.query = "repo".into();
+                    sb.search.editing = true;
                 }
                 1 => sb.attention_filter = true,
                 2 => sb.update = Some("v9.9.9".into()),
@@ -1506,7 +1499,7 @@ mod tests {
                         chosen: None,
                     })
                 }
-                5 => sb.query = "absent".into(),
+                5 => sb.search.query = "absent".into(),
                 _ => sb.rows.clear(),
             }
             sb.rebuild_visible(false);
@@ -1539,9 +1532,9 @@ mod tests {
             pane("$1", "work", "@2", 2, "server", "%22", 2, "node", Some(0)),
             pane("$2", "personal", "@3", 3, "shell", "%31", 1, "zsh", None),
         ];
-        sb.query.clear();
+        sb.search.query.clear();
         sb.attention_filter = false;
-        sb.search_focused = false;
+        sb.search.editing = false;
         sb.overlay = None;
         sb.update = None;
         sb.plugin_selected = true;
@@ -1951,13 +1944,13 @@ mod tests {
             sb.dispatch_key(Key::ToggleBranch);
             assert_eq!(sb.visible.len(), 3, "a collapsed session hides its windows");
             assert!(plain(&mut sb).contains("▶ work"));
-            sb.query = "npm".into();
+            sb.search.query = "npm".into();
             sb.rebuild_visible(false);
             assert!(
                 plain(&mut sb).contains("▢ npm"),
                 "search reveals matches under collapsed branches"
             );
-            sb.query.clear();
+            sb.search.query.clear();
             sb.rebuild_visible(false);
             assert_eq!(sb.visible.len(), 3, "search leaves collapse state intact");
             sb.dispatch_key(Key::ExpandAll);
@@ -1978,7 +1971,7 @@ mod tests {
             ("attention filter", "ignored", true),
             ("absent query", "absent", false),
         ] {
-            sb.query = query.into();
+            sb.search.query = query.into();
             sb.attention_filter = attention_filter;
             sb.rebuild_visible(false);
             sb.render(true);
@@ -2004,7 +1997,7 @@ mod tests {
                     .escape_default()
             ));
         }
-        sb.query.clear();
+        sb.search.query.clear();
         sb.attention_filter = false;
         sb.rebuild_visible(false);
 
@@ -2084,7 +2077,7 @@ mod tests {
         sb.settings.settings.show_all_panes = true;
         sb.settings.settings.tmux_management_enabled = true;
         sb.overlay = None;
-        sb.query.clear();
+        sb.search.query.clear();
         sb.plugin_selected = true;
         sb.rows = vec![row("%22")];
         sb.panes = vec![
@@ -2172,10 +2165,10 @@ mod tests {
         assert!(line(sb, "repo").starts_with(&sb.palette.state_bg("idle", true)));
         assert!(sb.last_frame.contains("3 selected · yy copy · dd delete"));
 
-        sb.query = "absent".into();
+        sb.search.query = "absent".into();
         sb.rebuild_visible(false);
         assert_eq!(sb.marked_ids().len(), 3, "hidden records stay selected");
-        sb.query.clear();
+        sb.search.query.clear();
         sb.rebuild_visible(false);
         let closed = sb.panes.pop().unwrap();
         assert_eq!(sb.marked_ids(), ["%11", "@2"], "closed records drop out");
@@ -2240,9 +2233,9 @@ mod tests {
             sb.active = "%2".into();
             sb.plugin_selected = true;
             sb.tick = 0;
-            sb.query.clear();
+            sb.search.query.clear();
             sb.attention_filter = false;
-            sb.search_focused = false;
+            sb.search.editing = false;
             sb.update = Some("v9.9.9".into());
             sb.overlay = None;
             sb.daemon.as_mut().unwrap().size = (80, 40);
@@ -2336,8 +2329,8 @@ mod tests {
         sb.rows[0].state = "working".into();
         sb.visible = vec![VisiblePane::Agent(0)];
         sb.sel = 1;
-        sb.query.clear();
-        sb.search_focused = false;
+        sb.search.query.clear();
+        sb.search.editing = false;
 
         sb.overlay = Some(Overlay::Help);
         sb.render(true);
@@ -2590,17 +2583,17 @@ mod tests {
                         sb.plugin_selected = focused;
                         sb.tick = tick;
                         for mode in 0..10 {
-                            sb.query.clear();
+                            sb.search.query.clear();
                             sb.attention_filter = false;
-                            sb.search_focused = false;
+                            sb.search.editing = false;
                             sb.overlay = None;
                             sb.update = None;
                             match mode {
                                 1 => {
-                                    sb.query = "repo".into();
-                                    sb.search_focused = true;
+                                    sb.search.query = "repo".into();
+                                    sb.search.editing = true;
                                 }
-                                2 => sb.query = "repo".into(),
+                                2 => sb.search.query = "repo".into(),
                                 3 => {
                                     sb.attention_filter = true;
                                 }
@@ -2612,7 +2605,7 @@ mod tests {
                                         chosen: None,
                                     })
                                 }
-                                7 => sb.query = "absent".into(),
+                                7 => sb.search.query = "absent".into(),
                                 8 => sb.rows.clear(),
                                 9 => {
                                     sb.overlay = Some(Overlay::Versions {
