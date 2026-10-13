@@ -1,18 +1,15 @@
-# agenmux v0.8.1
+# agenmux v0.8.2
 
 ## What's changed
 
-v0.8.1 makes the recently closed list searchable and links the agenmux YouTube
-playlist from the README and site.
+v0.8.2 lets the split sidebar dock on the right edge of the window.
 
-### Recently closed search
+### Right-hand sidebar
 
-- `/` in the recently closed list (`u`) filters entries as you type by label (`work`, `work:2`) or summary (`claude · repo`). `Enter` keeps the filter for navigation and `Esc` clears it; days without matches are hidden ([#196](https://github.com/snirt/agenmux/pull/196), [#195](https://github.com/snirt/agenmux/issues/195)).
-- The sidebar, settings and recently closed searches share one implementation, so `/`, `Enter` and `Esc` behave the same in each ([#196](https://github.com/snirt/agenmux/pull/196)).
-
-### Documentation
-
-- The README video fallback and the site player open the agenmux YouTube playlist, starting with the narrated intro ([#194](https://github.com/snirt/agenmux/pull/194)).
+- `display.sidebar_position = "right"` (or `set -g @agenmux-sidebar-position right`) opens the split sidebar on the right edge; `left` stays the default ([#199](https://github.com/snirt/agenmux/pull/199), [#198](https://github.com/snirt/agenmux/issues/198)).
+- Changing the position from the settings overlay, `agenmux config reload` or the tmux option moves open sidebars to the new edge at the same width, without switching windows ([#199](https://github.com/snirt/agenmux/pull/199)).
+- Beside a right-hand sidebar, `h` jumps toward the panes and `l` folds a branch, unless `keys.normal.jump` is configured ([#199](https://github.com/snirt/agenmux/pull/199)).
+- Restoring a previous tmux server's layout and cleaning up restored ghost panes follow the sidebar's side ([#199](https://github.com/snirt/agenmux/pull/199)).
 
 ### Assets
 
