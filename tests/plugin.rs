@@ -369,6 +369,45 @@ fn pane_add_kills_restored_ghost_shell() {
 }
 
 #[test]
+fn pane_add_docks_right_and_kills_a_right_ghost() {
+    let tmux = TestTmux::new("right-ghost");
+    let window = tmux.text(&["display-message", "-p", "#{window_id}"]);
+    let ghost = tmux.text(&[
+        "split-window",
+        "-hf",
+        "-l",
+        "30",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "exec sh",
+    ]);
+    tmux.assert_tmux(&["set-option", "-g", "@agenmux-on", "1"]);
+    tmux.assert_tmux(&["set-option", "-g", "@agenmux-width", "30"]);
+    tmux.assert_tmux(&["set-option", "-g", "@agenmux-sidebar-position", "right"]);
+
+    assert_success(tmux.bin(&["pane-add", &window]), "pane-add right");
+
+    let panes = tmux.text(&[
+        "list-panes",
+        "-t",
+        &window,
+        "-F",
+        "#{pane_id}\t#{pane_at_right}\t#{pane_width}\t#{@agenmux}",
+    ]);
+    assert!(
+        !panes.lines().any(|line| line.starts_with(&ghost)),
+        "{panes}"
+    );
+    assert_eq!(panes.lines().count(), 2, "{panes}");
+    assert!(
+        panes.lines().any(|line| line.ends_with("\t1\t30\t1")),
+        "{panes}"
+    );
+}
+
+#[test]
 fn pane_add_keeps_leftmost_non_shell_pane() {
     let tmux = TestTmux::new("leftmost-non-shell");
     let window = tmux.text(&["display-message", "-p", "#{window_id}"]);
@@ -3176,6 +3215,67 @@ fn daemon_live_width_keeps_startup_file_and_last_valid_overrides() {
         ])
         .is_empty()
     });
+}
+
+#[test]
+fn daemon_moves_open_sidebars_when_the_position_changes() {
+    let tmux = TestTmux::new("live-position");
+    app_file(
+        &tmux,
+        "[display]\nsidebar_width=26\nsidebar_position='right'\n[behavior]\nnotifications=false",
+    );
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agenmux-bin",
+        env!("CARGO_BIN_EXE_agenmux"),
+    ]);
+    assert_success(tmux.bin(&["toggle", "split"]), "start right sidebar");
+    let pane = tmux.text(&[
+        "list-panes",
+        "-f",
+        "#{==:#{pane_title},agenmux}",
+        "-F",
+        "#{pane_id}",
+    ]);
+    let edge = || {
+        tmux.text(&[
+            "display-message",
+            "-p",
+            "-t",
+            &pane,
+            "#{?pane_at_left,left,}#{?pane_at_right,right,} #{pane_width} #{pane_height}",
+        ])
+    };
+    let height = tmux.text(&["display-message", "-p", "#{window_height}"]);
+    tmux.wait_for(Duration::from_secs(4), || {
+        edge() == format!("right 26 {height}")
+            && !tmux
+                .text(&["show-option", "-gqv", "@agenmux-control-client"])
+                .is_empty()
+    });
+    // h jumps toward the panes on the right; l folds.
+    // A reinstall briefly drops the table, so a failed read is just "not yet".
+    let jumps = |key: &str| {
+        let keys = tmux.tmux(&["list-keys", "-T", "agenmux"]);
+        String::from_utf8_lossy(&keys.stdout).lines().any(|line| {
+            line.contains(&format!(" -T agenmux {key} ")) && line.contains("key 'enter'")
+        })
+    };
+    tmux.wait_for(Duration::from_secs(4), || jumps("h") && !jumps("l"));
+    tmux.assert_tmux(&["set-option", "-g", "@agenmux-sidebar-position", "left"]);
+    tmux.wait_for(Duration::from_secs(4), || {
+        edge() == format!("left 26 {height}")
+    });
+    tmux.wait_for(Duration::from_secs(4), || jumps("l") && !jumps("h"));
+    tmux.assert_tmux(&["set-option", "-gu", "@agenmux-sidebar-position"]);
+    tmux.wait_for(Duration::from_secs(4), || {
+        edge() == format!("right 26 {height}")
+    });
+    // The move is not mistaken for a border drag.
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(tmux.text(&["show-option", "-gqv", "@agenmux-width"]), "");
+    assert_success(tmux.bin(&["key", "close"]), "right sidebar close");
 }
 
 #[test]

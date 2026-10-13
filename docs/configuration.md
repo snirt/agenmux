@@ -17,6 +17,7 @@ A tmux option wins over the file when both set the same thing; see
 | `@agenmux-popup-key` | `e` | Popup launcher; empty disables it |
 | `@agenmux-display` | `split` | What the main key opens: `split` (sidebar) or `popup` |
 | `@agenmux-width` | `30` sidebar, `40` popup | Width in cells |
+| `@agenmux-sidebar-position` | `left` | Window edge the sidebar docks to: `left` or `right` |
 | `@agenmux-height` | auto | Fixed popup height; auto prefers at least 15 rows |
 | `@agenmux-hide-windows` | unset | Glob of windows to hide from the `prefix + w` picker; `''` restores the default picker |
 | `@agenmux-notifications` | `on` | Desktop notifications; `off` disables |
@@ -57,6 +58,7 @@ mode = "split"            # split | popup
 show_all_panes = true     # false: agents only
 show_frame = true         # frame around the whole sidebar pane
 sidebar_width = 30
+sidebar_position = "left" # left | right
 popup_width = 40
 popup_height = "auto"
 agent_label = "icon-text" # icon-text | icon | text
@@ -189,5 +191,6 @@ For each setting, the first layer that sets it wins:
   `1`/`0` in any case. `@agenmux-display` also accepts `float` for `popup`.
 - Dragging the sidebar border sets `@agenmux-width` live; unset it to go back to
   the file value.
+- Changing the sidebar position moves open sidebars to the new edge.
 - A bad live tmux override keeps the last valid setting and logs a warning.
 - With an invalid file, closing, teardown, and key and mouse input still work.

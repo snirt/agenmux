@@ -164,6 +164,16 @@ pub fn action_for(keys: &Keymap, chord: KeyChord) -> Option<Action> {
         .find(|(_, chords)| chords.contains(&chord))
         .map(|(action, _)| *action)
 }
+
+/// The fixed key that folds a branch: `h`, or `l` once jump has taken `h`,
+/// as it does by default beside a right-hand sidebar.
+pub fn fold_key(normal: &Keymap) -> u8 {
+    if action_for(normal, KeyChord::Printable(b'h')) == Some(Action::Jump) {
+        b'l'
+    } else {
+        b'h'
+    }
+}
 impl<'de> Deserialize<'de> for KeyChord {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         Self::parse(&String::deserialize(d)?).map_err(serde::de::Error::custom)

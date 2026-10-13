@@ -12,7 +12,8 @@ const MAX_COLLAPSED: usize = 256;
 
 /// The `list-windows` query `layout` reads. `window_name` goes last: it may
 /// contain the delimiter.
-pub const WINDOWS_FMT: &str = "list-windows -a -F '#{window_id}|#{window_panes}|#{automatic-rename}|#{window_layout}|#{window_name}'";
+/// The fourth field is 1 when the window's sidebar is on the right.
+pub const WINDOWS_FMT: &str = "list-windows -a -F '#{window_id}|#{window_panes}|#{automatic-rename}|#{P:#{?#{==:#{pane_title},agenmux},#{pane_at_right},}}|#{window_layout}|#{window_name}'";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -47,8 +48,11 @@ pub struct Window {
     pub name: String,
     pub automatic_rename: bool,
     pub layout: String,
-    /// The layout includes the agenmux pane: the full-height leftmost split.
+    /// The layout includes the agenmux pane: the full-height leftmost split,
+    /// or the rightmost one with `sidebar_right`.
     pub sidebar: bool,
+    #[serde(default)]
+    pub sidebar_right: bool,
     #[serde(default)]
     pub panes: Vec<Pane>,
 }
@@ -503,8 +507,8 @@ pub fn layout(panes: &[PaneMeta], agents: &[PaneRow], windows: &str) -> Vec<Sess
     let windows: HashMap<&str, Vec<&str>> = windows
         .lines()
         .filter_map(|line| {
-            let fields: Vec<&str> = line.splitn(5, '|').collect();
-            (fields.len() == 5).then(|| (fields[0], fields))
+            let fields: Vec<&str> = line.splitn(6, '|').collect();
+            (fields.len() == 6).then(|| (fields[0], fields))
         })
         .collect();
     let mut listed: HashMap<&str, usize> = HashMap::new();
@@ -528,15 +532,17 @@ pub fn layout(panes: &[PaneMeta], agents: &[PaneRow], windows: &str) -> Vec<Sess
         {
             let info = windows.get(pane.window_id.as_str());
             let field = |i: usize| info.map_or("", |f| f[i]);
+            let sidebar = field(1)
+                .parse::<usize>()
+                .is_ok_and(|n| n > listed[pane.window_id.as_str()]);
             session.windows.push(Window {
                 id: pane.window_id.clone(),
                 index: pane.window_index,
                 name: pane.window_name.clone(),
                 automatic_rename: field(2) != "0",
-                layout: field(3).to_string(),
-                sidebar: field(1)
-                    .parse::<usize>()
-                    .is_ok_and(|n| n > listed[pane.window_id.as_str()]),
+                layout: field(4).to_string(),
+                sidebar,
+                sidebar_right: sidebar && field(3) == "1",
                 panes: Vec::new(),
             });
         }
@@ -611,9 +617,10 @@ pub fn replay(
                 ]));
             }
             exists = true;
-            // The agenmux pane was index 0; a placeholder holds its cell until
-            // select-layout has placed the rest.
-            let (split, mut resumes) = if window.sidebar {
+            // The agenmux pane was the first pane (the last when on the right);
+            // a placeholder holds its cell until select-layout has placed the rest.
+            let left = window.sidebar && !window.sidebar_right;
+            let (split, mut resumes) = if left {
                 (&window.panes[..], Vec::new())
             } else {
                 (&window.panes[1..], vec![(p0.clone(), &window.panes[0])])
@@ -635,11 +642,25 @@ pub fn replay(
                 resumes.push((id.clone(), pane));
                 last = id;
             }
+            let placeholder = if left {
+                Some(p0.clone())
+            } else if window.sidebar {
+                run(&args(&[
+                    "split-window",
+                    "-t",
+                    &last,
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                ]))
+            } else {
+                None
+            };
             if !window.layout.is_empty() {
                 run(&args(&["select-layout", "-t", &p0, &window.layout]));
             }
-            if window.sidebar {
-                run(&args(&["kill-pane", "-t", &p0]));
+            if let Some(placeholder) = placeholder {
+                run(&args(&["kill-pane", "-t", &placeholder]));
             }
             // After the layout, so agents start at their final size.
             for (id, pane) in resumes {
@@ -697,6 +718,7 @@ mod tests {
                     automatic_rename: false,
                     layout: "abcd,80x24,0,0,1".into(),
                     sidebar: true,
+                    sidebar_right: false,
                     panes: vec![
                         Pane {
                             id: "%1".into(),
@@ -809,7 +831,7 @@ mod tests {
             meta(("$1", "work"), ("@4", 2), "%2", None),
             meta(("$1", "work"), ("@6", 3), "%3", None),
         ];
-        let windows = "@4|3|0|L4|my|name\n@6|1|1|L6|zsh\n";
+        let windows = "@4|3|0|1|L4|my|name\n@6|1|1||L6|zsh\n";
         let sessions = layout(&panes, &agents, windows);
         assert_eq!(sessions.len(), 1);
         let [w2, w3] = &sessions[0].windows[..] else {
@@ -824,6 +846,7 @@ mod tests {
             ),
             (2, "L4", true, false)
         );
+        assert!(w2.sidebar_right && !w3.sidebar_right);
         assert_eq!(w2.panes[0].agent.as_deref(), Some("claude"));
         assert_eq!(
             w2.panes[1],
@@ -915,7 +938,7 @@ mod tests {
         }
     }
 
-    const WINDOWS: &str = "@4|1|1|L4|w2\n@6|2|1|L6|w3\n@7|1|1|L7|w0\n";
+    const WINDOWS: &str = "@4|1|1||L4|w2\n@6|2|1||L6|w3\n@7|1|1||L7|w0\n";
 
     fn ids(log: &[Closed]) -> Vec<&str> {
         log.iter().map(|entry| entry.id.as_str()).collect()
@@ -1165,6 +1188,20 @@ mod tests {
                 "new-window -d -t =work:3 -c /repo -P -F #{window_index} #{pane_id} -n editor",
                 "split-window -t %8 -c /tmp -P -F #{pane_id}",
                 "select-layout -t %8 abcd,80x24,0,0,1",
+            ]
+        );
+        // A right-hand sidebar's cell is last in layout order, so its
+        // placeholder is split off after the saved panes.
+        session.windows[0].sidebar = true;
+        session.windows[0].sidebar_right = true;
+        assert_eq!(
+            replayed(&session, &HashSet::from([("work".to_string(), 0)])),
+            [
+                "new-window -d -t =work:3 -c /repo -P -F #{window_index} #{pane_id} -n editor",
+                "split-window -t %8 -c /tmp -P -F #{pane_id}",
+                "split-window -t %9 -P -F #{pane_id}",
+                "select-layout -t %8 abcd,80x24,0,0,1",
+                "kill-pane -t %9",
             ]
         );
         assert_eq!(

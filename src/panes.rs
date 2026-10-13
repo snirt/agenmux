@@ -1,3 +1,4 @@
+use crate::app_config::SidebarPosition;
 use crate::tmux::{self, TmuxError};
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -135,17 +136,23 @@ fn newest_value(rows: &[String]) -> Option<String> {
 }
 
 // Restore tools respawn processless sidebar panes as idle shells; remove them before splitting.
-fn kill_ghosts(win: &str, width: &str) {
+fn kill_ghosts(win: &str, width: &str, right: bool) {
     let default_shell =
         tmux::command(&["show-option", "-gqv", "default-shell"]).unwrap_or_default();
     let default_shell = default_shell.trim().rsplit('/').next().unwrap_or_default();
     let snapshot = crate::procs::Snapshot::take();
+    // The second field is 0 only for a pane on the sidebar's edge.
+    let edge = if right {
+        "#{?pane_at_right,0,1}"
+    } else {
+        "#{pane_left}"
+    };
     let panes = tmux::lines(&[
         "list-panes",
         "-t",
         win,
         "-F",
-        "#{pane_id}|#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}|#{window_height}|#{window_panes}|#{pane_pid}|#{pane_current_command}|#{pane_title}",
+        &format!("#{{pane_id}}|{edge}|#{{pane_top}}|#{{pane_width}}|#{{pane_height}}|#{{window_height}}|#{{window_panes}}|#{{pane_pid}}|#{{pane_current_command}}|#{{pane_title}}"),
     ])
     .unwrap_or_default();
     for row in panes {
@@ -298,7 +305,8 @@ pub(crate) fn pane_add_record(
     }
 
     let width = bounded_width(config.sidebar_width, &win).to_string();
-    kill_ghosts(&win, &width);
+    let right = config.sidebar_position == SidebarPosition::Right;
+    kill_ghosts(&win, &width, right);
     let layout = match tmux::command(&["display-message", "-p", "-t", &win, "#{window_layout}"]) {
         Ok(layout) => layout.trim_end().to_string(),
         Err(_) => return 1,
@@ -319,7 +327,7 @@ pub(crate) fn pane_add_record(
     let output = Command::new("tmux")
         .args([
             "split-window",
-            "-hbf",
+            if right { "-hf" } else { "-hbf" },
             "-d",
             "-l",
             &width,
@@ -418,6 +426,52 @@ pub fn pane_pin() -> i32 {
         let _ = tmux::command_status(&["resize-pane", "-t", &pane, "-x", &width]);
     }
     0
+}
+
+/// Moves every open sidebar on the other edge to `position`, at `width`.
+/// Forked tmux: the moves fire layout hooks whose run-shell output would
+/// desync a control client.
+pub fn dock(position: SidebarPosition, width: u16) {
+    let panes = tmux::lines(&[
+        "list-panes",
+        "-a",
+        "-f",
+        IS_SIDEBAR,
+        "-F",
+        "#{pane_id}|#{window_id}|#{pane_at_left}|#{pane_at_right}|#{window_panes}|#{pane_active}",
+    ])
+    .unwrap_or_default();
+    for row in panes {
+        let fields: Vec<&str> = row.split('|').collect();
+        let [pane, win, at_left, at_right, count, active] = fields[..] else {
+            continue;
+        };
+        // The anchor is the opposite corner, never the sidebar itself.
+        let (docked, flags, anchor) = match position {
+            SidebarPosition::Left => (at_left, "-fhb", "{top-left}"),
+            SidebarPosition::Right => (at_right, "-fh", "{bottom-right}"),
+        };
+        if docked == "1" || count == "1" {
+            continue;
+        }
+        let width = bounded_width(width, win).to_string();
+        let target = format!("{win}.{anchor}");
+        // Without -d tmux also switches the session to that window.
+        let moved = tmux::command_status(&[
+            "move-pane",
+            flags,
+            "-d",
+            "-l",
+            &width,
+            "-s",
+            pane,
+            "-t",
+            &target,
+        ]);
+        if moved.is_ok() && active == "1" {
+            let _ = tmux::command_status(&["select-pane", "-t", pane]);
+        }
+    }
 }
 
 fn bounded_width(width: u16, target: &str) -> u16 {

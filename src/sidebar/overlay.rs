@@ -405,6 +405,7 @@ fn setting_value(name: &str, buffer: &str) -> Result<String, String> {
 fn choices(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "display.mode" => Some(&["split", "popup"]),
+        "display.sidebar_position" => Some(&["left", "right"]),
         "display.agent_label" => Some(&["icon-text", "icon", "text"]),
         "theme.base" => Some(&["dark", "light", "terminal"]),
         _ if name.starts_with("quick_launchers.") && name.ends_with(".working_directory") => {
@@ -755,18 +756,34 @@ impl Sidebar {
                     }
                 }
                 // Fixed all-pane tree keys, listed while no action claims them.
+                let (fold, open) = match crate::app_config::fold_key(&self.normal_keys) {
+                    b'l' => ('l', 'h'),
+                    _ => ('h', 'l'),
+                };
                 for (label, chord, what) in [
                     (
                         "Space",
                         KeyChord::Printable(b' '),
-                        "fold branch (h/← fold, l/→ open)",
+                        format!("fold branch ({fold}/← fold, {open}/→ open)"),
                     ),
-                    ("z/Z", KeyChord::Printable(b'z'), "fold / open all branches"),
-                    ("u", KeyChord::Printable(b'u'), "recently closed (undo)"),
-                    ("v/V", KeyChord::Printable(b'v'), "select / select a range"),
+                    (
+                        "z/Z",
+                        KeyChord::Printable(b'z'),
+                        "fold / open all branches".into(),
+                    ),
+                    (
+                        "u",
+                        KeyChord::Printable(b'u'),
+                        "recently closed (undo)".into(),
+                    ),
+                    (
+                        "v/V",
+                        KeyChord::Printable(b'v'),
+                        "select / select a range".into(),
+                    ),
                 ] {
                     if action_for(&self.normal_keys, chord).is_none() {
-                        keys.push((label.into(), what.into()));
+                        keys.push((label.into(), what));
                     }
                 }
                 let keys: String = keys
@@ -1290,7 +1307,15 @@ impl Sidebar {
             crate::autoupdate::resumed(&self.plugin_dir);
         }
         let width_changed = next.sidebar_width != self.settings.settings.sidebar_width;
+        let position_changed = next.sidebar_position != self.settings.settings.sidebar_position;
         self.settings.replace(file, next);
+        // Popups leave this to the daemon, which sees the reload.
+        if position_changed && self.daemon.is_some() {
+            crate::panes::dock(
+                self.settings.settings.sidebar_position,
+                self.settings.settings.sidebar_width,
+            );
+        }
         if width_changed && self.daemon.is_some() {
             let panes = self
                 .tmux
@@ -1798,7 +1823,7 @@ mod tests {
                 .iter()
                 .map(|row| row.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["display.sidebar_width"]
+            vec!["display.sidebar_width", "display.sidebar_position"]
         );
         let (frame, _) = render_settings(
             &mut settings,

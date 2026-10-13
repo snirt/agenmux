@@ -343,8 +343,23 @@ impl Sidebar {
         // same barrier as active_pane: reading zero panes off a desynced
         // pipe used to tear the whole mirror set down
         let _ = self.tmux.sync();
+        let position = self.settings.settings.sidebar_position;
         let refreshed = self.settings.refresh(&mut self.tmux);
         self.adopt_reload(refreshed);
+        // Before measuring, so the moved panes are what the drag probe sees.
+        if self.settings.settings.sidebar_position != position {
+            let settings = &self.settings.settings;
+            panes::dock(settings.sidebar_position, settings.sidebar_width);
+            // The default jump and fold keys follow the side. Reload and the
+            // settings overlay reinstall already; a bare tmux option does not.
+            let installed = crate::tmux::command(&["show-option", "-gqv", "@agenmux-nav-version"])
+                .unwrap_or_default();
+            if installed.trim_end() != crate::setup::nav_version(settings)
+                && crate::setup::run_config(&self.plugin_dir, settings) == 0
+            {
+                crate::setup::reclaim_client_tables();
+            }
+        }
         self.sync_panes_view();
         let width_changed = refreshed.width_changed;
         let mut w = usize::MAX;
@@ -368,7 +383,8 @@ impl Sidebar {
         // One sidebar per window. mirror-add.sh claims atomically now, but servers
         // that ran the old racy version still carry duplicates. Keep the first —
         // a -hbf split takes index 0, so that's the newest and the one actually at
-        // the requested width; the squeezed leftovers go. This runs before the
+        // the requested width (a right-hand -hf split is last, but the resize
+        // below fixes whichever survives); the squeezed leftovers go. This runs before the
         // width fold and the drag probe below, and it puts the survivor back at
         // wopt: every extra split squeezed it, and that squeezed width would
         // otherwise look exactly like a border drag and get adopted globally.

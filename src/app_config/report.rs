@@ -53,6 +53,7 @@ A @agenmux-* tmux option, when set, overrides the file.
   show_all_panes       true | false                       (true)
   show_frame           true | false                       (true)
   sidebar_width        1..=10000 cells                    (30)
+  sidebar_position     left | right                       (left)
   popup_width          1..=10000 cells                    (40)
   popup_height         "auto" or 1..=10000 cells          (auto)
   agent_label          icon-text | icon | text            (icon-text)
@@ -148,6 +149,14 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
         (
             "display.sidebar_width".into(),
             config.sidebar_width.to_string(),
+        ),
+        (
+            "display.sidebar_position".into(),
+            match config.sidebar_position {
+                SidebarPosition::Left => "left",
+                SidebarPosition::Right => "right",
+            }
+            .into(),
         ),
         ("display.popup_width".into(), config.popup_width.to_string()),
         (

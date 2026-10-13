@@ -485,7 +485,7 @@ fn decode_protocol_payload(
                     }
                     // Fixed tree keys, like `G` and `.`: a configured chord wins.
                     b' ' => Key::ToggleBranch,
-                    b'h' => Key::Left,
+                    byte if byte == crate::app_config::fold_key(&config.normal) => Key::Left,
                     b'z' => Key::CollapseAll,
                     b'Z' => Key::ExpandAll,
                     b'R' => Key::RestoreLayout,
@@ -1189,6 +1189,22 @@ mod tests {
         assert!(matches!(
             read_key_with_config(fds[0], &disabled.normal, &disabled),
             Key::Other
+        ));
+        // Beside a right-hand sidebar, l folds and h jumps.
+        let right = crate::app_config::resolve(
+            &crate::app_config::parse("[display]\nsidebar_position = 'right'").unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
+        feed(b"l");
+        assert!(matches!(
+            read_key_with_config(fds[0], &right.normal, &right),
+            Key::Left
+        ));
+        feed(b"h");
+        assert!(matches!(
+            read_key_with_config(fds[0], &right.normal, &right),
+            Key::Jump
         ));
         unsafe {
             libc::close(fds[0]);

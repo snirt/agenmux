@@ -30,6 +30,9 @@ open. It lists every tmux session, window, and pane, with agent state inline.
 | `?` | Help |
 | `q` / `Q` | Close the sidebar |
 
+With `sidebar_position = "right"` and no custom `keys.normal.jump`, `h` and `l`
+swap: `h` jumps toward the panes and `l` collapses.
+
 Movement, jump, search, filter, reset, help, versions, settings, and close can be
 rebound; see [Configuration › Keys](configuration.md#keys).
 

@@ -582,10 +582,16 @@ fn key_bindings(config: &crate::app_config::AppConfig) -> Vec<(&'static str, Str
     // `Any` is tmux's fallback for keys nothing else claims, so it never does.
     // Tree keys are fixed defaults too; a configured chord or launcher prefix
     // on the same key replaces them below.
+    // The daemon decodes with the default keymap, where a raw `l` jumps, so a
+    // moved fold key sends the arrow instead.
+    let fold = match crate::app_config::fold_key(&config.normal) {
+        b'l' => ("l", "left"),
+        _ => ("h", "h"),
+    };
     for (key, action) in [
         ("Any", "other"),
         ("Space", "space"),
-        ("h", "h"),
+        fold,
         ("Left", "left"),
         ("Right", "right"),
         ("z", "collapse-all"),
@@ -900,6 +906,39 @@ mod tests {
     fn config(source: &str) -> crate::app_config::AppConfig {
         let file = crate::app_config::parse(source).unwrap();
         crate::app_config::resolve(&file, &Default::default()).unwrap()
+    }
+
+    #[test]
+    fn right_sidebar_swaps_default_jump_and_fold_keys() {
+        let find = |keys: &[(&str, String, String)], key: &str| {
+            keys.iter()
+                .find(|(t, k, _)| *t == NORMAL_TABLE && k == key)
+                .map(|(_, _, command)| command.clone())
+        };
+        let jump = Some(key_command("enter", "root", true));
+        let left = key_bindings(&config(""));
+        assert_eq!(find(&left, "l"), jump);
+        assert_eq!(find(&left, "h"), Some(key_command("h", NORMAL_TABLE, true)));
+        let right = key_bindings(&config("[display]\nsidebar_position = 'right'"));
+        assert_eq!(find(&right, "h"), jump);
+        assert_eq!(find(&right, "Enter"), jump);
+        assert_eq!(
+            find(&right, "l"),
+            Some(key_command("left", NORMAL_TABLE, true))
+        );
+        // A configured jump list is kept as written.
+        let custom = config("[display]\nsidebar_position = 'right'\n[keys.normal]\njump = ['l']");
+        let custom_keys = key_bindings(&custom);
+        assert_eq!(find(&custom_keys, "l"), jump);
+        assert_eq!(
+            find(&custom_keys, "h"),
+            Some(key_command("h", NORMAL_TABLE, true))
+        );
+        // Moving the default keys changes the fingerprint, so tables reinstall.
+        assert_ne!(
+            nav_version(&config("")),
+            nav_version(&config("[display]\nsidebar_position = 'right'"))
+        );
     }
 
     #[test]

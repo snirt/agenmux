@@ -82,6 +82,7 @@ pub struct DisplayConfig {
     pub show_frame: Option<bool>,
     pub agent_label: Option<AgentLabel>,
     pub sidebar_width: Option<u16>,
+    pub sidebar_position: Option<SidebarPosition>,
     pub popup_width: Option<u16>,
     pub popup_height: Option<PopupHeight>,
 }
@@ -90,6 +91,13 @@ pub struct DisplayConfig {
 pub enum DisplayMode {
     Split,
     Popup,
+}
+/// The window edge the split sidebar docks to.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(try_from = "String")]
+pub enum SidebarPosition {
+    Left,
+    Right,
 }
 /// How agent rows name their agent: `AGENT_ICON` and name, icon, or name.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
@@ -142,6 +150,7 @@ macro_rules! string_values {
     };
 }
 string_values!(DisplayMode, "expected split or popup", "split" => Split, "popup" => Popup);
+string_values!(SidebarPosition, "expected left or right", "left" => Left, "right" => Right);
 string_values!(AgentLabel, "expected icon-text, icon, or text", "icon-text" => IconText, "icon" => Icon, "text" => Text);
 string_values!(AutoHeight, "expected auto", "auto" => Auto);
 
@@ -313,6 +322,7 @@ version = 1
 [display]
 mode = "split"
 sidebar_width = 30
+sidebar_position = "left"
 popup_width = 40
 popup_height = "auto"
 [behavior]
@@ -380,6 +390,8 @@ clear = ["C-u"]
             "version = 1\nversion = 1",
             "[display]\nmode = 'float'",
             "[display]\nmode = { split = {} }",
+            "[display]\nsidebar_position = top",
+            "[display]\nsidebar_position = { right = {} }",
             "[display]\npopup_height = { auto = {} }",
             "[theme]\nbase = { dark = {} }",
             "[display]\ncommand = 'no'",

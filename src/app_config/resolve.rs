@@ -16,6 +16,7 @@ pub struct AppConfig {
     pub show_frame: bool,
     pub agent_label: AgentLabel,
     pub sidebar_width: u16,
+    pub sidebar_position: SidebarPosition,
     pub popup_width: u16,
     pub popup_height: PopupHeight,
     pub notifications: bool,
@@ -36,6 +37,7 @@ const OPTIONS: &[&str] = &[
     "height",
     "notifications",
     "hide-windows",
+    "sidebar-position",
 ];
 
 fn compatibility(suffix: &str, value: &str) -> Result<FileConfig, ConfigError> {
@@ -81,6 +83,13 @@ fn compatibility(suffix: &str, value: &str) -> Result<FileConfig, ConfigError> {
                     _ => return Err(bad()),
                 })
         }
+        "sidebar-position" => {
+            file.display.get_or_insert_default().sidebar_position = Some(match value {
+                "" | "left" => SidebarPosition::Left,
+                "right" => SidebarPosition::Right,
+                _ => return Err(bad()),
+            })
+        }
         "hide-windows" => {
             file.behavior.get_or_insert_default().hide_windows = Some(value.to_owned())
         }
@@ -119,6 +128,7 @@ pub fn resolve_cli(
             ("display.show_frame", "default"),
             ("display.agent_label", "default"),
             ("display.sidebar_width", "default"),
+            ("display.sidebar_position", "default"),
             ("display.popup_width", "default"),
             ("display.popup_height", "default"),
             ("behavior.notifications", "default"),
@@ -144,6 +154,7 @@ pub fn resolve_cli(
         show_frame: true,
         agent_label: AgentLabel::IconText,
         sidebar_width: 30,
+        sidebar_position: SidebarPosition::Left,
         popup_width: 40,
         popup_height: PopupHeight::Auto(AutoHeight::Auto),
         notifications: true,
@@ -176,6 +187,11 @@ pub fn resolve_cli(
             set!(show_frame, d.show_frame, "display.show_frame");
             set!(agent_label, d.agent_label, "display.agent_label");
             set!(sidebar_width, d.sidebar_width, "display.sidebar_width");
+            set!(
+                sidebar_position,
+                d.sidebar_position,
+                "display.sidebar_position"
+            );
             set!(popup_width, d.popup_width, "display.popup_width");
             set!(popup_height, d.popup_height, "display.popup_height");
         }
@@ -297,6 +313,17 @@ pub fn resolve_cli(
                     error
                 })?;
                 apply(&mut result, &layer, &source);
+            }
+        }
+    }
+    // Jump points at the panes: `l` beside a left sidebar, `h` beside a
+    // right one. A configured jump list is the user's and stays as written.
+    if result.sidebar_position == SidebarPosition::Right
+        && result.sources["keys.normal.jump"] == "default"
+    {
+        for chord in result.normal.get_mut(&Action::Jump).into_iter().flatten() {
+            if *chord == KeyChord::Printable(b'l') {
+                *chord = KeyChord::Printable(b'h');
             }
         }
     }
@@ -669,6 +696,14 @@ mod tests {
             DisplayMode::Popup
         );
         assert!(resolve_cli(&file, &options, Some("float")).is_err());
+        assert_eq!(config.sidebar_position, SidebarPosition::Left);
+        options.insert("@agenmux-sidebar-position".into(), "right".into());
+        let config = resolve(&file, &options).unwrap();
+        assert_eq!(config.sidebar_position, SidebarPosition::Right);
+        assert_eq!(
+            config.sources["display.sidebar_position"],
+            "tmux @agenmux-sidebar-position"
+        );
         options.remove("@agenmux-width");
         assert_eq!(resolve(&file, &options).unwrap().sidebar_width, 44);
         options.clear();
@@ -686,6 +721,7 @@ mod tests {
             ("display", "junk"),
             ("notifications", "anything-else"),
             ("hide-windows", "bad\nvalue"),
+            ("sidebar-position", "top"),
         ] {
             let options = BTreeMap::from([
                 (format!("@agents-mon-{suffix}"), invalid.into()),
