@@ -893,8 +893,11 @@ impl Sidebar {
             }
             DispatchMode::Normal => {}
         }
-        if let Key::Select(index) = &key {
+        if let Key::Select(index) | Key::Open(index) = &key {
             self.select_index(*index);
+            if matches!(key, Key::Open(_)) && self.on_branch_header() {
+                self.toggle_branch();
+            }
             return DispatchResult::Continue;
         }
         match key {
@@ -973,6 +976,7 @@ impl Sidebar {
             | Key::ClearSearch
             | Key::Text(_)
             | Key::Select(_)
+            | Key::Open(_)
             | Key::Other => {}
         }
         DispatchResult::Continue

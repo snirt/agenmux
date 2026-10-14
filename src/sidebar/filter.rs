@@ -606,6 +606,7 @@ impl Sidebar {
             | Key::ClearSearch
             | Key::Last
             | Key::Select(_)
+            | Key::Open(_)
             | Key::Sequence(_, _)
             | Key::Owned(_, _)
             | Key::Search

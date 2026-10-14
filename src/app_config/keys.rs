@@ -44,7 +44,7 @@ impl KeyChord {
     /// C-c, C-d, C-g, C-k, C-n, C-p, C-u, C-w, C-x, C-], C-^, C-_, plus the
     /// C-i/C-m/C-[/C-? aliases of Tab/Enter/Escape/BSpace.
     /// Exclude conventional signal, flow-control, and extended editing controls
-    /// (C-o/q/r/s/t/v/y/z and C-backslash), and the four bytes the sidebar's own
+    /// (C-o/q/r/s/t/v/y/z and C-backslash), and the bytes the sidebar's own
     /// input protocol claims before any keymap lookup.
     /// C-c is retained for the default search cancel; resolved_keys reserves
     /// C-c/C-d as emergency paths (except search cancel).
@@ -87,11 +87,11 @@ impl KeyChord {
                         return Err("control chord is not distinguishable from Enter or BSpace")
                     }
                     // The sidebar's key transport spends these on its own
-                    // packets (text prefix, wheel up/down, click target, key
-                    // sequence, clear filter), so they never reach a keymap
-                    // lookup in popup mode. Rejecting them keeps one config
-                    // from meaning two things across modes.
-                    0..=2 | 5..=6 | 12 => {
+                    // packets (text prefix, wheel up/down, click and double
+                    // click targets, key sequence, clear filter), so they
+                    // never reach a keymap lookup in popup mode. Rejecting
+                    // them keeps one config from meaning two things across modes.
+                    0..=2 | 5..=6 | 12 | 15 => {
                         return Err("control chord is reserved by the input protocol")
                     }
                     3..=4 | 7 | 11 | 14 | 16 | 21 | 23..=24 | 29..=31 => Self::Control(code),

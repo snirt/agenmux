@@ -105,6 +105,9 @@ impl BindingBackup {
         let mut keys = Vec::new();
         for (table, key) in [
             ("root", "MouseDown1Pane"),
+            ("root", "SecondClick1Pane"),
+            ("root", "DoubleClick1Pane"),
+            ("root", "TripleClick1Pane"),
             ("root", "WheelUpPane"),
             ("root", "WheelDownPane"),
             ("prefix", "w"),
@@ -346,7 +349,7 @@ fn setup(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> Result<(),
         install_settings_keys(&mut bindings);
         clear_table(SEQUENCE_TABLE)?;
         install_keys(&mut bindings, config);
-        install_wheel_keys(&mut bindings, &bin);
+        install_table_mouse_keys(&mut bindings, &bin);
         tmux::command_batch(&bindings)?;
         install_picker_filter(config.hide_windows.as_deref())?;
         install_status(&bin)?;
@@ -807,8 +810,26 @@ pub fn nav_version(config: &crate::app_config::AppConfig) -> String {
     format!("{NAV_LAYOUT}.{hash:016x}")
 }
 
-fn install_wheel_keys(commands: &mut Vec<Vec<String>>, _bin: &str) {
+/// tmux's default double/triple click on a pane: copy mode selecting a word or line.
+fn native_copy_click(select: &str) -> String {
+    format!(
+        r##"select-pane -t = ; if-shell -F \"#{{||:#{{pane_in_mode}},#{{mouse_any_flag}}}}\" {{ send-keys -M }} {{ copy-mode -H ; send-keys -X {select} ; run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel }}"##
+    )
+}
+
+fn install_table_mouse_keys(commands: &mut Vec<Vec<String>>, _bin: &str) {
     for table in [NORMAL_TABLE, SEARCH_TABLE] {
+        // A key from a plugin table drops the client back to root, so the
+        // DoubleClick that trails every sidebar double click re-enters it.
+        queue_bind(
+            commands,
+            table,
+            "DoubleClick1Pane",
+            &format!(
+                r#"if-shell -F '#{{==:#{{pane_title}},agenmux}}' "switch-client -T {table}" "{}""#,
+                native_copy_click("select-word")
+            ),
+        );
         for (key, action, native) in [
             (
                 "WheelUpPane",
@@ -831,14 +852,23 @@ fn install_mouse(_bin: &str) -> Result<(), TmuxError> {
         return Ok(());
     }
     let bin = ENGINE;
+    let click = |second: &str| {
+        format!(
+            "run-shell -b \\\"{bin} click '#{{pane_id}}' '#{{mouse_y}}' #{{q:client_name}}{second}\\\""
+        )
+    };
+    // tmux reports a press within its click timeout as SecondClick, then
+    // TripleClick, never as MouseDown; DoubleClick follows the second press
+    // 300ms later and would put the sidebar into copy mode.
     for (key, plugin, native) in [
         (
             "MouseDown1Pane",
-            format!(
-                "run-shell -b \\\"{bin} click '#{{pane_id}}' '#{{mouse_y}}' #{{q:client_name}}\\\""
-            ),
+            click(""),
             "select-pane -t = ; send-keys -M".to_string(),
         ),
+        ("SecondClick1Pane", click(" double"), "send-keys -M".to_string()),
+        ("DoubleClick1Pane", String::new(), native_copy_click("select-word")),
+        ("TripleClick1Pane", click(" double"), native_copy_click("select-line")),
         (
             "WheelUpPane",
             buffer_key_command("wheel-up"),

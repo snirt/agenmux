@@ -735,12 +735,12 @@ impl Sidebar {
                 if selected {
                     sel_top = lines.len();
                 }
-                // A click on the selected header toggles its branch.
+                // 2 marks a header for the click helper, selected or not.
                 lines.push((
                     format!("{}{E}[K\n", bar(&header, &row_bg, cols, width_of(&header))),
                     pane.pane.clone(),
                     ordinal + 1,
-                    u8::from(selected) * 2,
+                    2,
                 ));
                 if selected {
                     sel_bot = lines.len() - 1;
@@ -1887,6 +1887,19 @@ mod tests {
             assert!(std::fs::read_to_string(&sb.rows_file)
                 .unwrap()
                 .contains("%21\t3\t2"));
+            sb.select_index(1);
+            let open = sb.visible.len();
+            sb.dispatch_key(Key::Select(3));
+            sb.dispatch_key(Key::Select(3));
+            assert_eq!(
+                (sb.sel, sb.visible.len()),
+                (3, open),
+                "clicks only select a header"
+            );
+            sb.dispatch_key(Key::Open(3));
+            assert!(sb.visible.len() < open, "a double click folds the header");
+            sb.dispatch_key(Key::Open(3));
+            assert_eq!((sb.sel, sb.visible.len()), (3, open), "and opens it again");
             sb.select_index(5);
             sb.dispatch_key(Key::Left);
             assert_eq!(sb.sel, 3, "h on a pane steps out to its window header");
@@ -2064,6 +2077,7 @@ mod tests {
         themed_frames(&mut sb);
         custom_key_hints(&mut sb);
         versions_close_keys(&mut sb);
+        overlay_click_rows(&mut sb);
         multi_selection(&mut sb);
         if let Some(output) = std::env::var_os("AGENMUX_THEME_VISUAL_DIR") {
             visual_frames(&mut sb, &PathBuf::from(output));
@@ -2311,6 +2325,55 @@ mod tests {
             sb.dispatch_key(key.clone());
             assert!(sb.overlay.is_none(), "{key:?} leaves the picker open");
         }
+    }
+
+    /// Every list overlay publishes click rows on the screen rows they name.
+    fn overlay_click_rows(sb: &mut Sidebar) {
+        use crate::snapshot::{Closed, Session};
+        let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap();
+        let closed = |name: &str, time| Closed {
+            id: name.into(),
+            time,
+            session: Session {
+                name: name.into(),
+                ..Session::default()
+            },
+        };
+        sb.settings.settings.show_frame = true;
+        sb.daemon.as_mut().unwrap().size = (80, 40);
+        for (overlay, rows) in [
+            (
+                Overlay::Versions {
+                    sel: 0,
+                    chosen: None,
+                },
+                vec![(0, "auto-update")],
+            ),
+            (
+                Overlay::Undo {
+                    sel: 1,
+                    entries: vec![closed("alpha", 3 * 86_400), closed("beta", 86_400)],
+                    search: Default::default(),
+                },
+                vec![(0, "alpha"), (1, "beta")],
+            ),
+        ] {
+            sb.overlay = Some(overlay);
+            sb.last_frame.clear();
+            sb.render(true);
+            let plain = ansi.replace_all(&sb.last_frame, "").to_string();
+            let screen: Vec<_> = plain.lines().collect();
+            let map = std::fs::read_to_string(&sb.rows_file).unwrap();
+            for (index, label) in rows {
+                // The framed map leads with the border row the frame text lacks.
+                let line = map
+                    .lines()
+                    .position(|line| line == format!("=\t{index}\t0"))
+                    .unwrap_or_else(|| panic!("no click row {index}: {map}"));
+                assert!(screen[line - 1].contains(label), "{line}: {plain}\n{map}");
+            }
+        }
+        sb.overlay = None;
     }
 
     /// Split mode installs the user's chords into the tmux tables, so its help

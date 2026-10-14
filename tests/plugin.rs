@@ -1190,6 +1190,18 @@ fn setup_preserves_root_bindings_and_installs_plugin_tables() {
     assert_success(tmux.bin(&["setup"]), "agenmux setup with mouse on");
     let root_mouse = tmux.text(&["list-keys", "-T", "root"]);
     assert!(root_mouse.contains(" click '#{pane_id}'"), "{root_mouse}");
+    for key in ["SecondClick1Pane", "TripleClick1Pane"] {
+        let line = root_mouse.lines().find(|line| line.contains(key)).unwrap();
+        assert!(line.contains("client_name} double"), "{line}");
+    }
+    let double = root_mouse
+        .lines()
+        .find(|line| line.contains("DoubleClick1Pane"))
+        .unwrap();
+    assert!(
+        double.contains("agenmux}\" ''") && double.contains("select-word"),
+        "{double}"
+    );
     for table in ["agenmux", "agenmux-search"] {
         let keys = tmux.text(&["list-keys", "-T", table]);
         assert!(keys.contains("MouseDown1Pane"), "{table}: {keys}");

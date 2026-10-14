@@ -63,43 +63,58 @@ struct SettingRow {
 }
 
 const SETTINGS_MOUSE_OPTION: usize = 1 << 31;
-const SETTINGS_MOUSE_SEARCH: usize = u32::MAX as usize;
+const MOUSE_SEARCH: usize = u32::MAX as usize;
+
+/// One mouse model for every list: a click selects a row, a double click
+/// selects and activates it like Enter, and the search line starts a search.
+fn mouse_key(sel: &mut usize, key: Key, total: usize) -> Key {
+    match key {
+        Key::Select(MOUSE_SEARCH) | Key::Open(MOUSE_SEARCH) => Key::Search,
+        Key::Select(index) | Key::Open(index) if index < total => {
+            *sel = index;
+            if matches!(key, Key::Open(_)) {
+                Key::Jump
+            } else {
+                Key::Other
+            }
+        }
+        Key::Select(_) | Key::Open(_) => Key::Other,
+        key => key,
+    }
+}
+
+/// Row map lines for overlay click targets, in screen order below the title.
+fn click_rows(targets: &[Option<usize>]) -> String {
+    targets
+        .iter()
+        .map(|target| match target {
+            Some(index) => format!("=\t{index}\t0\n"),
+            None => "-\n".into(),
+        })
+        .collect()
+}
 
 fn settings_mouse_key(settings: &mut Settings, key: Key, total: usize) -> Key {
-    let Key::Select(target) = key else {
+    let (Key::Select(target) | Key::Open(target)) = key else {
         return key;
     };
-    if target == SETTINGS_MOUSE_SEARCH {
-        return if settings.edit.is_none() && !settings.confirm {
-            Key::Search
-        } else {
-            Key::Other
-        };
+    if settings.confirm {
+        return Key::Other;
     }
     if let Some(SettingEdit {
         editor: Editor::Select(select),
         ..
     }) = &mut settings.edit
     {
-        return if target
-            .checked_sub(SETTINGS_MOUSE_OPTION)
-            .is_some_and(|option| select.select(option))
-        {
-            Key::Jump
-        } else {
-            Key::Other
+        return match target.checked_sub(SETTINGS_MOUSE_OPTION) {
+            Some(option) if select.select(option) && matches!(key, Key::Open(_)) => Key::Jump,
+            _ => Key::Other,
         };
     }
-    if settings.edit.is_none() && !settings.confirm && target < total {
-        if target == settings.sel {
-            Key::Jump
-        } else {
-            settings.sel = target;
-            Key::Other
-        }
-    } else {
-        Key::Other
+    if settings.edit.is_some() {
+        return Key::Other;
     }
+    mouse_key(&mut settings.sel, key, total)
 }
 
 impl Overlay {
@@ -530,7 +545,7 @@ fn render_settings(
         Editor::TextEdit(_) => None,
     });
     out.push_str(&format!("\n{}\n", settings.search.line(cols)));
-    targets.extend([None, Some(SETTINGS_MOUSE_SEARCH)]);
+    targets.extend([None, Some(MOUSE_SEARCH)]);
     let narrow = cols < 80;
     if !narrow {
         out.push_str("  setting                    persisted      effective      source\n");
@@ -813,6 +828,9 @@ impl Sidebar {
                     .clone();
                 *sel = picker_sel(&tags, &cur, chosen.as_deref(), *sel);
                 let mut text = format!("{E}[2J{E}[H{header}{title} — versions{E}[0m\n\n");
+                let mut targets = vec![None, Some(0), None];
+                targets.extend((1..=tags.len()).map(Some));
+                click_rows = self::click_rows(&targets);
                 let mark = cursor_mark(&self.palette, *sel == 0, true, "idle");
                 let state = if self.settings.settings.auto_update {
                     "on"
@@ -862,8 +880,10 @@ impl Sidebar {
                     .map(|index| entries[index].clone())
                     .collect();
                 let mut text = format!("{E}[2J{E}[H{header}{title} — recently closed{E}[0m\n\n");
+                let mut targets = vec![None];
                 if active {
                     text.push_str(&format!("{}\n\n", search.line(cols)));
+                    targets.extend([Some(MOUSE_SEARCH), None]);
                 }
                 // ponytail: dims from the last scan; restore re-checks tmux.
                 let mut live = crate::snapshot::Live::default();
@@ -882,11 +902,14 @@ impl Sidebar {
                     if last_day.as_ref() != Some(&day) {
                         if last_day.is_some() {
                             text.push('\n');
+                            targets.push(None);
                         }
                         let accent = self.palette.accent_fg.fg("1");
                         text.push_str(&format!("  {accent}{day}{E}[0m\n"));
+                        targets.push(None);
                         last_day = Some(day);
                     }
+                    targets.push(Some(i));
                     let mark = cursor_mark(&self.palette, i == sel, true, "idle");
                     let (dim, end) = if entry.blocked(&live) {
                         (muted.as_str(), format!("{E}[0m"))
@@ -935,6 +958,7 @@ impl Sidebar {
                     join(&["restore needs tmux management".into(), find.into(), back])
                 };
                 text.push_str(&format!("\n{muted}{hint}{E}[0m"));
+                click_rows = self::click_rows(&targets);
                 text
             }
             Some(Overlay::Settings(settings)) => {
@@ -946,13 +970,7 @@ impl Sidebar {
                     cols,
                     rows,
                 );
-                click_rows = targets
-                    .into_iter()
-                    .map(|target| match target {
-                        Some(index) => format!("=\t{index}\t0\n"),
-                        None => "-\n".into(),
-                    })
-                    .collect();
+                click_rows = self::click_rows(&targets);
                 text
             }
             // Mutation prompts render inline in the list frame.
@@ -1028,7 +1046,7 @@ impl Sidebar {
                 let tags = known_tags(&self.plugin_dir);
                 let cur = current_tag();
                 sel = picker_sel(&tags, &cur, chosen.as_deref(), sel);
-                match key {
+                match mouse_key(&mut sel, key, tags.len() + 1) {
                     Key::Down => sel = (sel + 1).min(tags.len()),
                     Key::Up => sel = sel.saturating_sub(1),
                     Key::Jump if sel == 0 => self.toggle_auto_update(),
@@ -1065,6 +1083,7 @@ impl Sidebar {
                 mut search,
             } => {
                 let shown = undo_matches(&entries, &search);
+                let key = mouse_key(&mut sel, key, shown.len());
                 let picked = shown.get(sel).copied();
                 if let Some(reset) = search.key(&key, self.search_start(&key)) {
                     if reset {
@@ -1779,10 +1798,7 @@ mod tests {
             assert!(frame.lines().count() <= rows);
             assert_eq!(targets.len(), frame.lines().count().saturating_sub(1));
             assert!(targets.iter().any(Option::is_some));
-            assert_eq!(
-                targets.iter().flatten().next(),
-                Some(&SETTINGS_MOUSE_SEARCH)
-            );
+            assert_eq!(targets.iter().flatten().next(), Some(&MOUSE_SEARCH));
             assert!(frame.lines().all(|line| line.chars().count() <= cols + 20));
             assert!(frame.contains("agenmux"));
             if rows >= 16 {
@@ -2096,12 +2112,13 @@ mod tests {
         assert!(frame.contains("  popup"), "{frame}");
         assert!(targets.contains(&Some(SETTINGS_MOUSE_OPTION)));
         assert!(targets.contains(&Some(SETTINGS_MOUSE_OPTION + 1)));
+        let total = settings_rows("version = 1\n", &effective).len() + 1;
         assert!(matches!(
-            settings_mouse_key(
-                &mut settings,
-                Key::Select(SETTINGS_MOUSE_OPTION + 1),
-                settings_rows("version = 1\n", &effective).len() + 1,
-            ),
+            settings_mouse_key(&mut settings, Key::Select(SETTINGS_MOUSE_OPTION + 1), total),
+            Key::Other
+        ));
+        assert!(matches!(
+            settings_mouse_key(&mut settings, Key::Open(SETTINGS_MOUSE_OPTION + 1), total),
             Key::Jump
         ));
         let Some(SettingEdit {
@@ -2126,15 +2143,42 @@ mod tests {
             Key::Other
         ));
         assert_eq!(settings.sel, 2);
+        // A second single click on the selected row still only selects.
         assert!(matches!(
             settings_mouse_key(&mut settings, Key::Select(2), total),
-            Key::Jump
+            Key::Other
         ));
         assert!(matches!(
-            settings_mouse_key(&mut settings, Key::Select(SETTINGS_MOUSE_SEARCH), total),
+            settings_mouse_key(&mut settings, Key::Open(3), total),
+            Key::Jump
+        ));
+        assert_eq!(settings.sel, 3);
+        assert!(matches!(
+            settings_mouse_key(&mut settings, Key::Select(MOUSE_SEARCH), total),
             Key::Search
         ));
         assert_eq!(select_move(&Key::WheelUp, &effective.normal), Some(-1));
         assert_eq!(select_move(&Key::WheelDown, &effective.normal), Some(1));
+    }
+
+    #[test]
+    fn overlay_lists_share_the_mouse_model() {
+        let mut sel = 0;
+        assert!(matches!(mouse_key(&mut sel, Key::Select(2), 3), Key::Other));
+        assert_eq!(sel, 2);
+        assert!(matches!(mouse_key(&mut sel, Key::Select(2), 3), Key::Other));
+        assert!(matches!(mouse_key(&mut sel, Key::Open(1), 3), Key::Jump));
+        assert_eq!(sel, 1);
+        assert!(matches!(mouse_key(&mut sel, Key::Open(3), 3), Key::Other));
+        assert!(matches!(
+            mouse_key(&mut sel, Key::Select(MOUSE_SEARCH), 3),
+            Key::Search
+        ));
+        assert_eq!(sel, 1, "out-of-range and search clicks keep the selection");
+        assert!(matches!(mouse_key(&mut sel, Key::Down, 3), Key::Down));
+        assert_eq!(
+            click_rows(&[None, Some(0), Some(4)]),
+            "-\n=\t0\t0\n=\t4\t0\n"
+        );
     }
 }

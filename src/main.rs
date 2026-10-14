@@ -46,7 +46,7 @@ Commands:
 
 Internal (called by the tmux integration):
   sidebar, daemon, setup [--if-needed], toggle [split|popup] [client],
-  key <name> [client], click <pane> <row> <client>, wheel <pane> <up|down>,
+  key <name> [client], click <pane> <row> <client> [double], wheel <pane> <up|down>,
   pane-add [window [client]], pane-orphan, pane-pin, teardown,
   notification-open <socket> <pane> <bundle>
 ";
@@ -110,7 +110,12 @@ fn main() {
         ["sidebar-pane"] => pane_writers::run_pane(),
         ["key", key] => sidebar::send_key(key, None),
         ["key", key, client] => sidebar::send_key(key, Some(client)),
-        ["click", pane, y, client] => y.parse().map_or(2, |y| input::click(pane, y, client)),
+        ["click", pane, y, client] => y
+            .parse()
+            .map_or(2, |y| input::click(pane, y, client, false)),
+        ["click", pane, y, client, "double"] => {
+            y.parse().map_or(2, |y| input::click(pane, y, client, true))
+        }
         ["wheel", pane, "up"] => input::wheel(pane, input::Direction::Up),
         ["wheel", pane, "down"] => input::wheel(pane, input::Direction::Down),
         ["pane-add"] => panes::pane_add(None),

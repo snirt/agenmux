@@ -157,9 +157,11 @@ installer sets it from its font check. Change an icon with `AGENT_ICON`; see
 Requires `set -g mouse on`, and works in the sidebar only (tmux does not send
 mouse events into a popup).
 
-- Click a row to select it; click it again to jump.
+- Click a row to select it. Double-click it to jump to its pane.
+- Double-click a header to collapse or expand it.
+- Settings, versions (`U`) and recently closed (`u`) work the same way: click
+  selects, double-click does what Enter does.
 - Clicking elsewhere in the sidebar focuses it.
-- Click a selected header to collapse or expand it.
 - The wheel scrolls the list without changing selection.
 
 ## Status line

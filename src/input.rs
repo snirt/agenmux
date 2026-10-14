@@ -113,6 +113,8 @@ pub(crate) enum Key {
     End,
     Delete,
     Select(usize),
+    /// Double click: select the row, then activate it like Enter.
+    Open(usize),
     Down,
     WheelUp,
     WheelDown,
@@ -533,8 +535,9 @@ pub(crate) fn read_key_with_config(
             .flatten()
     };
     match b {
-        // Click target: a four-byte row index the mouse helper sends.
-        0x05 => {
+        // Click target: a four-byte row index the mouse helper sends, as a
+        // single (0x05) or double (0x0f) click.
+        0x05 | 0x0f => {
             let mut index = [0u8; 4];
             for byte in &mut index {
                 let Some(got) = next() else {
@@ -542,7 +545,12 @@ pub(crate) fn read_key_with_config(
                 };
                 *byte = got;
             }
-            return Key::Select(u32::from_be_bytes(index) as usize);
+            let index = u32::from_be_bytes(index) as usize;
+            return if b == 0x05 {
+                Key::Select(index)
+            } else {
+                Key::Open(index)
+            };
         }
         // Multi-key sequence, legacy packet without client identity.
         0x06 => {
@@ -939,7 +947,9 @@ pub enum Direction {
     Down,
 }
 
-pub fn click(pane: &str, y: usize, client: &str) -> i32 {
+/// `second` marks tmux's SecondClick/TripleClick: a press that follows
+/// another within tmux's click timeout, wherever that one landed.
+pub fn click(pane: &str, y: usize, client: &str, second: bool) -> i32 {
     if client.is_empty() {
         return 0;
     }
@@ -965,9 +975,9 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
             let mut fields = rows.lines().nth(y)?.split_whitespace();
             let target = fields.next()?.to_string();
             let index = fields.next()?.parse::<u32>().ok()?;
-            // 0 unselected, 1 selected row, 2 selected branch header.
-            let selected = fields.next().unwrap_or("0").to_string();
-            Some((target, index, selected))
+            // 2 marks a branch header.
+            let header = fields.next() == Some("2");
+            Some((target, index, header))
         })
         // "=" is the clicked sidebar pane itself: overlay rows are rendered
         // into every sidebar pane, so the row map cannot name one up front.
@@ -977,12 +987,20 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
                     && tmux::command(&["display-message", "-p", "-t", target, "#{pane_id}"])
                         .is_ok_and(|id| id.trim() == target)
         });
+    let press = match &target {
+        Some((target, index, _)) => format!("{client}\t{pane}\t{target}\t{index}"),
+        None => format!("{client}\t{pane}\t-"),
+    };
+    let record = runtime.join("agenmux-click");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let double = second
+        && std::fs::read_to_string(&record).is_ok_and(|last| is_double_click(&last, &press, now));
 
     // Every hop below is one tmux fork: chained commands, not one per step.
-    if let Some((target, index, selected)) = target {
-        if selected == "2" {
-            let _ = send_bytes_to(&runtime, b" "); // toggle branch
-        } else if selected == "1" {
+    match target {
+        Some((target, _, false)) if double && target.starts_with('%') => {
             let _ = send_bytes_to(&runtime, &[0x0c]); // "all"
             let _ = tmux::command_status(&[
                 "switch-client",
@@ -999,41 +1017,47 @@ pub fn click(pane: &str, y: usize, client: &str) -> i32 {
                 "-t",
                 &target,
             ]);
-        } else if tmux::command_status(&[
-            "switch-client",
-            "-c",
-            client,
-            "-t",
-            pane,
-            ";",
-            "switch-client",
-            "-c",
-            client,
-            "-T",
-            "agenmux",
-        ])
-        .is_ok()
-        {
-            let mut bytes = vec![0x05];
-            bytes.extend(index.to_be_bytes());
-            let _ = send_bytes_to(&runtime, &bytes);
         }
-    } else {
-        let _ = tmux::command_status(&[
-            "switch-client",
-            "-c",
-            client,
-            "-t",
-            pane,
-            ";",
-            "switch-client",
-            "-c",
-            client,
-            "-T",
-            "agenmux",
-        ]);
+        target => {
+            if tmux::command_status(&[
+                "switch-client",
+                "-c",
+                client,
+                "-t",
+                pane,
+                ";",
+                "switch-client",
+                "-c",
+                client,
+                "-T",
+                "agenmux",
+            ])
+            .is_ok()
+            {
+                if let Some((_, index, _)) = target {
+                    let mut bytes = vec![if double { 0x0f } else { 0x05 }];
+                    bytes.extend(index.to_be_bytes());
+                    let _ = send_bytes_to(&runtime, &bytes);
+                }
+            }
+        }
     }
+    // Record only after this press acted, so a double click that reads it
+    // cannot be overtaken by its own first press focusing the sidebar.
+    let _ = std::fs::write(&record, format!("{press}\t{now}"));
     0
+}
+
+/// A second press opens only the record the previous press hit. tmux sends
+/// it within its 300ms click timeout; the slack covers a slow first handler,
+/// and anything older is a stale record, not this click's first press.
+fn is_double_click(last: &str, press: &str, now: u128) -> bool {
+    last.rsplit_once('\t').is_some_and(|(previous, at)| {
+        previous == press
+            && at
+                .parse::<u128>()
+                .is_ok_and(|at| now.saturating_sub(at) <= 500)
+    })
 }
 
 pub fn wheel(pane: &str, direction: Direction) -> i32 {
@@ -1527,6 +1551,37 @@ command = "fish"
         unsafe { libc::close(fd) };
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(runtime).unwrap();
+    }
+
+    #[test]
+    fn click_packets_decode_single_and_double_clicks() {
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) };
+        let packets = [0x05u8, 0, 0, 1, 2, 0x0f, 0, 0, 0, 7];
+        unsafe { libc::write(fds[1], packets.as_ptr().cast(), packets.len()) };
+        let keys = default_keys(crate::app_config::KeyMode::Normal);
+        assert!(matches!(read_key(fds[0], &keys), Key::Select(258)));
+        assert!(matches!(read_key(fds[0], &keys), Key::Open(7)));
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    #[test]
+    fn a_second_press_opens_only_the_record_the_first_press_hit() {
+        let press = "client\t%1\t%7\t3";
+        assert!(is_double_click(&format!("{press}\t1000"), press, 1300));
+        // tmux reports a press on another row as a second click too.
+        assert!(!is_double_click("client\t%1\t%8\t4\t1000", press, 1300));
+        assert!(!is_double_click("other\t%1\t%7\t3\t1000", press, 1300));
+        assert!(!is_double_click("client\t%2\t%7\t3\t1000", press, 1300));
+        assert!(!is_double_click("client\t%1\t-\t1000", press, 1300));
+        // A stale record is not this click's first press.
+        assert!(!is_double_click(&format!("{press}\t1000"), press, 1501));
+        assert!(!is_double_click("", press, 1300));
+        assert!(!is_double_click(press, press, 1300));
     }
 
     #[test]
