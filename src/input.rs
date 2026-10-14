@@ -975,8 +975,8 @@ pub fn click(pane: &str, y: usize, client: &str, second: bool) -> i32 {
             let mut fields = rows.lines().nth(y)?.split_whitespace();
             let target = fields.next()?.to_string();
             let index = fields.next()?.parse::<u32>().ok()?;
-            // 2 marks a branch header.
-            let header = fields.next() == Some("2");
+            // 2 and 3 mark a selected and an unselected branch header.
+            let header = matches!(fields.next(), Some("2" | "3"));
             Some((target, index, header))
         })
         // "=" is the clicked sidebar pane itself: overlay rows are rendered

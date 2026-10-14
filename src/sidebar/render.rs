@@ -735,12 +735,12 @@ impl Sidebar {
                 if selected {
                     sel_top = lines.len();
                 }
-                // 2 marks a header for the click helper, selected or not.
+                // Headers are 2 when selected, 3 otherwise; rows are 1 or 0.
                 lines.push((
                     format!("{}{E}[K\n", bar(&header, &row_bg, cols, width_of(&header))),
                     pane.pane.clone(),
                     ordinal + 1,
-                    2,
+                    if selected { 2 } else { 3 },
                 ));
                 if selected {
                     sel_bot = lines.len() - 1;

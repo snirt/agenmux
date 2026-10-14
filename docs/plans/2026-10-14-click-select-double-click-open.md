@@ -30,7 +30,7 @@ Pieces:
 - `click` records the last press (client, sidebar pane, row target, index,
   time). A `double` press counts only when it matches that record, so presses
   on different rows never activate.
-- The rows map marks every branch header (`2`), selected or not.
+- The rows map marks branch headers `2` when selected and `3` otherwise.
 - Protocol: `0x05` + index stays "select"; new `0x0f` + index is "open"
   (`Key::Open`). The main list selects and toggles a header; overlays share one
   helper that maps select/open to their selection and `Jump`.
