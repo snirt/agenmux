@@ -1,15 +1,15 @@
-# agenmux v0.8.2
+# agenmux v0.8.3
 
 ## What's changed
 
-v0.8.2 lets the split sidebar dock on the right edge of the window.
+v0.8.3 separates selecting a sidebar row from jumping to its pane: a click selects, a double click opens.
 
-### Right-hand sidebar
+### Mouse
 
-- `display.sidebar_position = "right"` (or `set -g @agenmux-sidebar-position right`) opens the split sidebar on the right edge; `left` stays the default ([#199](https://github.com/snirt/agenmux/pull/199), [#198](https://github.com/snirt/agenmux/issues/198)).
-- Changing the position from the settings overlay, `agenmux config reload` or the tmux option moves open sidebars to the new edge at the same width, without switching windows ([#199](https://github.com/snirt/agenmux/pull/199)).
-- Beside a right-hand sidebar, `h` jumps toward the panes and `l` folds a branch, unless `keys.normal.jump` is configured ([#199](https://github.com/snirt/agenmux/pull/199)).
-- Restoring a previous tmux server's layout and cleaning up restored ghost panes follow the sidebar's side ([#199](https://github.com/snirt/agenmux/pull/199)).
+- A single click selects a record and keeps focus in the sidebar, even when the record is already selected; repeated clicks no longer switch panes ([#202](https://github.com/snirt/agenmux/pull/202), [#201](https://github.com/snirt/agenmux/issues/201)).
+- A double click on a record jumps to its pane, and a double click on a session or window header folds or unfolds it. Quick clicks on two different records only select ([#202](https://github.com/snirt/agenmux/pull/202)).
+- Settings, versions (`U`) and recently closed (`u`) follow the same rule: a click selects, a double click does what Enter does. Versions and recently closed now respond to the mouse, and clicking the recently closed search line refines the search ([#202](https://github.com/snirt/agenmux/pull/202)).
+- A double click in the sidebar no longer drops it into tmux copy mode ([#202](https://github.com/snirt/agenmux/pull/202)).
 
 ### Assets
 
