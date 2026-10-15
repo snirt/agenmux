@@ -2,33 +2,71 @@ use crate::app_config::{action_for, Action, KeyChord, KeyMode, Keymap};
 use crate::tmux;
 use std::time::{Duration, Instant};
 
-pub(crate) struct RawMode(Option<libc::termios>);
+pub(crate) struct RawMode(bool);
+
+static SAVED_TERMINAL: std::sync::Mutex<Option<libc::termios>> = std::sync::Mutex::new(None);
+static TERMINAL_HOOK: std::sync::Once = std::sync::Once::new();
+
+// Panic cleanup must work even when another thread holds Rust's stdout lock.
+fn terminal_write(mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        let n = unsafe { libc::write(1, bytes.as_ptr().cast(), bytes.len()) };
+        if n > 0 {
+            bytes = &bytes[n as usize..];
+        } else if n == 0
+            || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+        {
+            break;
+        }
+    }
+}
+
+fn restore_terminal() {
+    // These critical sections contain only non-panicking state changes and syscalls.
+    let mut saved = SAVED_TERMINAL.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(original) = saved.take() {
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &original) };
+        terminal_write(b"\x1b[?2004l\x1b[?25h");
+    }
+}
 
 impl RawMode {
     pub(crate) fn enable() -> RawMode {
         unsafe {
             let mut t: libc::termios = std::mem::zeroed();
             if libc::tcgetattr(0, &mut t) != 0 {
-                return RawMode(None); // not a tty (tests) — keys just won't work
+                return RawMode(false); // not a tty (tests) — keys just won't work
             }
-            let orig = t;
-            t.c_lflag &= !(libc::ICANON | libc::ECHO);
+            TERMINAL_HOOK.call_once(|| {
+                let previous = std::panic::take_hook();
+                std::panic::set_hook(Box::new(move |info| {
+                    restore_terminal();
+                    previous(info);
+                }));
+            });
+            let mut saved = SAVED_TERMINAL.lock().unwrap_or_else(|e| e.into_inner());
+            if saved.is_some() {
+                return RawMode(false); // one terminal owner per process
+            }
+            *saved = Some(t);
+            t.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN);
+            t.c_iflag &= !(libc::IXON | libc::IXOFF);
             t.c_cc[libc::VMIN] = 1;
             t.c_cc[libc::VTIME] = 0;
-            libc::tcsetattr(0, libc::TCSANOW, &t);
-            print!("\x1b[?2004h");
-            let _ = std::io::Write::flush(&mut std::io::stdout());
-            RawMode(Some(orig))
+            if libc::tcsetattr(0, libc::TCSANOW, &t) != 0 {
+                *saved = None;
+                return RawMode(false);
+            }
+            terminal_write(b"\x1b[?2004h");
+            RawMode(true)
         }
     }
 }
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        if let Some(orig) = self.0 {
-            print!("\x1b[?2004l");
-            let _ = std::io::Write::flush(&mut std::io::stdout());
-            unsafe { libc::tcsetattr(0, libc::TCSANOW, &orig) };
+        if self.0 {
+            restore_terminal();
         }
     }
 }
@@ -1083,6 +1121,260 @@ pub fn wheel(pane: &str, direction: Direction) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Run terminal ownership in a separate process: hooks and stdin are global.
+    #[test]
+    fn terminal_child() {
+        let Ok(mode) = std::env::var("AGENMUX_TEST_TERMINAL") else {
+            return;
+        };
+        if mode == "panic" || mode == "after-drop" {
+            let limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_CORE, &limit) }, 0);
+            std::panic::set_hook(Box::new(|_| {
+                let message = b"previous panic hook\n";
+                unsafe { libc::write(2, message.as_ptr().cast(), message.len()) };
+                // Abort inside the previous hook so unwinding cannot mask missing cleanup.
+                std::process::abort();
+            }));
+        }
+        let raw = RawMode::enable();
+        if mode == "non-tty" {
+            drop(raw);
+            return;
+        }
+        if mode == "after-drop" {
+            drop(raw);
+            let mut changed: libc::termios = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::tcgetattr(0, &mut changed) }, 0);
+            changed.c_lflag &= !libc::ECHO;
+            assert_eq!(unsafe { libc::tcsetattr(0, libc::TCSANOW, &changed) }, 0);
+            panic!("panic after terminal ownership ended");
+        }
+        use std::io::Write;
+        std::io::stdout().write_all(b"TERMINAL_READY\n").unwrap();
+        std::io::stdout().flush().unwrap();
+        if mode == "panic" {
+            let (send, ready) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _stdout = std::io::stdout().lock();
+                send.send(()).unwrap();
+                loop {
+                    std::thread::park();
+                }
+            });
+            ready.recv().unwrap();
+            panic!("terminal panic with stdout locked by another thread");
+        }
+        let config = config(true);
+        for _ in 0..5 {
+            assert!(matches!(read_search_key(0, &config.search), Key::Other));
+            std::io::stdout().write_all(b"CONTROL_READ\n").unwrap();
+            std::io::stdout().flush().unwrap();
+        }
+        assert!(matches!(read_search_key(0, &config.search), Key::AllStates));
+        std::io::stdout().write_all(b"CANCEL_READ\n").unwrap();
+        std::io::stdout().flush().unwrap();
+        assert!(matches!(read_search_key(0, &config.search), Key::Quit));
+        drop(raw);
+    }
+
+    struct TerminalChild {
+        child: std::process::Child,
+        master: std::fs::File,
+        slave: std::fs::File,
+        original: libc::termios,
+        output: Vec<u8>,
+    }
+
+    impl TerminalChild {
+        fn start(mode: &str) -> Self {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let (mut master, mut slave) = (-1, -1);
+            assert_eq!(
+                unsafe {
+                    libc::openpty(
+                        &mut master,
+                        &mut slave,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                },
+                0
+            );
+            let master = unsafe { std::fs::File::from_raw_fd(master) };
+            let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+            for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+                assert_eq!(
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                    0
+                );
+            }
+            let mut original: libc::termios = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(slave.as_raw_fd(), &mut original) },
+                0
+            );
+            original.c_lflag |= libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN;
+            original.c_iflag |= libc::IXON | libc::IXOFF;
+            assert_eq!(
+                unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &original) },
+                0
+            );
+            let child = terminal_command(mode)
+                .stdin(slave.try_clone().unwrap())
+                .stdout(slave.try_clone().unwrap())
+                .stderr(slave.try_clone().unwrap())
+                .spawn()
+                .unwrap();
+            Self {
+                child,
+                master,
+                slave,
+                original,
+                output: Vec::new(),
+            }
+        }
+
+        fn settings(&self) -> libc::termios {
+            use std::os::fd::AsRawFd;
+            let mut settings = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(self.slave.as_raw_fd(), &mut settings) },
+                0
+            );
+            settings
+        }
+
+        fn read_until(&mut self, marker: &[u8]) {
+            use std::io::Read;
+            use std::os::fd::AsRawFd;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !self.output.windows(marker.len()).any(|part| part == marker) {
+                assert!(
+                    Instant::now() < deadline,
+                    "terminal timed out: {:?}",
+                    String::from_utf8_lossy(&self.output)
+                );
+                if poll_fd(self.master.as_raw_fd(), Some(Duration::from_millis(20))) {
+                    let mut buf = [0; 4096];
+                    let n = self.master.read(&mut buf).unwrap();
+                    assert_ne!(n, 0);
+                    self.output.extend_from_slice(&buf[..n]);
+                }
+            }
+        }
+
+        fn finish(&mut self) -> std::process::ExitStatus {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    return status;
+                }
+                assert!(Instant::now() < deadline, "terminal child did not exit");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    impl Drop for TerminalChild {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    fn terminal_command(mode: &str) -> std::process::Command {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "input::tests::terminal_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("AGENMUX_TEST_TERMINAL", mode);
+        command
+    }
+
+    fn assert_termios_eq(actual: &libc::termios, expected: &libc::termios) {
+        assert_eq!(actual.c_iflag, expected.c_iflag, "input flags");
+        assert_eq!(actual.c_oflag, expected.c_oflag, "output flags");
+        assert_eq!(actual.c_cflag, expected.c_cflag, "control flags");
+        // BSD sets PENDIN when restoring canonical input; it is transient queue state.
+        assert_eq!(
+            actual.c_lflag & !libc::PENDIN,
+            expected.c_lflag & !libc::PENDIN,
+            "local flags"
+        );
+        assert_eq!(actual.c_cc, expected.c_cc, "control characters");
+        assert_eq!(unsafe { libc::cfgetispeed(actual) }, unsafe {
+            libc::cfgetispeed(expected)
+        });
+        assert_eq!(unsafe { libc::cfgetospeed(actual) }, unsafe {
+            libc::cfgetospeed(expected)
+        });
+    }
+
+    #[test]
+    fn terminal_controls_and_normal_drop() {
+        use std::io::Write;
+        let mut child = TerminalChild::start("normal");
+        child.read_until(b"TERMINAL_READY");
+        let active = child.settings();
+        assert_eq!(
+            active.c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN),
+            0
+        );
+        assert_eq!(active.c_iflag & (libc::IXON | libc::IXOFF), 0);
+        for byte in [0x1a, 0x1c, 0x13, 0x11, 0x0f] {
+            child.output.clear();
+            child.master.write_all(&[byte]).unwrap();
+            child.read_until(b"CONTROL_READ");
+        }
+        child.master.write_all(&[0x03]).unwrap();
+        child.read_until(b"CANCEL_READ");
+        child.master.write_all(&[0x04]).unwrap();
+        child.read_until(b"\x1b[?2004l\x1b[?25h");
+        assert!(child.finish().success());
+        assert_termios_eq(&child.settings(), &child.original);
+    }
+
+    #[test]
+    fn terminal_panic_restores_before_abort() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = TerminalChild::start("panic");
+        child.read_until(b"previous panic hook");
+        assert_eq!(child.finish().signal(), Some(libc::SIGABRT));
+        assert_termios_eq(&child.settings(), &child.original);
+        let output = String::from_utf8_lossy(&child.output);
+        assert!(output.contains("\x1b[?2004l\x1b[?25h"), "{output:?}");
+    }
+
+    #[test]
+    fn terminal_hook_does_not_restore_after_drop() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = TerminalChild::start("after-drop");
+        child.read_until(b"previous panic hook");
+        assert_eq!(child.finish().signal(), Some(libc::SIGABRT));
+        let mut expected = child.original;
+        expected.c_lflag &= !libc::ECHO;
+        assert_termios_eq(&child.settings(), &expected);
+    }
+
+    #[test]
+    fn terminal_non_tty_is_inactive() {
+        let output = terminal_command("non-tty")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!output.stdout.contains(&0x1b));
+    }
 
     fn config(management_enabled: bool) -> crate::app_config::AppConfig {
         let source = if management_enabled {

@@ -40,12 +40,13 @@ pub enum KeyChord {
     Backspace,
 }
 impl KeyChord {
-    /// Conservative portable controls with the current ISIG/IXON/IEXTEN mode:
+    /// Conservative portable controls:
     /// C-c, C-d, C-g, C-k, C-n, C-p, C-u, C-w, C-x, C-], C-^, C-_, plus the
     /// C-i/C-m/C-[/C-? aliases of Tab/Enter/Escape/BSpace.
     /// Exclude conventional signal, flow-control, and extended editing controls
     /// (C-o/q/r/s/t/v/y/z and C-backslash), and the bytes the sidebar's own
-    /// input protocol claims before any keymap lookup.
+    /// input protocol claims before any keymap lookup. Raw mode delivers those
+    /// controls as bytes, but other terminal layers may still claim them.
     /// C-c is retained for the default search cancel; resolved_keys reserves
     /// C-c/C-d as emergency paths (except search cancel).
     /// Custom terminal control-character assignments are not guaranteed.

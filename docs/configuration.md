@@ -173,6 +173,13 @@ Reserved chords:
 - `C-@`, `C-a`, `C-b`, `C-l`: used internally by the sidebar.
 - `C-i`, `C-m`, `C-[`, `C-?`: the same as `Tab`, `Enter`, `Escape`, `BSpace`.
 
+While the UI owns the terminal, software flow control, terminal-generated
+signals, and extended input controls are disabled. Ctrl-S and Ctrl-O do not
+pause or discard output; Ctrl-Z and Ctrl-\ do not suspend or kill the UI.
+Unbound control keys are ignored, and configured bindings still apply. Ctrl-C
+cancels search when bound to cancel; otherwise Ctrl-C/Ctrl-D exit. Closing the
+UI restores the saved terminal settings.
+
 ## Precedence
 
 For each setting, the first layer that sets it wins:
