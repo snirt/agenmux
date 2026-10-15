@@ -158,7 +158,7 @@ main() {
   ok config "$(tilde "$CFG")/ (config.toml optional, agents/ for overrides)"
   if [ -n "$label" ]; then
     app="$CFG/config.toml"
-    # ponytail: line-based TOML edit; an inline `display = { ... }` table is
+    # Line-based TOML edit; an inline `display = { ... }` table is
     # not recognised and would end up with a duplicate [display].
     if [ -f "$app" ] && grep -q '^[[:space:]]*\(display\.\)\{0,1\}agent_label[[:space:]]*=' "$app"; then
       skip labels "agent_label already set in $(tilde "$app")"

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 /// entries live while the pane sits idle and drop on any state change (a new
 /// prompt flips the pane to working), so the fork re-runs only when the
 /// subject could actually have changed.
-/// ponytail: assumes new sessions always bounce through a non-idle state
+/// Assumes new sessions always bounce through a non-idle state
 pub type SubjectCache = HashMap<String, (String, String)>;
 
 const SCREEN_MAX_AGE: Duration = Duration::from_secs(10);
@@ -104,7 +104,7 @@ pub struct ScanStats {
 /// Keep the last screen instead of capturing: a key is waiting and the pane
 /// has one. A pane with no screen yet is captured anyway — leaving it out
 /// would drop its row for a tick.
-/// ponytail: a held key defers every capture; states go stale until release,
+/// A held key defers every capture; states go stale until release,
 /// same as the pre-scan key gate already does.
 fn defer_capture(key_waiting: bool, has_screen: bool) -> bool {
     key_waiting && has_screen

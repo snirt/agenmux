@@ -407,7 +407,7 @@ fn new_sidebar(
         .unwrap_or_default();
     // Cached TSV stores cwd basename, enough to avoid blocking startup on
     // unchanged panes. Live scans upgrade matching entries to full paths.
-    // ponytail: basename can collide; persist full cwd if cache format changes.
+    // Basename can collide; persist full cwd if cache format changes.
     let seeded_subjects = cached_rows
         .iter()
         .filter(|row| row.pane != self_pane && !row.title.is_empty())

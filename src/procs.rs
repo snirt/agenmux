@@ -152,7 +152,7 @@ pub fn identify(
     // processes, so only the pane process and its direct children (the
     // foreground app itself) are checked: Claude's native build reports a
     // version-named command ("2.1.280") while its argv[0] is "claude".
-    // ponytail: add a runtime here if a new agent wrapper must expose its child.
+    // Add a runtime here if a new agent wrapper must expose its child.
     let delegates = [
         "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "nu", "pwsh", "node", "bun",
         "deno", "python", "python3", "ruby", "env", "npm", "npx", "pnpm", "yarn", "uv",

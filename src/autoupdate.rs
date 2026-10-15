@@ -802,7 +802,7 @@ fn exchange(a: &Path, b: &Path) -> io::Result<()> {
     if swapped {
         return Ok(());
     }
-    // ponytail: non-atomic fallback; a crash between the renames leaves `b`
+    // Non-atomic fallback; a crash between the renames leaves `b`
     // missing until the next start's recovery renames it back.
     let parked = b.with_extension(format!("swap-{}", std::process::id()));
     fs::rename(b, &parked)?;

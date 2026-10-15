@@ -369,7 +369,7 @@ const RENAME_FORMAT: &str = "@agenmux-rename-format";
 /// automatic-rename names a window after its active pane, so focusing the
 /// sidebar would rename every unnamed window "agenmux". While the sidebar is
 /// active, evaluate the window's own format on the pane focused before it.
-// ponytail: a window-local format the user set is reset to the global one on
+// A window-local format the user set is reset to the global one on
 // teardown; save and restore it if anyone sets per-window formats.
 fn keep_window_name(win: &str) {
     if tmux::command(&["show-options", "-wqv", "-t", win, RENAME_FORMAT])

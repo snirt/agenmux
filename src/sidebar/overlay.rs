@@ -885,7 +885,7 @@ impl Sidebar {
                     text.push_str(&format!("{}\n\n", search.line(cols)));
                     targets.extend([Some(MOUSE_SEARCH), None]);
                 }
-                // ponytail: dims from the last scan; restore re-checks tmux.
+                // Dims from the last scan; restore re-checks tmux.
                 let mut live = crate::snapshot::Live::default();
                 for pane in &self.panes {
                     live.windows

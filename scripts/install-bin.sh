@@ -83,7 +83,7 @@ want="$(bash "$DIR/scripts/version.sh" tag 2>/dev/null)"
 
 # A version switch (auto-update or manual) can land while this runs. Never
 # install an engine or state for source that is no longer checked out.
-# ponytail: check-then-mv, not a lock; the window is the mv itself.
+# Check-then-mv, not a lock; the window is the mv itself.
 source_unchanged() {
   [ "$(bash "$DIR/scripts/version.sh" tag 2>/dev/null)" = "$want" ] &&
     [ "$(git -C "$DIR" rev-parse HEAD 2>/dev/null || printf -)" = "$current_rev" ]

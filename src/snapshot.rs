@@ -246,7 +246,7 @@ impl Store {
         adopt(&mut self.pending, collapsed, panes);
     }
 
-    // ponytail: an empty scan keeps the last layout; a desynced read or a
+    // An empty scan keeps the last layout; a desynced read or a
     // dying server lists nothing, and that must not erase the restore offer.
     // A branch gone since the last capture was closed. The first capture
     // after open has nothing to compare with: closes while no sidebar ran are
@@ -280,7 +280,7 @@ impl Store {
 
     /// Write when collapse state or layout changed since the last write. The
     /// closed log is taken from the file: another sidebar may have edited it.
-    // ponytail: last writer wins when a popup and a split sidebar both run.
+    // Last writer wins when a popup and a split sidebar both run.
     pub fn save(&mut self, collapsed: &HashSet<String>, panes: &[PaneMeta]) {
         let collapsed = collapsed_keys(collapsed, &self.pending, panes);
         if self
@@ -315,7 +315,7 @@ impl Store {
 
     /// Read-modify-write of the file's log alone, so two sidebars logging the
     /// same close, or one forgetting an entry, do not undo each other.
-    // ponytail: no file lock; two edits racing between read and rename lose one.
+    // No file lock; two edits racing between read and rename lose one.
     fn edit_closed(&mut self, edit: impl FnOnce(&mut Vec<Closed>)) {
         let mut snap = read(&self.path)
             .filter(|snap| snap.server == self.server)

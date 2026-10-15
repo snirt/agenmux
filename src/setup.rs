@@ -501,7 +501,7 @@ fn install_hooks(_bin: &str) -> Result<(), TmuxError> {
 
 /// Seconds after a repeatable binding before tmux has reset its client to the
 /// root table, or `None` when repeating is disabled.
-// ponytail: global options read at setup; per-session or later changes to
+// Global options read at setup; per-session or later changes to
 // repeat-time apply after the next setup.
 fn repeat_reset_delay() -> Result<Option<f64>, TmuxError> {
     let mut ms = 0u32;
