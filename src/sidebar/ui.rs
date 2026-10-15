@@ -348,12 +348,12 @@ impl Search {
         }
     }
 
-    /// Overlay search row: `/ query`, or the `/ search` prompt.
-    pub(super) fn line(&self, cols: usize) -> String {
+    /// Overlay search row: `/ query`, or the caller's keymap-derived prompt.
+    pub(super) fn line(&self, cols: usize, prompt: &str) -> String {
         if self.active() {
             format!("/ {}", self.display("_", cols.saturating_sub(2)))
         } else {
-            "/ search".into()
+            prompt.into()
         }
     }
 

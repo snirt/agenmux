@@ -2386,6 +2386,116 @@ fn daemon_theme_is_a_startup_snapshot_without_global_color_mutation() {
 }
 
 #[test]
+fn recently_closed_forget_confirms_in_split_and_popup_input_modes() {
+    for split in [false, true] {
+        let tmux = TestTmux::new(if split {
+            "forget-split"
+        } else {
+            "forget-popup"
+        });
+        app_file(&tmux, "[display]\nshow_all_panes=true\nsidebar_width=90\n[behavior]\nnotifications=false\nauto_update=false\n[tmux_management]\nenabled=true\nconfirm_delete=false\n[keys.normal]\njump=['Tab']\nsearch=['?']\nhelp=[]\nreset=['x']\nclose=['z']\n");
+        let bin = env!("CARGO_BIN_EXE_agenmux");
+        tmux.assert_tmux(&["set-option", "-g", "@agenmux-bin", bin]);
+        let identity = tmux.text(&["display-message", "-p", "#{pid}|#{start_time}"]);
+        let snapshot = tmux
+            .tmp
+            .join(format!("state/agenmux/snapshot-{}", tmux.socket));
+        std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+        std::fs::write(&snapshot, format!("server = '{identity}'\n[[closed]]\nid = '$1001'\ntime = 1\n[closed.session]\nname = 'disposable-history'\n")).unwrap();
+        let mut viewer = tmux.attach();
+        tmux.wait_for(Duration::from_secs(2), || {
+            !tmux
+                .text(&["list-clients", "-F", "#{client_name}"])
+                .is_empty()
+        });
+        let client = tmux.text(&["list-clients", "-F", "#{client_name}"]);
+        let pane = if split {
+            assert_success(
+                tmux.bin(&["toggle", "split", &client]),
+                "start split history view",
+            );
+            tmux.text(&[
+                "list-panes",
+                "-a",
+                "-f",
+                "#{==:#{pane_title},agenmux}",
+                "-F",
+                "#{pane_id}",
+            ])
+        } else {
+            // Same standalone terminal input path as a popup, with a capturable PTY.
+            let program = format!("exec env TMPDIR='{0}' AGENMUX_RUNTIME_DIR='{0}' XDG_CONFIG_HOME='{0}/config' XDG_STATE_HOME='{0}/state' AGENMUX_DIR='{1}' '{bin}' sidebar", tmux.tmp.display(), env!("CARGO_MANIFEST_DIR"));
+            tmux.text(&[
+                "new-window",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-n",
+                "popup-input",
+                "/bin/bash",
+                "-c",
+                &program,
+            ])
+        };
+        let table_is = |table: &str| {
+            if split {
+                tmux.wait_for(Duration::from_secs(2), || {
+                    tmux.text(&[
+                        "display-message",
+                        "-p",
+                        "-c",
+                        &client,
+                        "#{client_key_table}",
+                    ]) == table
+                });
+            }
+        };
+        let shows = |needle: &str| {
+            tmux.wait_for(Duration::from_secs(4), || {
+                tmux.text(&["capture-pane", "-p", "-t", &pane])
+                    .contains(needle)
+            });
+        };
+        let send = |logical: &str, terminal: &str| {
+            if split {
+                assert_success(tmux.bin(&["key", logical, &client]), logical);
+            } else {
+                tmux.assert_tmux(&["send-keys", "-t", &pane, terminal]);
+            }
+        };
+        shows("settings");
+        send("undo", "u");
+        shows("disposable-history");
+        shows("? search");
+        shows("Tab restore");
+        let before = std::fs::read(&snapshot).unwrap();
+        send("sequence-64", "d");
+        shows("forget session disposable-history? y/N");
+        assert_eq!(std::fs::read(&snapshot).unwrap(), before);
+        table_is("agenmux-settings-edit");
+        send("escape", "Escape");
+        shows("d forget");
+        assert_eq!(std::fs::read(&snapshot).unwrap(), before);
+        table_is("agenmux");
+        send("sequence-64", "d");
+        shows("forget session disposable-history? y/N");
+        table_is("agenmux-settings-edit");
+        send("text-79", "y");
+        shows("nothing closed yet");
+        let remaining = std::fs::read_to_string(&snapshot).unwrap_or_default();
+        assert!(!remaining.contains("disposable-history"), "{remaining}");
+        table_is("agenmux");
+        if split {
+            assert_success(tmux.bin(&["key", "close", &client]), "close split test");
+        } else {
+            tmux.assert_tmux(&["kill-pane", "-t", &pane]);
+        }
+        let _ = viewer.kill();
+        let _ = viewer.wait();
+    }
+}
+
+#[test]
 fn tmux_management_creates_and_deletes_stable_targets() {
     let tmux = TestTmux::new("tmux-management");
     app_file(

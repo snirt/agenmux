@@ -19,6 +19,39 @@ pub(super) fn join(parts: &[String]) -> String {
         .join(" · ")
 }
 
+/// Label the first active binding, omitting unbound actions.
+pub(super) fn key_hint(keys: &Keymap, action: Action, what: &str) -> String {
+    keys[&action]
+        .first()
+        .map_or(String::new(), |c| format!("{} {what}", c.label(true)))
+}
+
+pub(super) fn back_hint(keys: &Keymap, what: &str) -> String {
+    let labels = [Action::Close, Action::Reset]
+        .iter()
+        .filter_map(|action| keys[action].first())
+        .map(|c| c.label(true))
+        .collect::<Vec<_>>();
+    if labels.is_empty() {
+        String::new()
+    } else {
+        format!("{} {what}", labels.join("/"))
+    }
+}
+
+pub(super) fn nav_label(keys: &Keymap, short: bool, all: bool) -> String {
+    let (down, up) = (&keys[&Action::Down], &keys[&Action::Up]);
+    let pairs = if all { down.len().max(up.len()) } else { 1 };
+    (0..pairs)
+        .filter_map(|i| match (down.get(i), up.get(i)) {
+            (Some(d), Some(u)) => Some(format!("{}/{}", d.label(short), u.label(short))),
+            (Some(c), None) | (None, Some(c)) => Some(c.label(short)),
+            (None, None) => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn fit_hint(hint: &str, width: usize) -> String {
     if hint.chars().count() <= width {
         return hint.into();
@@ -442,22 +475,11 @@ impl Sidebar {
 
     /// "<first chord> <what>", or nothing when the action is unbound.
     pub(super) fn hint(&self, keys: &Keymap, action: Action, what: &str) -> String {
-        keys[&action]
-            .first()
-            .map_or(String::new(), |c| format!("{} {what}", c.label(true)))
+        key_hint(keys, action, what)
     }
     /// "q/esc back": overlays close on both the close and the reset key.
     pub(super) fn back_hint(&self) -> String {
-        let keys = [Action::Close, Action::Reset]
-            .iter()
-            .filter_map(|action| self.normal_keys[action].first())
-            .map(|c| c.label(true))
-            .collect::<Vec<_>>();
-        if keys.is_empty() {
-            String::new()
-        } else {
-            format!("{} back", keys.join("/"))
-        }
+        back_hint(&self.normal_keys, "back")
     }
     pub(super) fn hints(&self, parts: &[(Action, &str)]) -> String {
         join(
@@ -477,19 +499,7 @@ impl Sidebar {
     }
     /// Down/up pairs: "j/k" (first pair) or "j/k ↓/↑" (all pairs).
     pub(super) fn nav_label(&self, short: bool, all: bool) -> String {
-        let (down, up) = (
-            &self.normal_keys[&Action::Down],
-            &self.normal_keys[&Action::Up],
-        );
-        let pairs = if all { down.len().max(up.len()) } else { 1 };
-        (0..pairs)
-            .filter_map(|i| match (down.get(i), up.get(i)) {
-                (Some(d), Some(u)) => Some(format!("{}/{}", d.label(short), u.label(short))),
-                (Some(c), None) | (None, Some(c)) => Some(c.label(short)),
-                (None, None) => None,
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
+        nav_label(&self.normal_keys, short, all)
     }
 
     /// Agent name and/or its configured `AGENT_ICON`, per
@@ -1378,6 +1388,8 @@ mod tests {
             let socket =
                 std::env::temp_dir().join(format!("agenmux-theme-{}.sock", std::process::id()));
             let socket = socket.to_str().unwrap();
+            let state =
+                std::env::temp_dir().join(format!("agenmux-theme-state-{}", std::process::id()));
             assert!(Command::new("tmux")
                 .args([
                     "-S",
@@ -1403,11 +1415,13 @@ mod tests {
                 ])
                 .env("AGENMUX_THEME_TEST_CHILD", "1")
                 .env("TMUX", format!("{socket},0,0"))
+                .env("XDG_STATE_HOME", &state)
                 .output()
                 .unwrap();
             let _ = Command::new("tmux")
                 .args(["-S", socket, "kill-server"])
                 .status();
+            let _ = std::fs::remove_dir_all(&state);
             assert!(
                 result.status.success(),
                 "{}",
@@ -2079,6 +2093,7 @@ mod tests {
         versions_close_keys(&mut sb);
         overlay_click_rows(&mut sb);
         multi_selection(&mut sb);
+        recently_closed_confirmation(&mut sb);
         if let Some(output) = std::env::var_os("AGENMUX_THEME_VISUAL_DIR") {
             visual_frames(&mut sb, &PathBuf::from(output));
         }
@@ -2327,6 +2342,188 @@ mod tests {
         }
     }
 
+    fn recently_closed_confirmation(sb: &mut Sidebar) {
+        use crate::snapshot::{self, Closed, Session, Snapshot, Store};
+        let file = crate::app_config::parse("[tmux_management]\nenabled=true\nconfirm_delete=false\n[keys.normal]\njump=['Tab']\nsearch=['?']\nhelp=[]\nreset=['x']\nclose=['z']\n").unwrap();
+        let saved_settings = sb.settings.settings.clone();
+        let saved_keys = sb.normal_keys.clone();
+        let saved_store = sb.snapshot.take();
+        sb.settings.settings = crate::app_config::resolve(&file, &Default::default()).unwrap();
+        sb.normal_keys = sb.settings.settings.normal.clone();
+        sb.daemon.as_mut().unwrap().size = (120, 40);
+        let identity = sb
+            .tmux
+            .run("display-message -p '#{pid}|#{start_time}|#{socket_path}'")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let fields: Vec<_> = identity.trim().split('|').collect();
+        let path = snapshot::path(fields[2]).unwrap();
+        let closed = |id: &str, name: &str| Closed {
+            id: id.into(),
+            time: 1,
+            session: Session {
+                name: name.into(),
+                ..Default::default()
+            },
+        };
+        let entries = vec![
+            closed("$1001", "other"),
+            closed("$1002", "match-one"),
+            closed("$1003", "match-two"),
+        ];
+        snapshot::write(
+            &path,
+            &Snapshot {
+                server: format!("{}|{}", fields[0], fields[1]),
+                closed: entries.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        sb.snapshot = Store::open(&mut sb.tmux);
+        assert!(sb.snapshot.is_some());
+        let open = |sb: &mut Sidebar, query: &str, sel| {
+            let search = super::super::ui::Search {
+                query: query.into(),
+                ..Default::default()
+            };
+            sb.overlay = Some(Overlay::Undo {
+                sel,
+                entries: sb.snapshot.as_ref().unwrap().closed(),
+                search,
+                forget: None,
+            });
+        };
+        let disk_ids = |sb: &Sidebar| {
+            sb.snapshot
+                .as_ref()
+                .unwrap()
+                .closed()
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>()
+        };
+        open(sb, "", 0);
+        sb.render(true);
+        assert!(
+            sb.last_frame.contains("Tab restore") && sb.last_frame.contains("? search"),
+            "{}",
+            sb.last_frame
+        );
+        assert!(!sb.last_frame.contains("/ search"));
+        open(sb, "match", 1);
+        sb.render(true);
+        assert!(
+            sb.last_frame.contains("? refine") && sb.last_frame.contains("z/x clear"),
+            "{}",
+            sb.last_frame
+        );
+        let before = std::fs::read(&path).unwrap();
+        for cancel in [
+            Key::AllStates,
+            Key::Text("n".into()),
+            Key::Down,
+            Key::Search,
+            Key::Jump,
+            Key::Select(0),
+            Key::Open(0),
+            Key::Sequence('d', None),
+        ] {
+            sb.dispatch_key(Key::Sequence('d', None));
+            assert!(sb.overlay_editing());
+            sb.render(true);
+            assert!(
+                sb.last_frame.contains("forget session match-two? y/N"),
+                "{}",
+                sb.last_frame
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            sb.dispatch_key(cancel);
+            assert!(!sb.overlay_editing());
+            let Some(Overlay::Undo {
+                sel,
+                entries,
+                search,
+                forget,
+            }) = &sb.overlay
+            else {
+                panic!("cancel must keep list open")
+            };
+            assert_eq!(*sel, 1);
+            assert_eq!(entries.len(), 3);
+            assert_eq!(search.query.value(), "match");
+            assert!(forget.is_none());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        // The prompt row sits under the title: visible in a short, narrow
+        // pane, with the label clipped before `y/N` is.
+        sb.dispatch_key(Key::Sequence('d', None));
+        sb.daemon.as_mut().unwrap().size = (24, 4);
+        sb.render(true);
+        assert!(
+            sb.last_frame.contains("forget session ") && sb.last_frame.contains("…? y/N"),
+            "{}",
+            sb.last_frame
+        );
+        sb.daemon.as_mut().unwrap().size = (120, 40);
+        // Confirm through the same fixed editor decoder used in popup mode.
+        use std::os::fd::AsRawFd;
+        let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(b"y").unwrap();
+        let key = crate::input::read_search_key(reader.as_raw_fd(), crate::input::settings_keys());
+        sb.dispatch_key(key);
+        assert!(!sb.overlay_editing());
+        assert_eq!(disk_ids(sb), ["$1001", "$1002"]);
+        let Some(Overlay::Undo { sel, entries, .. }) = &sb.overlay else {
+            panic!("confirm keeps list open")
+        };
+        assert_eq!(*sel, 0);
+        assert_eq!(entries.len(), 2);
+        sb.dispatch_key(Key::Sequence('d', None));
+        sb.dispatch_key(Key::Text("y".into()));
+        assert_eq!(disk_ids(sb), ["$1001"]);
+        sb.dispatch_key(Key::Sequence('d', None));
+        assert!(
+            !sb.overlay_editing(),
+            "no matches must not enter confirmation"
+        );
+        open(sb, "", 0);
+        // A reload that turns management off disarms a pending forget.
+        sb.dispatch_key(Key::Sequence('d', None));
+        assert!(sb.overlay_editing());
+        sb.settings.settings.tmux_management_enabled = false;
+        sb.dispatch_key(Key::Text("y".into()));
+        assert_eq!(disk_ids(sb), ["$1001"]);
+        sb.dispatch_key(Key::Sequence('d', None));
+        assert!(!sb.overlay_editing());
+        sb.render(true);
+        assert!(!sb.last_frame.contains("d forget"));
+        sb.settings.settings.tmux_management_enabled = true;
+        sb.normal_keys
+            .get_mut(&Action::Jump)
+            .unwrap()
+            .push(KeyChord::Printable(b'd'));
+        sb.dispatch_key(Key::Sequence('d', None));
+        assert!(!sb.overlay_editing(), "bound d must not forget");
+        sb.render(true);
+        assert!(!sb.last_frame.contains("d forget"));
+        sb.normal_keys.get_mut(&Action::Jump).unwrap().pop();
+        sb.dispatch_key(Key::Sequence('d', None));
+        sb.dispatch_key(Key::Text("y".into()));
+        assert!(disk_ids(sb).is_empty());
+        let Some(Overlay::Undo { sel, entries, .. }) = &sb.overlay else {
+            panic!("empty list stays open")
+        };
+        assert_eq!(*sel, 0);
+        assert!(entries.is_empty());
+        sb.dispatch_key(Key::Sequence('d', None));
+        assert!(!sb.overlay_editing());
+        let _ = std::fs::remove_file(&path);
+        sb.snapshot = saved_store;
+        sb.settings.settings = saved_settings;
+        sb.normal_keys = saved_keys;
+        sb.overlay = None;
+    }
+
     /// Every list overlay publishes click rows on the screen rows they name.
     fn overlay_click_rows(sb: &mut Sidebar) {
         use crate::snapshot::{Closed, Session};
@@ -2354,6 +2551,7 @@ mod tests {
                     sel: 1,
                     entries: vec![closed("alpha", 3 * 86_400), closed("beta", 86_400)],
                     search: Default::default(),
+                    forget: None,
                 },
                 vec![(0, "alpha"), (1, "beta")],
             ),

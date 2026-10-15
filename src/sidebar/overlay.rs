@@ -4,7 +4,9 @@ use crate::release;
 use crate::tmux::{command, command_spawn};
 use std::path::{Path, PathBuf};
 
-use super::render::{app_title, clip_frame, cursor_mark, join};
+use super::render::{
+    app_title, back_hint, clip_frame, clip_width, cursor_mark, join, key_hint, nav_label,
+};
 use super::ui::{
     bar, Action as UiAction, Editor, Label, Search, Select, SelectedRow, TextEdit, TopBar,
 };
@@ -22,6 +24,7 @@ pub(super) enum Overlay {
         sel: usize,
         entries: Vec<crate::snapshot::Closed>,
         search: Search,
+        forget: Option<String>,
     },
     Settings(Settings),
     Create {
@@ -501,6 +504,9 @@ fn render_settings(
     rows: usize,
 ) -> (String, Vec<Option<usize>>) {
     let all = visible_settings_rows(settings, effective);
+    let hint = |action, what| key_hint(&effective.normal, action, what);
+    let back = back_hint(&effective.normal, "back");
+    let cancel = back_hint(&effective.normal, "cancel");
     let show_revert = settings.search.query.is_empty();
     let total = all.len() + usize::from(show_revert);
     settings.sel = if total == 0 {
@@ -512,12 +518,12 @@ fn render_settings(
     let mut out = format!("{E}[2J{E}[H{E}[1m{} — settings{E}[0m\n", app_title());
     let mut targets = Vec::new();
     if settings.confirm {
-        out.push_str("\nRevert to defaults?\n\nPersisted customizations will be removed.\nCLI and tmux overrides remain effective.\n\nEnter confirm · Esc cancel");
+        out.push_str(&format!("\nRevert to defaults?\n\nPersisted customizations will be removed.\nCLI and tmux overrides remain effective.\n\n{}", join(&[hint(Action::Jump, "confirm"), cancel])));
         return (clip_frame(&out, cols, rows.saturating_sub(1)), targets);
     }
     if !settings.editable {
         if let Some((_, message)) = &settings.message {
-            out.push_str(&format!("\nerror: {message}\n\nEsc back"));
+            out.push_str(&format!("\nerror: {message}\n\n{back}"));
         }
         return (clip_frame(&out, cols, rows.saturating_sub(1)), targets);
     }
@@ -544,7 +550,10 @@ fn render_settings(
         Editor::Select(select) => Some(select),
         Editor::TextEdit(_) => None,
     });
-    out.push_str(&format!("\n{}\n", settings.search.line(cols)));
+    out.push_str(&format!(
+        "\n{}\n",
+        settings.search.line(cols, &hint(Action::Search, "search"))
+    ));
     targets.extend([None, Some(MOUSE_SEARCH)]);
     let narrow = cols < 80;
     if !narrow {
@@ -649,18 +658,27 @@ fn render_settings(
         });
     } else if settings.search.editing {
         out.push_str(&format!("\n{}", Search::EDIT_HINT));
-    } else if settings.search.active() {
-        out.push_str(if narrow {
-            "\njk move · Enter edit · / refine · Esc clear"
-        } else {
-            "\n↑↓/jk move · Enter edit · / refine · Esc clear"
-        });
     } else {
-        out.push_str(if narrow {
-            "\njk move · Enter edit · / find · Esc back"
+        let (search, leave) = if settings.search.active() {
+            ("refine", back_hint(&effective.normal, "clear"))
         } else {
-            "\n↑↓/jk move · Enter edit · / search · Esc back"
-        });
+            (if narrow { "find" } else { "search" }, back)
+        };
+        let nav = nav_label(&effective.normal, true, false);
+        let nav = if nav.is_empty() {
+            nav
+        } else {
+            format!("{nav} move")
+        };
+        out.push_str(&format!(
+            "\n{}",
+            join(&[
+                nav,
+                hint(Action::Jump, "edit"),
+                hint(Action::Search, search),
+                leave,
+            ])
+        ));
     }
     targets.extend([None, None]);
     let frame = clip_frame(&out, cols, rows.saturating_sub(1));
@@ -872,6 +890,7 @@ impl Sidebar {
                 sel,
                 entries,
                 search,
+                forget,
             }) => {
                 let (sel, any, active, editing) =
                     (*sel, !entries.is_empty(), search.active(), search.editing);
@@ -879,10 +898,24 @@ impl Sidebar {
                     .into_iter()
                     .map(|index| entries[index].clone())
                     .collect();
-                let mut text = format!("{E}[2J{E}[H{header}{title} — recently closed{E}[0m\n\n");
+                // A pending forget takes the blank row under the title, which
+                // stays on screen however long the list grows.
+                let prompt = forget
+                    .as_ref()
+                    .and_then(|id| entries.iter().find(|entry| entry.id == *id))
+                    .map_or(String::new(), |entry| {
+                        let kind = undo_kind(entry);
+                        // "forget <kind> " and "? y/N" frame the clipped label.
+                        let room = cols.saturating_sub(kind.len() + 13);
+                        let label = clip_width(&undo_label(entry), room);
+                        format!("{error}forget {kind} {}? y/N{E}[0m", label.trim_end())
+                    });
+                let mut text =
+                    format!("{E}[2J{E}[H{header}{title} — recently closed{E}[0m\n{prompt}\n");
                 let mut targets = vec![None];
                 if active {
-                    text.push_str(&format!("{}\n\n", search.line(cols)));
+                    // Drawn only while active, when the row shows the query.
+                    text.push_str(&format!("{}\n\n", search.line(cols, "")));
                     targets.extend([Some(MOUSE_SEARCH), None]);
                 }
                 // ponytail: dims from the last scan; restore re-checks tmux.
@@ -918,13 +951,7 @@ impl Sidebar {
                     };
                     text.push_str(&format!(
                         "{mark}{dim}{time}  {:<7}  {:<w$}  {}{end}\n",
-                        if entry.is_session() {
-                            "session"
-                        } else if entry.is_pane() {
-                            "pane"
-                        } else {
-                            "window"
-                        },
+                        undo_kind(entry),
                         undo_label(entry),
                         undo_summary(entry),
                         w = width.unwrap_or(0),
@@ -941,21 +968,33 @@ impl Sidebar {
                     text.push_str(&format!(" {muted}{empty}{E}[0m\n"));
                 }
                 let (find, back) = if active {
-                    ("/ refine", "Esc clear".to_string())
+                    (
+                        key_hint(&self.normal_keys, Action::Search, "refine"),
+                        back_hint(&self.normal_keys, "clear"),
+                    )
                 } else {
-                    ("/ search", self.back_hint())
+                    (
+                        key_hint(&self.normal_keys, Action::Search, "search"),
+                        back_hint(&self.normal_keys, "back"),
+                    )
                 };
-                let hint = if editing {
+                let hint = if forget.is_some() {
+                    String::new()
+                } else if editing {
                     Search::EDIT_HINT.into()
                 } else if self.settings.settings.tmux_management_enabled {
                     join(&[
                         self.hint(&self.normal_keys, Action::Jump, "restore"),
-                        "d forget".into(),
-                        find.into(),
+                        if self.forget_available() {
+                            "d forget".into()
+                        } else {
+                            String::new()
+                        },
+                        find,
                         back,
                     ])
                 } else {
-                    join(&["restore needs tmux management".into(), find.into(), back])
+                    join(&["restore needs tmux management".into(), find, back])
                 };
                 text.push_str(&format!("\n{muted}{hint}{E}[0m"));
                 click_rows = self::click_rows(&targets);
@@ -1081,7 +1120,28 @@ impl Sidebar {
                 mut sel,
                 mut entries,
                 mut search,
+                mut forget,
             } => {
+                if let Some(id) = forget.take() {
+                    if self.forget_available() && matches!(&key, Key::Text(text) if text == "y") {
+                        if let Some(index) = entries.iter().position(|entry| entry.id == id) {
+                            let entry = entries.remove(index);
+                            if let Some(store) = self.snapshot.as_mut() {
+                                store.forget(&entry.id);
+                            }
+                            sel = sel.min(undo_matches(&entries, &search).len().saturating_sub(1));
+                        }
+                    }
+                    self.overlay = Some(Overlay::Undo {
+                        sel,
+                        entries,
+                        search,
+                        forget,
+                    });
+                    self.sync_key_table();
+                    self.last_frame.clear();
+                    return super::DispatchResult::Continue;
+                }
                 let shown = undo_matches(&entries, &search);
                 let key = mouse_key(&mut sel, key, shown.len());
                 let picked = shown.get(sel).copied();
@@ -1093,6 +1153,7 @@ impl Sidebar {
                         sel,
                         entries,
                         search,
+                        forget,
                     });
                     // `/` and Esc leave the sidebar table; typing needs the edit one.
                     self.sync_key_table();
@@ -1115,14 +1176,10 @@ impl Sidebar {
                     }
                     // `d` reaches the sidebar as the `dd` sequence prefix, which
                     // exists only with tmux management on.
-                    Key::Sequence('d', _) => {
-                        if let Some(index) = picked {
-                            let entry = entries.remove(index);
-                            if let Some(store) = self.snapshot.as_mut() {
-                                store.forget(&entry.id);
-                            }
-                            // The forgotten entry matched, so one fewer shows.
-                            sel = sel.min(shown.len().saturating_sub(2));
+                    Key::Sequence('d', _) if self.forget_available() => {
+                        forget = picked.map(|index| entries[index].id.clone());
+                        if forget.is_some() {
+                            self.use_key_table("agenmux-settings-edit");
                         }
                     }
                     Key::AllStates | Key::Quit | Key::Close => {
@@ -1135,6 +1192,7 @@ impl Sidebar {
                     sel,
                     entries,
                     search,
+                    forget,
                 });
             }
             Overlay::Create { target, mut name } => {
@@ -1210,11 +1268,17 @@ impl Sidebar {
             .spawn();
     }
 
+    /// Forgetting rides the `dd` prefix: management on and `d` unbound.
+    fn forget_available(&self) -> bool {
+        self.settings.settings.tmux_management_enabled
+            && action_for(&self.normal_keys, KeyChord::Printable(b'd')).is_none()
+    }
+
     /// An overlay text field has focus: keys arrive as text, not commands.
     pub(super) fn overlay_editing(&self) -> bool {
         match &self.overlay {
             Some(Overlay::Settings(settings)) => settings.edit.is_some() || settings.search.editing,
-            Some(Overlay::Undo { search, .. }) => search.editing,
+            Some(Overlay::Undo { search, forget, .. }) => search.editing || forget.is_some(),
             _ => false,
         }
     }
@@ -1546,6 +1610,7 @@ impl Sidebar {
             sel: 0,
             entries,
             search: Search::default(),
+            forget: None,
         });
         self.last_frame.clear();
     }
@@ -1562,6 +1627,16 @@ fn undo_matches(entries: &[crate::snapshot::Closed], search: &Search) -> Vec<usi
 }
 
 /// `work` for a session, `work:2` for a window or a pane in it.
+fn undo_kind(entry: &crate::snapshot::Closed) -> &'static str {
+    if entry.is_session() {
+        "session"
+    } else if entry.is_pane() {
+        "pane"
+    } else {
+        "window"
+    }
+}
+
 fn undo_label(entry: &crate::snapshot::Closed) -> String {
     match &entry.session.windows[..] {
         [window] if !entry.is_session() => {
@@ -1771,6 +1846,59 @@ mod tests {
     }
 
     #[test]
+    fn settings_command_hints_follow_bindings_but_editor_hints_stay_fixed() {
+        let file = crate::app_config::parse("[keys.normal]\ndown=['n']\nup=['p']\njump=['Tab']\nsearch=['?']\nhelp=[]\nreset=['x']\nclose=['z']\n").unwrap();
+        let mut effective = crate::app_config::resolve(&file, &Default::default()).unwrap();
+        let mut settings = settings_state(Ok((PathBuf::new(), false, "version = 1\n".into())));
+        let palette = crate::app_config::Palette::default();
+        let render = |settings: &mut Settings, effective: &crate::app_config::AppConfig| {
+            render_settings(settings, effective, &palette, true, 120, 40).0
+        };
+        let frame = render(&mut settings, &effective);
+        for hint in ["n/p move", "Tab edit", "? search", "z/x back"] {
+            assert!(frame.contains(hint), "{frame}");
+        }
+        for stale in ["j/k", "Enter edit", "/ search", "Esc back"] {
+            assert!(!frame.contains(stale), "{frame}");
+        }
+        settings.search.query = "display".into();
+        let frame = render(&mut settings, &effective);
+        assert!(
+            frame.contains("? refine") && frame.contains("z/x clear"),
+            "{frame}"
+        );
+        settings.confirm = true;
+        let frame = render(&mut settings, &effective);
+        assert!(frame.contains("Tab confirm · z/x cancel"), "{frame}");
+        settings.confirm = false;
+        settings.editable = false;
+        settings.message = Some((true, "invalid document".into()));
+        let frame = render(&mut settings, &effective);
+        assert!(frame.contains("z/x back"), "{frame}");
+        settings.editable = true;
+        settings.message = None;
+        settings.search.query.clear();
+        settings.edit = Some(SettingEdit {
+            name: "test".into(),
+            editor: Editor::TextEdit(TextEdit::new("value".into())),
+        });
+        assert!(render(&mut settings, &effective).contains("Enter apply · Esc cancel"));
+        settings.edit = None;
+        for action in [
+            Action::Down,
+            Action::Up,
+            Action::Jump,
+            Action::Search,
+            Action::Close,
+            Action::Reset,
+        ] {
+            effective.normal.get_mut(&action).unwrap().clear();
+        }
+        let frame = render(&mut settings, &effective);
+        assert!(!frame.contains(" · "), "unbound footer: {frame}");
+    }
+
+    #[test]
     fn settings_frames_fit_wide_narrow_and_tiny_views() {
         let effective =
             crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
@@ -1802,7 +1930,7 @@ mod tests {
             assert!(frame.lines().all(|line| line.chars().count() <= cols + 20));
             assert!(frame.contains("agenmux"));
             if rows >= 16 {
-                assert!(frame.contains("Esc back"), "{frame}");
+                assert!(frame.contains("q/esc back"), "{frame}");
                 settings.message = Some((false, "saved".into()));
                 let (saved, _) = render_settings(
                     &mut settings,
@@ -2059,7 +2187,7 @@ mod tests {
         );
 
         assert!(frame.contains("error:"));
-        assert!(frame.contains("Esc back"));
+        assert!(frame.contains("q/esc back"));
         assert!(!frame.contains("Enter edit"));
         assert!(!frame.contains("Revert to defaults"));
     }
