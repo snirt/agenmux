@@ -356,7 +356,12 @@ impl KeySequence {
 /// nothing more arrives.
 fn chord(first: u8, next: impl FnMut() -> Option<u8>) -> Option<KeyChord> {
     Some(match first {
-        0x1b => return escape_chord(next),
+        0x1b => {
+            return match escape_input(next)? {
+                EscapeInput::Chord(chord) => Some(chord),
+                EscapeInput::Paste => None,
+            }
+        }
         0x09 => KeyChord::Tab,
         0x0a | 0x0d => KeyChord::Enter,
         0x08 | 0x7f => KeyChord::Backspace,
@@ -366,33 +371,63 @@ fn chord(first: u8, next: impl FnMut() -> Option<u8>) -> Option<KeyChord> {
     })
 }
 
-/// Decode the tail of an escape sequence: CSI (ESC [ A) normally, SS3
-/// (ESC O A) in application-cursor mode, tilde forms for Home/End/PgUp/PgDn.
+enum EscapeInput {
+    Chord(KeyChord),
+    Paste,
+}
+
+/// Consume the entire CSI/SS3 tail before deciding whether it is supported.
 /// No tail is a bare Esc; an incomplete or unknown tail is nothing.
-fn escape_chord(mut next: impl FnMut() -> Option<u8>) -> Option<KeyChord> {
-    let Some(a) = next() else {
-        return Some(KeyChord::Escape);
-    };
-    if a != b'[' && a != b'O' {
-        return None;
-    }
-    Some(match next()? {
-        b'A' => KeyChord::Up,
-        b'B' => KeyChord::Down,
-        b'C' => KeyChord::Right,
-        b'D' => KeyChord::Left,
-        b'H' => KeyChord::Home,
-        b'F' => KeyChord::End,
-        digit @ b'1'..=b'8' if a == b'[' && next()? == b'~' => match digit {
-            b'1' | b'7' => KeyChord::Home,
-            b'3' => KeyChord::Delete,
-            b'4' | b'8' => KeyChord::End,
-            b'5' => KeyChord::PageUp,
-            b'6' => KeyChord::PageDown,
+fn escape_input(mut next: impl FnMut() -> Option<u8>) -> Option<EscapeInput> {
+    'escape: loop {
+        let Some(prefix) = next() else {
+            return Some(EscapeInput::Chord(KeyChord::Escape));
+        };
+        if prefix == 0x1b {
+            continue;
+        }
+        if prefix != b'[' && prefix != b'O' {
+            return None;
+        }
+        // Supported tails fit in four bytes; still drain longer unsupported tails.
+        let mut tail = [0u8; 4];
+        let mut len = 0usize;
+        loop {
+            let byte = next()?;
+            // ESC starts a new sequence; CAN/SUB cancel the current sequence.
+            match byte {
+                0x1b => continue 'escape,
+                0x18 | 0x1a => return None,
+                _ => {}
+            }
+            if len < tail.len() {
+                tail[len] = byte;
+            }
+            len += 1;
+            if (0x40..=0x7e).contains(&byte) {
+                break;
+            }
+        }
+        let tail = tail.get(..len)?;
+        return Some(EscapeInput::Chord(match tail {
+            b"A" => KeyChord::Up,
+            b"B" => KeyChord::Down,
+            b"C" => KeyChord::Right,
+            b"D" => KeyChord::Left,
+            b"H" => KeyChord::Home,
+            b"F" => KeyChord::End,
+            b"200~" if prefix == b'[' => return Some(EscapeInput::Paste),
+            [digit, b'~'] if prefix == b'[' => match digit {
+                b'1' | b'7' => KeyChord::Home,
+                b'3' => KeyChord::Delete,
+                b'4' | b'8' => KeyChord::End,
+                b'5' => KeyChord::PageUp,
+                b'6' => KeyChord::PageDown,
+                _ => return None,
+            },
             _ => return None,
-        },
-        _ => return None,
-    })
+        }));
+    }
 }
 
 /// Logical action → dispatcher key. Popup input maps chords through the
@@ -460,48 +495,54 @@ fn decode_protocol_payload(
             .filter(|byte| (0x20..=0x7e).contains(byte))
             .map(|byte| Key::Text(char::from(byte).to_string()))
             .unwrap_or(Key::Other),
-        _ => {
-            let chord = chord(first, next);
-            chord
-                .and_then(|chord| {
-                    if keys.contains_key(&Action::Accept) {
-                        match chord {
-                            KeyChord::Left => return Some(Key::Left),
-                            KeyChord::Right => return Some(Key::Right),
-                            KeyChord::Home => return Some(Key::Home),
-                            KeyChord::End => return Some(Key::End),
-                            KeyChord::Delete => return Some(Key::Delete),
-                            _ => {}
-                        }
-                    }
-                    action_key(keys, chord)
-                })
-                .unwrap_or(match first {
-                    b'G' => Key::Last,
-                    b'.' => Key::TogglePanes,
-                    byte if sequence_bindings(config)
-                        .iter()
-                        .any(|binding| binding.sequence.as_bytes()[0] == byte) =>
-                    {
-                        Key::Sequence(char::from(byte), None)
-                    }
-                    // Fixed tree keys, like `G` and `.`: a configured chord wins.
-                    b' ' => Key::ToggleBranch,
-                    byte if byte == crate::app_config::fold_key(&config.normal) => Key::Left,
-                    b'z' => Key::CollapseAll,
-                    b'Z' => Key::ExpandAll,
-                    b'R' => Key::RestoreLayout,
-                    b'u' => Key::Undo,
-                    b'x' => Key::DismissLayout,
-                    b'v' => Key::Mark,
-                    b'V' => Key::MarkRange,
-                    0x03 | 0x04 => Key::Quit,
-                    0x1b if chord == Some(KeyChord::Left) => Key::Left,
-                    0x1b if chord == Some(KeyChord::Right) => Key::Right,
-                    _ => Key::Other,
-                })
-        }
+        _ => key_for_chord(first, chord(first, next), keys, config),
     }
+}
+
+fn key_for_chord(
+    first: u8,
+    chord: Option<KeyChord>,
+    keys: &Keymap,
+    config: &crate::app_config::AppConfig,
+) -> Key {
+    chord
+        .and_then(|chord| {
+            if keys.contains_key(&Action::Accept) {
+                match chord {
+                    KeyChord::Left => return Some(Key::Left),
+                    KeyChord::Right => return Some(Key::Right),
+                    KeyChord::Home => return Some(Key::Home),
+                    KeyChord::End => return Some(Key::End),
+                    KeyChord::Delete => return Some(Key::Delete),
+                    _ => {}
+                }
+            }
+            action_key(keys, chord)
+        })
+        .unwrap_or(match first {
+            b'G' => Key::Last,
+            b'.' => Key::TogglePanes,
+            byte if sequence_bindings(config)
+                .iter()
+                .any(|binding| binding.sequence.as_bytes()[0] == byte) =>
+            {
+                Key::Sequence(char::from(byte), None)
+            }
+            // Fixed tree keys, like `G` and `.`: a configured chord wins.
+            b' ' => Key::ToggleBranch,
+            byte if byte == crate::app_config::fold_key(&config.normal) => Key::Left,
+            b'z' => Key::CollapseAll,
+            b'Z' => Key::ExpandAll,
+            b'R' => Key::RestoreLayout,
+            b'u' => Key::Undo,
+            b'x' => Key::DismissLayout,
+            b'v' => Key::Mark,
+            b'V' => Key::MarkRange,
+            0x03 | 0x04 => Key::Quit,
+            0x1b if chord == Some(KeyChord::Left) => Key::Left,
+            0x1b if chord == Some(KeyChord::Right) => Key::Right,
+            _ => Key::Other,
+        })
 }
 
 #[cfg(test)]
@@ -535,6 +576,13 @@ pub(crate) fn read_key_with_config(
             .flatten()
     };
     match b {
+        0x1b => {
+            return match escape_input(next) {
+                Some(EscapeInput::Paste) => read_paste(fd, false),
+                Some(EscapeInput::Chord(chord)) => key_for_chord(b, Some(chord), keys, config),
+                None => key_for_chord(b, None, keys, config),
+            };
+        }
         // Click target: a four-byte row index the mouse helper sends, as a
         // single (0x05) or double (0x0f) click.
         0x05 | 0x0f => {
@@ -644,10 +692,11 @@ pub(crate) fn read_key_with_config(
 
 /// Consume a terminal's bracketed paste as one edit; never interpret pasted
 /// Enter/Escape as commands. Drain oversized pastes before the next key.
-fn read_paste(fd: libc::c_int) -> Key {
+fn read_paste(fd: libc::c_int, collect: bool) -> Key {
     let mut bytes = Vec::new();
     let mut tail = [0u8; 6];
     let mut count = 0usize;
+    // A 1s idle gap ends draining; slower pastes need persistent state to stay isolated.
     while poll_fd(fd, Some(Duration::from_secs(1))) {
         let Some(byte) = read_byte(fd) else { break };
         tail[count % 6] = byte;
@@ -657,12 +706,14 @@ fn read_paste(fd: libc::c_int) -> Key {
                 .map(|i| tail[(count + i) % 6])
                 .eq(b"\x1b[201~".iter().copied())
         {
-            if count <= 65536 {
-                bytes.truncate(bytes.len().saturating_sub(5));
-            }
-            return Key::Text(String::from_utf8_lossy(&bytes).into_owned());
+            bytes.truncate(count - 6);
+            return if collect {
+                Key::Text(String::from_utf8_lossy(&bytes).into_owned())
+            } else {
+                Key::Other
+            };
         }
-        if bytes.len() < 65536 {
+        if collect && bytes.len() < 65536 {
             bytes.push(byte);
         }
     }
@@ -679,39 +730,6 @@ pub(crate) fn read_search_key(fd: libc::c_int, keys: &Keymap) -> Key {
         poll_fd(fd, Some(Duration::from_millis(100)))
             .then(|| read_byte(fd))
             .flatten()
-    };
-    let mut prefix = Vec::new();
-    if first == 0x1b {
-        if let Some(a) = next() {
-            prefix.push(a);
-            if a == b'[' {
-                if let Some(b) = next() {
-                    prefix.push(b);
-                    if b == b'2' {
-                        if let Some(c) = next() {
-                            prefix.push(c);
-                            if c == b'0' {
-                                for _ in 0..2 {
-                                    if let Some(byte) = next() {
-                                        prefix.push(byte);
-                                    }
-                                }
-                            }
-                        }
-                        if prefix == b"[200~" {
-                            return read_paste(fd);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let bare_escape = first == 0x1b && prefix.is_empty();
-    let mut prefix = prefix.into_iter();
-    let mut next = || {
-        prefix
-            .next()
-            .or_else(|| if bare_escape { None } else { next() })
     };
     if first >= 0x20 && first != 0x7f {
         let len = if first < 0x80 {
@@ -736,7 +754,16 @@ pub(crate) fn read_search_key(fd: libc::c_int, keys: &Keymap) -> Key {
             .map(Key::Text)
             .unwrap_or(Key::Other);
     }
-    chord(first, next)
+    let chord = if first == 0x1b {
+        match escape_input(next) {
+            Some(EscapeInput::Paste) => return read_paste(fd, true),
+            Some(EscapeInput::Chord(chord)) => Some(chord),
+            None => None,
+        }
+    } else {
+        chord(first, next)
+    };
+    chord
         .and_then(|chord| match chord {
             KeyChord::Left => Some(Key::Left),
             KeyChord::Right => Some(Key::Right),
@@ -1236,6 +1263,307 @@ mod tests {
         }
     }
 
+    fn with_input(bytes: &[u8], check: impl FnOnce(libc::c_int)) {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let bytes = bytes.to_vec();
+        let sender = std::thread::spawn(move || writer.write_all(&bytes).unwrap());
+        check(reader.as_raw_fd());
+        drop(reader);
+        sender.join().unwrap();
+    }
+
+    #[test]
+    fn normal_paste_does_not_dispatch_commands() {
+        let config = config(true);
+        for body in [
+            b"xuR\rdd\x03\x04".as_slice(),
+            b"",
+            b"\x1b[20x\x1b[201x\x1b[A",
+        ] {
+            let mut bytes = b"\x1b[200~".to_vec();
+            bytes.extend_from_slice(body);
+            bytes.extend_from_slice(b"\x1b[201~j");
+            with_input(&bytes, |fd| {
+                assert!(matches!(
+                    read_key_with_config(fd, &config.normal, &config),
+                    Key::Other
+                ));
+                assert!(matches!(read_key(fd, &config.normal), Key::Down));
+                assert!(matches!(read_key(fd, &config.normal), Key::Quit));
+            });
+        }
+    }
+
+    #[test]
+    fn unknown_escape_sequences_do_not_leak_into_either_input_mode() {
+        let normal = default_keys(KeyMode::Normal);
+        let search = default_keys(KeyMode::Search);
+        for sequence in [
+            b"\x1b[1;5A".as_slice(),
+            b"\x1b[1;2B",
+            b"\x1b[1;3C",
+            b"\x1b[15;2~",
+            b"\x1b[200;1~",
+            b"\x1b[1 q",
+            b"\x1b[?25h",
+            b"\x1b[Z",
+        ] {
+            let mut bytes = sequence.to_vec();
+            bytes.push(b'j');
+            with_input(&bytes, |fd| {
+                assert!(matches!(read_key(fd, &normal), Key::Other), "{sequence:?}");
+                assert!(matches!(read_key(fd, &normal), Key::Down), "{sequence:?}");
+                assert!(matches!(read_key(fd, &normal), Key::Quit), "{sequence:?}");
+            });
+            with_input(&bytes, |fd| {
+                assert!(
+                    matches!(read_search_key(fd, &search), Key::Other),
+                    "{sequence:?}"
+                );
+                assert!(
+                    matches!(read_search_key(fd, &search), Key::Text(text) if text == "j"),
+                    "{sequence:?}"
+                );
+                assert!(
+                    matches!(read_search_key(fd, &search), Key::Quit),
+                    "{sequence:?}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn interrupted_escape_restarts_without_leaking_bytes() {
+        let normal = default_keys(KeyMode::Normal);
+        let search = default_keys(KeyMode::Search);
+        for bytes in [
+            b"\x1b[1;\x1b[Aj".as_slice(),
+            b"\x1bO1;\x1bOAj",
+            b"\x1b[1;\x1b\x1b[Aj",
+            b"\x1b\x1b[Aj",
+        ] {
+            with_input(bytes, |fd| {
+                assert!(matches!(read_key(fd, &normal), Key::Up));
+                assert!(matches!(read_key(fd, &normal), Key::Down));
+                assert!(matches!(read_key(fd, &normal), Key::Quit));
+            });
+            with_input(bytes, |fd| {
+                assert!(matches!(read_search_key(fd, &search), Key::Up));
+                assert!(matches!(read_search_key(fd, &search), Key::Text(text) if text == "j"));
+                assert!(matches!(read_search_key(fd, &search), Key::Quit));
+            });
+        }
+        for bytes in [b"\x1b[1;\x1b[Rj".as_slice(), b"\x1b[1;\x1b[1;5Aj"] {
+            with_input(bytes, |fd| {
+                assert!(matches!(read_key(fd, &normal), Key::Other));
+                assert!(matches!(read_key(fd, &normal), Key::Down));
+                assert!(matches!(read_key(fd, &normal), Key::Quit));
+            });
+            with_input(bytes, |fd| {
+                assert!(matches!(read_search_key(fd, &search), Key::Other));
+                assert!(matches!(read_search_key(fd, &search), Key::Text(text) if text == "j"));
+                assert!(matches!(read_search_key(fd, &search), Key::Quit));
+            });
+        }
+        let paste = b"\x1b[1;\x1b[200~xuR\rdd\x18\x1a\x1b[201~j";
+        with_input(paste, |fd| {
+            assert!(matches!(read_key(fd, &normal), Key::Other));
+            assert!(matches!(read_key(fd, &normal), Key::Down));
+            assert!(matches!(read_key(fd, &normal), Key::Quit));
+        });
+        with_input(paste, |fd| {
+            assert!(
+                matches!(read_search_key(fd, &search), Key::Text(text) if text == "xuR\rdd\x18\x1a")
+            );
+            assert!(matches!(read_search_key(fd, &search), Key::Text(text) if text == "j"));
+            assert!(matches!(read_search_key(fd, &search), Key::Quit));
+        });
+    }
+
+    #[test]
+    fn cancelled_escape_preserves_the_next_key() {
+        let normal = default_keys(KeyMode::Normal);
+        let search = default_keys(KeyMode::Search);
+        for bytes in [
+            b"\x1b[1;\x18j".as_slice(),
+            b"\x1b[1;\x1aj",
+            b"\x1bO1;\x18j",
+            b"\x1bO1;\x1aj",
+        ] {
+            with_input(bytes, |fd| {
+                assert!(matches!(read_key(fd, &normal), Key::Other));
+                assert!(matches!(read_key(fd, &normal), Key::Down));
+                assert!(matches!(read_key(fd, &normal), Key::Quit));
+            });
+            with_input(bytes, |fd| {
+                assert!(matches!(read_search_key(fd, &search), Key::Other));
+                assert!(matches!(read_search_key(fd, &search), Key::Text(text) if text == "j"));
+                assert!(matches!(read_search_key(fd, &search), Key::Quit));
+            });
+        }
+    }
+
+    #[test]
+    fn oversized_paste_is_drained_in_both_modes() {
+        let normal = default_keys(KeyMode::Normal);
+        let search = default_keys(KeyMode::Search);
+        for len in [65530, 65531, 65535, 65536, 65537, 70000] {
+            let mut bytes = b"\x1b[200~".to_vec();
+            bytes.extend(std::iter::repeat_n(b'x', len));
+            bytes.extend_from_slice(b"\x1b[201~j");
+            with_input(&bytes, |fd| {
+                assert!(matches!(read_key(fd, &normal), Key::Other));
+                assert!(matches!(read_key(fd, &normal), Key::Down));
+                assert!(matches!(read_key(fd, &normal), Key::Quit));
+            });
+            with_input(&bytes, |fd| {
+                assert!(
+                    matches!(
+                        read_search_key(fd, &search),
+                        Key::Text(text) if text == "x".repeat(len.min(65536))
+                    ),
+                    "length: {len}"
+                );
+                assert!(matches!(read_search_key(fd, &search), Key::Text(text) if text == "j"));
+                assert!(matches!(read_search_key(fd, &search), Key::Quit));
+            });
+        }
+    }
+
+    #[test]
+    fn escape_parsing_stays_inside_logical_key_packets() {
+        let normal = default_keys(KeyMode::Normal);
+        for payload in [
+            b"\x1b[200~".as_slice(),
+            b"\x1b[1;5A",
+            b"\x1b[1;",
+            b"\x1b[1;\x1b[R",
+            b"\x1b[1;\x18",
+            b"\x1b[1;\x1a",
+        ] {
+            let mut bytes = vec![0x08, payload.len() as u8, 0, 7];
+            bytes.extend_from_slice(payload);
+            bytes.extend_from_slice(b"client1\x08\x01\x00\x07jclient1");
+            with_input(&bytes, |fd| {
+                assert!(matches!(
+                    read_key(fd, &normal),
+                    Key::Owned(key, client) if matches!(*key, Key::Other) && client == "client1"
+                ));
+                assert!(matches!(
+                    read_key(fd, &normal),
+                    Key::Owned(key, client) if matches!(*key, Key::Down) && client == "client1"
+                ));
+                assert!(matches!(read_key(fd, &normal), Key::Quit));
+            });
+        }
+    }
+
+    #[test]
+    fn incomplete_input_ends_without_an_action() {
+        let normal = default_keys(KeyMode::Normal);
+        let search = default_keys(KeyMode::Search);
+        for bytes in [b"\x1b[".as_slice(), b"\x1b[1;", b"\x1b[200~xuR\rdd"] {
+            with_input(bytes, |fd| {
+                assert!(matches!(read_key(fd, &normal), Key::Other));
+                assert!(matches!(read_key(fd, &normal), Key::Quit));
+            });
+            with_input(bytes, |fd| {
+                assert!(matches!(read_search_key(fd, &search), Key::Other));
+                assert!(matches!(read_search_key(fd, &search), Key::Quit));
+            });
+        }
+    }
+
+    #[test]
+    fn incomplete_input_times_out_and_next_key_still_works() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        for text_mode in [false, true] {
+            let keys = default_keys(if text_mode {
+                KeyMode::Search
+            } else {
+                KeyMode::Normal
+            });
+            for bytes in [b"\x1b[".as_slice(), b"\x1b[1;", b"\x1b[200~xuR\rdd"] {
+                let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+                let read = || {
+                    if text_mode {
+                        read_search_key(reader.as_raw_fd(), &keys)
+                    } else {
+                        read_key(reader.as_raw_fd(), &keys)
+                    }
+                };
+                writer.write_all(bytes).unwrap();
+                assert!(matches!(read(), Key::Other));
+                writer.write_all(b"j").unwrap();
+                if text_mode {
+                    assert!(matches!(read(), Key::Text(text) if text == "j"));
+                } else {
+                    assert!(matches!(read(), Key::Down));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn long_unknown_csi_is_drained_without_growing_the_capture() {
+        let normal = default_keys(KeyMode::Normal);
+        let mut bytes = b"\x1b[".to_vec();
+        bytes.extend(std::iter::repeat_n(b'1', 10000));
+        bytes.extend_from_slice(b"Aj");
+        with_input(&bytes, |fd| {
+            assert!(matches!(read_key(fd, &normal), Key::Other));
+            assert!(matches!(read_key(fd, &normal), Key::Down));
+            assert!(matches!(read_key(fd, &normal), Key::Quit));
+        });
+    }
+
+    #[test]
+    fn chunked_escape_and_paste_wait_for_in_flight_bytes() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        for text_mode in [false, true] {
+            let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+            let sender = std::thread::spawn(move || {
+                for byte in b"\x1b[1;5A\x1b[200~" {
+                    writer.write_all(&[*byte]).unwrap();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                std::thread::sleep(Duration::from_millis(150));
+                for byte in "xuR\rddé\x1b[201~j".as_bytes() {
+                    writer.write_all(&[*byte]).unwrap();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            });
+            let fd = reader.as_raw_fd();
+            let keys = default_keys(if text_mode {
+                KeyMode::Search
+            } else {
+                KeyMode::Normal
+            });
+            let read = || {
+                if text_mode {
+                    read_search_key(fd, &keys)
+                } else {
+                    read_key(fd, &keys)
+                }
+            };
+            assert!(matches!(read(), Key::Other));
+            let paste = read();
+            if text_mode {
+                assert!(matches!(paste, Key::Text(text) if text == "xuR\rddé"));
+                assert!(matches!(read(), Key::Text(text) if text == "j"));
+            } else {
+                assert!(matches!(paste, Key::Other));
+                assert!(matches!(read(), Key::Down));
+            }
+            assert!(matches!(read(), Key::Quit));
+            sender.join().unwrap();
+        }
+    }
+
     #[test]
     fn popup_text_keys_and_bracketed_paste_are_atomic() {
         let mut fds = [0; 2];
@@ -1466,14 +1794,14 @@ command = "fish"
         ));
     }
 
-    /// Feed escape_chord a scripted tail. Every byte goes through the same
+    /// Feed escape_input a scripted tail. Every byte goes through the same
     /// reader, which is the point: mirror mode delivers keys over a
     /// non-blocking FIFO one byte at a time, so a tail byte that has not
     /// arrived yet must be waited for, not read blind. Reading the pair
     /// without polling hit EAGAIN and dropped every other arrow.
     fn decode(tail: &[Option<u8>]) -> Option<KeyChord> {
         let mut it = tail.iter().copied();
-        escape_chord(move || it.next().flatten())
+        chord(0x1b, move || it.next().flatten())
     }
 
     fn default_keys(mode: crate::app_config::KeyMode) -> Keymap {
