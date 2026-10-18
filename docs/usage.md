@@ -71,7 +71,7 @@ Panes running `nvim` or `lazygit` show the Neovim or git icon.
 
 - `▼` is open, `▶` is collapsed.
 - A collapsed `▶` takes the color of the most urgent agent hidden under it
-  (blocked, then done, then working) and blinks.
+  (blocked, then done, then working) and blinks while `display.animate` is on.
 - Collapse state survives closing the sidebar and restarting tmux. After a
   restart it applies to sessions and windows (by index) with the same names.
 - Search and User attention show every match without changing what is
@@ -140,6 +140,27 @@ one is not a close. Press `u` to list them, newest first:
 `display.agent_label` picks `icon-text` (default), `icon`, or `text`. The
 installer sets it from its font check. Change an icon with `AGENT_ICON`; see
 [Adding / overriding agents](custom-agents.md).
+
+### Motion and glyphs
+
+- `display.animate = false` stops the blink and the spinner, and the sidebar
+  stops redrawing every 250 ms. Every state shows a steady glyph; a working
+  agent shows `⣾`.
+- `display.glyphs = "plain"` swaps braille and Nerd Font glyphs for plain
+  text, for fonts and terminals without them:
+
+  | State | `rich` (default) | `plain` |
+  | --- | --- | --- |
+  | blocked | `⣿` red | `!` |
+  | working | spinner, `⣾` when steady | `\|/-\` spinner, `>` when steady |
+  | done | `⣿` green | `*` |
+  | idle | `⣿` green | `.` |
+
+  Agent icons that are not plain ASCII are hidden (the name still shows), and
+  every window and pane row uses `▢`. The `#{agenmux}` status segment follows
+  the same setting.
+- With `rich` glyphs and no animation, blocked, done, and idle share `⣿` and
+  differ only by color; `plain` gives each state its own shape.
 
 ## Search and filters
 

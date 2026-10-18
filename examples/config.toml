@@ -14,6 +14,8 @@ sidebar_position = "left" # window edge the sidebar docks to: left | right
 popup_width = 40
 popup_height = "auto" # "auto" or cells
 agent_label = "icon-text" # agent rows: icon-text | icon | text
+animate = true         # false: steady glyphs, no blink or spinner, no 250 ms redraws
+glyphs = "rich"        # rich | plain: ASCII states and no Nerd Font icons
 
 [behavior]
 notifications = true

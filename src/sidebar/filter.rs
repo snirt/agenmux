@@ -445,6 +445,9 @@ impl Sidebar {
     /// Whether the frame animates: a visible agent needs attention, or one is
     /// hidden under a collapsed header whose `▶` blinks for it.
     pub(super) fn animating(&self) -> bool {
+        if !self.settings.settings.animate {
+            return false;
+        }
         let attention = |state: &str| matches!(state, "working" | "blocked" | "done");
         self.visible
             .iter()

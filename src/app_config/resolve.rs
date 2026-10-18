@@ -15,6 +15,9 @@ pub struct AppConfig {
     pub show_all_panes: bool,
     pub show_frame: bool,
     pub agent_label: AgentLabel,
+    /// Blink and spin; off draws every state with a steady glyph.
+    pub animate: bool,
+    pub glyphs: Glyphs,
     pub sidebar_width: u16,
     pub sidebar_position: SidebarPosition,
     pub popup_width: u16,
@@ -127,6 +130,8 @@ pub fn resolve_cli(
             ("display.show_all_panes", "default"),
             ("display.show_frame", "default"),
             ("display.agent_label", "default"),
+            ("display.animate", "default"),
+            ("display.glyphs", "default"),
             ("display.sidebar_width", "default"),
             ("display.sidebar_position", "default"),
             ("display.popup_width", "default"),
@@ -153,6 +158,8 @@ pub fn resolve_cli(
         show_all_panes: true,
         show_frame: true,
         agent_label: AgentLabel::IconText,
+        animate: true,
+        glyphs: Glyphs::Rich,
         sidebar_width: 30,
         sidebar_position: SidebarPosition::Left,
         popup_width: 40,
@@ -186,6 +193,8 @@ pub fn resolve_cli(
             set!(show_all_panes, d.show_all_panes, "display.show_all_panes");
             set!(show_frame, d.show_frame, "display.show_frame");
             set!(agent_label, d.agent_label, "display.agent_label");
+            set!(animate, d.animate, "display.animate");
+            set!(glyphs, d.glyphs, "display.glyphs");
             set!(sidebar_width, d.sidebar_width, "display.sidebar_width");
             set!(
                 sidebar_position,
@@ -637,6 +646,16 @@ mod tests {
         assert_eq!(framed.sources["display.show_frame"], "file");
         assert!(parse("[display]\nshow_all_panes = 'true'").is_err());
         assert!(parse("[display]\nshow_frame = 'false'").is_err());
+        assert!(default.animate);
+        assert_eq!(default.glyphs, Glyphs::Rich);
+        let calm = parse("[display]\nanimate = false\nglyphs = 'plain'").unwrap();
+        let calm = resolve(&calm, &BTreeMap::new()).unwrap();
+        assert!(!calm.animate);
+        assert_eq!(calm.glyphs, Glyphs::Plain);
+        assert_eq!(calm.sources["display.animate"], "file");
+        assert_eq!(calm.sources["display.glyphs"], "file");
+        assert!(parse("[display]\nanimate = 'off'").is_err());
+        assert!(parse("[display]\nglyphs = 'ascii'").is_err());
         let paused = resolve(
             &parse("[behavior]\nauto_update = false").unwrap(),
             &BTreeMap::new(),
@@ -667,6 +686,8 @@ mod tests {
                 **field != "display.show_all_panes"
                     && **field != "display.show_frame"
                     && **field != "display.agent_label"
+                    && **field != "display.animate"
+                    && **field != "display.glyphs"
                     && **field != "behavior.auto_update"
             })
             .filter(|(field, _)| field.starts_with("display.") || field.starts_with("behavior."))

@@ -81,6 +81,8 @@ pub struct DisplayConfig {
     pub show_all_panes: Option<bool>,
     pub show_frame: Option<bool>,
     pub agent_label: Option<AgentLabel>,
+    pub animate: Option<bool>,
+    pub glyphs: Option<Glyphs>,
     pub sidebar_width: Option<u16>,
     pub sidebar_position: Option<SidebarPosition>,
     pub popup_width: Option<u16>,
@@ -106,6 +108,59 @@ pub enum AgentLabel {
     IconText,
     Icon,
     Text,
+}
+/// Status and icon glyphs: braille and Nerd Font icons, or plain text for
+/// fonts and terminals that lack them.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(try_from = "String")]
+pub enum Glyphs {
+    Rich,
+    Plain,
+}
+/// The characters one glyph set draws agent states with.
+pub struct GlyphSet {
+    pub blocked: char,
+    pub done: char,
+    pub idle: char,
+    /// Working without animation, and in the status line.
+    pub working: char,
+    pub spinner: [char; 8],
+}
+const RICH: GlyphSet = GlyphSet {
+    blocked: '⣿',
+    done: '⣿',
+    idle: '⣿',
+    working: '⣾',
+    spinner: ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'],
+};
+const PLAIN: GlyphSet = GlyphSet {
+    blocked: '!',
+    done: '*',
+    idle: '.',
+    working: '>',
+    spinner: ['|', '/', '-', '\\', '|', '/', '-', '\\'],
+};
+impl Glyphs {
+    pub const fn set(self) -> &'static GlyphSet {
+        match self {
+            Glyphs::Rich => &RICH,
+            Glyphs::Plain => &PLAIN,
+        }
+    }
+    /// Steady glyph for a state; unknown states draw as idle.
+    pub fn state(self, state: &str) -> char {
+        let set = self.set();
+        match state {
+            "blocked" => set.blocked,
+            "done" => set.done,
+            "working" => set.working,
+            _ => set.idle,
+        }
+    }
+    /// Plain glyphs keep only ASCII agent icons ("OC"); the rest need fonts.
+    pub fn shows_icon(self, icon: &str) -> bool {
+        self == Glyphs::Rich || icon.is_ascii()
+    }
 }
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -152,6 +207,7 @@ macro_rules! string_values {
 string_values!(DisplayMode, "expected split or popup", "split" => Split, "popup" => Popup);
 string_values!(SidebarPosition, "expected left or right", "left" => Left, "right" => Right);
 string_values!(AgentLabel, "expected icon-text, icon, or text", "icon-text" => IconText, "icon" => Icon, "text" => Text);
+string_values!(Glyphs, "expected rich or plain", "rich" => Rich, "plain" => Plain);
 string_values!(AutoHeight, "expected auto", "auto" => Auto);
 
 mod file;

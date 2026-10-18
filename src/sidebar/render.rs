@@ -7,7 +7,8 @@ use super::overlay::{current_tag, Overlay};
 use super::ui::{bar, TopBar};
 use super::{Sidebar, VisiblePane, E};
 
-const SPIN: [char; 8] = ['⠹', '⢸', '⣰', '⣤', '⣆', '⡇', '⠏', '⠛'];
+#[cfg(test)]
+const SPIN: [char; 8] = crate::app_config::Glyphs::Rich.set().spinner;
 
 /// " · "-separated hint segments, skipping unbound (empty) ones.
 pub(super) fn join(parts: &[String]) -> String {
@@ -511,6 +512,11 @@ impl Sidebar {
             .iter()
             .find(|c| c.name == agent)
             .map_or("", |c| c.icon.as_str());
+        let icon = if self.settings.settings.glyphs.shows_icon(icon) {
+            icon
+        } else {
+            ""
+        };
         match self.settings.settings.agent_label {
             _ if icon.is_empty() => agent.to_string(),
             AgentLabel::IconText => format!("{icon} {agent}"),
@@ -519,27 +525,32 @@ impl Sidebar {
         }
     }
 
-    fn dot(&self, state: &str) -> String {
-        let on = (self.tick / 2).is_multiple_of(2);
-        let fg = self.palette.state_fg(state).fg("");
-        match state {
-            "blocked" => {
-                if on {
-                    format!("{fg}⣿{E}[0m")
-                } else {
-                    " ".into()
-                }
-            }
-            "working" => format!("{fg}{}{E}[0m", SPIN[(self.tick % 8) as usize]),
-            "done" => {
-                if on {
-                    format!("{fg}⣿{E}[0m")
-                } else {
-                    " ".into()
-                }
-            }
-            _ => format!("{fg}⣿{E}[0m"),
+    /// Animation phase: frozen at the first frame when animation is off, so
+    /// blinking states stay lit and the spinner stands still.
+    fn phase(&self) -> u32 {
+        if self.settings.settings.animate {
+            self.tick
+        } else {
+            0
         }
+    }
+
+    /// Blinking states show on two ticks, then off for two.
+    fn blink_on(&self) -> bool {
+        (self.phase() / 2).is_multiple_of(2)
+    }
+
+    fn dot(&self, state: &str) -> String {
+        let fg = self.palette.state_fg(state).fg("");
+        let glyphs = self.settings.settings.glyphs;
+        let glyph = match state {
+            "blocked" | "done" if !self.blink_on() => return " ".into(),
+            "working" if self.settings.settings.animate => {
+                glyphs.set().spinner[(self.phase() % 8) as usize]
+            }
+            _ => glyphs.state(state),
+        };
+        format!("{fg}{glyph}{E}[0m")
     }
 
     /// Frame and click-row sink: stdout in tty mode; direct writes to visible
@@ -662,7 +673,7 @@ impl Sidebar {
                     _ => 0,
                 })
                 .filter(|state| *state != "idle");
-            let on = (self.tick / 2).is_multiple_of(2);
+            let on = self.blink_on();
             match urgent {
                 Some(state) if on => {
                     format!("{}▶{accent}", self.palette.state_fg(state).fg("1"))
@@ -789,7 +800,9 @@ impl Sidebar {
                     self.agent_label(&row.agent)
                 )
             } else {
+                let plain = self.settings.settings.glyphs == crate::app_config::Glyphs::Plain;
                 let glyph = match pane.command.as_str() {
+                    _ if plain => "▢",
                     "nvim" => "\u{f36f}",    // nf-linux-neovim
                     "lazygit" => "\u{e702}", // nf-dev-git
                     _ if expanded => "▢",
@@ -1809,7 +1822,42 @@ mod tests {
                 "{label:?} agent label: {line}"
             );
         }
+        // Plain glyphs drop non-ASCII icons and give each state an ASCII
+        // shape; turning animation off freezes blink and spinner.
+        use crate::app_config::Glyphs;
         sb.settings.settings.agent_label = AgentLabel::IconText;
+        sb.settings.settings.glyphs = Glyphs::Plain;
+        sb.render(true);
+        let plain = ansi.replace_all(&sb.last_frame, "").to_string();
+        let line = plain.lines().find(|line| line.contains("repo")).unwrap();
+        assert!(
+            line.contains("claude") && !line.contains('◆'),
+            "plain glyphs drop the icon: {line}"
+        );
+        assert!(
+            !plain.contains(['\u{f36f}', '\u{e702}', '\u{eb7f}']),
+            "{plain}"
+        );
+        let dot = |sb: &Sidebar, state| ansi.replace_all(&sb.dot(state), "").to_string();
+        let tick = sb.tick;
+        sb.tick = 2; // the blink's off phase
+        assert_eq!(dot(&sb, "blocked"), " ", "blocked blinks while animating");
+        assert_eq!(dot(&sb, "working"), "-");
+        sb.settings.settings.animate = false;
+        for (state, glyph) in [
+            ("blocked", "!"),
+            ("done", "*"),
+            ("idle", "."),
+            ("working", ">"),
+        ] {
+            assert_eq!(dot(&sb, state), glyph, "steady {state}");
+        }
+        sb.settings.settings.glyphs = Glyphs::Rich;
+        assert_eq!(dot(&sb, "done"), "⣿", "done stays lit without blinking");
+        assert_eq!(dot(&sb, "working"), "⣾", "the spinner stands still");
+        assert!(!sb.animating(), "no ticks without animation");
+        sb.settings.settings.animate = true;
+        sb.tick = tick;
         for all_panes in [true, false] {
             sb.settings.settings.show_all_panes = all_panes;
             sb.rebuild_visible(false);

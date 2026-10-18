@@ -338,6 +338,7 @@ fn is_bool_setting(name: &str) -> bool {
         name,
         "display.show_all_panes"
             | "display.show_frame"
+            | "display.animate"
             | "behavior.notifications"
             | "behavior.auto_update"
             | "tmux_management.enabled"
@@ -425,6 +426,7 @@ fn choices(name: &str) -> Option<&'static [&'static str]> {
         "display.mode" => Some(&["split", "popup"]),
         "display.sidebar_position" => Some(&["left", "right"]),
         "display.agent_label" => Some(&["icon-text", "icon", "text"]),
+        "display.glyphs" => Some(&["rich", "plain"]),
         "theme.base" => Some(&["dark", "light", "terminal"]),
         _ if name.starts_with("quick_launchers.") && name.ends_with(".working_directory") => {
             Some(&["selected", "tmux"])
@@ -824,15 +826,26 @@ impl Sidebar {
                     .filter(|(label, _)| !label.is_empty())
                     .map(|(label, what)| format!("{label:<8} {what}\n"))
                     .collect();
+                let glyphs = self.settings.settings.glyphs;
+                let (spinning, spins, blinks) = if self.settings.settings.animate {
+                    (glyphs.set().spinner[0], " (spinner)", " (blinks)")
+                } else {
+                    (glyphs.state("working"), "", "")
+                };
+                let glyph = |state| glyphs.state(state);
                 format!(
                     "{E}[2J{E}[H{header}{title} — help{E}[0m\n\n\
 {E}[1mstatus{E}[0m\n\
- {idle}⣿{E}[0m  idle\n\
- {working}⠹{E}[0m  working (spinner)\n\
- {blocked}⣿{E}[0m  blocked, waiting for input (blinks)\n\
- {done}⣿{E}[0m  done, not viewed yet (blinks)\n\n\
+ {idle}{}{E}[0m  idle\n\
+ {working}{}{E}[0m  working{spins}\n\
+ {blocked}{}{E}[0m  blocked, waiting for input{blinks}\n\
+ {done}{}{E}[0m  done, not viewed yet{blinks}\n\n\
 {E}[1mkeys{E}[0m\n{keys}\n\
-{muted}press any key to return{E}[0m"
+{muted}press any key to return{E}[0m",
+                    glyph("idle"),
+                    spinning,
+                    glyph("blocked"),
+                    glyph("done"),
                 )
             }
             Some(Overlay::Versions { sel, chosen }) => {

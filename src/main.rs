@@ -275,7 +275,13 @@ fn cmd_status() -> i32 {
             Err(_) => return 0, // no server -> empty segment, like bash
         }
     };
-    print!("{}", scan::status_segment(&rows));
+    // glyphs is file-only, so skip the tmux option round trip; a broken file
+    // falls back to the default rather than blanking the status line
+    let glyphs = app_config::load()
+        .ok()
+        .and_then(|file| file.display?.glyphs)
+        .unwrap_or(app_config::Glyphs::Rich);
+    print!("{}", scan::status_segment(&rows, glyphs));
     0
 }
 

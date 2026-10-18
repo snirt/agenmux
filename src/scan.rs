@@ -1,5 +1,6 @@
 // Pane enumeration + state detection over the control-mode pipe.
 // Output contract: byte-identical to `scan.sh list` / `scan.sh status`.
+use crate::app_config::Glyphs;
 use crate::conf::AgentConf;
 use crate::procs::{self, IdentCache, Snapshot};
 use crate::tmux::{Tmux, TmuxError};
@@ -417,20 +418,16 @@ pub fn to_tsv(rows: &[PaneRow]) -> String {
 
 /// `#[fg=red]⣿#[default]N #[fg=yellow]⣾#[default]N #[fg=green]⣿#[default]N`,
 /// zero counts omitted, no trailing space. Empty when no agents.
-pub fn status_segment(rows: &[PaneRow]) -> String {
+pub fn status_segment(rows: &[PaneRow], glyphs: Glyphs) -> String {
     let n = |s: &str| rows.iter().filter(|r| r.state == s).count();
-    let (b, w, i) = (n("blocked"), n("working"), n("idle"));
-    let mut out = String::new();
-    if b > 0 {
-        out.push_str(&format!("#[fg=red]⣿#[default]{b} "));
-    }
-    if w > 0 {
-        out.push_str(&format!("#[fg=yellow]⣾#[default]{w} "));
-    }
-    if i > 0 {
-        out.push_str(&format!("#[fg=green]⣿#[default]{i} "));
-    }
-    out.trim_end().to_string()
+    [("blocked", "red"), ("working", "yellow"), ("idle", "green")]
+        .into_iter()
+        .filter_map(|(state, color)| {
+            let count = n(state);
+            (count > 0).then(|| format!("#[fg={color}]{}#[default]{count}", glyphs.state(state)))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Parse cached TSV back into rows (only state is needed downstream, but
@@ -543,12 +540,22 @@ mod tests {
 
     #[test]
     fn segment_counts_and_omits_zeros() {
-        assert_eq!(status_segment(&[]), "");
+        assert_eq!(status_segment(&[], Glyphs::Rich), "");
         assert_eq!(
-            status_segment(&[row("working"), row("idle"), row("idle")]),
+            status_segment(&[row("working"), row("idle"), row("idle")], Glyphs::Rich),
             "#[fg=yellow]⣾#[default]1 #[fg=green]⣿#[default]2"
         );
-        assert_eq!(status_segment(&[row("blocked")]), "#[fg=red]⣿#[default]1");
+        assert_eq!(
+            status_segment(&[row("blocked")], Glyphs::Rich),
+            "#[fg=red]⣿#[default]1"
+        );
+        assert_eq!(
+            status_segment(
+                &[row("blocked"), row("working"), row("idle")],
+                Glyphs::Plain
+            ),
+            "#[fg=red]!#[default]1 #[fg=yellow]>#[default]1 #[fg=green].#[default]1"
+        );
     }
 
     #[test]
