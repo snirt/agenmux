@@ -1,15 +1,33 @@
-# agenmux v0.8.3
+# agenmux v0.8.4
 
 ## What's changed
 
-v0.8.3 separates selecting a sidebar row from jumping to its pane: a click selects, a double click opens.
+v0.8.4 adds settings to stop the animation and use plain-text glyphs, fixes layout restore on tmux 3.8, hardens the terminal against panics and control keys, and stops pasted text and modified keys from leaking into commands.
 
-### Mouse
+### Motion and glyphs
 
-- A single click selects a record and keeps focus in the sidebar, even when the record is already selected; repeated clicks no longer switch panes ([#202](https://github.com/snirt/agenmux/pull/202), [#201](https://github.com/snirt/agenmux/issues/201)).
-- A double click on a record jumps to its pane, and a double click on a session or window header folds or unfolds it. Quick clicks on two different records only select ([#202](https://github.com/snirt/agenmux/pull/202)).
-- Settings, versions (`U`) and recently closed (`u`) follow the same rule: a click selects, a double click does what Enter does. Versions and recently closed now respond to the mouse, and clicking the recently closed search line refines the search ([#202](https://github.com/snirt/agenmux/pull/202)).
-- A double click in the sidebar no longer drops it into tmux copy mode ([#202](https://github.com/snirt/agenmux/pull/202)).
+- `display.animate = false` stops blinking and the spinner: blocked and done stay lit, working shows a steady glyph, and the 250 ms redraw stops ([#219](https://github.com/snirt/agenmux/pull/219), [#213](https://github.com/snirt/agenmux/issues/213)).
+- `display.glyphs = "plain"` replaces font-dependent glyphs with plain text in the sidebar, the help legend and the `#{agenmux}` status segment: `!` blocked, `>` working, `*` done, `.` idle. Agent icons that are not plain ASCII are hidden and Nerd Font window icons become `▢` ([#219](https://github.com/snirt/agenmux/pull/219)).
+- Both settings are editable from Settings ([#219](https://github.com/snirt/agenmux/pull/219)).
+
+### tmux 3.8
+
+- Closing the sidebar restores the window's original layout again. tmux 3.8 reports layouts as JSON, and the size check before restoring did not understand that format, so the restore was silently skipped ([#221](https://github.com/snirt/agenmux/pull/221), [#220](https://github.com/snirt/agenmux/issues/220)).
+
+### Terminal
+
+- A panic now restores the terminal settings, turns off bracketed paste and shows the cursor before exiting, so the shell is usable afterwards ([#217](https://github.com/snirt/agenmux/pull/217), [#206](https://github.com/snirt/agenmux/issues/206)).
+- While the sidebar is open, Ctrl-Z, Ctrl-\, Ctrl-S and Ctrl-O no longer suspend, kill or freeze it. Ctrl-C and Ctrl-D still cancel or exit as before ([#217](https://github.com/snirt/agenmux/pull/217)).
+
+### Input
+
+- Modified keys such as Ctrl-Up no longer leak characters like `5A` into search, and unknown escape sequences do nothing ([#215](https://github.com/snirt/agenmux/pull/215), [#205](https://github.com/snirt/agenmux/issues/205)).
+- Bracketed paste is ignored in normal mode instead of running as commands, and is inserted as one edit in text fields ([#215](https://github.com/snirt/agenmux/pull/215)).
+
+### Overlays
+
+- Recently closed (`u`) and settings (`s`) footers show your configured keys, and hide actions that are unbound ([#218](https://github.com/snirt/agenmux/pull/218), [#212](https://github.com/snirt/agenmux/issues/212)).
+- `d` in recently closed now asks `forget …? y/N` before removing an entry from restore history; only `y` forgets ([#218](https://github.com/snirt/agenmux/pull/218)).
 
 ### Assets
 
