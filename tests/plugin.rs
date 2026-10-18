@@ -284,6 +284,26 @@ fn latency_stats(samples: &[Duration]) -> (u128, u128, u128) {
 }
 
 #[test]
+fn teardown_restores_a_layout_saved_at_the_current_size() {
+    let tmux = TestTmux::new("restore-layout");
+    tmux.assert_tmux(&["split-window", "-h"]);
+    let window = tmux.text(&["display-message", "-p", "#{window_id}"]);
+    let saved = tmux.text(&["display-message", "-p", "#{window_layout}"]);
+    let option = format!("@agenmux-layout-{window}");
+    tmux.assert_tmux(&["set-option", "-g", &option, &saved]);
+    tmux.assert_tmux(&["split-window", "-hf", "-t", &window]);
+    tmux.assert_tmux(&["set-option", "-p", "@agenmux", "1"]);
+    tmux.assert_tmux(&["select-layout", "-t", &window, "even-vertical"]);
+
+    assert_success(tmux.bin(&["teardown"]), "agenmux teardown");
+
+    assert_eq!(
+        tmux.text(&["display-message", "-p", "-t", &window, "#{window_layout}"]),
+        saved
+    );
+}
+
+#[test]
 fn teardown_discards_a_layout_after_window_size_changes() {
     let tmux = TestTmux::new("restore-size");
     let window = tmux.text(&["display-message", "-p", "#{window_id}"]);

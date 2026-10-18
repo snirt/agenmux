@@ -562,8 +562,24 @@ pub fn pane_orphan() -> i32 {
     0
 }
 
-fn layout_size(layout: &str) -> Option<&str> {
-    layout.split_once(',')?.1.split(',').next()
+/// `csum,WxH,...`, or tmux 3.8's JSON whose first `"w"`/`"h"` are the root's.
+fn layout_size(layout: &str) -> Option<String> {
+    if layout.starts_with('{') {
+        let field = |key: &str| {
+            let value = layout.split_once(key)?.1;
+            value
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .filter(|n| !n.is_empty())
+        };
+        return Some(format!("{}x{}", field("\"w\":")?, field("\"h\":")?));
+    }
+    layout
+        .split_once(',')?
+        .1
+        .split(',')
+        .next()
+        .map(str::to_string)
 }
 
 pub(crate) fn restore_layout(window: &str) {
@@ -586,7 +602,7 @@ pub(crate) fn restore_layout(window: &str) {
         "#{window_width}x#{window_height}",
     ])
     .unwrap_or_default();
-    if layout_size(layout) == Some(current.trim()) {
+    if layout_size(layout).as_deref() == Some(current.trim()) {
         let _ = tmux::command_status(&["select-layout", "-t", window, layout]);
     }
 }
@@ -699,7 +715,13 @@ mod tests {
 
     #[test]
     fn layout_size_is_the_absolute_window_size() {
-        assert_eq!(layout_size("abcd,100x30,0,0[100x30,0,0,1]"), Some("100x30"));
+        assert_eq!(
+            layout_size("abcd,100x30,0,0[100x30,0,0,1]").as_deref(),
+            Some("100x30")
+        );
         assert_eq!(layout_size("invalid"), None);
+        let json = r#"{"V":2,"L":{"t":"h","w":120,"h":40,"x":0,"y":0,"c":[{"t":"p","w":60,"h":40,"x":0,"y":0,"l":0,"i":0,"I":"%0"},{"t":"p","w":59,"h":40,"x":61,"y":0,"a":true,"i":1,"I":"%1"}]}}"#;
+        assert_eq!(layout_size(json).as_deref(), Some("120x40"));
+        assert_eq!(layout_size(r#"{"V":2,"L":{"t":"h"}}"#), None);
     }
 }
