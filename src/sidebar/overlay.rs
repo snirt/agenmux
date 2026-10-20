@@ -4,12 +4,8 @@ use crate::release;
 use crate::tmux::{command, command_spawn};
 use std::path::{Path, PathBuf};
 
-use super::render::{
-    app_title, back_hint, clip_frame, clip_width, cursor_mark, join, key_hint, nav_label,
-};
-use super::ui::{
-    bar, Action as UiAction, Editor, Label, Search, Select, SelectedRow, TextEdit, TopBar,
-};
+use super::render::{back_hint, clip_frame, clip_width, cursor_mark, join, key_hint, nav_label};
+use super::ui::{Action as UiAction, Editor, Label, Search, Select, SelectedRow, TextEdit, TopBar};
 use super::{MutationTarget, Sidebar, E};
 
 pub(super) enum Overlay {
@@ -502,6 +498,7 @@ fn render_settings(
     effective: &crate::app_config::AppConfig,
     palette: &crate::app_config::Palette,
     focused: bool,
+    header: &str,
     cols: usize,
     rows: usize,
 ) -> (String, Vec<Option<usize>>) {
@@ -517,7 +514,7 @@ fn render_settings(
         settings.sel.min(total - 1)
     };
     let selected = all.get(settings.sel);
-    let mut out = format!("{E}[2J{E}[H{E}[1m{} — settings{E}[0m\n", app_title());
+    let mut out = format!("{header}\n");
     let mut targets = Vec::new();
     if settings.confirm {
         out.push_str(&format!("\nRevert to defaults?\n\nPersisted customizations will be removed.\nCLI and tmux overrides remain effective.\n\n{}", join(&[hint(Action::Jump, "confirm"), cancel])));
@@ -734,10 +731,9 @@ impl Sidebar {
     }
 
     pub(super) fn render_overlay(&mut self, force: bool) {
-        let title = app_title();
         let (cols, rows) = self.render_size();
         let top_bar = TopBar::new(&self.palette, self.plugin_selected, self.header_inherited);
-        let header = top_bar.foreground("1");
+        let header = |name| top_bar.overlay(name, cols);
         let muted = self.palette.muted_fg.fg("");
         let idle = self.palette.idle_fg.fg("");
         let working = self.palette.working_fg.fg("");
@@ -834,7 +830,7 @@ impl Sidebar {
                 };
                 let glyph = |state| glyphs.state(state);
                 format!(
-                    "{E}[2J{E}[H{header}{title} — help{E}[0m\n\n\
+                    "{}\n\n\
 {E}[1mstatus{E}[0m\n\
  {idle}{}{E}[0m  idle\n\
  {working}{}{E}[0m  working{spins}\n\
@@ -842,6 +838,7 @@ impl Sidebar {
  {done}{}{E}[0m  done, not viewed yet{blinks}\n\n\
 {E}[1mkeys{E}[0m\n{keys}\n\
 {muted}press any key to return{E}[0m",
+                    header("help"),
                     glyph("idle"),
                     spinning,
                     glyph("blocked"),
@@ -858,7 +855,7 @@ impl Sidebar {
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
                 *sel = picker_sel(&tags, &cur, chosen.as_deref(), *sel);
-                let mut text = format!("{E}[2J{E}[H{header}{title} — versions{E}[0m\n\n");
+                let mut text = format!("{}\n\n", header("versions"));
                 let mut targets = vec![None, Some(0), None];
                 targets.extend((1..=tags.len()).map(Some));
                 click_rows = self::click_rows(&targets);
@@ -923,8 +920,7 @@ impl Sidebar {
                         let label = clip_width(&undo_label(entry), room);
                         format!("{error}forget {kind} {}? y/N{E}[0m", label.trim_end())
                     });
-                let mut text =
-                    format!("{E}[2J{E}[H{header}{title} — recently closed{E}[0m\n{prompt}\n");
+                let mut text = format!("{}\n{prompt}\n", header("recently closed"));
                 let mut targets = vec![None];
                 if active {
                     // Drawn only while active, when the row shows the query.
@@ -1019,6 +1015,7 @@ impl Sidebar {
                     &self.settings.settings,
                     &self.palette,
                     self.plugin_selected,
+                    &header("settings"),
                     cols,
                     rows,
                 );
@@ -1029,26 +1026,6 @@ impl Sidebar {
             Some(Overlay::Create { .. } | Overlay::Rename { .. } | Overlay::Confirm(_)) | None => {
                 return
             }
-        };
-        let header_bg = top_bar.background();
-        let text = if header_bg.is_empty() {
-            text
-        } else {
-            let (header, body) = text.split_once('\n').unwrap_or((&text, ""));
-            // Clear with the canvas background, not the header fill.
-            let header = header
-                .strip_prefix(&format!("{E}[2J{E}[H"))
-                .unwrap_or(header);
-            let width = title.chars().count()
-                + match self.overlay {
-                    Some(Overlay::Help) => 7,
-                    Some(Overlay::Undo { .. }) => 18,
-                    _ => 11,
-                };
-            format!(
-                "{E}[2J{E}[H{}\n{body}",
-                bar(header, &header_bg, cols, width)
-            )
         };
         self.emit(text, &click_rows, force);
     }
@@ -1710,6 +1687,10 @@ fn clock(time: u64, now: u64) -> (String, String) {
 mod tests {
     use super::*;
 
+    fn settings_header(cols: usize) -> String {
+        TopBar::new(&crate::app_config::Palette::default(), false, false).overlay("settings", cols)
+    }
+
     #[test]
     fn undo_rows_name_the_branch_and_summarize_it() {
         use crate::snapshot::{Closed, Pane, Session, Window};
@@ -1865,7 +1846,16 @@ mod tests {
         let mut settings = settings_state(Ok((PathBuf::new(), false, "version = 1\n".into())));
         let palette = crate::app_config::Palette::default();
         let render = |settings: &mut Settings, effective: &crate::app_config::AppConfig| {
-            render_settings(settings, effective, &palette, true, 120, 40).0
+            render_settings(
+                settings,
+                effective,
+                &palette,
+                true,
+                &settings_header(120),
+                120,
+                40,
+            )
+            .0
         };
         let frame = render(&mut settings, &effective);
         for hint in ["n/p move", "Tab edit", "? search", "z/x back"] {
@@ -1933,6 +1923,7 @@ mod tests {
                 &effective,
                 &crate::app_config::Palette::default(),
                 true,
+                &settings_header(cols),
                 cols,
                 rows,
             );
@@ -1950,6 +1941,7 @@ mod tests {
                     &effective,
                     &crate::app_config::Palette::default(),
                     true,
+                    &settings_header(cols),
                     cols,
                     rows,
                 );
@@ -1961,6 +1953,7 @@ mod tests {
                 &effective,
                 &crate::app_config::Palette::default(),
                 true,
+                &settings_header(cols),
                 cols,
                 rows,
             );
@@ -1987,6 +1980,7 @@ mod tests {
             &effective,
             &crate::app_config::Palette::default(),
             true,
+            &settings_header(80),
             80,
             20,
         );
@@ -2033,6 +2027,7 @@ mod tests {
             &effective,
             &crate::app_config::Palette::default(),
             true,
+            &settings_header(80),
             80,
             20,
         );
@@ -2093,6 +2088,7 @@ mod tests {
             &effective,
             &crate::app_config::Palette::default(),
             true,
+            &settings_header(50),
             50,
             14,
         );
@@ -2195,6 +2191,7 @@ mod tests {
             &effective,
             &crate::app_config::Palette::default(),
             true,
+            &settings_header(50),
             50,
             14,
         );
@@ -2243,6 +2240,7 @@ mod tests {
             &effective,
             &crate::app_config::Palette::default(),
             true,
+            &settings_header(50),
             50,
             19,
         );

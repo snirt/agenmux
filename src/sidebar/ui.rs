@@ -34,6 +34,14 @@ impl<'a> TopBar<'a> {
             String::new()
         }
     }
+
+    /// Clears the screen and draws the `<app> — <name>` overlay top bar.
+    pub(super) fn overlay(&self, name: &str, cols: usize) -> String {
+        let title = format!("{} — {name}", super::render::app_title());
+        let line = format!("{}{title}{E}[0m", self.foreground("1"));
+        let width = title.chars().count();
+        format!("{E}[2J{E}[H{}", bar(&line, &self.background(), cols, width))
+    }
 }
 
 pub(super) fn bar(line: &str, bg: &str, cols: usize, width: usize) -> String {
@@ -401,6 +409,19 @@ mod tests {
         let explicit = TopBar::new(&palette, false, false);
         assert_eq!(explicit.foreground("1"), palette.header_fg.fg("1"));
         assert_eq!(explicit.background(), "");
+    }
+
+    #[test]
+    fn overlay_header_uses_top_bar_colors_and_fills_when_focused() {
+        let palette = crate::app_config::Palette::default();
+        let title = format!("{} — settings", super::super::render::app_title());
+        assert_eq!(
+            TopBar::new(&palette, false, false).overlay("settings", 80),
+            format!("{E}[2J{E}[H{}{title}{E}[0m", palette.header_fg.fg("1"))
+        );
+        let focused = TopBar::new(&palette, true, true).overlay("settings", 80);
+        assert!(focused.starts_with(&format!("{E}[2J{E}[H{}", palette.header_bg.bg())));
+        assert!(focused.ends_with(&format!("{}{E}[0m", " ".repeat(80 - title.chars().count()))));
     }
 
     #[test]
