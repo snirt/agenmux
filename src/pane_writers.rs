@@ -6,6 +6,12 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+/// A live reader drains a frame in microseconds. One that stopped draining
+/// gets dropped after this; the next reconcile reopens it and replays a full
+/// frame, which repaints over any torn one.
+const WRITE_BUDGET: Duration = Duration::from_millis(100);
 
 pub(crate) fn frame_path(runtime: &Path, pane: &str) -> PathBuf {
     runtime.join(format!("agenmux-frame-{pane}"))
@@ -15,7 +21,8 @@ struct PaneWriter(File);
 
 impl PaneWriter {
     fn open(runtime: &Path, pane: &str) -> std::io::Result<Self> {
-        // Nonblocking open avoids hanging while tmux starts the pane reader.
+        // Nonblocking: neither a reader still starting nor one that stopped
+        // draining may stall the daemon.
         let file = OpenOptions::new()
             .write(true)
             .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
@@ -23,20 +30,21 @@ impl PaneWriter {
         if !file.metadata()?.file_type().is_fifo() {
             return Err(std::io::Error::other("sidebar frame target is not a FIFO"));
         }
-        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
-        if flags < 0
-            || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) }
-                < 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
         Ok(Self(file))
     }
 
-    fn emit(&mut self, frame: &[u8]) -> std::io::Result<()> {
-        // macOS can block forever when one FIFO write exceeds its 8 KiB buffer.
-        for chunk in frame.chunks(4096) {
-            self.0.write_all(chunk)?;
+    fn emit(&mut self, frame: &[u8], deadline: Instant) -> std::io::Result<()> {
+        let mut rest = frame;
+        while !rest.is_empty() {
+            // Chunks fit the 8 KiB FIFO buffer macOS starts with.
+            match self.0.write(&rest[..rest.len().min(4096)]) {
+                Ok(n) => rest = &rest[n..],
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        && crate::tmux::poll_by(self.0.as_raw_fd(), libc::POLLOUT, deadline) => {}
+                Err(e) => return Err(e),
+            }
         }
         Ok(())
     }
@@ -73,8 +81,9 @@ impl PaneWriters {
     }
 
     pub fn emit(&mut self, frame: &str) {
+        let deadline = Instant::now() + WRITE_BUDGET;
         self.writers
-            .retain(|_, writer| writer.emit(frame.as_bytes()).is_ok());
+            .retain(|_, writer| writer.emit(frame.as_bytes(), deadline).is_ok());
     }
 
     pub fn clear(&mut self) {
@@ -205,7 +214,7 @@ mod tests {
         let writer = std::thread::spawn(move || {
             PaneWriter::open(&runtime, "%1")
                 .unwrap()
-                .emit(&sent)
+                .emit(&sent, Instant::now() + Duration::from_secs(2))
                 .unwrap();
             std::fs::remove_file(path).unwrap();
             std::fs::remove_dir(runtime).unwrap();
@@ -228,5 +237,41 @@ mod tests {
         }
         writer.join().unwrap();
         assert_eq!(received, frame);
+    }
+
+    #[test]
+    fn a_reader_that_stops_draining_drops_its_writer_within_the_budget() {
+        let runtime = std::env::temp_dir().join(format!(
+            "agenmux-stuck-reader-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&runtime).unwrap();
+        let path = frame_path(&runtime, "%1");
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        // Opened like the pane reader, then never read.
+        let fd = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) };
+        assert!(fd >= 0);
+        let _reader = unsafe { File::from_raw_fd(fd) };
+
+        let mut writers = PaneWriters {
+            writers: HashMap::new(),
+            runtime: runtime.clone(),
+        };
+        assert!(writers.reconcile(["%1".to_string()]));
+        let started = Instant::now();
+        writers.emit(&"x".repeat(1 << 20));
+        assert!(
+            started.elapsed() < WRITE_BUDGET * 3,
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(writers.writers.is_empty());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(runtime).unwrap();
     }
 }

@@ -280,6 +280,7 @@ pub struct Sidebar {
     rows_file: PathBuf,
     cache_file: PathBuf,
     last_frame: String,
+    last_rows: String,
     update: Option<String>, // newer release to advertise in the header
     update_ready: bool,     // that release is prepared for the next start
     update_note: std::sync::Arc<std::sync::Mutex<Option<String>>>, // picker's auto-update line
@@ -459,6 +460,7 @@ fn new_sidebar(
         rows_file,
         cache_file,
         last_frame: String::new(),
+        last_rows: String::new(),
         update,
         update_ready,
         update_note: Default::default(),

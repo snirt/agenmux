@@ -77,6 +77,22 @@ fn superseded(mine: &str, current: &str) -> bool {
     !mine.is_empty() && !current.is_empty() && current != mine
 }
 
+/// Both owner options arrive in one tagged reply: a stray hook block read in
+/// its place lacks the tag, and cannot shift one value into the other.
+const OWNER_QUERY: &str =
+    "display-message -p 'am-owner|#{@agenmux-generation}|#{@agenmux-control-client}'";
+
+fn claimed_elsewhere(generation: &str, client: &str, reply: &str) -> bool {
+    let Some((current_generation, current_client)) = reply
+        .trim_end()
+        .strip_prefix("am-owner|")
+        .and_then(|rest| rest.split_once('|'))
+    else {
+        return false;
+    };
+    superseded(generation, current_generation) || superseded(client, current_client)
+}
+
 /// Headless-mode state: frames → visible panes, keys ← FIFO, size ← panes.
 pub(super) struct Daemon {
     pub(super) keys_path: PathBuf,
@@ -306,18 +322,10 @@ impl Sidebar {
         if self.tmux.sync().is_err() {
             return false;
         }
-        if !generation.is_empty()
-            && self
-                .tmux
-                .run("show-option -gqv @agenmux-generation")
-                .is_ok_and(|current| superseded(&generation, &current))
-        {
-            return true;
-        }
-        match self.tmux.run("show-option -gqv @agenmux-control-client") {
-            Ok(current) => superseded(&client, &current),
-            Err(_) => false, // a broken pipe is not a takeover; the loop exits elsewhere
-        }
+        // a broken pipe is not a takeover; the loop exits elsewhere
+        self.tmux
+            .run(OWNER_QUERY)
+            .is_ok_and(|reply| claimed_elsewhere(&generation, &client, &reply))
     }
 
     /// Refresh only render dimensions after a layout notification. Drag
@@ -644,6 +652,19 @@ mod tests {
         assert!(!superseded("client-7", "")); // unset is not a claim
         assert!(!superseded("", "client-9")); // we never published a name
         assert!(!superseded("", ""));
+    }
+
+    #[test]
+    fn only_a_tagged_owner_reply_counts_as_a_claim() {
+        let mine = |reply: &str| claimed_elsewhere("g1", "client-7", reply);
+        assert!(!mine("am-owner|g1|client-7\n"));
+        assert!(mine("am-owner|g2|client-7\n"));
+        assert!(mine("am-owner|g1|client-9\n"));
+        assert!(!mine("am-owner||\n")); // unset is not a claim
+                                        // A stray block read in the reply's place: empty, or another value.
+        assert!(!mine(""));
+        assert!(!mine("g2\n"));
+        assert!(!claimed_elsewhere("", "client-7", "am-owner|g2|client-7"));
     }
 
     #[test]

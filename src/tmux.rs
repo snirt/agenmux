@@ -6,9 +6,13 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::{Duration, Instant};
 
 const MAX_DRAIN_LINES: usize = 256;
 const MAX_DRAIN_BYTES: usize = 64 * 1024;
+/// Replies take milliseconds; a busy server's heavy capture ~100ms. Past
+/// this the server is stalled, and waiting longer only freezes the UI.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 pub struct PendingChanges {
@@ -249,6 +253,11 @@ pub struct Tmux {
     rdr: BufReader<ChildStdout>,
     notifications: Notifications,
     partial_line: Vec<u8>,
+    reply_timeout: Duration,
+    sync_seq: u64,
+    /// Marker sent after a missed deadline. Until it echoes back, a late
+    /// reply may still be queued, so no command may read a response.
+    sync_marker: Option<String>,
 }
 
 impl Tmux {
@@ -294,10 +303,17 @@ impl Tmux {
             rdr,
             notifications: Notifications::default(),
             partial_line: Vec::new(),
+            reply_timeout: REPLY_TIMEOUT,
+            sync_seq: 0,
+            sync_marker: None,
         };
         // attach emits an unrequested greeting block — consume it so the
         // first run() doesn't pair with the wrong %begin
-        t.read_block()?;
+        if let Err(error) = t.read_block(Instant::now() + t.reply_timeout) {
+            // Drop waits for the client, which a stalled server never releases.
+            let _ = t.child.kill();
+            return Err(error);
+        }
         Ok(t)
     }
 
@@ -331,12 +347,23 @@ impl Tmux {
 
     /// Send one tmux command, return its output (without trailing newline
     /// handling — lines joined by \n).
+    ///
+    /// A missed deadline is a soft error: the late reply is discarded by a
+    /// sync marker, and commands fail fast until that marker echoes back.
     pub fn run(&mut self, cmd: &str) -> Result<String, TmuxError> {
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
+        if self.sync_marker.is_some() {
+            self.await_sync(t0)?;
+        }
         self.stdin.write_all(cmd.as_bytes())?;
         self.stdin.write_all(b"\n")?;
         self.stdin.flush()?;
-        let r = self.read_block();
+        let r = match self.read_block(t0 + self.reply_timeout) {
+            Err(TmuxError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
+                self.send_sync().and(Err(timed_out()))
+            }
+            r => r,
+        };
         debug_log(cmd, &r, t0.elapsed());
         r
     }
@@ -345,12 +372,50 @@ impl Tmux {
     /// run-shell results, etc.) until our marker echoes back. Makes the pipe
     /// self-healing — an off-by-one can survive at most one poll cycle.
     pub fn sync(&mut self) -> Result<(), TmuxError> {
-        self.stdin.write_all(b"display-message -p am-sync\n")?;
+        // An outstanding marker means the server already missed a deadline:
+        // check for it without stalling again.
+        let deadline = if self.sync_marker.is_some() {
+            Instant::now()
+        } else {
+            self.send_sync()?;
+            Instant::now() + self.reply_timeout
+        };
+        self.await_sync(deadline)
+    }
+
+    /// Numbered so a marker still queued from an earlier barrier cannot end
+    /// this one early.
+    fn send_sync(&mut self) -> Result<(), TmuxError> {
+        self.sync_seq += 1;
+        let marker = format!("am-sync-{}", self.sync_seq);
+        self.stdin
+            .write_all(format!("display-message -p {marker}\n").as_bytes())?;
         self.stdin.flush()?;
+        self.sync_marker = Some(marker);
+        Ok(())
+    }
+
+    /// Matches the marker line itself, not its block: a timed-out read can
+    /// leave the pipe mid-block.
+    fn await_sync(&mut self, deadline: Instant) -> Result<(), TmuxError> {
+        let mut line = String::new();
         loop {
-            if self.read_block()? == "am-sync\n" {
+            line.clear();
+            match self.read_line_retry(&mut line, deadline) {
+                Ok(0) => return Err(TmuxError::Exited),
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Err(timed_out()),
+                Err(e) => return Err(e.into()),
+            }
+            let l = line.trim_end_matches(['\n', '\r']);
+            if Some(l) == self.sync_marker.as_deref() {
+                self.sync_marker = None;
                 return Ok(());
             }
+            if l.starts_with("%exit") {
+                return Err(TmuxError::Exited);
+            }
+            self.notifications.observe(l);
         }
     }
 
@@ -379,6 +444,10 @@ impl Tmux {
             let l = line.trim_end_matches(['\n', '\r']);
             if l.starts_with("%exit") {
                 return Err(TmuxError::Exited);
+            }
+            if Some(l) == self.sync_marker.as_deref() {
+                self.sync_marker = None;
+                continue;
             }
             self.notifications.observe(l);
         }
@@ -432,30 +501,47 @@ impl Tmux {
     /// Keeping partial bytes undecoded also lets a bounded drain hand a
     /// mid-codepoint line back to the blocking response reader safely. Other
     /// lines remain strict UTF-8 so malformed command bodies still fail.
-    fn read_line_retry(&mut self, line: &mut String) -> std::io::Result<usize> {
+    /// Past `deadline` it fails with TimedOut, keeping the partial line for
+    /// whichever read comes next.
+    fn read_line_retry(&mut self, line: &mut String, deadline: Instant) -> std::io::Result<usize> {
         let mut bytes = std::mem::take(&mut self.partial_line);
         loop {
-            match self.rdr.read_until(b'\n', &mut bytes) {
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            let buffer = self.rdr.buffer();
+            let take = buffer
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(buffer.len(), |end| end + 1);
+            let complete = take > 0 && buffer[take - 1] == b'\n';
+            bytes.extend_from_slice(&buffer[..take]);
+            self.rdr.consume(take);
+            if complete {
+                break;
+            }
+            if !poll_by(self.fd(), libc::POLLIN, deadline) {
+                self.partial_line = bytes;
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            match self.rdr.fill_buf().map(<[u8]>::is_empty) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
-                Ok(0) if bytes.is_empty() => return Ok(0),
-                Ok(_) => {
-                    let len = bytes.len();
-                    line.push_str(&decode_protocol_line(bytes)?);
-                    return Ok(len);
-                }
+                Ok(true) if bytes.is_empty() => return Ok(0),
+                Ok(true) => break,
+                Ok(false) => {}
             }
         }
+        let len = bytes.len();
+        line.push_str(&decode_protocol_line(bytes)?);
+        Ok(len)
     }
 
     /// Read until a complete %begin..%end/%error block; returns its body.
     /// Lines outside a block are notifications (%exit => Exited).
-    fn read_block(&mut self) -> Result<String, TmuxError> {
+    fn read_block(&mut self, deadline: Instant) -> Result<String, TmuxError> {
         let mut line = String::new();
         // wait for %begin
         let tag = loop {
             line.clear();
-            if self.read_line_retry(&mut line)? == 0 {
+            if self.read_line_retry(&mut line, deadline)? == 0 {
                 return Err(TmuxError::Exited);
             }
             let l = line.trim_end_matches(['\n', '\r']);
@@ -472,7 +558,7 @@ impl Tmux {
         let mut body = String::new();
         loop {
             line.clear();
-            if self.read_line_retry(&mut line)? == 0 {
+            if self.read_line_retry(&mut line, deadline)? == 0 {
                 return Err(TmuxError::Exited);
             }
             let l = line.trim_end_matches(['\n', '\r']);
@@ -527,15 +613,37 @@ fn poll_ready(revents: libc::c_short) -> bool {
 /// fd readable or terminal right now (0ms poll)? A drained pipe may report
 /// only HUP on Linux; ERR/NVAL must likewise reach read() and surface as I/O.
 fn fd_ready(fd: libc::c_int) -> bool {
+    poll_by(fd, libc::POLLIN, Instant::now())
+}
+
+/// fd ready for `events`, or terminal, before `deadline`? A deadline already
+/// past still checks once.
+pub(crate) fn poll_by(fd: libc::c_int, events: libc::c_short, deadline: Instant) -> bool {
     if fd < 0 {
         return false;
     }
-    let mut p = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    unsafe { libc::poll(&mut p, 1, 0) > 0 && poll_ready(p.revents) }
+    loop {
+        let mut p = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_micros()
+            .div_ceil(1000)
+            .min(i32::MAX as u128) as i32;
+        match unsafe { libc::poll(&mut p, 1, ms) } {
+            0 => return false,
+            n if n > 0 => return p.revents & events != 0 || poll_ready(p.revents),
+            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+            _ => return false,
+        }
+    }
+}
+
+fn timed_out() -> TmuxError {
+    TmuxError::Error("reply timed out".into())
 }
 
 /// "%begin <time> <num> <flags>" -> num
@@ -590,6 +698,9 @@ mod tests {
             child,
             notifications: Notifications::default(),
             partial_line: Vec::new(),
+            reply_timeout: REPLY_TIMEOUT,
+            sync_seq: 0,
+            sync_marker: None,
         }
     }
 
@@ -780,6 +891,32 @@ mod tests {
             tmux.pending_changes().panes,
             HashSet::from(["%8".to_string()])
         );
+    }
+
+    #[test]
+    fn a_late_reply_times_out_and_never_answers_the_next_command() {
+        let mut tmux = scripted_tmux(
+            r#"read _; sleep .4; printf '%s\n' '%begin 1 1 0' stale '%end 1 1 0'
+               read marker; printf '%s\n' '%begin 1 2 0' "${marker#display-message -p }" '%end 1 2 0'
+               read _; printf '%s\n' '%begin 1 3 0' fresh '%end 1 3 0'; sleep 1"#,
+        );
+        tmux.reply_timeout = Duration::from_millis(100);
+        let started = Instant::now();
+        assert!(matches!(tmux.run("slow"), Err(TmuxError::Error(_))));
+        assert!(started.elapsed() < Duration::from_millis(300));
+
+        // Still waiting on the marker: fail fast instead of stalling again.
+        let started = Instant::now();
+        assert!(matches!(tmux.run("early"), Err(TmuxError::Error(_))));
+        assert!(started.elapsed() < Duration::from_millis(50));
+
+        std::thread::sleep(Duration::from_millis(600));
+        let body = match tmux.run("fresh") {
+            Ok(body) => body,
+            Err(error) => panic!("{error}"),
+        };
+        assert_eq!(body, "fresh\n");
+        let _ = tmux.child.kill();
     }
 
     #[test]

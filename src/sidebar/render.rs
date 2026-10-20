@@ -604,11 +604,15 @@ impl Sidebar {
             )
         };
         // Rows map must match what the click helper sees under each rendered row.
-        // Rename it into place: every frame rewrites it, and a truncate-then-
-        // write lets a concurrent click read an empty map.
-        let staged = self.rows_file.with_extension("tmp");
-        if std::fs::write(&staged, &rows).is_ok() {
-            let _ = std::fs::rename(&staged, &self.rows_file);
+        // Rename it into place: a truncate-then-write lets a concurrent click
+        // read an empty map. Animation frames leave the rows alone.
+        if rows != self.last_rows {
+            let staged = self.rows_file.with_extension("tmp");
+            if std::fs::write(&staged, &rows).is_ok()
+                && std::fs::rename(&staged, &self.rows_file).is_ok()
+            {
+                self.last_rows = rows;
+            }
         }
         let changed = force || frame != self.last_frame;
         // Synchronized output: tmux reads a frame in PTY-sized pieces and can
@@ -1916,6 +1920,14 @@ mod tests {
             sb.settings.settings.show_all_panes == edited && sb.panes_override.is_none(),
             "an edited config value overrides the live toggle"
         );
+        // Animation frames leave an unchanged rows map alone; the hierarchy
+        // below changes the rows, and its fixture proves the rewrite.
+        sb.render(true);
+        std::fs::write(&sb.rows_file, "sentinel").unwrap();
+        sb.tick += 1;
+        sb.render(true);
+        sb.tick -= 1;
+        assert_eq!(std::fs::read_to_string(&sb.rows_file).unwrap(), "sentinel");
         sb.settings.settings.show_all_panes = true;
         sb.config_show_all = true;
         sb.panes_override = None;
