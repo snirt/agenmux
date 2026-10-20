@@ -30,6 +30,14 @@ fn restore_terminal() {
     }
 }
 
+/// True while a `RawMode` holds the terminal, i.e. a TUI frame is on screen.
+pub(crate) fn terminal_owned() -> bool {
+    SAVED_TERMINAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+}
+
 impl RawMode {
     pub(crate) fn enable() -> RawMode {
         unsafe {
@@ -1173,6 +1181,12 @@ mod tests {
             drop(raw);
             return;
         }
+        if mode == "diagnostic" {
+            crate::diag::error("during the frame");
+            drop(raw);
+            crate::diag::error("after the frame");
+            return;
+        }
         if mode == "after-drop" {
             drop(raw);
             let mut changed: libc::termios = unsafe { std::mem::zeroed() };
@@ -1219,6 +1233,10 @@ mod tests {
 
     impl TerminalChild {
         fn start(mode: &str) -> Self {
+            Self::spawn(terminal_command(mode))
+        }
+
+        fn spawn(mut command: std::process::Command) -> Self {
             use std::os::fd::{AsRawFd, FromRawFd};
             let (mut master, mut slave) = (-1, -1);
             assert_eq!(
@@ -1252,7 +1270,7 @@ mod tests {
                 unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &original) },
                 0
             );
-            let child = terminal_command(mode)
+            let child = command
                 .stdin(slave.try_clone().unwrap())
                 .stdout(slave.try_clone().unwrap())
                 .stderr(slave.try_clone().unwrap())
@@ -1391,6 +1409,22 @@ mod tests {
         let mut expected = child.original;
         expected.c_lflag &= !libc::ECHO;
         assert_termios_eq(&child.settings(), &expected);
+    }
+
+    #[test]
+    fn diagnostics_skip_the_owned_terminal() {
+        let state = std::env::temp_dir().join(format!("agenmux-tui-diag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let mut command = terminal_command("diagnostic");
+        command.env("XDG_STATE_HOME", &state);
+        let mut child = TerminalChild::spawn(command);
+        child.read_until(b"agenmux: after the frame");
+        assert!(child.finish().success());
+        let output = String::from_utf8_lossy(&child.output);
+        assert!(!output.contains("during the frame"), "{output:?}");
+        let log = std::fs::read_to_string(state.join("agenmux").join(crate::diag::DAEMON_LOG));
+        let _ = std::fs::remove_dir_all(&state);
+        assert_eq!(log.unwrap(), "agenmux: during the frame\n");
     }
 
     #[test]

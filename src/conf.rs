@@ -122,7 +122,7 @@ fn compile(name: &str, key: &str, pat: &str) -> Option<Regex> {
     match Regex::new(pat) {
         Ok(r) => Some(r),
         Err(e) => {
-            eprintln!("agenmux: {name}.conf {key}: bad regex: {e}");
+            crate::diag::error(&format!("{name}.conf {key}: bad regex: {e}"));
             None
         }
     }

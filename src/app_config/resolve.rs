@@ -509,7 +509,9 @@ impl LiveConfig {
     fn report(&mut self, error: &ConfigError) {
         let diagnostic = error.to_string();
         if self.reported.len() < 16 && self.reported.insert(diagnostic.clone()) {
-            eprintln!("agenmux: {diagnostic}; retaining last valid application settings");
+            crate::diag::error(&format!(
+                "{diagnostic}; retaining last valid application settings"
+            ));
         }
     }
 }

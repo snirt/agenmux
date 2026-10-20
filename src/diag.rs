@@ -107,6 +107,39 @@ fn format_clock(epoch_secs: u64, millis: u32) -> String {
     )
 }
 
+/// Stderr, unless a TUI owns the terminal: a line there would land on top of
+/// the live frame, so it goes to the daemon log (and the trace) instead.
+pub fn error(msg: &str) {
+    if !crate::input::terminal_owned() {
+        eprintln!("agenmux: {msg}");
+        return;
+    }
+    trace!("{msg}");
+    let _ = append_private(&daemon_log_path(), &format!("agenmux: {msg}"));
+}
+
+fn append_private(path: &Path, line: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    create_private_dir(path)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    writeln!(file, "{line}")
+}
+
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    match path.parent() {
+        Some(dir) => std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir),
+        None => Ok(()),
+    }
+}
+
 /// `$XDG_STATE_HOME/agenmux/daemon.log`, else `~/.local/state/agenmux/daemon.log`:
 /// where the XDG spec puts logs, and where a reboot or a temp-dir sweep does
 /// not erase the evidence of yesterday's failure. The runtime temp dir is the
@@ -155,13 +188,8 @@ pub fn rotate_daemon_log(path: &Path) {
 /// previous one. Opened for append so every writer lands at the end even
 /// after the file is replaced underneath it.
 pub fn create_daemon_log(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    if let Some(dir) = path.parent() {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
-    }
+    use std::os::unix::fs::OpenOptionsExt;
+    create_private_dir(path)?;
     rotate_daemon_log(path);
     // std refuses append+truncate in one open; an empty leftover goes first
     let _ = std::fs::remove_file(path);
