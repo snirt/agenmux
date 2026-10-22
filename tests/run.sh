@@ -828,6 +828,17 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   $T kill-pane -t "$agentp"
   sleep 4
   optw2="$($T show-option -gqv @agenmux-width)"
+  # a layout change can stack the mirror above the agent pane instead: it then
+  # spans the full window width with the pane count unchanged, and that must
+  # NOT read as a border drag either
+  $T new-window -t t: 'exec sleep 60'
+  sleep 4 # mirror via hook + a daemon baseline measure with both panes open
+  flipw="$($T display-message -p -t t: '#{window_id}')"
+  $T select-layout -t "$flipw" even-vertical
+  sleep 4
+  optw3="$($T show-option -gqv @agenmux-width)"
+  flipped="$($T list-panes -t "$flipw" -F '#{pane_title}	#{pane_width}' |
+    awk -F'\t' '$1 == "agenmux" { print $2; exit }')"
   env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" "$BIN_ABS" key q
   sleep 0.2
   stayed="$($T list-panes -a -F '#{pane_title}' 2>/dev/null | grep -cx agenmux)"
@@ -845,11 +856,11 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
     [ "$before" = "$after" ] && [ "$new_ok" -eq 1 ] &&
     printf '%s\n' "$delayed_frame" | grep -Fq claude &&
     [ "$raced" -eq 1 ] && [ "$widths" = 45 ] && [ "$optw" = 45 ] &&
-    [ "$optw2" = 45 ] &&
+    [ "$optw2" = 45 ] && [ "$optw3" = 45 ] && [ "$flipped" = 200 ] &&
     [ "$left" -eq 0 ] && [ -z "$(find "$tmp" -name 'agenmux-frame-%*' -type p -print -quit)" ]; then
     echo "ok   mirror-mode-no-bump-lifecycle"
   else
-    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors readers=$readers focus=$focus_kept keys=$keys_ok control=$control_ok stayed=$stayed live=$([ -n "$live_frame" ] && echo y || echo n) layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok delayed=$([ -n "$delayed_frame" ] && printf '%s\n' "$delayed_frame" | grep -Fq claude && echo y || echo n) raced=$raced widths=$widths optw=$optw optw2=$optw2 left=$left"
+    echo "FAIL mirror-mode-no-bump-lifecycle: mirrors=$mirrors readers=$readers focus=$focus_kept keys=$keys_ok control=$control_ok stayed=$stayed live=$([ -n "$live_frame" ] && echo y || echo n) layout-same=$([ "$before" = "$after" ] && echo y || echo n) new=$new_ok delayed=$([ -n "$delayed_frame" ] && printf '%s\n' "$delayed_frame" | grep -Fq claude && echo y || echo n) raced=$raced widths=$widths optw=$optw optw2=$optw2 optw3=$optw3 flipped=$flipped left=$left"
     fail=1
   fi
   $T kill-server 2>/dev/null || true

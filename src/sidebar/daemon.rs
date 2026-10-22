@@ -61,6 +61,17 @@ fn watched_height(ms: &[M], active_session: &str) -> usize {
         .unwrap_or(24)
 }
 
+/// The user dragged this sidebar's border: its window is the active one, its
+/// size and pane count match the previous tick (nothing was split, killed or
+/// resized around it), and the width differs from the configured bound. A
+/// sidebar as wide as its window has no horizontal neighbour: it is alone, or a
+/// layout change stacked it above or below the other panes. No border drag
+/// ends there, so that width is a layout accident, never a preference.
+fn dragged(m: &M, wopt: usize, baseline: Option<&((usize, usize), usize)>) -> bool {
+    let bound = wopt.min(m.win_size.0.saturating_sub(2).max(1));
+    m.active && m.w < m.win_size.0 && m.w != bound && baseline == Some(&(m.win_size, m.panes))
+}
+
 /// Should the daemon shut down after measuring no preserved panes? Only once
 /// panes existed (or the startup grace ran out) AND the emptiness repeats:
 /// a hook's run-shell block can desync the control pipe for exactly one
@@ -441,12 +452,7 @@ impl Sidebar {
         let drag: Option<(String, usize)> = {
             let d = self.daemon.as_ref().unwrap();
             ms.iter()
-                .find(|m| {
-                    !width_changed
-                        && m.active
-                        && m.w != wopt.min(m.win_size.0.saturating_sub(2).max(1))
-                        && d.win_sizes.get(&m.win) == Some(&(m.win_size, m.panes))
-                })
+                .find(|m| !width_changed && dragged(m, wopt, d.win_sizes.get(&m.win)))
                 .map(|m| (m.pane.clone(), m.w))
         };
         if let Some((src_pane, width)) = drag {
@@ -630,6 +636,40 @@ mod tests {
             panes: 2,
             active,
         }
+    }
+
+    #[test]
+    fn a_full_width_sidebar_is_not_a_border_drag() {
+        let baseline = ((200, 50), 2);
+        let at = |w: usize, panes: usize| M {
+            w,
+            panes,
+            ..m("$0", 50, true)
+        };
+        // dragged from 30 to 45 with the window otherwise untouched
+        assert!(dragged(&at(45, 2), 30, Some(&baseline)));
+        // the regression: even-vertical stacked the sidebar above the agent
+        // pane, so it spans the full width with the pane count unchanged
+        assert!(!dragged(&at(200, 2), 30, Some(&baseline)));
+        // alone after its neighbour was killed: the count changed, and a tick
+        // later the count matches again but the width is still the window's
+        assert!(!dragged(&at(200, 1), 30, Some(&baseline)));
+        assert!(!dragged(&at(200, 1), 30, Some(&((200, 50), 1))));
+        // a split or kill beside the sidebar is not a drag
+        assert!(!dragged(&at(45, 3), 30, Some(&baseline)));
+        // first measure of a window: nothing to compare against
+        assert!(!dragged(&at(45, 2), 30, None));
+        // at the configured width there is nothing to adopt
+        assert!(!dragged(&at(30, 2), 30, Some(&baseline)));
+        // only the active window's sidebar can be the one under the pointer
+        assert!(!dragged(
+            &M {
+                active: false,
+                ..at(45, 2)
+            },
+            30,
+            Some(&baseline)
+        ));
     }
 
     #[test]
