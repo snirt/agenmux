@@ -11,7 +11,7 @@ local out = assert(rex.call("session.new_split", {
   direction = "horizontal",
   side = "before",
   ratio = a.ratio,
-  focus = false,
+  focus = a.focus, -- rex do parses true/false
   layout = { block = {
     flavor = "com.superlogical.terminal.shell",
     label = a.label,

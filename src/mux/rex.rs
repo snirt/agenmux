@@ -527,7 +527,7 @@ impl Rex {
             };
             if let Some(window) = view.windows.iter().find(|w| w.window_id == window.window_id) {
                 if window.sidebar().is_none() {
-                    let _ = add_sidebar(&session.session_id, window, ratio);
+                    let _ = add_sidebar(&session.session_id, window, ratio, false);
                 }
             }
         }
@@ -1214,8 +1214,13 @@ fn sidebar_block(label: &str, popup: bool) -> Result<Value, TmuxError> {
 }
 
 /// Split the whole tiled layer (its top split, or its only block) so the
-/// sidebar spans the window's full height.
-fn add_sidebar(session: &str, window: &ViewWindow, ratio: f64) -> Result<(), TmuxError> {
+/// sidebar spans the window's full height. `focus`: the user opened it.
+fn add_sidebar(
+    session: &str,
+    window: &ViewWindow,
+    ratio: f64,
+    focus: bool,
+) -> Result<(), TmuxError> {
     let layout = &window
         .tiled()
         .ok_or_else(|| TmuxError::Error("window has no tiled layer".into()))?
@@ -1240,6 +1245,7 @@ fn add_sidebar(session: &str, window: &ViewWindow, ratio: f64) -> Result<(), Tmu
         &format!("ratio={ratio}"),
         &format!("label={SIDEBAR}"),
         &format!("exe={exe}"),
+        &format!("focus={focus}"),
     ])
     .map(drop)
 }
@@ -1276,7 +1282,7 @@ pub fn rex_toggle(session: &str, block: &str, mode: &str) -> i32 {
                 let request = json!({"session_id": session, "block_id": sidebar});
                 Rex::call(Some(session), "block.close", request).map(drop)
             }
-            None => add_sidebar(session, window, saved_ratio().unwrap_or(DEFAULT_RATIO)),
+            None => add_sidebar(session, window, saved_ratio().unwrap_or(DEFAULT_RATIO), true),
         }
     };
     match result {
@@ -1319,7 +1325,7 @@ pub fn rex_sidebars() -> i32 {
                     let request = json!({"session_id": session, "window_id": window.window_id});
                     let _ = Rex::call(Some(&session), "session.close_window", request);
                 } else if window.sidebar().is_none() {
-                    if let Err(e) = add_sidebar(&session, window, ratio) {
+                    if let Err(e) = add_sidebar(&session, window, ratio, false) {
                         eprintln!("agenmux: {}: {e}", window.window_id);
                     }
                 }
