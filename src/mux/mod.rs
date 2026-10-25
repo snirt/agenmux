@@ -6,7 +6,7 @@
 mod rex;
 mod tmux;
 
-pub use rex::{publish_reload, rex_sidebars, rex_toggle, Rex};
+pub use rex::{publish_reload, rex_close_sidebars, rex_reopen, rex_sidebars, rex_toggle, Rex};
 
 use crate::scan::ParsedPane;
 use crate::snapshot::{Closed, Live, Snapshot};
@@ -45,6 +45,16 @@ pub trait Multiplexer {
     /// The tty sidebar lives in a pane of its own (a Rex block) rather than a
     /// popup: closing, jumping and launching keep it running.
     fn embedded(&self) -> bool {
+        false
+    }
+    /// This sidebar sends notifications. Where every sidebar scans the
+    /// server on its own, one of them speaks for all.
+    fn notifies(&self) -> bool {
+        true
+    }
+    /// Nobody sees this sidebar and another one tracks the server: periodic
+    /// scans can wait for a change event.
+    fn quiet(&self) -> bool {
         false
     }
 
@@ -132,21 +142,175 @@ pub trait Multiplexer {
     }
 }
 
-/// AGENMUX_MUX=tmux|rex picks the server; otherwise Rex when running inside a
-/// Rex block outside tmux.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Backend {
+    Tmux,
+    Rex,
+}
+
+const AMBIGUOUS: &str = "both a tmux and a Rex server are running, and this \
+shell is in neither; pass --mux tmux or --mux rex, or set AGENMUX_MUX";
+
+/// Which multiplexer this process works with, decided once:
+/// 1. `--mux` (main exports it as AGENMUX_MUX) or AGENMUX_MUX;
+/// 2. the one whose pane or block this process runs in. Both variables can
+///    be inherited stale (a Rex server started from tmux hands every block
+///    TMUX), so with both set the nearer ancestor shell decides;
+/// 3. outside both, the only server running.
+pub fn backend() -> Result<Backend, String> {
+    static BACKEND: std::sync::OnceLock<Result<Backend, String>> = std::sync::OnceLock::new();
+    BACKEND.get_or_init(resolve).clone()
+}
+
 pub fn is_rex() -> bool {
+    backend() == Ok(Backend::Rex)
+}
+
+fn resolve() -> Result<Backend, String> {
     match std::env::var("AGENMUX_MUX").as_deref() {
-        Ok("rex") => true,
-        Ok("tmux") => false,
-        _ => std::env::var_os("TMUX").is_none() && std::env::var_os("REX_SESSION").is_some(),
+        Ok("rex") => return Ok(Backend::Rex),
+        Ok("tmux") => return Ok(Backend::Tmux),
+        Ok("") | Err(_) => {}
+        Ok(other) => return Err(format!("AGENMUX_MUX={other}: expected tmux or rex")),
+    }
+    let in_tmux = std::env::var_os("TMUX").is_some();
+    let in_rex = std::env::var_os("REX_SESSION").is_some();
+    match (in_tmux, in_rex) {
+        (true, false) => return Ok(Backend::Tmux),
+        (false, true) => return Ok(Backend::Rex),
+        (true, true) => {
+            let found = nearest(&ancestors(), tmux_pane_pid(), rex::block_pid());
+            if let Some(found) = found {
+                return Ok(found);
+            }
+        }
+        (false, false) => {}
+    }
+    match (tmux_running(), rex::running()) {
+        (true, true) => Err(AMBIGUOUS.into()),
+        (false, true) => Ok(Backend::Rex),
+        // with no server at all, tmux's own error says so
+        _ => Ok(Backend::Tmux),
+    }
+}
+
+/// The multiplexer whose shell is the nearest of `ancestors` (this process
+/// first): the inner one when nested, and never one whose pane is gone.
+fn nearest(ancestors: &[u32], tmux: Option<u32>, rex: Option<u32>) -> Option<Backend> {
+    let depth = |pid: Option<u32>| pid.and_then(|pid| ancestors.iter().position(|&a| a == pid));
+    match (depth(tmux), depth(rex)) {
+        (Some(t), Some(r)) if r < t => Some(Backend::Rex),
+        (Some(_), _) => Some(Backend::Tmux),
+        (None, Some(_)) => Some(Backend::Rex),
+        (None, None) => None,
+    }
+}
+
+/// This process and its parents, nearest first.
+fn ancestors() -> Vec<u32> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    let mut pid = Pid::from_u32(std::process::id());
+    let mut chain = vec![pid.as_u32()];
+    while chain.len() < 64 {
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        let Some(parent) = sys.process(pid).and_then(|p| p.parent()) else {
+            break;
+        };
+        chain.push(parent.as_u32());
+        pid = parent;
+    }
+    chain
+}
+
+/// Plain tmux forks: the crate's tmux helpers ask `is_rex` first.
+fn tmux_quiet(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("tmux")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn tmux_pane_pid() -> Option<u32> {
+    let pane = std::env::var("TMUX_PANE").ok()?;
+    tmux_quiet(&["display-message", "-p", "-t", &pane, "#{pane_pid}"])?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn tmux_running() -> bool {
+    tmux_quiet(&["list-sessions"]).is_some()
+}
+
+/// `--mux tmux|rex` anywhere in `args`, removed and exported as AGENMUX_MUX
+/// so child processes agree.
+pub fn take_mux_flag(args: &mut Vec<String>) -> Result<(), String> {
+    let Some(at) = args
+        .iter()
+        .position(|a| a == "--mux" || a.starts_with("--mux="))
+    else {
+        return Ok(());
+    };
+    let flag = args.remove(at);
+    let value = match flag.strip_prefix("--mux=") {
+        Some(value) => Some(value.to_string()),
+        None => (at < args.len()).then(|| args.remove(at)),
+    };
+    match value.as_deref() {
+        Some(value @ ("tmux" | "rex")) => {
+            std::env::set_var("AGENMUX_MUX", value);
+            Ok(())
+        }
+        _ => Err("--mux takes tmux or rex".into()),
     }
 }
 
 /// `monitoring`: the long-lived sidebar client, which wants pane output.
 pub fn connect(monitoring: bool) -> Result<Box<dyn Multiplexer>, TmuxError> {
-    Ok(match (is_rex(), monitoring) {
-        (true, monitoring) => Box::new(Rex::connect(monitoring)?),
-        (false, true) => Box::new(Tmux::connect_monitoring()?),
-        (false, false) => Box::new(Tmux::connect()?),
+    Ok(match (backend().map_err(TmuxError::Choose)?, monitoring) {
+        (Backend::Rex, monitoring) => Box::new(Rex::connect(monitoring)?),
+        (Backend::Tmux, true) => Box::new(Tmux::connect_monitoring()?),
+        (Backend::Tmux, false) => Box::new(Tmux::connect()?),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_nearer_shell_wins_and_a_gone_pane_never_does() {
+        let chain = [10, 20, 30, 40];
+        assert_eq!(nearest(&chain, Some(20), Some(40)), Some(Backend::Tmux));
+        assert_eq!(nearest(&chain, Some(40), Some(20)), Some(Backend::Rex));
+        // a stale TMUX: its pane is no ancestor of this process
+        assert_eq!(nearest(&chain, Some(99), Some(30)), Some(Backend::Rex));
+        assert_eq!(nearest(&chain, None, Some(30)), Some(Backend::Rex));
+        assert_eq!(nearest(&chain, None, None), None);
+    }
+
+    #[test]
+    fn the_mux_flag_is_taken_from_anywhere() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let mut list = args(&["list", "--mux", "rex", "-s", "work"]);
+        assert_eq!(take_mux_flag(&mut list), Ok(()));
+        assert_eq!(list, args(&["list", "-s", "work"]));
+        let mut status = args(&["--mux=tmux", "status"]);
+        assert_eq!(take_mux_flag(&mut status), Ok(()));
+        assert_eq!(status, args(&["status"]));
+        assert!(take_mux_flag(&mut args(&["list", "--mux"])).is_err());
+        assert!(take_mux_flag(&mut args(&["--mux", "screen", "list"])).is_err());
+        let mut plain = args(&["list"]);
+        assert_eq!(take_mux_flag(&mut plain), Ok(()));
+    }
 }

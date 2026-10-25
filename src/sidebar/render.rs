@@ -605,6 +605,16 @@ impl Sidebar {
                 frame.replace(&format!("{E}[0m"), &format!("{E}[0m{fg}"))
             )
         };
+        // The fill stays under every reset, so erases paint it too.
+        let frame = match &self.fill {
+            Some(fill) => format!(
+                "{fill}{}",
+                frame
+                    .replace(&format!("{E}[0m"), &format!("{E}[0m{fill}"))
+                    .replace(&format!("{E}[49m"), fill)
+            ),
+            None => frame,
+        };
         // Rows map must match what the click helper sees under each rendered row.
         // Rename it into place: a truncate-then-write lets a concurrent click
         // read an empty map. Animation frames leave the rows alone.

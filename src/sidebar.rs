@@ -26,6 +26,11 @@ const OUTPUT_SCAN_MIN: Duration = Duration::from_millis(500);
 /// Scans block the loop for tens to hundreds of ms. Holding j/k leaves the key
 /// FIFO empty between repeats, so scans wait for a pause this long.
 const NAVIGATION_QUIET: Duration = Duration::from_millis(250);
+/// Rex reports one change as a burst of events (a popup opening sends
+/// several): scan once they have been quiet this long, waiting at most the
+/// cap after the first.
+const EVENT_SETTLE: Duration = Duration::from_millis(60);
+const EVENT_SETTLE_MAX: Duration = Duration::from_millis(200);
 /// How long a created pane may take to appear in the scan before its
 /// selection is given up: a few periodic scans on a loaded server.
 const PENDING_SELECT_PATIENCE: Duration = Duration::from_secs(10);
@@ -36,6 +41,8 @@ struct ScanSchedule {
     output_due: Option<Instant>,
     immediate: bool,
     quiet_until: Instant,
+    /// The first event of a burst still settling.
+    burst: Option<Instant>,
 }
 
 impl ScanSchedule {
@@ -46,7 +53,14 @@ impl ScanSchedule {
             output_due: None,
             immediate: false,
             quiet_until: now,
+            burst: None,
         }
+    }
+
+    fn settle(&mut self, now: Instant) {
+        let start = *self.burst.get_or_insert(now);
+        let until = (now + EVENT_SETTLE).min(start + EVENT_SETTLE_MAX);
+        self.quiet_until = self.quiet_until.max(until);
     }
 
     fn observe_navigation(&mut self, now: Instant) {
@@ -75,6 +89,7 @@ impl ScanSchedule {
 
     fn complete(&mut self, now: Instant, periodic: bool) {
         self.immediate = false;
+        self.burst = None;
         if periodic {
             while self.next_periodic <= now {
                 self.next_periodic += PERIODIC_SCAN;
@@ -272,6 +287,9 @@ pub struct Sidebar {
     popup_client: String,
     /// A message for servers without a message line, shown in the header.
     flash: Option<(String, Instant)>,
+    /// A background SGR painted under every frame: a Rex popup's floating
+    /// layer leaves the terminal's default background clear.
+    fill: Option<String>,
     /// tty mouse: the last press's rows-map record, for double clicks.
     last_press: Option<((String, usize), Instant)>,
     plugin_dir: PathBuf,
@@ -392,7 +410,6 @@ fn new_sidebar(
     mut settings: crate::app_config::AppConfig,
 ) -> Sidebar {
     let confs = crate::conf::load_all(&plugin_dir);
-    let embedded = mux.embedded();
     // read once: the check behind it runs at most daily, and switching version
     // restarts the engine anyway
     let update = update_available(&plugin_dir);
@@ -453,11 +470,12 @@ fn new_sidebar(
         tick: 0,
         self_pane,
         pin: None,
-        // an embedded sidebar acts for the server's own client
+        // a Rex sidebar or popup acts for the server's own client
         popup_client: crate::compat_env("AGENMUX_POPUP_CLIENT", "AGENTS_MON_POPUP_CLIENT")
-            .or_else(|| embedded.then(|| "rex".to_string()))
+            .or_else(|| crate::mux::is_rex().then(|| "rex".to_string()))
             .unwrap_or_default(),
         flash: None,
+        fill: None,
         last_press: None,
         plugin_dir,
         rows_file,
@@ -541,12 +559,21 @@ pub fn run(plugin_dir: PathBuf) -> i32 {
         // where a resize would reflow them into junk.
         print!("{E}[?1049h{E}[?1000h{E}[?1006h{E}[2J");
     }
+    if !sb.mux.embedded() && crate::mux::is_rex() {
+        // One shade off the terminal's own background: Rex leaves a cell
+        // whose background equals the default clear, as if never painted.
+        sb.fill = crate::input::query_background(0).map(|(r, g, b)| {
+            let shade = |c: u8| c.checked_add(1).unwrap_or(c - 1);
+            format!("{E}[48;2;{};{};{}m", shade(r), shade(g), shade(b))
+        });
+    }
     crate::autoupdate::spawn_scheduler(sb.plugin_dir.clone());
-    sb.snapshot = crate::snapshot::Store::open(sb.mux.as_mut());
     sb.pin = pin;
     // tty mode is the popup: while it is visible it owns input.
     sb.plugin_selected = !sb.mux.embedded();
     sb.render(true);
+    // after the first frame: opening it asks the server for its identity
+    sb.snapshot = crate::snapshot::Store::open(sb.mux.as_mut());
     // A launch activating this release confirms it on the first frame.
     if let Some(ready) = std::env::var_os("AGENMUX_READY") {
         let _ = std::fs::write(ready, "");
@@ -651,7 +678,18 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             if !periodic && changes.focus && !changes.full {
                 sb.mux.defer_output(std::mem::take(&mut changes.panes));
             }
-            match sb.scan_tick(periodic, &changes) {
+            let idle = periodic
+                && sb.mux.quiet()
+                && !changes.full
+                && !changes.layout
+                && !changes.focus
+                && changes.panes.is_empty();
+            let scanned = if idle {
+                Ok(())
+            } else {
+                sb.scan_tick(periodic, &changes)
+            };
+            match scanned {
                 Ok(()) => {}
                 // a pipe I/O error can leave a response block half-read —
                 // the pipe is desynced, restarting is the only safe move
@@ -659,7 +697,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                     trace!("scan ended the daemon: {e}");
                     break;
                 }
-                Err(TmuxError::Error(_)) => {} // e.g. pane died mid-scan
+                Err(TmuxError::Error(_) | TmuxError::Choose(_)) => {} // e.g. pane died mid-scan
             }
             if sb.daemon.is_some() && sb.superseded() {
                 return true; // a newer daemon owns the panes now
@@ -742,6 +780,9 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             }
             if sb.has_immediate_change() {
                 scans.request_immediate();
+            }
+            if crate::mux::is_rex() {
+                scans.settle(Instant::now());
             }
         }
         if key_ready {
@@ -1627,8 +1668,10 @@ impl Sidebar {
             }
             store.save(&self.collapsed, &self.panes);
         }
-        for event in &update.events {
-            let _ = crate::notifications::deliver(self.settings.settings.notifications, event);
+        if self.mux.notifies() {
+            for event in &update.events {
+                let _ = crate::notifications::deliver(self.settings.settings.notifications, event);
+            }
         }
         self.rebuild_visible(false);
         // single cursor: focus landing on a visible agent pane snaps selection

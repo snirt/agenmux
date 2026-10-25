@@ -86,6 +86,20 @@ pub struct Live {
     pub windows: HashSet<(String, u32)>,
     /// Every window `@n` and pane `%n`.
     pub ids: HashSet<String>,
+    /// The server appends a new window rather than placing it at an index
+    /// (Rex): a window is live by its id alone, since closing one renumbers
+    /// the windows after it.
+    pub appends: bool,
+}
+
+impl Live {
+    pub fn has_window(&self, session: &str, window: &Window) -> bool {
+        if self.appends {
+            self.ids.contains(&window.id)
+        } else {
+            self.windows.contains(&(session.to_string(), window.index))
+        }
+    }
 }
 
 impl Closed {
@@ -125,7 +139,7 @@ impl Closed {
             self.session
                 .windows
                 .iter()
-                .any(|w| live.windows.contains(&(name.clone(), w.index)))
+                .any(|w| live.has_window(name, w))
         }
     }
 }
@@ -1048,6 +1062,7 @@ mod tests {
         let live = |windows: &[(&str, u32)], ids: &[&str]| Live {
             windows: windows.iter().map(|(s, i)| (s.to_string(), *i)).collect(),
             ids: ids.iter().map(|id| id.to_string()).collect(),
+            appends: false,
         };
         let work2 = live(&[("work", 2)], &["@9"]);
         assert!(closed_session.blocked(&work2));
@@ -1056,6 +1071,25 @@ mod tests {
         assert!(!closed_session.blocked(&Live::default()));
         assert!(closed_pane.blocked(&work2), "its window @4 is gone");
         assert!(!closed_pane.blocked(&live(&[], &["@4"])));
+
+        // Rex renumbers the windows after a closed one: only its id counts
+        let appends = |live: Live| Live {
+            appends: true,
+            ..live
+        };
+        let closed_window = Closed {
+            session: Session {
+                windows: vec![Window {
+                    id: "window:b".into(),
+                    index: 2,
+                    ..Window::default()
+                }],
+                ..closed_window.session.clone()
+            },
+            ..closed_window
+        };
+        assert!(!closed_window.blocked(&appends(live(&[("work", 2)], &["window:c"]))));
+        assert!(closed_window.blocked(&appends(live(&[], &["window:b"]))));
     }
 
     #[test]

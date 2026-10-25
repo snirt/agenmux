@@ -45,6 +45,11 @@ Commands:
   -V, --version            Print the version
   -h, --help               Print this help
 
+Options:
+  --mux tmux|rex           The multiplexer to use. Inside a tmux pane or a Rex
+                           block it is detected; outside both, the only server
+                           running is used. AGENMUX_MUX does the same.
+
 Internal (called by the tmux integration):
   sidebar, daemon, setup [--if-needed], toggle [split|popup] [client],
   key <name> [client], click <pane> <row> <client> [double], wheel <pane> <up|down>,
@@ -52,7 +57,7 @@ Internal (called by the tmux integration):
   notification-open <socket> <pane> <bundle>
 
 Internal (called by the Rex integration, rex/agenmux.lua):
-  rex-toggle <session> <block> [split|popup], rex-sidebars
+  rex-toggle <session> <block> [split|popup] [client], rex-sidebars
 ";
 
 pub(crate) fn compat_env(name: &str, legacy: &str) -> Option<String> {
@@ -61,7 +66,11 @@ pub(crate) fn compat_env(name: &str, legacy: &str) -> Option<String> {
         .or_else(|| std::env::var(legacy).ok())
 }
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if let Err(e) = mux::take_mux_flag(&mut args) {
+        eprintln!("agenmux: {e}");
+        std::process::exit(2);
+    }
     let strs: Vec<&str> = args.iter().map(String::as_str).collect();
     let code = match strs.as_slice() {
         ["--version"] | ["-V"] => {
@@ -113,8 +122,11 @@ fn main() {
         }
         ["sidebar-pane"] => pane_writers::run_pane(),
         ["rex-sidebars"] => mux::rex_sidebars(),
-        ["rex-toggle", session, block] => mux::rex_toggle(session, block, "split"),
-        ["rex-toggle", session, block, mode] => mux::rex_toggle(session, block, mode),
+        ["rex-toggle", session, block] => mux::rex_toggle(session, block, "split", ""),
+        ["rex-toggle", session, block, mode] => mux::rex_toggle(session, block, mode, ""),
+        ["rex-toggle", session, block, mode, client] => {
+            mux::rex_toggle(session, block, mode, client)
+        }
         ["key", key] => sidebar::send_key(key, None),
         ["key", key, client] => sidebar::send_key(key, Some(client)),
         ["click", pane, y, client] => y

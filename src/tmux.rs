@@ -104,6 +104,8 @@ pub enum TmuxError {
     Exited,
     Error(String),
     Io(std::io::Error),
+    /// No multiplexer could be chosen; the message says how to pick one.
+    Choose(String),
 }
 
 impl std::fmt::Display for TmuxError {
@@ -112,6 +114,7 @@ impl std::fmt::Display for TmuxError {
             TmuxError::Exited => write!(f, "tmux exited"),
             TmuxError::Error(e) => write!(f, "tmux: {e}"),
             TmuxError::Io(e) => write!(f, "tmux pipe: {e}"),
+            TmuxError::Choose(e) => write!(f, "{e}"),
         }
     }
 }

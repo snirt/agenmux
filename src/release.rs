@@ -657,6 +657,16 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
     if running {
         teardown_runtime(&old_control);
     }
+    // Rex sidebars hold leases too: close them and reopen them after. Only
+    // when run in Rex or pointed at it: the only-server-running fallback
+    // must not close sidebars on a server nobody named.
+    let named = std::env::var_os("REX_SESSION").is_some()
+        || std::env::var("AGENMUX_MUX").is_ok_and(|mux| mux == "rex");
+    let rex_sidebars = if named && crate::mux::is_rex() {
+        crate::mux::rex_close_sidebars()
+    } else {
+        Vec::new()
+    };
     // A closed daemon takes seconds to exit and release its lease.
     let result = crate::autoupdate::exclusive(plugin_dir, Duration::from_secs(20))
         .map_err(|()| "busy")
@@ -678,6 +688,7 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
     if running {
         reenter(plugin_dir, was_open);
     }
+    crate::mux::rex_reopen(&rex_sidebars);
     if let Err(reason) = result {
         if let Some(pause) = pause {
             pause.undo();

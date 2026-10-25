@@ -140,6 +140,37 @@ pub(crate) fn poll_inputs(
 }
 
 /// Read one byte; None on EOF or error.
+/// The terminal's default background (OSC 11), asked once at startup in raw
+/// mode; None when it does not answer in time.
+pub(crate) fn query_background(fd: libc::c_int) -> Option<(u8, u8, u8)> {
+    terminal_write(b"\x1b]11;?\x1b\\");
+    let deadline = std::time::Instant::now() + Duration::from_millis(300);
+    let mut reply = Vec::new();
+    while !reply.ends_with(b"\x1b\\") && !reply.ends_with(b"\x07") && reply.len() < 64 {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() || !poll_fd(fd, Some(left)) {
+            break;
+        }
+        reply.push(read_byte(fd)?);
+    }
+    parse_background(&String::from_utf8_lossy(&reply))
+}
+
+/// `ESC ] 11 ; rgb:RRRR/GGGG/BBBB ST`, each channel 1-4 hex digits.
+fn parse_background(reply: &str) -> Option<(u8, u8, u8)> {
+    let rgb = reply.split("rgb:").nth(1)?;
+    let rgb = rgb
+        .trim_end_matches(['\x07', '\\'])
+        .trim_end_matches('\x1b');
+    let mut channels = rgb.split('/').map(|hex| {
+        let value = u32::from_str_radix(hex, 16).ok()?;
+        // scale to 8 bits from however many digits it has
+        let max = (1u32 << (4 * hex.len() as u32)) - 1;
+        Some((value * 255 / max.max(1)) as u8)
+    });
+    Some((channels.next()??, channels.next()??, channels.next()??))
+}
+
 fn read_byte(fd: libc::c_int) -> Option<u8> {
     let mut b = [0u8; 1];
     let n = unsafe { libc::read(fd, b.as_mut_ptr().cast(), 1) };
@@ -1229,6 +1260,20 @@ mod tests {
             libc::close(fds[0]);
             libc::close(fds[1]);
         }
+    }
+
+    #[test]
+    fn background_replies_parse_at_any_channel_width() {
+        assert_eq!(
+            parse_background("\x1b]11;rgb:2424/2727/3a3a\x1b\\"),
+            Some((0x24, 0x27, 0x3a))
+        );
+        assert_eq!(
+            parse_background("\x1b]11;rgb:ff/80/00\x07"),
+            Some((255, 128, 0))
+        );
+        assert_eq!(parse_background(""), None);
+        assert_eq!(parse_background("\x1b]11;rgb:zz/00/00\x07"), None);
     }
 
     #[test]

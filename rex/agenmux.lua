@@ -5,8 +5,9 @@
 -- Options:
 --   bin        the agenmux binary (default: "agenmux" on the server's PATH)
 --   key        toggles the sidebar in the current window (default "alt+s")
---   popup_key  shows the sidebar as a floating popup (default "alt+e";
---              false binds nothing)
+--   popup_key  opens or closes the sidebar as a floating popup (default "alt+p";
+--              false binds nothing). Not alt+e: on a US Mac keyboard Option+E
+--              is a dead key, which never reaches Rex
 --
 -- For a sidebar in every window, as the tmux integration places them, run
 -- `agenmux rex-sidebars` once per Rex server start.
@@ -16,9 +17,10 @@ return function(opts)
 
   local function toggle(mode)
     return function(ctx)
-      -- detached: placing the sidebar outlives this action
-      assert(rex.exec.start({ bin, "rex-toggle", ctx.session_id, ctx.block_id or "", mode },
-        { detach = true }))
+      -- detached: placing the sidebar outlives this action. The client is
+      -- the app window the key came from: the sidebar navigates that one.
+      local args = { bin, "rex-toggle", ctx.session_id, ctx.block_id or "", mode, ctx.client_id or "" }
+      assert(rex.exec.start(args, { detach = true }))
     end
   end
 
@@ -29,11 +31,11 @@ return function(opts)
   }
   rex.action{
     name = "agenmux_popup",
-    title = "Show agenmux popup",
+    title = "Toggle agenmux popup",
     run = toggle("popup"),
   }
   rex.bind(opts.key or "alt+s", "agenmux_sidebar")
   if opts.popup_key ~= false then
-    rex.bind(opts.popup_key or "alt+e", "agenmux_popup")
+    rex.bind(opts.popup_key or "alt+p", "agenmux_popup")
   end
 end

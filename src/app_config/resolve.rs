@@ -529,7 +529,13 @@ pub fn reload(plugin_dir: &Path) -> i32 {
             return e.exit_code();
         }
     };
-    let rex = crate::mux::is_rex();
+    let rex = match crate::mux::backend() {
+        Ok(backend) => backend == crate::mux::Backend::Rex,
+        Err(e) => {
+            eprintln!("agenmux: {e}");
+            return 1;
+        }
+    };
     let options = if rex {
         Ok(BTreeMap::new())
     } else {
