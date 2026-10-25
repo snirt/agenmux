@@ -157,8 +157,8 @@ via the Rex backend instead of `tmux -S`.
 Tty sidebars each scan the server. With N windows that is N scanners and N×
 capture load. If §2 leaves this measurable, reuse the daemon: one
 `agenmux daemon` per Rex server scans and renders. Sidebar blocks run a thin
-frame reader (the `pane_writers` role). Skip if per-sidebar cost is
-negligible after §2.
+frame reader (the `pane_writers` role). Planned in
+[the shared daemon plan](2026-10-25-rex-shared-daemon.md).
 
 ### 9. Not applicable
 
