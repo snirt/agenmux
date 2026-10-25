@@ -582,16 +582,18 @@ impl Sidebar {
         } else {
             clip_frame(&frame, cols, cap)
         };
-        let rows: String = rows
+        // the title row is not clickable; a frame adds its border above it
+        let (lead, limit) = if framed.is_some() {
+            ("-\n-\n", cap + 1)
+        } else {
+            ("-\n", cap.saturating_sub(1))
+        };
+        let rows: String = lead
             .lines()
-            .take(cap.saturating_sub(1))
+            .chain(rows.lines())
+            .take(limit)
             .map(|r| format!("{r}\n"))
             .collect();
-        let rows = if framed.is_some() {
-            format!("-\n-\n{rows}")
-        } else {
-            rows
-        };
         // Restore the normal foreground after glyph/attribute resets, including
         // inside filled rows. Inherited dark foreground adds no bytes.
         let fg = self.palette.text_fg.fg("");
