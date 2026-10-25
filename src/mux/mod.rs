@@ -37,8 +37,9 @@ pub trait Multiplexer {
     /// Which panes clients look at, and the one the user acts in.
     fn client_focus(&mut self) -> Option<crate::focus::ClientFocus>;
 
-    /// Bring `pane` to the front. false: the caller jumps the tmux way.
-    fn focus(&mut self, _pane: &str) -> bool {
+    /// Bring a session, window or pane to the front. false: the caller jumps
+    /// the tmux way.
+    fn focus(&mut self, _id: &str) -> bool {
         false
     }
     /// The tty sidebar lives in a pane of its own (a Rex block) rather than a

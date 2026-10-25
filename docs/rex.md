@@ -38,8 +38,10 @@ Everything in [usage](usage.md) works the same, except:
   keys or the mouse, however it was closed. `display.sidebar_width` does not
   apply.
 - **Focus**: the cursor follows the pane focused in the sidebar's own session.
-- **Mouse**: the sidebar block turns on mouse reporting itself. Click,
-  double-click and wheel work as in tmux.
+- **Mouse**: the sidebar block turns on mouse reporting itself. Click and
+  wheel work as in tmux. Double-click goes to any row: a session header to
+  its current window, a window header to its focused pane. Fold with the
+  keys.
 - **Messages** (copy confirmations, errors) show in the sidebar's hint line;
   Rex has no message line.
 - **`yy`** copies `rex session …`, `rex window …` or `rex block …` through

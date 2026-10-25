@@ -703,11 +703,30 @@ impl Multiplexer for Rex {
         Some(crate::focus::parse_clients(&row, false))
     }
 
-    fn focus(&mut self, pane: &str) -> bool {
-        let Some((session, window)) = self.locate(pane) else {
+    fn focus(&mut self, id: &str) -> bool {
+        // a session goes to its current window, a window to its focused pane
+        let header = self.listing.sessions.iter().find_map(|s| {
+            let window = if id == s.session_id {
+                s.active_window_id.as_deref()?
+            } else {
+                id
+            };
+            let window = s.windows.iter().find(|w| w.window_id == window)?;
+            let real = window.blocks.iter().filter(|b| !b.agenmux());
+            let block = real
+                .clone()
+                .find(|b| window.focused_block_id.as_ref() == Some(&b.block_id))
+                .or(real.clone().next())?;
+            Some((s.session_id.clone(), window.window_id.clone(), block.block_id.clone()))
+        });
+        if let Some((session, window, block)) = header {
+            Self::focus_block(&session, &window, &block);
+            return true;
+        }
+        let Some((session, window)) = self.locate(id) else {
             return false;
         };
-        Self::focus_block(&session, &window, pane);
+        Self::focus_block(&session, &window, id);
         true
     }
 

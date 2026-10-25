@@ -931,7 +931,11 @@ impl Sidebar {
         }
         if let Key::Select(index) | Key::Open(index) = &key {
             self.select_index(*index);
-            if matches!(key, Key::Open(_)) && self.on_branch_header() {
+            // an embedded sidebar stays put, so a double-click goes to any
+            // row, header or pane; elsewhere it folds a header
+            if matches!(key, Key::Open(_)) && self.daemon.is_none() && self.mux.embedded() {
+                self.jump();
+            } else if matches!(key, Key::Open(_)) && self.on_branch_header() {
                 self.toggle_branch();
             } else if matches!(key, Key::Open(_)) && self.daemon.is_none() {
                 // tty mode has no click helper to jump for it
@@ -1716,14 +1720,15 @@ impl Sidebar {
 
     /// true = exit the loop (popup jump hands off to native toggle)
     fn jump(&mut self) -> bool {
-        let Some(target) = self
-            .visible
-            .get(self.sel.wrapping_sub(1))
-            .map(|&pane| self.visible_pane_id(pane).to_string())
-        else {
+        let Some((record, target)) = self.visible.get(self.sel.wrapping_sub(1)).map(|&pane| {
+            (
+                self.visible_id(pane).to_string(),
+                self.visible_pane_id(pane).to_string(),
+            )
+        }) else {
             return false;
         };
-        if self.mux.focus(&target) {
+        if self.mux.focus(&record) {
             self.clear_filter();
             // a popup is done once it jumps; an embedded sidebar stays
             return self.daemon.is_none() && !self.mux.embedded();
