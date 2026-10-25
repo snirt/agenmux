@@ -1050,8 +1050,16 @@ impl Sidebar {
             ])),
             _ => None,
         };
+        // servers without a message line: the next scans clear it again
+        let flash = self
+            .flash
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(3))
+            .map(|(message, _)| message.clone());
         let hint = if let Some(inline_hint) = inline_hint {
             inline_hint
+        } else if let Some(flash) = flash {
+            flash
         } else if !sequence_hint.is_empty() {
             sequence_hint
         } else if self.search.editing {
@@ -1456,7 +1464,7 @@ mod tests {
         .unwrap();
         let settings = crate::app_config::resolve(&file, &Default::default()).unwrap();
         let mut sb = new_sidebar(
-            Tmux::connect().unwrap_or_else(|e| panic!("{e}")),
+            Box::new(Tmux::connect().unwrap_or_else(|e| panic!("{e}"))),
             dir.clone(),
             dir.join("cache"),
             dir.join("rows"),
@@ -2412,7 +2420,7 @@ mod tests {
         sb.normal_keys = sb.settings.settings.normal.clone();
         sb.daemon.as_mut().unwrap().size = (120, 40);
         let identity = sb
-            .tmux
+            .mux
             .run("display-message -p '#{pid}|#{start_time}|#{socket_path}'")
             .unwrap_or_else(|error| panic!("{error}"));
         let fields: Vec<_> = identity.trim().split('|').collect();
@@ -2439,7 +2447,7 @@ mod tests {
             },
         )
         .unwrap();
-        sb.snapshot = Store::open(&mut sb.tmux);
+        sb.snapshot = Store::open(sb.mux.as_mut());
         assert!(sb.snapshot.is_some());
         let open = |sb: &mut Sidebar, query: &str, sel| {
             let search = super::super::ui::Search {

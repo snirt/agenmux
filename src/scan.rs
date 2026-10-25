@@ -2,8 +2,9 @@
 // Output contract: byte-identical to `scan.sh list` / `scan.sh status`.
 use crate::app_config::Glyphs;
 use crate::conf::AgentConf;
+use crate::mux::Multiplexer;
 use crate::procs::{self, IdentCache, Snapshot};
-use crate::tmux::{Tmux, TmuxError};
+use crate::tmux::TmuxError;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -149,16 +150,16 @@ pub struct ScanSnapshot {
     pub agents: Vec<PaneRow>,
 }
 
-struct ParsedPane {
-    meta: PaneMeta,
-    pid: u32,
-    width: usize,
-    height: usize,
+pub struct ParsedPane {
+    pub meta: PaneMeta,
+    pub pid: u32,
+    pub width: usize,
+    pub height: usize,
 }
 
 // tmux 3.7 can render tabs and non-ASCII format separators as underscores; keep
 // machine-readable tmux formats on a printable ASCII delimiter.
-const LIST_FMT: &str = "list-panes -a -F '#{session_id}|#{session_name}|#{window_id}|#{window_index}|#{window_name}|#{pane_id}|#{pane_index}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_title}|#{@agenmux}'";
+pub(crate) const LIST_FMT: &str = "list-panes -a -F '#{session_id}|#{session_name}|#{window_id}|#{window_index}|#{window_name}|#{pane_id}|#{pane_index}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_title}|#{@agenmux}'";
 
 fn valid_tmux_id(value: &str, prefix: char) -> bool {
     value
@@ -166,7 +167,7 @@ fn valid_tmux_id(value: &str, prefix: char) -> bool {
         .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
-fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
+pub(crate) fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
     rows.lines()
         .filter_map(|line| {
             let separator = if line.contains('|') { '|' } else { '\t' };
@@ -217,7 +218,7 @@ fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
 }
 
 pub fn scan(
-    tmux: &mut Tmux,
+    mux: &mut dyn Multiplexer,
     confs: &[AgentConf],
     cache: &mut IdentCache,
     subj: &mut SubjectCache,
@@ -226,7 +227,7 @@ pub fn scan(
     let mut screens = ScreenCache::default();
     let dirty = std::collections::HashSet::new();
     scan_cached(
-        tmux,
+        mux,
         confs,
         cache,
         subj,
@@ -245,7 +246,7 @@ pub fn scan(
 }
 
 pub fn scan_cached(
-    tmux: &mut Tmux,
+    mux: &mut dyn Multiplexer,
     confs: &[AgentConf],
     cache: &mut IdentCache,
     subj: &mut SubjectCache,
@@ -254,18 +255,14 @@ pub fn scan_cached(
     policy: ScanPolicy<'_>,
 ) -> Result<(ScanSnapshot, ScanStats), TmuxError> {
     crate::diag::begin_scan();
-    tmux.sync()?;
-    let rows = tmux.run(LIST_FMT)?;
+    let parsed_panes = mux.panes(self_pane)?;
     let mut snap: Option<Snapshot> = None;
     let mut panes = Vec::new();
     let mut agents = Vec::new();
     let mut seen = IdentCache::new();
-    let buf = format!("agenmux-{}", std::process::id());
-    let cap = std::env::temp_dir().join(&buf);
-    let mut used_buffer = false;
     let mut stats = ScanStats::default();
     let result: Result<ScanSnapshot, TmuxError> = (|| {
-        for parsed in parse_panes(&rows, self_pane) {
+        for parsed in parsed_panes {
             let ParsedPane {
                 mut meta,
                 pid,
@@ -309,23 +306,7 @@ pub fn scan_cached(
                 stats.deferred.insert(pane.to_string());
                 (stale.unwrap_or_default(), true)
             } else {
-                // pane content must never travel over the control pipe: a pane
-                // displaying literal "%end <t> <num>" text (logs, this plugin's
-                // own docs...) would terminate the response block early and
-                // desync every later command. Route it through a buffer + file.
-                screens.get_or_capture(key, force, policy.now, || {
-                    tmux.run(&format!("capture-pane -b '{buf}' -t '{pane}'"))?;
-                    used_buffer = true;
-                    tmux.run(&format!("save-buffer -b '{buf}' '{}'", cap.display()))?;
-                    // only pipe failures are Io: the daemon exits on Io as a desync
-                    std::fs::read(&cap)
-                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                        .map_err(|e| {
-                            let message = format!("capture file {}: {e}", cap.display());
-                            trace!("{message}");
-                            TmuxError::Error(message)
-                        })
-                })?
+                screens.get_or_capture(key, force, policy.now, || mux.capture(pane))?
             };
             if reused {
                 stats.reused += 1;
@@ -392,10 +373,6 @@ pub fn scan_cached(
         );
         Ok(ScanSnapshot { panes, agents })
     })();
-    if used_buffer {
-        let _ = tmux.run(&format!("delete-buffer -b '{buf}'"));
-        let _ = std::fs::remove_file(&cap);
-    }
     let snapshot = result?;
     subj.retain(|pane, _| seen.keys().any(|k| &k.0 == pane)); // dead panes pruned
     screens

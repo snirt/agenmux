@@ -188,14 +188,14 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     // "" not TMUX_PANE: toggle.sh launches the daemon from the pane the user
     // pressed the key in, and adopting that pane would hide its agent
     let mut sb = new_sidebar(
-        tmux,
+        Box::new(tmux),
         plugin_dir,
         cache_file,
         tmp.join("agenmux-rows"),
         String::new(),
         settings,
     );
-    sb.snapshot = crate::snapshot::Store::open(&mut sb.tmux);
+    sb.snapshot = crate::snapshot::Store::open(sb.mux.as_mut());
     // The command runs on this control connection, so it identifies the exact
     // client even when tmux forks and reports a different OS PID. It can briefly
     // be empty while a busy server finishes attaching; retry below.
@@ -203,7 +203,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     let mut control_client = String::new();
     for _ in 0..100 {
         let client = sb
-            .tmux
+            .mux
             .run("display-message -p '#{client_name}'")
             .ok()
             .map(|client| client.trim().to_string())
@@ -211,7 +211,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         if let Some(client) = client {
             let quoted = client.replace('\'', "\\'");
             if sb
-                .tmux
+                .mux
                 .run(&format!("set-option -g @agenmux-control-client '{quoted}'"))
                 .is_err()
             {
@@ -225,7 +225,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     let quoted_tmp = tmp.to_string_lossy().replace('\'', "\\'");
     if control_client.is_empty()
         || sb
-            .tmux
+            .mux
             .run(&format!(
                 "set-option -g @agenmux-runtime-dir '{quoted_tmp}'"
             ))
@@ -303,7 +303,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
 
 impl Sidebar {
     fn measure_panes(&mut self) -> Vec<M> {
-        self.tmux
+        self.mux
             .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}|#{window_id}|#{pane_width}|#{pane_height}|#{window_width} #{window_height}|#{window_panes}|#{window_active}|#{session_id}'")
             .unwrap_or_default()
             .lines()
@@ -330,11 +330,11 @@ impl Sidebar {
         };
         // Ownership decides whether we abandon every pane without teardown.
         // A stale hook response must not look like a newer daemon's claim.
-        if self.tmux.sync().is_err() {
+        if self.mux.sync().is_err() {
             return false;
         }
         // a broken pipe is not a takeover; the loop exits elsewhere
-        self.tmux
+        self.mux
             .run(OWNER_QUERY)
             .is_ok_and(|reply| claimed_elsewhere(&generation, &client, &reply))
     }
@@ -342,7 +342,7 @@ impl Sidebar {
     /// Refresh only render dimensions after a layout notification. Drag
     /// adoption and pane reconciliation stay on the periodic mirror tick.
     pub(super) fn refresh_geometry(&mut self) -> bool {
-        let _ = self.tmux.sync();
+        let _ = self.mux.sync();
         let ms = self.measure_panes();
         let Some(w) = ms.iter().map(|m| m.w).min() else {
             return false;
@@ -361,9 +361,9 @@ impl Sidebar {
     pub(super) fn mirror_tick(&mut self) -> bool {
         // same barrier as active_pane: reading zero panes off a desynced
         // pipe used to tear the whole mirror set down
-        let _ = self.tmux.sync();
+        let _ = self.mux.sync();
         let position = self.settings.settings.sidebar_position;
-        let refreshed = self.settings.refresh(&mut self.tmux);
+        let refreshed = self.settings.refresh(self.mux.as_mut());
         self.adopt_reload(refreshed);
         // Before measuring, so the moved panes are what the drag probe sees.
         if self.settings.settings.sidebar_position != position {
@@ -458,7 +458,7 @@ impl Sidebar {
         if let Some((src_pane, width)) = drag {
             if (1..=10000).contains(&width)
                 && self
-                    .tmux
+                    .mux
                     .run(&format!("set-option -g @agenmux-width {width}"))
                     .is_ok()
             {
@@ -544,7 +544,7 @@ impl Sidebar {
 
     /// Windows a real (non control-mode) client is looking at.
     fn visible_windows(&mut self) -> HashSet<String> {
-        self.tmux
+        self.mux
             .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{window_id}'")
             .unwrap_or_default()
             .lines()
@@ -559,7 +559,7 @@ impl Sidebar {
             return; // no real client: leave mirror_tick's warm-one fallback alone
         }
         let out = self
-            .tmux
+            .mux
             .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}|#{window_id}'")
             .unwrap_or_default();
         let panes: Vec<String> = out
@@ -596,11 +596,11 @@ impl Sidebar {
             return;
         };
         let owns = if generation.is_empty() {
-            self.tmux
+            self.mux
                 .run("show-option -gqv @agenmux-control-client")
                 .is_ok_and(|current| current.trim() == client)
         } else {
-            self.tmux
+            self.mux
                 .run("show-option -gqv @agenmux-generation")
                 .is_ok_and(|current| current.trim() == generation)
         };

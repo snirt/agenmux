@@ -610,6 +610,7 @@ impl Sidebar {
             | Key::Last
             | Key::Select(_)
             | Key::Open(_)
+            | Key::Press(_)
             | Key::Sequence(_, _)
             | Key::Owned(_, _)
             | Key::Search

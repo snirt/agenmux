@@ -88,6 +88,7 @@ limits are in [docs/troubleshooting.md](docs/troubleshooting.md).
 - [Usage](docs/usage.md)
 - [Configuration](docs/configuration.md)
 - [Desktop notifications](docs/notifications.md)
+- [Rex](docs/rex.md)
 - [Adding / overriding agents](docs/custom-agents.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Development](docs/development.md): tests, dev harnesses, runtime architecture

@@ -1,7 +1,7 @@
 use crate::app_config::{action_for, Action, KeyChord};
 use crate::input::{Key, SequenceAction};
 use crate::release;
-use crate::tmux::{command, command_spawn};
+use crate::tmux::command_spawn;
 use std::path::{Path, PathBuf};
 
 use super::render::{back_hint, clip_frame, clip_width, cursor_mark, join, key_hint, nav_label};
@@ -1032,13 +1032,13 @@ impl Sidebar {
 
     pub(super) fn open_rename_input(&mut self, mut target: MutationTarget, action: SequenceAction) {
         target.action = action;
-        let (id, format) = match action {
-            SequenceAction::RenamePane => (target.pane_id.as_str(), "#{pane_title}"),
-            SequenceAction::RenameWindow => (target.window_id.as_str(), "#{window_name}"),
-            SequenceAction::RenameSession => (target.session_id.as_str(), "#{session_name}"),
+        let kind = match action {
+            SequenceAction::RenamePane => crate::mux::Kind::Pane,
+            SequenceAction::RenameWindow => crate::mux::Kind::Window,
+            SequenceAction::RenameSession => crate::mux::Kind::Session,
             _ => return,
         };
-        match command(&["display-message", "-p", "-t", id, format]) {
+        match self.mux.name(kind, target.ids()) {
             Ok(name) => {
                 let name = name
                     .trim_end_matches(['\r', '\n'])
@@ -1301,7 +1301,7 @@ impl Sidebar {
             return;
         }
         let clients = self
-            .tmux
+            .mux
             .run("list-clients -F '#{client_name}|#{pane_title}'")
             .unwrap_or_default();
         for line in clients.lines() {
@@ -1327,8 +1327,7 @@ impl Sidebar {
             return Err("configuration changed on disk; reopen settings".into());
         }
         let file = crate::app_config::parse(source).map_err(|error| error.to_string())?;
-        let options = crate::app_config::read_options(|command| self.tmux.run(command))
-            .map_err(|error| error.to_string())?;
+        let options = self.mux.options().map_err(|error| error.to_string())?;
         let next = self
             .settings
             .resolve(&file, &options)
@@ -1339,6 +1338,8 @@ impl Sidebar {
             .resolve(&old_file, &options)
             .map_err(|error| error.to_string())?;
         crate::app_config::save_document(path, source).map_err(|error| error.to_string())?;
+        // key tables are tmux's; Rex binds its keys in init.lua
+        let tables = self.mux.as_tmux().is_some();
         let rollback = || -> Result<(), String> {
             if old_existed {
                 crate::app_config::save_document(path, old_source)
@@ -1348,12 +1349,12 @@ impl Sidebar {
                     return Err(error.to_string());
                 }
             }
-            if crate::setup::run_config(&self.plugin_dir, &old) != 0 {
+            if tables && crate::setup::run_config(&self.plugin_dir, &old) != 0 {
                 return Err("could not restore previous key tables".into());
             }
             Ok(())
         };
-        if crate::setup::run_config(&self.plugin_dir, &next) != 0 {
+        if tables && crate::setup::run_config(&self.plugin_dir, &next) != 0 {
             return Err(match rollback() {
                 Ok(()) => "could not apply settings; previous settings restored".into(),
                 Err(error) => format!("could not apply settings; rollback failed: {error}"),
@@ -1363,14 +1364,7 @@ impl Sidebar {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos().to_string())
             .unwrap_or_else(|_| "settings".into());
-        if self
-            .tmux
-            .run(&format!(
-                "set-option -g {} {token}",
-                crate::app_config::RELOAD_OPTION
-            ))
-            .is_err()
-        {
+        if self.mux.publish_reload(&token).is_err() {
             return Err(match rollback() {
                 Ok(()) => "could not publish settings; previous settings restored".into(),
                 Err(error) => format!("could not publish settings; rollback failed: {error}"),
@@ -1391,7 +1385,7 @@ impl Sidebar {
         }
         if width_changed && self.daemon.is_some() {
             let panes = self
-                .tmux
+                .mux
                 .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}|#{window_width}'")
                 .unwrap_or_default();
             for line in panes.lines() {

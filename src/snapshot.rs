@@ -89,12 +89,14 @@ pub struct Live {
 }
 
 impl Closed {
+    /// tmux `$n` or a Rex `session:` id.
     pub fn is_session(&self) -> bool {
-        self.id.starts_with('$')
+        self.id.starts_with('$') || self.id.starts_with("session:")
     }
 
+    /// tmux `%n` or a Rex `block:` id.
     pub fn is_pane(&self) -> bool {
-        self.id.starts_with('%')
+        self.id.starts_with('%') || self.id.starts_with("block:")
     }
 
     /// The closed pane of a pane entry.
@@ -146,13 +148,18 @@ pub fn agents(sessions: &[Session]) -> usize {
 /// `<state dir>/snapshot-<socket name>`: one file per tmux server socket.
 pub fn path(socket_path: &str) -> Option<PathBuf> {
     let socket = Path::new(socket_path.trim()).file_name()?.to_str()?;
+    state_file(&format!("snapshot-{socket}"))
+}
+
+/// `<state dir>/<name>`.
+pub fn state_file(name: &str) -> Option<PathBuf> {
     let xdg = std::env::var_os("XDG_STATE_HOME");
     let home = std::env::var_os("HOME");
     crate::diag::state_dir(
         xdg.as_deref().map(Path::new),
         home.as_deref().map(Path::new),
     )
-    .map(|dir| dir.join(format!("snapshot-{socket}")))
+    .map(|dir| dir.join(name))
 }
 
 pub fn prev_path(path: &Path) -> PathBuf {
@@ -215,21 +222,8 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn open(tmux: &mut crate::tmux::Tmux) -> Option<Store> {
-        // A fresh control client answers empty until its attach completes.
-        let mut out = String::new();
-        for _ in 0..100 {
-            out = tmux
-                .run("display-message -p '#{pid}|#{start_time}|#{socket_path}'")
-                .ok()?;
-            if !out.trim().is_empty() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let mut fields = out.trim().splitn(3, '|');
-        let server = format!("{}|{}", fields.next()?, fields.next()?);
-        let path = path(fields.next()?)?;
+    pub fn open(mux: &mut dyn crate::mux::Multiplexer) -> Option<Store> {
+        let (server, path) = mux.snapshot_home()?;
         let (collapsed, prev) = open(&path, &server);
         Some(Store {
             path,

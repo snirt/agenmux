@@ -209,9 +209,12 @@ where
 fn click_command(event: &AttentionEvent) -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let exe = exe.to_str()?;
+    let bundle = terminal_bundle()?;
+    if crate::mux::is_rex() {
+        return Some(build_click_command(exe, REX_SOCKET, &event.pane, bundle));
+    }
     let tmux = std::env::var("TMUX").ok()?;
     let socket = tmux.split(',').next().filter(|socket| !socket.is_empty())?;
-    let bundle = terminal_bundle()?;
     Some(build_click_command(exe, socket, &event.pane, bundle))
 }
 
@@ -233,6 +236,7 @@ fn terminal_bundle() -> Option<&'static str> {
         "apple_terminal" => Some("com.apple.Terminal"),
         "kitty" => Some("net.kovidgoyal.kitty"),
         "alacritty" => Some("org.alacritty"),
+        "rex" => Some("com.superlogical.rex"),
         _ => None,
     }
 }
@@ -246,11 +250,30 @@ fn known_bundle(bundle: &str) -> Option<&'static str> {
         "com.apple.Terminal" => Some("com.apple.Terminal"),
         "net.kovidgoyal.kitty" => Some("net.kovidgoyal.kitty"),
         "org.alacritty" => Some("org.alacritty"),
+        "com.superlogical.rex" => Some("com.superlogical.rex"),
         _ => None,
     }
 }
 
+/// `notification-open rex <block> <bundle>`: the pane lives on the Rex
+/// server that REX_SERVER (or the default socket) names.
+const REX_SOCKET: &str = "rex";
+
 pub fn open_pane(socket: &str, pane: &str, bundle: &str) -> i32 {
+    if socket == REX_SOCKET {
+        if !pane.starts_with("block:") {
+            return 0;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(command) = activation_command(bundle) {
+            let _ = SystemRunner.run(&command);
+        }
+        if let Ok(mut rex) = crate::mux::Rex::connect(false) {
+            use crate::mux::Multiplexer;
+            rex.focus(pane);
+        }
+        return 0;
+    }
     if socket.is_empty() || !valid_pane(pane) {
         return 0;
     }

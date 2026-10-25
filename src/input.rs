@@ -161,6 +161,9 @@ pub(crate) enum Key {
     Select(usize),
     /// Double click: select the row, then activate it like Enter.
     Open(usize),
+    /// Left press on a screen row (0-based), from the tty's own mouse
+    /// reporting; the sidebar maps it through its rows map.
+    Press(usize),
     Down,
     WheelUp,
     WheelDown,
@@ -405,7 +408,7 @@ fn chord(first: u8, next: impl FnMut() -> Option<u8>) -> Option<KeyChord> {
         0x1b => {
             return match escape_input(next)? {
                 EscapeInput::Chord(chord) => Some(chord),
-                EscapeInput::Paste => None,
+                EscapeInput::Paste | EscapeInput::Mouse(_) => None,
             }
         }
         0x09 => KeyChord::Tab,
@@ -420,6 +423,28 @@ fn chord(first: u8, next: impl FnMut() -> Option<u8>) -> Option<KeyChord> {
 enum EscapeInput {
     Chord(KeyChord),
     Paste,
+    Mouse(Key),
+}
+
+/// SGR mouse report `<button;column;row` + `M` (press) or `m` (release).
+fn sgr_mouse(report: &[u8]) -> Key {
+    let Some((&end, body)) = report.split_last() else {
+        return Key::Other;
+    };
+    let fields: Vec<usize> = std::str::from_utf8(body.strip_prefix(b"<").unwrap_or(body))
+        .unwrap_or_default()
+        .split(';')
+        .filter_map(|field| field.parse().ok())
+        .collect();
+    let [button, _column, row] = fields[..] else {
+        return Key::Other;
+    };
+    match (button, end) {
+        (0, b'M') => Key::Press(row.saturating_sub(1)),
+        (64, _) => Key::WheelUp,
+        (65, _) => Key::WheelDown,
+        _ => Key::Other,
+    }
 }
 
 /// Consume the entire CSI/SS3 tail before deciding whether it is supported.
@@ -438,6 +463,8 @@ fn escape_input(mut next: impl FnMut() -> Option<u8>) -> Option<EscapeInput> {
         // Supported tails fit in four bytes; still drain longer unsupported tails.
         let mut tail = [0u8; 4];
         let mut len = 0usize;
+        // SGR mouse reports run longer; keep theirs whole
+        let mut report = Vec::new();
         loop {
             let byte = next()?;
             // ESC starts a new sequence; CAN/SUB cancel the current sequence.
@@ -449,10 +476,16 @@ fn escape_input(mut next: impl FnMut() -> Option<u8>) -> Option<EscapeInput> {
             if len < tail.len() {
                 tail[len] = byte;
             }
+            if report.len() < 32 {
+                report.push(byte);
+            }
             len += 1;
             if (0x40..=0x7e).contains(&byte) {
                 break;
             }
+        }
+        if prefix == b'[' && report.first() == Some(&b'<') {
+            return Some(EscapeInput::Mouse(sgr_mouse(&report)));
         }
         let tail = tail.get(..len)?;
         return Some(EscapeInput::Chord(match tail {
@@ -604,18 +637,35 @@ pub(crate) fn read_key(fd: libc::c_int, keys: &Keymap) -> Key {
     read_key_with_config(fd, keys, config)
 }
 
+#[cfg(test)]
 pub(crate) fn read_key_with_config(
     fd: libc::c_int,
     keys: &Keymap,
     config: &crate::app_config::AppConfig,
 ) -> Key {
+    read_key_continuing(fd, keys, config, &[])
+}
+
+/// `continuing`: the keys that complete or extend a pending sequence. They
+/// win over single-key bindings, so after `c` the `s` of `cs` is the
+/// sequence, not settings. tmux's key tables do this in split mode; tty mode
+/// reads physical keys and has to do it here.
+pub(crate) fn read_key_continuing(
+    fd: libc::c_int,
+    keys: &Keymap,
+    config: &crate::app_config::AppConfig,
+    continuing: &[char],
+) -> Key {
     let Some(b) = read_byte(fd) else {
         return Key::Quit;
     }; // EOF: explicit close
-       // Every byte of the tail goes through the same polling reader. In mirror
-       // mode keys arrive over a non-blocking FIFO that the key sender feeds one
-       // byte at a time, so the tail is routinely still in flight; reading it
-       // without polling hit EAGAIN and dropped every other arrow.
+    if b.is_ascii_graphic() && continuing.contains(&char::from(b)) {
+        return Key::Sequence(char::from(b), None);
+    }
+    // Every byte of the tail goes through the same polling reader. In mirror
+    // mode keys arrive over a non-blocking FIFO that the key sender feeds one
+    // byte at a time, so the tail is routinely still in flight; reading it
+    // without polling hit EAGAIN and dropped every other arrow.
     let next = || {
         poll_fd(fd, Some(Duration::from_millis(50)))
             .then(|| read_byte(fd))
@@ -625,6 +675,7 @@ pub(crate) fn read_key_with_config(
         0x1b => {
             return match escape_input(next) {
                 Some(EscapeInput::Paste) => read_paste(fd, false),
+                Some(EscapeInput::Mouse(key)) => key,
                 Some(EscapeInput::Chord(chord)) => key_for_chord(b, Some(chord), keys, config),
                 None => key_for_chord(b, None, keys, config),
             };
@@ -803,6 +854,7 @@ pub(crate) fn read_search_key(fd: libc::c_int, keys: &Keymap) -> Key {
     let chord = if first == 0x1b {
         match escape_input(next) {
             Some(EscapeInput::Paste) => return read_paste(fd, true),
+            Some(EscapeInput::Mouse(key)) => return key,
             Some(EscapeInput::Chord(chord)) => Some(chord),
             None => None,
         }
@@ -1156,6 +1208,52 @@ pub fn wheel(pane: &str, direction: Direction) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pending_sequence_outranks_single_key_bindings() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { libc::write(fds[1], b"ss".as_ptr().cast(), 2) }, 2);
+        let config = crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+        let keys = &config.normal;
+        // after `c`, `s` is the second key of `cs`
+        let continued = read_key_continuing(fds[0], keys, &config, &['c', 's']);
+        assert!(
+            matches!(continued, Key::Sequence('s', None)),
+            "{continued:?}"
+        );
+        // with nothing pending it is the settings key
+        let alone = read_key_continuing(fds[0], keys, &config, &[]);
+        assert!(matches!(alone, Key::Settings), "{alone:?}");
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    #[test]
+    fn sgr_mouse_reports_decode_back_to_back() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let bytes = b"\x1b[<0;6;3M\x1b[<0;6;3m\x1b[<0;6;3M\x1b[<65;6;3Mj";
+        assert_eq!(
+            unsafe { libc::write(fds[1], bytes.as_ptr().cast(), bytes.len()) },
+            bytes.len() as isize
+        );
+        let config = crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+        let keys =
+            crate::app_config::resolved_keys(crate::app_config::KeyMode::Normal, None).unwrap();
+        let read = || format!("{:?}", read_key_with_config(fds[0], &keys, &config));
+        assert_eq!(read(), "Press(2)");
+        assert_eq!(read(), "Other");
+        assert_eq!(read(), "Press(2)");
+        assert_eq!(read(), "WheelDown");
+        assert_eq!(read(), "Down");
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
 
     // Run terminal ownership in a separate process: hooks and stdin are global.
     #[test]

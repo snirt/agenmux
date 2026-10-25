@@ -7,6 +7,7 @@ mod conf;
 mod detect;
 mod focus;
 mod input;
+mod mux;
 mod notifications;
 mod pane_writers;
 mod panes;
@@ -49,6 +50,9 @@ Internal (called by the tmux integration):
   key <name> [client], click <pane> <row> <client> [double], wheel <pane> <up|down>,
   pane-add [window [client]], pane-orphan, pane-pin, teardown,
   notification-open <socket> <pane> <bundle>
+
+Internal (called by the Rex integration, rex/agenmux.lua):
+  rex-toggle <session> <block> [split|popup], rex-sidebars
 ";
 
 pub(crate) fn compat_env(name: &str, legacy: &str) -> Option<String> {
@@ -108,6 +112,9 @@ fn main() {
             sidebar::run_daemon(plugin_dir(), scan_cache_path())
         }
         ["sidebar-pane"] => pane_writers::run_pane(),
+        ["rex-sidebars"] => mux::rex_sidebars(),
+        ["rex-toggle", session, block] => mux::rex_toggle(session, block, "split"),
+        ["rex-toggle", session, block, mode] => mux::rex_toggle(session, block, mode),
         ["key", key] => sidebar::send_key(key, None),
         ["key", key, client] => sidebar::send_key(key, Some(client)),
         ["click", pane, y, client] => y
@@ -182,11 +189,11 @@ fn self_pane() -> Option<String> {
 
 fn run_scan() -> Result<scan::ScanSnapshot, tmux::TmuxError> {
     let confs = conf::load_all(&plugin_dir());
-    let mut t = tmux::Tmux::connect()?;
+    let mut mux = mux::connect(false)?;
     let mut cache = procs::IdentCache::new();
     let mut subj = scan::SubjectCache::new();
     scan::scan(
-        &mut t,
+        mux.as_mut(),
         &confs,
         &mut cache,
         &mut subj,

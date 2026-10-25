@@ -399,8 +399,12 @@ pub fn read_options(
 }
 pub fn current(cli: Option<&str>) -> Result<AppConfig, ConfigError> {
     let file = snapshot()?;
-    let options =
-        read_options(|cmd| crate::tmux::command(&cmd.split_whitespace().collect::<Vec<_>>()))?;
+    // Rex has no tmux options: config.toml alone configures it
+    let options = if crate::mux::is_rex() {
+        BTreeMap::new()
+    } else {
+        read_options(|cmd| crate::tmux::command(&cmd.split_whitespace().collect::<Vec<_>>()))?
+    };
     resolve_cli(file, &options, cli)
 }
 
@@ -445,7 +449,7 @@ impl LiveConfig {
     }
     /// Invalid overrides retain the entire last valid snapshot. At most 16
     /// distinct diagnostics per process.
-    pub fn refresh(&mut self, tmux: &mut crate::tmux::Tmux) -> Refreshed {
+    pub fn refresh(&mut self, mux: &mut dyn crate::mux::Multiplexer) -> Refreshed {
         if self.last_read.elapsed() < std::time::Duration::from_millis(200) {
             return Refreshed::default();
         }
@@ -453,11 +457,7 @@ impl LiveConfig {
         // A bumped token means someone ran `config reload`: re-read the file
         // once for that token. A rejected file keeps the last valid one, and
         // the token still advances so one bad edit cannot re-report forever.
-        let token = tmux
-            .run(&format!("show-option -gqv {RELOAD_OPTION}"))
-            .ok()
-            .map(|value| value.trim_end_matches('\n').to_owned())
-            .filter(|value| !value.is_empty());
+        let token = mux.reload_token();
         let mut reloaded = false;
         if token != self.reload_token {
             self.reload_token = token;
@@ -469,12 +469,13 @@ impl LiveConfig {
                 Err(e) => self.report(&e),
             }
         }
-        let next = read_options(|cmd| tmux.run(cmd))
+        let next = mux
+            .options()
             .and_then(|options| resolve_cli(&self.file, &options, self.cli_mode.as_deref()));
         let reported = self.reported.len();
         let width_changed = self.accept(next);
         if self.reported.len() != reported {
-            let _ = tmux.run("display-message 'agenmux: invalid live application configuration; keeping last valid settings. Run agenmux config check --effective for details.'");
+            let _ = mux.run("display-message 'agenmux: invalid live application configuration; keeping last valid settings. Run agenmux config check --effective for details.'");
         }
         Refreshed {
             width_changed,
@@ -528,15 +529,19 @@ pub fn reload(plugin_dir: &Path) -> i32 {
             return e.exit_code();
         }
     };
-    let options =
-        match read_options(|cmd| crate::tmux::command(&cmd.split_whitespace().collect::<Vec<_>>()))
-        {
-            Ok(options) => options,
-            Err(e) => {
-                eprintln!("agenmux: {e}");
-                return e.exit_code();
-            }
-        };
+    let rex = crate::mux::is_rex();
+    let options = if rex {
+        Ok(BTreeMap::new())
+    } else {
+        read_options(|cmd| crate::tmux::command(&cmd.split_whitespace().collect::<Vec<_>>()))
+    };
+    let options = match options {
+        Ok(options) => options,
+        Err(e) => {
+            eprintln!("agenmux: {e}");
+            return e.exit_code();
+        }
+    };
     let config = match resolve(&file, &options) {
         Ok(config) => config,
         Err(e) => {
@@ -546,7 +551,8 @@ pub fn reload(plugin_dir: &Path) -> i32 {
     };
     let installed =
         crate::tmux::command(&["show-option", "-gqv", "@agenmux-nav-version"]).unwrap_or_default();
-    let reinstalled = installed.trim_end() != crate::setup::nav_version(&config);
+    // Rex binds its keys in init.lua; there are no tables to reinstall
+    let reinstalled = !rex && installed.trim_end() != crate::setup::nav_version(&config);
     if reinstalled {
         if crate::setup::run_config(plugin_dir, &config) != 0 {
             return 1;
@@ -558,7 +564,12 @@ pub fn reload(plugin_dir: &Path) -> i32 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos().to_string())
         .unwrap_or_else(|_| "reload".into());
-    if crate::tmux::command_status(&["set-option", "-g", RELOAD_OPTION, &token]).is_err() {
+    let published = if rex {
+        crate::mux::publish_reload(&token)
+    } else {
+        crate::tmux::command_status(&["set-option", "-g", RELOAD_OPTION, &token])
+    };
+    if published.is_err() {
         eprintln!("agenmux: cannot publish the reload signal");
         return 1;
     }

@@ -122,7 +122,17 @@ impl From<std::io::Error> for TmuxError {
     }
 }
 
+/// Under Rex, a tmux server that happens to be running belongs to another
+/// workspace: the forked helpers must never query or drive it.
+fn refuse_under_rex() -> Result<(), TmuxError> {
+    if crate::mux::is_rex() {
+        return Err(TmuxError::Error("not inside tmux".into()));
+    }
+    Ok(())
+}
+
 pub fn command(args: &[&str]) -> Result<String, TmuxError> {
+    refuse_under_rex()?;
     let output = Command::new("tmux").args(args).output()?;
     if !output.status.success() {
         return Err(TmuxError::Error(
@@ -208,6 +218,7 @@ fn command_batch_chunk(commands: &[Vec<String>]) -> Result<(), TmuxError> {
     if commands.is_empty() {
         return Ok(());
     }
+    refuse_under_rex()?;
     let mut command = Command::new("tmux");
     for (index, args) in commands.iter().enumerate() {
         if index != 0 {
@@ -228,6 +239,7 @@ fn command_batch_chunk(commands: &[Vec<String>]) -> Result<(), TmuxError> {
 }
 
 pub fn command_spawn(args: &[&str]) -> Result<(), TmuxError> {
+    refuse_under_rex()?;
     Command::new("tmux").args(args).spawn()?;
     Ok(())
 }
