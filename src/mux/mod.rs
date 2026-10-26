@@ -6,12 +6,17 @@
 mod rex;
 mod tmux;
 
-pub use rex::{publish_reload, rex_close_sidebars, rex_reopen, rex_sidebars, rex_toggle, Rex};
+pub use rex::{
+    publish_reload, rex_close_sidebars, rex_reopen, rex_sidebars, rex_toggle,
+    runtime_dir as rex_runtime_dir, Rex,
+};
 
+use crate::app_config::AppConfig;
 use crate::scan::ParsedPane;
 use crate::snapshot::{Closed, Live, Snapshot};
 use crate::tmux::{PendingChanges, Tmux, TmuxError};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
 
 /// Which record a management action names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +24,35 @@ pub enum Kind {
     Session,
     Window,
     Pane,
+}
+
+/// A sidebar pane as the daemon measures it, in cells.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SidebarPane {
+    pub pane: String,
+    pub win: String,
+    pub sess: String,
+    pub w: usize,
+    pub h: usize,
+    pub win_size: (usize, usize),
+    /// Panes in its window, the sidebar included.
+    pub panes: usize,
+    /// Its window is its session's current one.
+    pub active: bool,
+    /// Its size is the one its layout gives it: no placement or client
+    /// resize is still on the way.
+    pub settled: bool,
+    /// Some: the backend knows whether a divider moved. None: compare exact
+    /// window cell sizes (tmux). Estimated sizes must never veto a known drag.
+    pub width_drag: Option<bool>,
+}
+
+/// The daemon that owns the sidebars: the activation that started it, and
+/// its connection.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Owner {
+    pub generation: String,
+    pub client: String,
 }
 
 /// A record and the records above it, as the scan reported them.
@@ -127,6 +161,54 @@ pub trait Multiplexer {
     fn publish_reload(&mut self, token: &str) -> Result<(), TmuxError>;
     /// Live `@agenmux-*` overrides; empty where the server has none.
     fn options(&mut self) -> Result<BTreeMap<String, String>, crate::app_config::ConfigError>;
+
+    // The daemon: one process scans and renders into every sidebar pane. It
+    // decides; these only report and act. The defaults suit a server no
+    // daemon runs on.
+
+    /// Every sidebar pane.
+    fn sidebar_panes(&mut self) -> Vec<SidebarPane> {
+        Vec::new()
+    }
+    /// Windows a real client shows.
+    fn visible_windows(&mut self) -> HashSet<String> {
+        HashSet::new()
+    }
+    /// Set each pane's width in cells. false: one of them failed.
+    fn resize_panes(&mut self, _widths: &[(String, usize)]) -> bool {
+        false
+    }
+    fn close_panes(&mut self, _panes: &[String]) {}
+    /// The settings moved the sidebars to the other side.
+    fn dock_sidebars(&mut self, _plugin_dir: &Path, _settings: &AppConfig) {}
+    /// Close every sidebar pane, putting their windows' layouts back.
+    fn close_sidebars(&mut self) {}
+    /// Make the width a dragged sidebar settled on the configured one.
+    fn save_width(&mut self, _width: usize) -> bool {
+        false
+    }
+    /// This connection's name, which a daemon's ownership record carries.
+    fn connection(&mut self) -> Option<String> {
+        None
+    }
+    /// The ownership record; None when it could not be read.
+    fn owner(&mut self) -> Option<Owner> {
+        None
+    }
+    /// Record `client` as the owner, and the runtime dir its helpers use.
+    fn publish_owner(&mut self, _client: &str, _runtime: &Path) -> Result<(), TmuxError> {
+        Err(TmuxError::Error("no daemon on this server".into()))
+    }
+    /// Clear the record, if `generation` (when given) still owns it.
+    fn clear_owner(&mut self, _generation: Option<&str>) {}
+    /// Where keys the server delivers itself go.
+    fn set_key_sink(&mut self, _fd: libc::c_int) {}
+    /// Change events cover the session the user acts in.
+    fn follow_session(&mut self, _session: &str) -> bool {
+        true
+    }
+    /// `client` types text into the sidebar, or stops.
+    fn text_input(&mut self, _client: &str, _on: bool) {}
 
     /// A tmux command over the control pipe; other servers refuse it, so
     /// tmux-only features (key tables, layouts, clients) fail soft.
@@ -273,6 +355,26 @@ pub fn take_mux_flag(args: &mut Vec<String>) -> Result<(), String> {
         }
         _ => Err("--mux takes tmux or rex".into()),
     }
+}
+
+/// The pane or block this process runs in, as an id safe in a file name.
+pub fn own_pane() -> Option<String> {
+    let (name, prefix, valid): (_, _, fn(u8) -> bool) = match backend().ok()? {
+        Backend::Tmux => ("TMUX_PANE", "%", |b| b.is_ascii_digit()),
+        Backend::Rex => ("REX_BLOCK", "block:", |b| {
+            b.is_ascii_alphanumeric() || b == b'-'
+        }),
+    };
+    std::env::var(name).ok().filter(|id| {
+        id.strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(valid))
+    })
+}
+
+/// The server sends the daemon its keys itself (tmux key tables). Elsewhere
+/// each sidebar pane forwards its terminal input.
+pub fn routes_keys() -> bool {
+    backend() == Ok(Backend::Tmux)
 }
 
 /// `monitoring`: the long-lived sidebar client, which wants pane output.

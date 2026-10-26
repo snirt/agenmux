@@ -107,3 +107,206 @@ fn rex_calls_never_start_a_server() {
         assert!(line.starts_with("--autostart=false "), "{line}");
     }
 }
+
+/// Exercise the real sidebar-pane process, including FIFO framing, ioctl size
+/// reads, SIGWINCH replay and terminal cleanup. No Rex server or live UI needed.
+struct PtyPane {
+    child: std::process::Child,
+    master: std::fs::File,
+    slave: std::fs::File,
+    writer: std::fs::File,
+    dir: PathBuf,
+    output: Vec<u8>,
+}
+
+impl PtyPane {
+    fn start() -> Self {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("agenmux-viewport-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = dir.join(format!("agenmux-rex-{}", unsafe { libc::geteuid() }));
+        std::fs::create_dir_all(&runtime).unwrap();
+        let mut master = -1;
+        let mut slave = -1;
+        let mut size = libc::winsize {
+            ws_col: 4,
+            ws_row: 2,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut size,
+                )
+            },
+            0
+        );
+        let master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+            assert_eq!(
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                0
+            );
+        }
+        let child = Command::new(env!("CARGO_BIN_EXE_agenmux"))
+            .arg("sidebar-pane")
+            .env("AGENMUX_MUX", "rex")
+            .env("REX_BLOCK", "block:test")
+            .env("TMPDIR", &dir)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .stdin(slave.try_clone().unwrap())
+            .stdout(slave.try_clone().unwrap())
+            .stderr(slave.try_clone().unwrap())
+            .spawn()
+            .unwrap();
+        let path = runtime.join("agenmux-frame-block:test");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let writer = loop {
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+            {
+                break file;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pane did not create its FIFO"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let mut pane = Self {
+            child,
+            master,
+            slave,
+            writer,
+            dir,
+            output: Vec::new(),
+        };
+        pane.read_until(b"\x1b[2J");
+        pane.output.clear();
+        pane
+    }
+
+    fn ready(&self, milliseconds: i32) -> bool {
+        use std::os::fd::AsRawFd;
+        let mut p = libc::pollfd {
+            fd: self.master.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        unsafe { libc::poll(&mut p, 1, milliseconds) > 0 }
+    }
+
+    fn read_until(&mut self, marker: &[u8]) {
+        use std::io::Read;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !self.output.windows(marker.len()).any(|s| s == marker) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "viewport timed out: {:?}",
+                String::from_utf8_lossy(&self.output)
+            );
+            if self.ready(20) {
+                let mut buf = [0u8; 8192];
+                let n = self.master.read(&mut buf).unwrap();
+                assert!(n > 0);
+                self.output.extend_from_slice(&buf[..n]);
+            }
+        }
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) {
+        use std::os::fd::AsRawFd;
+        let size = libc::winsize {
+            ws_col: cols,
+            ws_row: rows,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        self.output.clear();
+        assert_eq!(
+            unsafe { libc::ioctl(self.slave.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+            0
+        );
+        assert_eq!(
+            unsafe { libc::kill(self.child.id() as i32, libc::SIGWINCH) },
+            0
+        );
+        self.read_until(b"\x1b[?2026l");
+    }
+}
+
+impl Drop for PtyPane {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[test]
+fn sidebar_pane_reprojects_complete_frames_on_pty_resize_without_new_input() {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    let mut p = PtyPane::start();
+    let body = "\x1b[Habcdef\n123456\nthird 一❤️\n";
+    p.writer
+        .write_all(format!("\x1b[?2026h{body}").as_bytes())
+        .unwrap();
+    assert!(!p.ready(50), "partial frames must not reach the terminal");
+    p.writer.write_all(b"\x1b[?2026l").unwrap();
+    p.read_until(b"\x1b[?2026l");
+    let out = String::from_utf8_lossy(&p.output);
+    assert!(out.contains("abcd\x1b[2;1H1234"), "{out:?}");
+    assert!(!out.contains("ef") && !out.contains("56") && !out.contains("third"));
+    assert!(!out.contains('\n'));
+    // No new daemon frame: a blocked reader must wake and replay its cache.
+    for _ in 0..4 {
+        p.resize(12, 3);
+        let out = String::from_utf8_lossy(&p.output);
+        assert!(
+            out.contains("abcdef") && out.contains("third 一❤️"),
+            "{out:?}"
+        );
+        p.resize(1, 1);
+        let out = String::from_utf8_lossy(&p.output);
+        assert!(out.contains("\x1b[2J\x1b[1;1Ha") && !out.contains("bc") && !out.contains("123"));
+    }
+    p.writer.write_all(b"\x1b[?2026htorn\x1b[").unwrap();
+    assert!(!p.ready(30));
+    p.writer
+        .write_all(b"\x1b[?2026h\x1b[HOK\x1b[?2026l")
+        .unwrap();
+    p.output.clear();
+    p.read_until(b"\x1b[?2026l");
+    assert!(String::from_utf8_lossy(&p.output).contains("\x1b[2J\x1b[1;1HO"));
+    p.output.clear();
+    assert_eq!(unsafe { libc::kill(p.child.id() as i32, libc::SIGTERM) }, 0);
+    p.read_until(b"\x1b[?1049l");
+    assert!(String::from_utf8_lossy(&p.output).contains("\x1b[?7h"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(status) = p.child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "pane failed to stop");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let mut terminal = unsafe { std::mem::zeroed::<libc::termios>() };
+    assert_eq!(
+        unsafe { libc::tcgetattr(p.slave.as_raw_fd(), &mut terminal) },
+        0
+    );
+    assert_ne!(terminal.c_lflag & libc::ICANON, 0);
+    assert_ne!(terminal.c_lflag & libc::ECHO, 0);
+}

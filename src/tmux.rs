@@ -153,6 +153,7 @@ pub fn runtime_dir() -> PathBuf {
     std::env::var_os("AGENMUX_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
+        .or_else(|| crate::mux::is_rex().then(crate::mux::rex_runtime_dir))
         .or_else(|| {
             command(&["show-option", "-gqv", "@agenmux-runtime-dir"])
                 .ok()

@@ -18,11 +18,11 @@ Then run `rex config reload`. Options:
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `bin` | `"agenmux"` | The agenmux binary. Rex actions see a bare `PATH`, so give a full path. |
-| `key` | `"alt+s"` | Toggle the sidebar in the current window; with `display.mode = "popup"`, show the popup. |
+| `key` | `"alt+s"` | Turn the sidebars on or off; with `display.mode = "popup"`, show the popup. |
 | `popup_key` | `"alt+p"` | Open or close the sidebar as a floating popup; `false` binds nothing. Avoid Mac dead keys such as alt+e, alt+i, alt+n and alt+u: macOS keeps them from Rex. |
 
-While a sidebar is open, every new session and window gets one too, as in
-tmux. A window whose sidebar you toggled off stays without.
+As in tmux, the key turns agenmux on in the current window, and every
+window you move to gets a sidebar too. Pressed again, it closes them all.
 
 agenmux never edits `init.lua`. To keep a sidebar in every window, old ones
 included, run `agenmux rex-sidebars` once per Rex server start.
@@ -34,17 +34,26 @@ then the app's own copy.
 
 Everything in [usage](usage.md) works the same, except:
 
-- **Width**: the sidebar opens at the width you last resized one to, with
-  keys or the mouse, however it was closed. `display.sidebar_width` does not
-  apply. `display.sidebar_position` does.
+- **One daemon**, as in tmux: it scans, renders and sends notifications, and
+  each sidebar block only shows its frames and passes on your keys. It starts
+  with the first sidebar and ends with the last.
+- **Width**: `display.sidebar_width`, in columns. Dragging a sidebar's
+  border resizes every sidebar and keeps that width, as tmux keeps
+  `@agenmux-width`; a split, a close or a window resize puts it back.
+  `display.sidebar_position` applies too. Width requests settle against each
+  terminal's reported columns, independently of other blocks' fonts and sizes.
+  Hidden blocks settle when the app next displays them; unresponsive clients
+  park instead of causing repeated layout changes. Rex's minimum pane sizes
+  bound the realized width without overwriting the saved preference. Frames
+  are projected into each pane's current PTY viewport and repainted on resize,
+  so a narrow or short pane cannot wrap rows or scroll the tree.
 - **Popup**: `display.popup_width` and a fixed `popup_height` size it in
   cells; `popup_height = "auto"` takes 80% of the window.
-- **Focus**: the cursor follows the pane focused in the sidebar's own session,
-  or in a popup, the pane it opened over. Jumps go to the app window whose
-  key opened the sidebar.
-- **Notifications** come from one sidebar, whichever others are open. A
-  sidebar in a window you are not looking at waits for Rex's events instead
-  of polling.
+- **Focus**: the cursor follows the session the app shows. Rex does not
+  report it, so agenmux reads the app's own record of it from its macOS
+  preferences when it changes, or uses newer live focus changes while that
+  persisted record lags. A popup follows the pane it opened over. Jumps go to
+  the app window whose key opened the sidebar.
 - **Mouse**: the sidebar block turns on mouse reporting itself. Click and
   wheel work as in tmux. Double-click goes to any row: a session header to
   its current window, a window header to its focused pane. Fold with the

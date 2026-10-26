@@ -1,8 +1,9 @@
-use super::{Ids, Kind, Multiplexer};
+use super::{Ids, Kind, Multiplexer, Owner, SidebarPane};
+use crate::app_config::AppConfig;
 use crate::scan::{parse_panes, ParsedPane, LIST_FMT};
 use crate::snapshot::{Closed, Live, Snapshot};
 use crate::tmux::{command, command_status, PendingChanges, Tmux, TmuxError};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
 
 impl Multiplexer for Tmux {
@@ -258,20 +259,14 @@ impl Multiplexer for Tmux {
         let location = format!("#{{window_id}}|#{{?{},1,0}}", crate::panes::IS_SIDEBAR);
         let client_filter = format!("#{{==:#{{client_name}},{client}}}");
         let mut reached_expected = expected_window.is_none();
-        loop {
-            let Ok(location) = command(&["list-clients", "-f", &client_filter, "-F", &location])
-            else {
-                break;
-            };
+        while let Ok(location) = command(&["list-clients", "-f", &client_filter, "-F", &location]) {
             let (window, on_sidebar) = location.trim().split_once('|').unwrap_or(("", "0"));
             // Creation names the exact destination. Wait for tmux to publish the
             // completed switch; only treat a later move away as user intent.
             if let Some(expected) = expected_window {
                 if window == expected {
                     reached_expected = true;
-                } else if reached_expected {
-                    break;
-                } else if Instant::now() >= deadline {
+                } else if reached_expected || Instant::now() >= deadline {
                     break;
                 } else {
                     std::thread::sleep(Duration::from_millis(50));
@@ -407,6 +402,105 @@ impl Multiplexer for Tmux {
         crate::app_config::read_options(|cmd| self.run(cmd))
     }
 
+    fn sidebar_panes(&mut self) -> Vec<SidebarPane> {
+        self.run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}|#{window_id}|#{pane_width}|#{pane_height}|#{window_width} #{window_height}|#{window_panes}|#{window_active}|#{session_id}'")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(parse_sidebar_pane)
+            .collect()
+    }
+
+    fn visible_windows(&mut self) -> HashSet<String> {
+        self.run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{window_id}'")
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    // Forked tmux: resizes and kills fire hooks whose run-shell output
+    // would desync the control pipe.
+    fn resize_panes(&mut self, widths: &[(String, usize)]) -> bool {
+        forked_batch(widths.iter().map(|(pane, width)| {
+            ["resize-pane", "-t", pane, "-x", &width.to_string()]
+                .map(String::from)
+                .to_vec()
+        }))
+    }
+
+    fn close_panes(&mut self, panes: &[String]) {
+        forked_batch(
+            panes
+                .iter()
+                .map(|pane| ["kill-pane", "-t", pane].map(String::from).to_vec()),
+        );
+    }
+
+    fn dock_sidebars(&mut self, plugin_dir: &std::path::Path, settings: &AppConfig) {
+        crate::panes::dock(settings.sidebar_position, settings.sidebar_width);
+        // The default jump and fold keys follow the side. Reload and the
+        // settings overlay reinstall already; a bare tmux option does not.
+        let installed =
+            command(&["show-option", "-gqv", "@agenmux-nav-version"]).unwrap_or_default();
+        if installed.trim_end() != crate::setup::nav_version(settings)
+            && crate::setup::run_config(plugin_dir, settings) == 0
+        {
+            crate::setup::reclaim_client_tables();
+        }
+    }
+
+    fn close_sidebars(&mut self) {
+        let _ = crate::panes::teardown_panes();
+    }
+
+    fn save_width(&mut self, width: usize) -> bool {
+        self.run(&format!("set-option -g @agenmux-width {width}"))
+            .is_ok()
+    }
+
+    fn connection(&mut self) -> Option<String> {
+        // The command runs on this control connection, so it identifies the
+        // exact client even when tmux forks and reports a different OS PID.
+        self.run("display-message -p '#{client_name}'")
+            .ok()
+            .map(|client| client.trim().to_string())
+            .filter(|client| !client.is_empty())
+    }
+
+    fn owner(&mut self) -> Option<Owner> {
+        parse_owner(&self.run(OWNER_QUERY).ok()?)
+    }
+
+    fn publish_owner(&mut self, client: &str, runtime: &std::path::Path) -> Result<(), TmuxError> {
+        // Unescaped: show-option hands the value back unescaped too.
+        let client = client.replace('\'', "\\'");
+        self.run(&format!("set-option -g @agenmux-control-client '{client}'"))?;
+        let runtime = runtime.to_string_lossy().replace('\'', "\\'");
+        self.run(&format!("set-option -g @agenmux-runtime-dir '{runtime}'"))
+            .map(drop)
+    }
+
+    fn clear_owner(&mut self, generation: Option<&str>) {
+        let _ = crate::panes::clear_ownership(generation);
+    }
+
+    fn set_key_sink(&mut self, fd: libc::c_int) {
+        Tmux::set_key_sink(self, fd);
+    }
+
+    fn follow_session(&mut self, session: &str) -> bool {
+        self.run(&format!("switch-client -t '{session}'")).is_ok()
+    }
+
+    fn text_input(&mut self, client: &str, on: bool) {
+        let table = if on {
+            crate::setup::SEARCH_TABLE
+        } else {
+            crate::setup::NORMAL_TABLE
+        };
+        let _ = command_status(&["switch-client", "-c", client, "-T", table]);
+    }
+
     fn run(&mut self, cmd: &str) -> Result<String, TmuxError> {
         Tmux::run(self, cmd)
     }
@@ -417,6 +511,67 @@ impl Multiplexer for Tmux {
     fn as_tmux(&mut self) -> Option<&mut Tmux> {
         Some(self)
     }
+}
+
+/// Both owner options arrive in one tagged reply: a stray hook block read in
+/// its place lacks the tag, and cannot shift one value into the other.
+const OWNER_QUERY: &str =
+    "display-message -p 'am-owner|#{@agenmux-generation}|#{@agenmux-control-client}'";
+
+fn parse_owner(reply: &str) -> Option<Owner> {
+    let (generation, client) = reply
+        .trim_end()
+        .strip_prefix("am-owner|")?
+        .split_once('|')?;
+    Some(Owner {
+        generation: generation.to_string(),
+        client: client.to_string(),
+    })
+}
+
+fn parse_sidebar_pane(line: &str) -> Option<SidebarPane> {
+    let fields: Vec<&str> = line.split('|').collect();
+    let [pane, win, pw, ph, ws, wp, active, sess] = fields.as_slice() else {
+        return None;
+    };
+    let (Ok(w), Ok(h), Ok(panes)) = (
+        pw.parse::<usize>(),
+        ph.parse::<usize>(),
+        wp.parse::<usize>(),
+    ) else {
+        return None;
+    };
+    let (window_width, window_height) = ws
+        .split_once(' ')
+        .and_then(|(width, height)| Some((width.parse().ok()?, height.parse().ok()?)))?;
+    Some(SidebarPane {
+        pane: (*pane).into(),
+        win: (*win).into(),
+        sess: (*sess).into(),
+        w,
+        h,
+        win_size: (window_width, window_height),
+        panes,
+        active: *active == "1",
+        settled: true,
+        width_drag: None, // tmux reports exact window cell sizes
+    })
+}
+
+/// One forked tmux running `commands` in order; true when there were none.
+fn forked_batch(commands: impl Iterator<Item = Vec<String>>) -> bool {
+    let mut argv: Vec<String> = Vec::new();
+    for cmd in commands {
+        if !argv.is_empty() {
+            argv.push(";".into());
+        }
+        argv.extend(cmd);
+    }
+    if argv.is_empty() {
+        return true;
+    }
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    command_status(&args).is_ok()
 }
 
 fn run_forked(args: &[String]) -> Option<String> {
@@ -460,6 +615,22 @@ fn parse_pane_cwd(ids: Ids, response: &str) -> Result<String, TmuxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_tagged_owner_reply_is_read() {
+        let owner = |generation: &str, client: &str| Owner {
+            generation: generation.into(),
+            client: client.into(),
+        };
+        assert_eq!(
+            parse_owner("am-owner|g1|client-7\n"),
+            Some(owner("g1", "client-7"))
+        );
+        assert_eq!(parse_owner("am-owner||\n"), Some(owner("", "")));
+        // A stray block read in the reply's place: empty, or another value.
+        assert_eq!(parse_owner(""), None);
+        assert_eq!(parse_owner("g2\n"), None);
+    }
 
     #[test]
     fn reference_names_the_selected_record_by_tmux_id() {

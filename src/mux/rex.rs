@@ -1,4 +1,4 @@
-use super::{Ids, Kind, Multiplexer};
+use super::{Ids, Kind, Multiplexer, Owner, SidebarPane};
 use crate::app_config::{AppConfig, DisplayMode, PopupHeight, SidebarPosition};
 use crate::scan::ParsedPane;
 use crate::snapshot::{Closed, Live, Snapshot};
@@ -24,8 +24,6 @@ const POPUP: &str = "agenmux-popup";
 const SCAN: &str = include_str!("rex_scan.lua");
 const PLACE: &str = include_str!("rex_place.lua");
 const POPUP_LAYER: &str = include_str!("rex_popup.lua");
-/// Sidebar share of the window before the user ever resizes one.
-const DEFAULT_RATIO: f64 = 0.15;
 
 /// The `rex` CLI. Actions run from init.lua get the server's bare PATH, so
 /// fall back to the CLI shipped beside the server, then the app's install.
@@ -131,6 +129,9 @@ struct Block {
     title: Title,
     #[serde(default)]
     size: Size,
+    /// The client that sizes it; without one it keeps a default size.
+    #[serde(default)]
+    owner: Option<String>,
 }
 
 impl Block {
@@ -169,12 +170,16 @@ struct Title {
     title: String,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Debug)]
 struct Size {
     #[serde(default)]
     columns: usize,
     #[serde(default)]
     rows: usize,
+    #[serde(default)]
+    cell_width_px: usize,
+    #[serde(default)]
+    cell_height_px: usize,
 }
 
 /// `session.view`, for the layout work the scan script does not report.
@@ -323,89 +328,122 @@ pub struct Rex {
     monitoring: bool,
     events: Option<Events>,
     pending: PendingChanges,
-    width: Width,
-    started: Option<std::time::Instant>,
     /// Sessions seen holding a window: only those count as emptied.
     had_windows: std::collections::HashSet<String>,
-    /// Windows holding a real block at the last scan; `None` before the first.
-    known_windows: Option<std::collections::HashSet<String>>,
     /// The split sidebar that speaks for all of them; see `elect`.
     leader: bool,
     /// No split sidebar runs: a popup is all there is.
     alone: bool,
-    /// This sidebar's window is its session's active one.
-    shown: bool,
+    /// Each session's active window and its focused block, at the last scan.
+    foci: HashMap<String, (Option<String>, Option<String>)>,
+    /// The session whose focus moved last: where the user acts.
+    acted: Option<String>,
+    /// Last app preference observed; unchanged persisted data must not erase live focus.
+    shown: Option<String>,
+    /// Each window's layout at the last measure.
+    shapes: HashMap<String, String>,
+    /// Last applied divider share and terminal width; a font/window resize alone is not a drag.
+    dividers: HashMap<String, (f64, usize)>,
+    /// Initial placement estimate only; never used as a render size.
+    app: Option<(usize, usize)>,
+    /// Window dimensions in each sidebar's cell units, with rounding noise removed.
+    window_sizes: HashMap<String, (usize, usize)>,
+    /// Ratio requests waiting for the client to resize its terminal.
+    resizing: HashMap<String, Resize>,
     /// agenmux's own blocks at the last scan, whose events `observe` skips.
     own_blocks: HashSet<String>,
 }
-
-/// The running sidebar's share of its window, scan to scan.
-#[derive(Default)]
-struct Width {
-    ratio: Option<f64>,
-    /// Placement is done: from here a change of `ratio` is the user's.
-    settled: bool,
-    /// The window's blocks at the last scan.
-    blocks: Vec<String>,
-    /// When `blocks` last changed. The app evens out the splits of a window
-    /// it shows a moment after a pane opens or closes, often a scan later.
-    reshaped: Option<Instant>,
-    /// The saved share at the last scan.
-    seen: Option<f64>,
+/// One asynchronous, bounded width search in this terminal's own cell units.
+/// PTY columns remain authoritative. Unresponsive clients park after one probe.
+#[derive(Clone, Copy, Debug)]
+struct Resize {
+    target: usize,
+    from_columns: usize,
+    requested_share: f64,
+    lower: (f64, Option<usize>),
+    upper: (f64, Option<usize>),
+    requested: Instant,
+    probed: bool,
+    parked: bool,
+    measured_share: f64,
 }
 
-/// How long after a pane opens or closes a change of share is still the
-/// app's evening out, not the user.
-const RESHAPE: Duration = Duration::from_secs(1);
-
-#[derive(Debug, PartialEq)]
-enum WidthChange {
-    /// The user resized the sidebar: the next one opens this wide.
-    Save(f64),
-    /// A pane opened or closed and the sidebar's share went with it, as when
-    /// a pane split beside the sidebar and its neighbour closes: back to this.
-    Fit(f64),
-}
-
-impl Width {
-    /// Fold in this scan's share of the window. Placement moves the border
-    /// until it reaches the saved width, and the app may reset it meanwhile:
-    /// none of that is the user. Rex may also refuse the saved width (a
-    /// narrower window), so `waited` settles it regardless. A change within
-    /// `RESHAPE` of the blocks changing is the layout reshaping; later, a resize.
-    /// A change to the saved share, or with it, is another sidebar's resize
-    /// reaching this one: saving it back would undo a narrower window's refusal.
-    fn observe(
-        &mut self,
-        ratio: f64,
-        saved: Option<f64>,
-        waited: bool,
-        blocks: Vec<String>,
-        now: Instant,
-    ) -> Option<WidthChange> {
-        let near = |a: f64, b: f64| (a - b).abs() < 1e-3;
-        if self.blocks != blocks {
-            self.reshaped = Some(now);
+impl Resize {
+    fn plan(target: usize, columns: usize, seat: &Seat, previous: Option<Self>) -> Option<Self> {
+        let border = seat.border.as_ref()?;
+        if columns == 0 || seat.share <= 0.0 || target == columns {
+            return None;
         }
-        self.blocks = blocks;
-        let reshaping = self.reshaped.is_some_and(|at| now - at < RESHAPE);
-        let synced = std::mem::replace(&mut self.seen, saved) != saved
-            || saved.is_some_and(|saved| near(ratio, saved));
-        let moved = self.settled && self.ratio.is_some_and(|before| !near(ratio, before));
-        self.settled |= waited || saved.is_some_and(|saved| near(ratio, saved));
-        self.ratio = Some(ratio);
-        match saved {
-            _ if moved && !reshaping && !synced => {
-                // this sidebar's own save: the next change is still the user's
-                self.seen = Some(ratio);
-                Some(WidthChange::Save(ratio))
-            }
-            Some(saved) if self.settled && reshaping && !near(ratio, saved) => {
-                self.ratio = Some(saved);
-                Some(WidthChange::Fit(saved))
-            }
-            _ => None,
+        let min = border.span * 0.05;
+        let max = border.span * 0.95;
+        let previous =
+            previous.filter(|p| p.target == target && !(p.parked && columns != p.from_columns));
+        let no_response = previous.is_some_and(|p| columns == p.from_columns);
+        if no_response && previous.is_some_and(|p| p.probed) {
+            return None; // one liveness probe only; wait for an actual PTY response
         }
+        let mut lower = previous.map_or((min, None), |p| p.lower);
+        let mut upper = previous.map_or((max, None), |p| p.upper);
+        if columns < target {
+            lower = (seat.share, Some(columns));
+        } else {
+            upper = (seat.share, Some(columns));
+        }
+        if upper.0 - lower.0 < 1e-6 {
+            if ((seat.share - min).abs() < 1e-6 && columns > target)
+                || ((seat.share - max).abs() < 1e-6 && columns < target)
+            {
+                return None; // physical layout/client limit; never send no-op resizes
+            }
+            // The window/font changed during the search: discard obsolete bounds.
+            lower = (min, None);
+            upper = (max, None);
+        }
+        let share = if previous.is_none() {
+            // First estimate only. Minimum-size clamping can make it inaccurate.
+            (seat.share * (target as f64 + 0.5) / (columns as f64 + 0.5)).clamp(min, max)
+        } else if no_response {
+            // A minimum-size plateau and a hidden client look identical. Probe
+            // a known opposite bound (or halfway to an unknown one), then park
+            // if the client still sends no new cell count.
+            if columns < target {
+                if upper.1.is_some() {
+                    upper.0
+                } else {
+                    (seat.share + upper.0) / 2.0
+                }
+            } else if lower.1.is_some() {
+                lower.0
+            } else {
+                (seat.share + lower.0) / 2.0
+            }
+        } else {
+            let fraction = match (lower.1, upper.1) {
+                (Some(lo), Some(hi)) if hi > lo => {
+                    ((target as f64 - lo as f64) / (hi - lo) as f64).clamp(0.125, 0.875)
+                }
+                _ => 0.5,
+            };
+            lower.0 + (upper.0 - lower.0) * fraction
+        };
+        if (share - seat.share).abs() < 1e-6 {
+            return None;
+        }
+        Some(Self {
+            target,
+            from_columns: columns,
+            requested_share: share,
+            lower,
+            upper,
+            requested: Instant::now(),
+            probed: no_response,
+            parked: false,
+            measured_share: if no_response {
+                previous.unwrap().measured_share
+            } else {
+                seat.share
+            },
+        })
     }
 }
 
@@ -427,9 +465,9 @@ struct Border {
 }
 
 /// Move the border beside a sidebar so it takes `share` of its window.
-fn fit(session: &str, seat: &Seat, share: f64) {
+fn fit(session: &str, seat: &Seat, share: f64) -> bool {
     let Some(border) = &seat.border else {
-        return;
+        return false;
     };
     let part = (share / border.span).clamp(0.05, 0.95);
     let request = json!({
@@ -439,7 +477,7 @@ fn fit(session: &str, seat: &Seat, share: f64) {
         "after_block_id": border.after,
         "ratio": if border.sidebar_before { part } else { 1.0 - part },
     });
-    let _ = Rex::call(Some(session), "session.resize_pane", request);
+    Rex::call(Some(session), "session.resize_pane", request).is_ok()
 }
 
 fn seat(node: &Value, own: &str) -> Option<Seat> {
@@ -490,7 +528,6 @@ impl Rex {
             Self::run(&["whoami"])?;
         }
         Ok(Rex {
-            started: Some(std::time::Instant::now()),
             monitoring,
             events: monitoring.then(Events::spawn).flatten(),
             pending: PendingChanges {
@@ -599,61 +636,12 @@ impl Rex {
             .map(str::to_string)
     }
 
-    /// A resize of this sidebar (keys or mouse) resizes the other open ones
-    /// and becomes the size the next one opens at, however this one closes
-    /// later. Only a change counts: every
-    /// sidebar saving its unchanged width would undo the user's last resize.
-    fn track_ratio(&mut self) {
-        let Ok(own) = std::env::var("REX_BLOCK") else {
-            return;
-        };
-        let found = self.listing.sessions.iter().find_map(|s| {
-            let w = s
-                .windows
-                .iter()
-                .find(|w| w.blocks.iter().any(|b| b.block_id == own))?;
-            Some((s, w, seat(&w.layout, &own)?))
-        });
-        let Some((session, window, seat)) = found else {
-            return;
-        };
-        let mut blocks: Vec<String> = window.blocks.iter().map(|b| b.block_id.clone()).collect();
-        blocks.sort();
-        blocks.push(window.others.to_string());
-        let waited = self
-            .started
-            .is_some_and(|at| at.elapsed() > std::time::Duration::from_secs(3));
-        match self
-            .width
-            .observe(seat.share, saved_ratio(), waited, blocks, Instant::now())
-        {
-            Some(WidthChange::Save(ratio)) => {
-                save_ratio(ratio);
-                // every open sidebar follows, as in tmux
-                for s in &self.listing.sessions {
-                    for w in &s.windows {
-                        for b in w.blocks.iter().filter(|b| b.label == SIDEBAR) {
-                            if b.block_id != own {
-                                if let Some(other) = self::seat(&w.layout, &b.block_id) {
-                                    fit(&s.session_id, &other, ratio);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Some(WidthChange::Fit(saved)) => fit(&session.session_id, &seat, saved),
-            None => {}
-        }
-    }
-
     /// Closing works as in tmux. A window whose last real block closed
     /// takes its sidebar with it, and a session whose last window closed is
     /// destroyed: Rex would keep it empty, and an empty session has no row
     /// to show. Undo still lists it. A session never seen with a window may
     /// be one the app is still filling, so it is left alone.
     fn reap(&mut self) {
-        let own = std::env::var("REX_BLOCK").ok();
         for session in &self.listing.sessions {
             if session.windows.is_empty() {
                 if self.had_windows.remove(&session.session_id) {
@@ -663,93 +651,304 @@ impl Rex {
                 continue;
             }
             self.had_windows.insert(session.session_id.clone());
-            let Some(window) = session
+            let lone: Vec<&Window> = session
                 .windows
                 .iter()
-                .find(|w| w.blocks.iter().any(|b| Some(&b.block_id) == own.as_ref()))
-            else {
+                .filter(|w| w.others == 0 && !w.blocks.is_empty())
+                .filter(|w| w.blocks.iter().all(Block::agenmux))
+                .collect();
+            // a sidebar is all these windows hold: closing them all ends the
+            // session
+            if lone.is_empty() {
                 continue;
-            };
-            if window.others > 0 || window.blocks.iter().any(|b| !b.agenmux()) {
-                continue;
-            }
-            // this sidebar is all its window holds: either call ends it
-            if session.windows.len() == 1 {
+            } else if lone.len() == session.windows.len() {
                 let request = json!({"session_id": session.session_id});
                 let _ = Self::call(None, "session.destroy", request);
             } else {
-                let request =
-                    json!({"session_id": session.session_id, "window_id": window.window_id});
-                let _ = Self::call(Some(&session.session_id), "session.close_window", request);
-            }
-        }
-    }
-
-    /// The split sidebar with the lowest block id speaks for all of them: it
-    /// places new windows' sidebars and sends the notifications, so two never
-    /// race for a window or alert twice.
-    fn elect(&mut self) {
-        let own = std::env::var("REX_BLOCK").ok();
-        let windows = || self.listing.sessions.iter().flat_map(|s| &s.windows);
-        let first = windows()
-            .flat_map(|w| &w.blocks)
-            .filter(|b| b.label == SIDEBAR)
-            .map(|b| &b.block_id)
-            .min();
-        self.leader = own.is_some() && first == own.as_ref();
-        self.alone = first.is_none();
-        self.shown = self.listing.sessions.iter().any(|s| {
-            s.windows.iter().any(|w| {
-                s.active_window_id.as_ref() == Some(&w.window_id)
-                    && w.blocks.iter().any(|b| Some(&b.block_id) == own.as_ref())
-            })
-        });
-    }
-
-    /// A window that appears while a sidebar is open gets one too, as tmux's
-    /// `@agenmux-on` gives every new window one. Only windows new since the
-    /// last scan: one whose sidebar was toggled off stays without.
-    fn spread(&mut self) {
-        let real = |w: &Window| w.others > 0 || w.blocks.iter().any(|b| !b.agenmux());
-        let windows = || {
-            self.listing
-                .sessions
-                .iter()
-                .flat_map(|s| s.windows.iter().map(move |w| (s, w)))
-        };
-        let now = windows()
-            .filter(|(_, w)| real(w))
-            .map(|(_, w)| w.window_id.clone())
-            .collect();
-        let Some(known) = self.known_windows.replace(now) else {
-            return;
-        };
-        if !self.leader {
-            return;
-        }
-        let ratio = saved_ratio().unwrap_or(DEFAULT_RATIO);
-        for (session, window) in windows() {
-            if !real(window)
-                || known.contains(&window.window_id)
-                || window.blocks.iter().any(|b| b.label == SIDEBAR)
-            {
-                continue;
-            }
-            let Ok(view) = Self::view(&session.session_id) else {
-                continue;
-            };
-            if let Some(window) = view
-                .windows
-                .iter()
-                .find(|w| w.window_id == window.window_id)
-            {
-                if window.sidebar().is_none() {
-                    let client = client();
-                    let _ =
-                        add_sidebar(&session.session_id, window, ratio, false, client.as_deref());
+                for window in lone {
+                    let request =
+                        json!({"session_id": session.session_id, "window_id": window.window_id});
+                    let _ = Self::call(Some(&session.session_id), "session.close_window", request);
                 }
             }
         }
+    }
+
+    /// The daemon, which runs in no block, speaks for every sidebar: it
+    /// places new windows' sidebars and sends the notifications. A popup
+    /// sends them only while no sidebar is open.
+    fn elect(&mut self) {
+        self.leader = std::env::var_os("REX_BLOCK").is_none();
+        self.alone = !self
+            .listing
+            .sessions
+            .iter()
+            .flat_map(|s| &s.windows)
+            .flat_map(|w| &w.blocks)
+            .any(|b| b.label == SIDEBAR);
+    }
+
+    /// Observe app selection changes and live server focus changes. The app's
+    /// persisted record may lag; rereading the same record is not a new selection.
+    fn update_acting(&mut self, shown: Option<String>) {
+        if let Some(shown) = shown {
+            if self.shown.as_ref() != Some(&shown)
+                && self.listing.sessions.iter().any(|s| s.session_id == shown)
+            {
+                self.acted = Some(shown.clone());
+            }
+            self.shown = Some(shown);
+        }
+        let mut moved = None;
+        for s in &self.listing.sessions {
+            let window = s
+                .windows
+                .iter()
+                .find(|w| Some(&w.window_id) == s.active_window_id.as_ref());
+            let focus = (
+                s.active_window_id.clone(),
+                window.and_then(|w| w.focused_block_id.clone()),
+            );
+            let before = self.foci.insert(s.session_id.clone(), focus.clone());
+            if before.is_some_and(|before| before != focus) {
+                moved = Some(s.session_id.clone());
+            }
+        }
+        if moved.is_some() {
+            self.acted = moved;
+        }
+        self.foci
+            .retain(|id, _| self.listing.sessions.iter().any(|s| &s.session_id == id));
+        if self
+            .acted
+            .as_ref()
+            .is_none_or(|id| !self.listing.sessions.iter().any(|s| &s.session_id == id))
+        {
+            self.acted = self.listing.sessions.first().map(|s| s.session_id.clone());
+        }
+    }
+
+    fn acting(&mut self) -> Option<&Session> {
+        self.update_acting(shown_session());
+        self.listing
+            .sessions
+            .iter()
+            .find(|s| Some(&s.session_id) == self.acted.as_ref())
+    }
+
+    fn request_width(&mut self, block: &str, width: usize) -> bool {
+        let found = self.listing.sessions.iter().find_map(|s| {
+            s.windows.iter().find_map(|w| {
+                let b = w.blocks.iter().find(|b| b.block_id == block)?;
+                // Unowned terminals still carry the server's default geometry.
+                if b.owner.is_none() || s.active_window_id.as_ref() != Some(&w.window_id) {
+                    return None;
+                }
+                Some((
+                    s.session_id.clone(),
+                    seat(&w.layout, block)?,
+                    b.size.columns,
+                ))
+            })
+        });
+        let Some((session, seat, columns)) = found else {
+            return false;
+        };
+        if width == columns {
+            if let Some(mut pending) = self.resizing.get(block).copied() {
+                // A new preference can cancel a request while a hidden PTY
+                // still reports the old width. Restore its last measured ratio,
+                // not the unacknowledged ratio currently in the layout.
+                let share = if pending.from_columns == columns {
+                    pending.measured_share
+                } else {
+                    seat.share
+                };
+                if (share - seat.share).abs() > 1e-6 {
+                    if !fit(&session, &seat, share) {
+                        return false;
+                    }
+                    pending.target = width;
+                    pending.requested_share = share;
+                    pending.requested = Instant::now();
+                    pending.probed = false;
+                    pending.parked = false;
+                    self.resizing.insert(block.to_string(), pending);
+                    return true;
+                }
+            }
+            self.resizing.remove(block);
+            self.dividers
+                .insert(block.to_string(), (seat.share, columns));
+            return true;
+        }
+        let Some(plan) = Resize::plan(width, columns, &seat, self.resizing.get(block).copied())
+        else {
+            // Park unresponsive clients/physical constraints, keeping the
+            // desired target so a later real PTY resize can restart calibration.
+            if let Some(pending) = self.resizing.get_mut(block) {
+                if pending.from_columns != columns {
+                    pending.measured_share = seat.share;
+                    self.dividers
+                        .insert(block.to_string(), (seat.share, columns));
+                }
+                pending.parked = true;
+                pending.from_columns = columns;
+                pending.requested_share = seat.share;
+            }
+            return false;
+        };
+        if !fit(&session, &seat, plan.requested_share) {
+            return false;
+        }
+        self.resizing.insert(block.to_string(), plan);
+        true
+    }
+
+    fn measure_sidebars(&mut self) -> Vec<SidebarPane> {
+        let mut shapes = HashMap::new();
+        let mut panes = Vec::new();
+        let mut retry = Vec::new();
+        let mut live = HashSet::new();
+        for s in &self.listing.sessions {
+            for w in &s.windows {
+                let shape = format!(
+                    "{}{:?}",
+                    w.layout,
+                    w.blocks
+                        .iter()
+                        .map(|b| (&b.block_id, &b.size))
+                        .collect::<Vec<_>>()
+                );
+                let stable = self.shapes.get(&w.window_id) == Some(&shape);
+                shapes.insert(w.window_id.clone(), shape);
+                for b in w.blocks.iter().filter(|b| b.label == SIDEBAR) {
+                    let Some(seat) = seat(&w.layout, &b.block_id) else {
+                        continue;
+                    };
+                    live.insert(b.block_id.clone());
+                    if let Some(pending) = self.resizing.get(&b.block_id).copied() {
+                        if b.size.columns == pending.target {
+                            self.resizing.remove(&b.block_id);
+                            self.dividers
+                                .insert(b.block_id.clone(), (seat.share, b.size.columns));
+                        } else if (seat.share - pending.requested_share).abs() > 1e-6 {
+                            // An external layout change superseded our request.
+                            self.resizing.remove(&b.block_id);
+                        } else {
+                            if b.size.columns != pending.from_columns {
+                                // Every applied step is a new divider baseline,
+                                // even when the requested width cannot be granted.
+                                self.dividers
+                                    .insert(b.block_id.clone(), (seat.share, b.size.columns));
+                            }
+                            if stable
+                                && s.active_window_id.as_ref() == Some(&w.window_id)
+                                && (b.size.columns != pending.from_columns
+                                    || (!pending.parked
+                                        && pending.requested.elapsed()
+                                            >= Duration::from_millis(250)))
+                            {
+                                retry.push((b.block_id.clone(), pending.target));
+                            }
+                        }
+                    }
+                    let before = self.dividers.get(&b.block_id).copied();
+                    let width_drag = before.is_some_and(|(share, cols)| {
+                        (share - seat.share).abs() > 1e-6 && cols != b.size.columns
+                    });
+                    // A ratio can arrive before its PTY size. Do not publish a
+                    // settled baseline or recalibrate from this mixed snapshot.
+                    let waiting = before.is_some_and(|(share, cols)| {
+                        (share - seat.share).abs() > 1e-6 && cols == b.size.columns
+                    });
+                    let settled = stable
+                        && b.owner.is_some()
+                        && !self.resizing.contains_key(&b.block_id)
+                        && !waiting;
+                    // Window sizes are placement estimates only. In particular,
+                    // padding makes them change as shares change, even in a
+                    // fixed-size app window. Divider evidence is authoritative.
+                    let measured =
+                        window_cells_in(w, &b.size).unwrap_or((b.size.columns, b.size.rows));
+                    let size = self
+                        .window_sizes
+                        .entry(w.window_id.clone())
+                        .or_insert(measured);
+                    if settled
+                        && (size.0.abs_diff(measured.0) > 2 || size.1.abs_diff(measured.1) > 2)
+                    {
+                        *size = measured;
+                    }
+                    if settled && !width_drag {
+                        self.dividers
+                            .insert(b.block_id.clone(), (seat.share, b.size.columns));
+                    }
+                    panes.push(SidebarPane {
+                        pane: b.block_id.clone(),
+                        win: w.window_id.clone(),
+                        sess: s.session_id.clone(),
+                        w: b.size.columns,
+                        h: b.size.rows,
+                        win_size: *size,
+                        panes: w.blocks.len() + w.others,
+                        active: s.active_window_id.as_ref() == Some(&w.window_id),
+                        settled,
+                        width_drag: Some(width_drag),
+                    });
+                }
+            }
+        }
+        self.window_sizes.retain(|w, _| shapes.contains_key(w));
+        self.resizing.retain(|b, _| live.contains(b));
+        self.dividers.retain(|b, _| live.contains(b));
+        self.shapes = shapes;
+        for (block, target) in retry {
+            self.request_width(&block, target);
+        }
+        panes
+    }
+    /// While agenmux is on, the window the user moves to gets a sidebar, as
+    /// tmux gives every window one when a client visits it.
+    fn spread(&mut self) {
+        if !self.leader {
+            return;
+        }
+        let Some(session) = self.acting().map(|s| s.session_id.clone()) else {
+            return;
+        };
+        let session = self
+            .listing
+            .sessions
+            .iter()
+            .find(|s| s.session_id == session);
+        let window = session.and_then(|s| {
+            s.windows
+                .iter()
+                .find(|w| Some(&w.window_id) == s.active_window_id.as_ref())
+        });
+        let Some((session, window)) = session.zip(window) else {
+            return;
+        };
+        let real = window.others > 0 || window.blocks.iter().any(|b| !b.agenmux());
+        if !real || window.blocks.iter().any(|b| b.label == SIDEBAR) {
+            return;
+        }
+        let (session, window_id) = (session.session_id.clone(), window.window_id.clone());
+        let share = self.share();
+        let Ok(view) = Self::view(&session) else {
+            return;
+        };
+        if let Some(window) = view.windows.iter().find(|w| w.window_id == window_id) {
+            if window.sidebar().is_none() {
+                let _ = add_sidebar(&session, window, share, false, client().as_deref());
+            }
+        }
+    }
+
+    /// The sidebar's share of an app window.
+    fn share(&self) -> f64 {
+        share_of(self.app, 0)
     }
 
     fn new_window(session: &str, label: &str, block: Value) -> Result<String, TmuxError> {
@@ -852,7 +1051,6 @@ impl Multiplexer for Rex {
             .collect();
         self.elect();
         if self.monitoring && self.embedded() {
-            self.track_ratio();
             self.reap();
             self.spread();
         }
@@ -931,13 +1129,17 @@ impl Multiplexer for Rex {
     /// Rex clients do not say which session they show. The sidebar lives in
     /// one: what that session's active window focuses is what the user acts in.
     fn client_focus(&mut self) -> Option<crate::focus::ClientFocus> {
+        // a popup follows its own session; the daemon, where the user acts
         let own = std::env::var("REX_SESSION").ok();
-        let session = self
-            .listing
-            .sessions
-            .iter()
-            .find(|s| Some(&s.session_id) == own.as_ref())
-            .or(self.listing.sessions.first())?;
+        let session = match own {
+            Some(own) => self
+                .listing
+                .sessions
+                .iter()
+                .find(|s| s.session_id == own)
+                .or(self.listing.sessions.first())?,
+            None => self.acting()?,
+        };
         let window = session
             .windows
             .iter()
@@ -995,7 +1197,7 @@ impl Multiplexer for Rex {
     }
 
     fn quiet(&self) -> bool {
-        self.embedded() && !self.leader && !self.shown
+        self.embedded() && !self.leader
     }
 
     fn embedded(&self) -> bool {
@@ -1196,10 +1398,22 @@ impl Multiplexer for Rex {
 
     /// `expected_window` may be in another session (`cs`), and a window just
     /// created gets its sidebar from the leader's next scan: wait for it
-    /// briefly, then place one. With no window, this sidebar's own block.
+    /// briefly, then place one. With no window, the sidebar the user acts in.
     fn focus_sidebar(&mut self, _client: &str, expected_window: Option<&str>) {
         let Some(expected) = expected_window else {
-            if let Some(own) = std::env::var("REX_BLOCK").ok() {
+            // the daemon's sidebar: the one where the user acts
+            let own = std::env::var("REX_BLOCK").ok().or_else(|| {
+                let session = self.acting()?;
+                session
+                    .windows
+                    .iter()
+                    .find(|w| Some(&w.window_id) == session.active_window_id.as_ref())?
+                    .blocks
+                    .iter()
+                    .find(|b| b.label == SIDEBAR)
+                    .map(|b| b.block_id.clone())
+            });
+            if let Some(own) = own {
                 if let Some((session, window)) = self.locate(&own) {
                     Self::focus_block(&session, &window, &own);
                 }
@@ -1227,8 +1441,8 @@ impl Multiplexer for Rex {
             }
             if Instant::now() >= deadline {
                 if self.embedded() {
-                    let ratio = saved_ratio().unwrap_or(DEFAULT_RATIO);
-                    let _ = add_sidebar(&session, &window, ratio, true, client().as_deref());
+                    let share = self.share();
+                    let _ = add_sidebar(&session, &window, share, true, client().as_deref());
                 }
                 return;
             }
@@ -1432,9 +1646,233 @@ impl Multiplexer for Rex {
         publish_reload(token)
     }
 
+    /// Rex has no options: a dragged width is a state file.
     fn options(&mut self) -> Result<BTreeMap<String, String>, crate::app_config::ConfigError> {
-        Ok(BTreeMap::new())
+        let width = std::fs::read_to_string(state_file(WIDTH_FILE)).ok();
+        Ok(width
+            .map(|width| ("@agenmux-width".to_string(), width.trim().to_string()))
+            .into_iter()
+            .collect())
     }
+
+    /// Rendering uses the terminal's actual dimensions, not a layout estimate.
+    /// The client may use different fonts and keep hidden terminals at old sizes.
+    fn sidebar_panes(&mut self) -> Vec<SidebarPane> {
+        if let Ok(listing) = Self::json(&["do", "-e", SCAN, "--json"]) {
+            self.listing = listing;
+        }
+        let acting = self.acting().map(|s| s.session_id.clone());
+        self.app = app_cells(&self.listing, acting.as_deref());
+        self.measure_sidebars()
+    }
+
+    /// Rex does not say which session an app window shows: every
+    /// session's current window counts.
+    fn visible_windows(&mut self) -> HashSet<String> {
+        self.listing
+            .sessions
+            .iter()
+            .filter_map(|s| s.active_window_id.clone())
+            .collect()
+    }
+
+    fn resize_panes(&mut self, widths: &[(String, usize)]) -> bool {
+        let mut ok = true;
+        for (block, width) in widths {
+            ok &= self.request_width(block, *width);
+        }
+        ok
+    }
+
+    fn close_panes(&mut self, panes: &[String]) {
+        for block in panes {
+            if let Some((session, _)) = self.locate(block) {
+                let request = json!({"session_id": session, "block_id": block});
+                let _ = Self::call(Some(&session), "block.close", request);
+            }
+        }
+    }
+
+    fn close_sidebars(&mut self) {
+        rex_close_sidebars();
+    }
+
+    fn save_width(&mut self, width: usize) -> bool {
+        if std::fs::write(state_file(WIDTH_FILE), format!("{width}\n")).is_err() {
+            return false;
+        }
+        // Geometry refreshes can run before the mirror tick handles a drag.
+        // Only acknowledging it here consumes the divider change.
+        self.dividers.clear();
+        true
+    }
+
+    fn connection(&mut self) -> Option<String> {
+        Some(format!("pid:{}", std::process::id()))
+    }
+
+    fn owner(&mut self) -> Option<Owner> {
+        let record = std::fs::read_to_string(crate::tmux::runtime_dir().join(OWNER_FILE))
+            .unwrap_or_default();
+        let (generation, client) = record.trim_end().split_once('|').unwrap_or_default();
+        Some(Owner {
+            generation: generation.to_string(),
+            client: client.to_string(),
+        })
+    }
+
+    fn publish_owner(&mut self, client: &str, runtime: &std::path::Path) -> Result<(), TmuxError> {
+        let generation = std::env::var("AGENMUX_GENERATION").unwrap_or_default();
+        std::fs::write(runtime.join(OWNER_FILE), format!("{generation}|{client}\n"))?;
+        Ok(())
+    }
+
+    fn clear_owner(&mut self, generation: Option<&str>) {
+        if generation.is_none_or(|g| self.owner().is_some_and(|o| o.generation == g)) {
+            let _ = std::fs::remove_file(crate::tmux::runtime_dir().join(OWNER_FILE));
+        }
+    }
+}
+
+/// The dragged sidebar width, in cells.
+const WIDTH_FILE: &str = "rex-sidebar-width";
+/// `generation|client` of the daemon that owns the sidebars.
+const OWNER_FILE: &str = "agenmux-owner";
+
+/// Where the daemon, its sidebar panes and key senders meet.
+pub fn runtime_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("agenmux-rex-{}", unsafe { libc::geteuid() }))
+}
+
+/// Estimate a window in this sidebar's font, solely for resize classification.
+/// Cell counts from different terminal fonts are not interchangeable.
+fn window_cells_in(w: &Window, font: &Size) -> Option<(usize, usize)> {
+    w.blocks
+        .iter()
+        .filter(|b| !b.agenmux())
+        .filter_map(|b| Some((b, rect(&w.layout, &b.block_id)?)))
+        .max_by(|(_, a), (_, b)| a[2].total_cmp(&b[2]))
+        .map(|(b, r)| {
+            let cols = b.size.columns.saturating_mul(b.size.cell_width_px.max(1))
+                / font.cell_width_px.max(1);
+            let rows = b.size.rows.saturating_mul(b.size.cell_height_px.max(1))
+                / font.cell_height_px.max(1);
+            (cells(cols, r[2]), cells(rows, r[3]))
+        })
+}
+
+/// The window's size, from its widest real block: a block the app has not
+/// sized yet says nothing about it.
+fn window_cells(w: &Window) -> Option<(usize, usize)> {
+    w.blocks
+        .iter()
+        .filter(|b| !b.agenmux())
+        .filter_map(|b| Some((b, rect(&w.layout, &b.block_id)?)))
+        .max_by(|(_, a), (_, b)| a[2].total_cmp(&b[2]))
+        .map(|(b, r)| (cells(b.size.columns, r[2]), cells(b.size.rows, r[3])))
+}
+
+/// The app window's size in cells: the window it shows in `shown`, else in
+/// any session, measured from its widest real block.
+fn app_cells(listing: &Listing, shown: Option<&str>) -> Option<(usize, usize)> {
+    let shown = listing
+        .sessions
+        .iter()
+        .find(|s| Some(s.session_id.as_str()) == shown);
+    shown
+        .and_then(current_window)
+        .and_then(window_cells)
+        .or_else(|| {
+            listing
+                .sessions
+                .iter()
+                .filter_map(current_window)
+                .find_map(window_cells)
+        })
+}
+
+/// The session's current window.
+fn current_window(s: &Session) -> Option<&Window> {
+    s.windows
+        .iter()
+        .find(|w| Some(&w.window_id) == s.active_window_id.as_ref())
+}
+
+/// The sidebar's share of an app window `app` cells wide, which frames the
+/// sidebar block with `frame` of them.
+fn share_of(app: Option<(usize, usize)>, frame: usize) -> f64 {
+    let width = (sidebar_width() + frame) as f64;
+    app.map_or(0.2, |(cols, _)| width / cols.max(1) as f64)
+        .clamp(0.05, 0.5)
+}
+
+/// The share for a sidebar placed outside the daemon, from a fresh scan.
+fn placement_share() -> f64 {
+    let listing = Rex::json(&["do", "-e", SCAN, "--json"]).ok();
+    share_of(
+        listing.and_then(|l| app_cells(&l, shown_session().as_deref())),
+        0,
+    )
+}
+
+/// The session the app shows. Rex reports none, but the app keeps its own
+/// record in its preferences as you switch.
+fn shown_session() -> Option<String> {
+    let out = Command::new("defaults")
+        .args(["export", "com.superlogical.rex", "-"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let plist = String::from_utf8_lossy(&out.stdout);
+    let rest = plist
+        .split_once("<key>Workspace.lastFocusedSession</key>")?
+        .1;
+    let data = rest.split_once("<data>")?.1.split_once("</data>")?.0;
+    let record: Value = serde_json::from_slice(&unbase64(data)?).ok()?;
+    record["sessionID"].as_str().map(str::to_string)
+}
+
+/// Standard base64, whitespace ignored.
+fn unbase64(text: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    let (mut bits, mut count) = (0u32, 0);
+    for byte in text
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
+    {
+        bits = bits << 6 | ALPHABET.iter().position(|&a| a == byte)? as u32;
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            out.push((bits >> count) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// A whole-window count of cells from a block's `count` and its `share`.
+fn cells(count: usize, share: f64) -> usize {
+    if share > 0.0 {
+        (count as f64 / share).round() as usize
+    } else {
+        count
+    }
+}
+
+/// `block`'s rect in `node`: [x, y, width, height] as window fractions.
+fn rect(node: &Value, block: &str) -> Option<[f64; 4]> {
+    if node["block_id"].as_str() == Some(block) {
+        let r = node["rect"].as_array()?;
+        return Some([
+            r.first()?.as_f64()?,
+            r.get(1)?.as_f64()?,
+            r.get(2)?.as_f64()?,
+            r.get(3)?.as_f64()?,
+        ]);
+    }
+    let split = node.get("split")?;
+    rect(&split["before"], block).or_else(|| rect(&split["after"], block))
 }
 
 /// `config reload` outside tmux: the token sidebars watch is a state file.
@@ -1445,25 +1883,6 @@ pub fn publish_reload(token: &str) -> Result<(), TmuxError> {
     }
     std::fs::write(path, token)?;
     Ok(())
-}
-
-/// Saved sidebar share: a sidebar opens at the width the last one closed
-/// with, however it was resized (keys or mouse).
-fn saved_ratio() -> Option<f64> {
-    std::fs::read_to_string(state_file("rex-sidebar-ratio"))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
-}
-
-fn save_ratio(ratio: f64) {
-    let path = state_file("rex-sidebar-ratio");
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    // {:?} round-trips, so an untouched live ratio compares equal to it
-    let _ = std::fs::write(path, format!("{ratio:?}\n"));
 }
 
 /// The app client that opened this sidebar, from Rex's `ctx.client_id`:
@@ -1531,16 +1950,60 @@ fn window_layout(window: &crate::snapshot::Window) -> (Value, Vec<&crate::snapsh
     (layout, window.panes.iter().collect())
 }
 
+/// The sidebar width in cells: the last dragged one, else the configured.
+fn sidebar_width() -> usize {
+    std::fs::read_to_string(state_file(WIDTH_FILE))
+        .ok()
+        .and_then(|width| width.trim().parse().ok())
+        .or_else(|| config().map(|c| c.sidebar_width as usize))
+        .unwrap_or(30)
+}
+
+/// The live daemon its owner record names.
+fn daemon_pid() -> Option<libc::pid_t> {
+    let record = std::fs::read_to_string(crate::tmux::runtime_dir().join(OWNER_FILE)).ok()?;
+    let pid = record.trim_end().rsplit_once("|pid:")?.1.parse().ok()?;
+    (unsafe { libc::kill(pid, 0) } == 0).then_some(pid)
+}
+
+/// Start the daemon that renders into the sidebar blocks, unless its owner
+/// record names a live one. Two racing starts are fine: the later claim
+/// wins and the earlier daemon leaves.
+fn ensure_daemon(client: Option<&str>) -> Result<(), TmuxError> {
+    if daemon_pid().is_some() {
+        return Ok(());
+    }
+    use std::os::unix::process::CommandExt;
+    let mut daemon = Command::new(std::env::current_exe()?);
+    daemon
+        .arg("daemon")
+        .env("AGENMUX_MUX", "rex")
+        // it runs in no block, whichever block asked for it
+        .env_remove("REX_BLOCK")
+        .env_remove("REX_SESSION")
+        // its own group: closing the block that asked must not end it
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(client) = client {
+        daemon.env("AGENMUX_REX_CLIENT", client);
+    }
+    daemon.spawn()?;
+    Ok(())
+}
+
 /// Split the whole tiled layer (its top split, or its only block) so the
 /// sidebar spans the window's full height, at `display.sidebar_position`.
 /// `focus`: the user opened it.
 fn add_sidebar(
     session: &str,
     window: &ViewWindow,
-    ratio: f64,
+    share: f64,
     focus: bool,
     client: Option<&str>,
 ) -> Result<(), TmuxError> {
+    ensure_daemon(client)?;
     let layout = &window
         .tiled()
         .ok_or_else(|| TmuxError::Error("window has no tiled layer".into()))?
@@ -1565,7 +2028,7 @@ fn add_sidebar(
         format!("anchor={anchor}"),
         format!("side={side}"),
         format!("edge={}", edge["block_id"].as_str().unwrap_or_default()),
-        format!("ratio={ratio}"),
+        format!("share={share}"),
         format!("label={SIDEBAR}"),
         format!("exe={exe}"),
         format!("focus={focus}"),
@@ -1600,16 +2063,18 @@ pub fn rex_toggle(session: &str, block: &str, mode: &str, client: &str) -> i32 {
     else {
         return 1;
     };
+    // on and off everywhere, as in tmux: the daemon's teardown closes every
+    // sidebar
+    if let Some(daemon) = daemon_pid() {
+        unsafe { libc::kill(daemon, libc::SIGTERM) };
+        return 0;
+    }
     report(match window.sidebar() {
-        // the running sidebar already saved any resize of it
         Some(sidebar) => {
             let request = json!({"session_id": session, "block_id": sidebar});
             Rex::call(Some(session), "block.close", request).map(drop)
         }
-        None => {
-            let ratio = saved_ratio().unwrap_or(DEFAULT_RATIO);
-            add_sidebar(session, window, ratio, true, client)
-        }
+        None => add_sidebar(session, window, placement_share(), true, client),
     })
 }
 
@@ -1719,14 +2184,14 @@ pub fn rex_close_sidebars() -> Vec<(String, String)> {
 /// Put a sidebar back in each window `rex_close_sidebars` emptied, running
 /// whichever release is installed now.
 pub fn rex_reopen(windows: &[(String, String)]) {
-    let ratio = saved_ratio().unwrap_or(DEFAULT_RATIO);
+    let share = placement_share();
     for (session, id) in windows {
         let Ok(view) = Rex::view(session) else {
             continue;
         };
         let window = view.windows.iter().find(|w| &w.window_id == id);
         if let Some(window) = window.filter(|w| w.sidebar().is_none()) {
-            let _ = add_sidebar(session, window, ratio, false, client().as_deref());
+            let _ = add_sidebar(session, window, share, false, client().as_deref());
         }
     }
 }
@@ -1755,14 +2220,13 @@ pub fn rex_sidebars() -> i32 {
             let Ok(view) = Rex::view(&session) else {
                 continue;
             };
-            let ratio = saved_ratio().unwrap_or(DEFAULT_RATIO);
             for window in &view.windows {
                 if window.real_blocks() == 0 {
                     // the window's last real block closed: the sidebar goes too
                     let request = json!({"session_id": session, "window_id": window.window_id});
                     let _ = Rex::call(Some(&session), "session.close_window", request);
                 } else if window.sidebar().is_none() {
-                    if let Err(e) = add_sidebar(&session, window, ratio, false, None) {
+                    if let Err(e) = add_sidebar(&session, window, placement_share(), false, None) {
                         eprintln!("agenmux: {}: {e}", window.window_id);
                     }
                 }
@@ -1786,63 +2250,308 @@ pub fn rex_sidebars() -> i32 {
 mod tests {
     use super::*;
 
+    fn geometry_listing() -> Listing {
+        let windows: Vec<_> = [(34, 46, 147, 16), (24, 18, 148, 17)]
+            .into_iter().enumerate().map(|(i, (cols, rows, other, font))| json!({
+                "window_id": format!("window:{i}"),
+                "layout": {"rect":[0,0,1,1], "split": {
+                    "direction":"horizontal", "ratio":0.2,
+                    "before":{"block_id":format!("side:{i}"), "rect":[0,0,0.2,1]},
+                    "after":{"block_id":format!("shell:{i}"), "rect":[0.2,0,0.8,1]}
+                }},
+                "blocks":[
+                    {"block_id":format!("side:{i}"),"label":"agenmux","owner":"client:1",
+                     "size":{"columns":cols,"rows":rows,"cell_width_px":17,"cell_height_px":39}},
+                    {"block_id":format!("shell:{i}"),"label":"shell",
+                     "size":{"columns":other,"rows":46,"cell_width_px":font,"cell_height_px":39}}
+                ]
+            })).collect();
+        serde_json::from_value(json!({"sessions":[{
+            "session_id":"session:1","active_window_id":"window:0","windows":windows
+        }]}))
+        .unwrap()
+    }
+
     #[test]
-    fn width_saves_only_user_resizes_after_placement() {
-        let two = || vec!["a".to_string(), "side".to_string()];
-        let three = || vec!["a".to_string(), "b".to_string(), "side".to_string()];
-        let start = Instant::now();
-        let at = |ms: u64| start + Duration::from_millis(ms);
-        let mut width = Width::default();
-        // the app's half split, then placement reaching the saved 0.2
-        assert_eq!(width.observe(0.5, Some(0.2), false, two(), at(0)), None);
-        assert_eq!(width.observe(0.2, Some(0.2), false, two(), at(10)), None);
-        assert_eq!(width.observe(0.2, Some(0.2), false, two(), at(20)), None);
-        // a resize, and only the change itself
-        assert_eq!(
-            width.observe(0.26, Some(0.2), false, two(), at(2000)),
-            Some(WidthChange::Save(0.26))
+    fn unchanged_app_preferences_do_not_erase_live_session_focus() {
+        let mut rex = Rex {
+            listing: geometry_listing(),
+            ..Rex::default()
+        };
+        rex.listing.sessions.push(
+            serde_json::from_value(json!({
+                "session_id":"session:2","active_window_id":"window:other","windows":[{
+                    "window_id":"window:other","blocks":[]
+                }]
+            }))
+            .unwrap(),
         );
-        assert_eq!(width.observe(0.26, Some(0.26), false, two(), at(2100)), None);
-        // a pane closing beside it reshapes the layout: back to the saved width
-        assert_eq!(width.observe(0.26, Some(0.26), false, three(), at(3000)), None);
-        assert_eq!(
-            width.observe(0.5, Some(0.26), false, two(), at(3100)),
-            Some(WidthChange::Fit(0.26))
-        );
-        assert_eq!(width.observe(0.26, Some(0.26), false, two(), at(3200)), None);
-        // the app evens the splits out a scan after the blocks change
-        assert_eq!(width.observe(0.26, Some(0.26), false, three(), at(5000)), None);
-        assert_eq!(
-            width.observe(0.3333, Some(0.26), false, three(), at(5200)),
-            Some(WidthChange::Fit(0.26))
-        );
-        assert_eq!(width.observe(0.26, Some(0.26), false, three(), at(5300)), None);
-        // a resize once that settles is the user's again
-        assert_eq!(
-            width.observe(0.3, Some(0.26), false, three(), at(7000)),
-            Some(WidthChange::Save(0.3))
-        );
+        rex.update_acting(Some("session:1".into()));
+        assert_eq!(rex.acted.as_deref(), Some("session:1"));
+        rex.listing.sessions[1].windows[0].focused_block_id = Some("shell:other".into());
+        rex.update_acting(Some("session:1".into()));
+        for _ in 0..3 {
+            rex.update_acting(Some("session:1".into()));
+            assert_eq!(rex.acted.as_deref(), Some("session:2"));
+        }
+        // A newly changed app record still wins when focus has not moved.
+        rex.update_acting(Some("session:2".into()));
+        rex.update_acting(Some("session:1".into()));
+        assert_eq!(rex.acted.as_deref(), Some("session:1"));
+        rex.listing.sessions.remove(0);
+        rex.update_acting(Some("session:1".into()));
+        assert_eq!(rex.acted.as_deref(), Some("session:2"));
+        assert!(!rex.foci.contains_key("session:1"));
+    }
 
-        // the next scan after a save, while the user keeps resizing
+    #[test]
+    fn client_resizes_do_not_become_saved_drags_and_delayed_dividers_do() {
+        let mut rex = Rex {
+            listing: geometry_listing(),
+            ..Rex::default()
+        };
+        rex.measure_sidebars();
+        rex.measure_sidebars();
+        // A one-column client/font resize can fall within estimation rounding.
+        rex.listing.sessions[0].windows[0].blocks[0].size.columns = 35;
+        rex.measure_sidebars();
+        let p = rex.measure_sidebars()[0].clone();
+        assert!(p.settled);
+        assert_eq!(p.width_drag, Some(false));
+        // The divider moves first, but the terminal can lag by several scans.
+        let layout = &mut rex.listing.sessions[0].windows[0].layout;
+        layout["split"]["ratio"] = json!(0.25);
+        layout["split"]["before"]["rect"] = json!([0, 0, 0.25, 1]);
+        for _ in 0..3 {
+            let p = rex.measure_sidebars()[0].clone();
+            assert_eq!(p.width_drag, Some(false));
+            assert!(
+                !p.settled,
+                "unchanged PTY columns cannot settle a moved ratio"
+            );
+        }
+        rex.listing.sessions[0].windows[0].blocks[0].size.columns = 40;
+        assert!(!rex.measure_sidebars()[0].settled);
+        assert_eq!(rex.measure_sidebars()[0].width_drag, Some(true));
         assert_eq!(
-            width.observe(0.32, Some(0.3), false, three(), at(7100)),
-            Some(WidthChange::Save(0.32))
+            rex.measure_sidebars()[0].width_drag,
+            Some(true),
+            "refreshes cannot consume a drag before the mirror tick"
         );
-        // another sidebar's resize moves this one: not saved back, even
-        // where a narrower window refuses it
-        assert_eq!(width.observe(0.3, Some(0.35), false, three(), at(8000)), None);
-        assert_eq!(width.observe(0.35, Some(0.35), false, three(), at(8100)), None);
-        assert_eq!(width.observe(0.32, Some(0.4), false, three(), at(9000)), None);
-        assert_eq!(width.observe(0.32, Some(0.4), false, three(), at(9100)), None);
+        rex.dividers.clear(); // save_width acknowledges it after persisting
+        assert_eq!(rex.measure_sidebars()[0].width_drag, Some(false));
+    }
 
-        // a width Rex refused never matches: settles once waited
-        let mut width = Width::default();
-        assert_eq!(width.observe(0.31, Some(0.2), false, two(), at(0)), None);
-        assert_eq!(width.observe(0.31, Some(0.2), true, two(), at(3000)), None);
+    #[test]
+    fn render_geometry_is_the_actual_pty_even_with_identical_ratios() {
+        let mut rex = Rex {
+            listing: geometry_listing(),
+            app: Some((1000, 1000)),
+            ..Rex::default()
+        };
+        let first = rex.measure_sidebars();
         assert_eq!(
-            width.observe(0.25, Some(0.2), true, two(), at(3100)),
-            Some(WidthChange::Save(0.25))
+            first.iter().map(|p| (p.w, p.h)).collect::<Vec<_>>(),
+            [(34, 46), (24, 18)]
         );
+        assert!(first.iter().all(|p| !p.settled));
+        assert!(rex.measure_sidebars().iter().all(|p| p.settled));
+        // Sidebar font changes do not calibrate unrelated windows.
+        let other = rex.window_sizes["window:1"];
+        rex.listing.sessions[0].windows[0].blocks[0]
+            .size
+            .cell_width_px = 20;
+        let changing = rex.measure_sidebars();
+        assert!(!changing[0].settled);
+        assert_eq!(changing[0].w, 34);
+        let changed = rex.measure_sidebars();
+        assert_ne!(changed[0].win_size, first[0].win_size);
+        assert_eq!(changed[1].win_size, other);
+        assert_eq!(changed[0].w, 34);
+    }
+
+    #[test]
+    fn pending_resize_never_promotes_a_requested_width_to_render_geometry() {
+        let mut rex = Rex {
+            listing: geometry_listing(),
+            ..Rex::default()
+        };
+        let pending = Resize {
+            target: 40,
+            from_columns: 34,
+            lower: (0.2, Some(34)),
+            upper: (0.95, None),
+            requested: Instant::now(),
+            probed: false,
+            parked: false,
+            measured_share: 0.2,
+            requested_share: 0.25,
+        };
+        rex.resizing.insert("side:0".into(), pending);
+        let layout = &mut rex.listing.sessions[0].windows[0].layout;
+        layout["split"]["ratio"] = json!(0.25);
+        layout["split"]["before"]["rect"] = json!([0, 0, 0.25, 1]);
+        for _ in 0..5 {
+            let p = &rex.measure_sidebars()[0];
+            assert_eq!(p.w, 34);
+            assert!(
+                !p.settled,
+                "two unchanged scans do not prove the client applied the ratio"
+            );
+        }
+        rex.listing.sessions[0].windows[0].blocks[0].size.columns = 40;
+        assert_eq!(rex.measure_sidebars()[0].w, 40);
+        assert!(!rex.resizing.contains_key("side:0"));
+        assert!(rex.measure_sidebars()[0].settled);
+    }
+
+    #[test]
+    fn an_applied_constrained_step_does_not_hide_a_later_user_drag() {
+        let mut rex = Rex {
+            listing: geometry_listing(),
+            ..Rex::default()
+        };
+        let initial = seat(&rex.listing.sessions[0].windows[0].layout, "side:0").unwrap();
+        rex.resizing.insert(
+            "side:0".into(),
+            Resize::plan(1, 34, &initial, None).unwrap(),
+        );
+        let w = &mut rex.listing.sessions[0].windows[0];
+        w.layout["split"]["before"]["rect"] = json!([0, 0, 0.05, 1]);
+        w.blocks[0].size.columns = 16;
+        rex.measure_sidebars();
+        assert_eq!(rex.dividers["side:0"], (0.05, 16));
+        // Dragging back to the original ratio must not look like "no change".
+        let w = &mut rex.listing.sessions[0].windows[0];
+        w.layout["split"]["before"]["rect"] = json!([0, 0, 0.2, 1]);
+        w.blocks[0].size.columns = 34;
+        rex.measure_sidebars();
+        let moved = rex.measure_sidebars()[0].clone();
+        assert!(moved.settled);
+        assert_eq!(moved.width_drag, Some(true));
+        assert!(!rex.resizing.contains_key("side:0"));
+    }
+
+    #[test]
+    fn a_client_minimum_is_acknowledged_without_restoring_an_obsolete_ratio() {
+        let mut rex = Rex {
+            listing: geometry_listing(),
+            ..Rex::default()
+        };
+        let initial = seat(&rex.listing.sessions[0].windows[0].layout, "side:0").unwrap();
+        let pending = Resize::plan(1, 34, &initial, None).unwrap();
+        assert_eq!(pending.requested_share, 0.05);
+        rex.resizing.insert("side:0".into(), pending);
+        let w = &mut rex.listing.sessions[0].windows[0];
+        w.layout["split"]["before"]["rect"] = json!([0, 0, 0.05, 1]);
+        w.blocks[0].size.columns = 16;
+        // This path parks without a CLI call: the border is already at its limit.
+        assert!(!rex.resize_panes(&[("side:0".into(), 1)]));
+        let parked = rex.resizing["side:0"];
+        assert!(parked.parked);
+        assert_eq!(parked.measured_share, 0.05);
+        // Choosing the realized minimum cancels the impossible target in place.
+        assert!(rex.resize_panes(&[("side:0".into(), 16)]));
+        assert!(!rex.resizing.contains_key("side:0"));
+        assert_eq!(rex.dividers["side:0"], (0.05, 16));
+    }
+
+    #[test]
+    fn unresponsive_width_search_parks_and_restarts_from_fresh_pty_data() {
+        let mut seat = Seat {
+            share: 0.2,
+            border: Some(Border {
+                before: "side".into(),
+                after: "shell".into(),
+                sidebar_before: true,
+                span: 1.0,
+            }),
+        };
+        let first = Resize::plan(17, 35, &seat, None).unwrap();
+        seat.share = first.requested_share;
+        let mut probe = Resize::plan(17, 35, &seat, Some(first)).unwrap();
+        assert!(probe.probed);
+        assert_eq!(
+            probe.measured_share, 0.2,
+            "unacknowledged ratios are not measurements"
+        );
+        seat.share = probe.requested_share;
+        assert!(Resize::plan(17, 35, &seat, Some(probe)).is_none());
+        probe.parked = true;
+        let width = |share: f64| ((174.0 * share - 3.2).floor() as usize).max(16);
+        let mut columns = width(seat.share);
+        let mut previous = Some(probe);
+        for _ in 0..40 {
+            if columns == 17 {
+                break;
+            }
+            let step = Resize::plan(17, columns, &seat, previous).unwrap();
+            seat.share = step.requested_share;
+            columns = width(seat.share);
+            previous = Some(step);
+        }
+        assert_eq!(columns, 17);
+    }
+
+    #[test]
+    fn width_feedback_crosses_minimum_size_plateaus_without_oscillation() {
+        for scale in [100.0, 174.0, 240.0] {
+            for start in [0.05, 0.08, 0.2, 0.7] {
+                for target in [17, 18, 30, 60] {
+                    let mut seat = Seat {
+                        share: start,
+                        border: Some(Border {
+                            before: "side".into(),
+                            after: "shell".into(),
+                            sidebar_before: true,
+                            span: 1.0,
+                        }),
+                    };
+                    let mut previous = None;
+                    let width = |share: f64| ((scale * share - 3.2_f64).floor() as usize).max(16);
+                    let mut columns = width(seat.share);
+                    for _ in 0..40 {
+                        if columns == target {
+                            break;
+                        }
+                        let plan = Resize::plan(target, columns, &seat, previous).unwrap();
+                        seat.share = plan.requested_share;
+                        columns = width(seat.share);
+                        previous = Some(plan);
+                    }
+                    assert_eq!(columns, target, "scale={scale}, start={start}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn width_feedback_converges_in_the_sidebars_own_font() {
+        for scale in [100.0, 174.0, 240.0] {
+            for target in [15, 30, 60] {
+                let mut seat = Seat {
+                    share: 0.2,
+                    border: Some(Border {
+                        before: "side".into(),
+                        after: "shell".into(),
+                        sidebar_before: true,
+                        span: 1.0,
+                    }),
+                };
+                let mut previous = None;
+                let mut columns = (scale * seat.share - 3.2_f64).floor() as usize;
+                for _ in 0..8 {
+                    if columns == target {
+                        break;
+                    }
+                    let p = Resize::plan(target, columns, &seat, previous).unwrap();
+                    seat.share = p.requested_share;
+                    columns = (scale * seat.share - 3.2_f64).floor() as usize;
+                    previous = Some(p);
+                }
+                assert_eq!(columns, target, "scale={scale}");
+            }
+        }
     }
 
     #[test]
@@ -1923,6 +2632,18 @@ mod tests {
         assert_eq!(cwd(&tree["split"]["before"]), json!("/a"));
         assert_eq!(tree["split"]["after"]["split"]["ratio"].as_f64(), Some(0.5));
         assert_eq!(cwd(&tree["split"]["after"]["split"]["after"]), json!("/c"));
+    }
+
+    #[test]
+    fn the_app_record_decodes_across_lines() {
+        // as `defaults export` wraps a data value
+        let data = "\n\teyJzZXNzaW9uSUQiOiJzZXNz\n\taW9uOjEifQ==\n\t";
+        assert_eq!(
+            unbase64(data).as_deref(),
+            Some(br#"{"sessionID":"session:1"}"#.as_slice())
+        );
+        assert_eq!(unbase64("Zm8=").as_deref(), Some(b"fo".as_slice()));
+        assert_eq!(unbase64("Z!=="), None);
     }
 
     #[test]

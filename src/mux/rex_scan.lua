@@ -18,6 +18,8 @@ for _, s in ipairs(assert(rex.call("session.list")).sessions or {}) do
             blocks[#blocks + 1] = {
               block_id = b.block_id,
               label = b.label,
+              -- the client a terminal is sized for, if any shows it
+              owner = b.owner,
               process = rex.block.call(terminal, "process", q),
               title = rex.block.call(terminal, "title", q),
               size = rex.block.call(terminal, "size", q),

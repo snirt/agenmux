@@ -26,7 +26,7 @@ fn restore_terminal() {
     let mut saved = SAVED_TERMINAL.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(original) = saved.take() {
         unsafe { libc::tcsetattr(0, libc::TCSANOW, &original) };
-        terminal_write(b"\x1b[?2004l\x1b[?25h");
+        terminal_write(b"\x1b[?2026l\x1b[?7h\x1b[?2004l\x1b[?25h");
     }
 }
 
@@ -105,37 +105,31 @@ pub(crate) fn key_pending(fd: libc::c_int) -> bool {
     poll_fd(fd, Some(Duration::ZERO))
 }
 
-/// poll the key fd + the tmux control pipe; returns (key_ready, pipe_ready).
+/// poll the key fds + the tmux control pipe; returns (key_ready, pipe_ready).
 /// pipe_buffered short-circuits the wait — data is already in the BufReader.
 pub(crate) fn poll_inputs(
-    key_fd: libc::c_int,
+    key_fds: [libc::c_int; 2],
     pipe_fd: libc::c_int,
     pipe_buffered: bool,
     timeout: Duration,
 ) -> (bool, bool) {
-    let mut fds = [
-        libc::pollfd {
-            fd: key_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        },
-        libc::pollfd {
-            fd: pipe_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        },
-    ];
+    let poll = |fd| libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let mut fds = [poll(pipe_fd), poll(key_fds[0]), poll(key_fds[1])];
     let ms = if pipe_buffered {
         0
     } else {
         timeout.as_millis().min(i32::MAX as u128) as i32
     };
-    let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, ms) };
-    let key = n > 0 && fds[0].revents & libc::POLLIN != 0;
+    let n = unsafe { libc::poll(fds.as_mut_ptr(), 3, ms) };
+    let key = n > 0 && fds[1..].iter().any(|fd| fd.revents & libc::POLLIN != 0);
     // a dead pipe sets only HUP/ERR/NVAL — POLLIN alone never reports it, and
     // the loop then sleeps forever instead of reading its way to EOF
     let dead = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
-    let pipe = pipe_buffered || (n > 0 && fds[1].revents & (libc::POLLIN | dead) != 0);
+    let pipe = pipe_buffered || (n > 0 && fds[0].revents & (libc::POLLIN | dead) != 0);
     (key, pipe)
 }
 

@@ -260,6 +260,81 @@ pub(super) fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
     out
 }
 
+/// Final viewport projection, performed by the pane that owns the PTY. Use
+/// absolute rows, not line feeds: a shorter mirror must never scroll the tree.
+/// Autowrap stays off while we own the screen, closing the race between a
+/// TIOCGWINSZ read and a concurrent terminal resize.
+pub(crate) fn viewport_frame(frame: &str, cols: usize, rows: usize) -> String {
+    let mut out = format!("{E}[?2026h{E}[?25l{E}[?7l{E}[H{E}[0m{E}[2J");
+    let (mut row, mut col) = (0usize, 0usize);
+    let mut chars = frame.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.next() != Some('[') {
+                continue;
+            }
+            let mut parameters = String::new();
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    match c {
+                        'H' | 'f' => {
+                            let mut parts = parameters.split(';');
+                            row = parts
+                                .next()
+                                .and_then(|p| p.parse::<usize>().ok())
+                                .unwrap_or(1)
+                                .max(1)
+                                - 1;
+                            col = parts
+                                .next()
+                                .and_then(|p| p.parse::<usize>().ok())
+                                .unwrap_or(1)
+                                .max(1)
+                                - 1;
+                            if row < rows && col < cols {
+                                out.push_str(&format!("{E}[{};{}H", row + 1, col + 1));
+                            }
+                        }
+                        'G' => {
+                            col = parameters.parse::<usize>().unwrap_or(1).max(1) - 1;
+                            if row < rows && col < cols {
+                                out.push_str(&format!("{E}[{}G", col + 1));
+                            }
+                        }
+                        'm' => out.push_str(&format!("{E}[{parameters}m")),
+                        'K' | 'J' if row < rows && col < cols => {
+                            out.push_str(&format!("{E}[{parameters}{c}"));
+                        }
+                        _ => {} // screen modes belong to this renderer, not the frame
+                    }
+                    break;
+                }
+                parameters.push(c);
+            }
+        } else if c == '\n' {
+            row += 1;
+            col = 0;
+            if row < rows && cols > 0 {
+                out.push_str(&format!("{E}[{};1H", row + 1));
+            }
+        } else if c == '\r' {
+            col = 0;
+            if row < rows && cols > 0 {
+                out.push_str(&format!("{E}[{};1H", row + 1));
+            }
+        } else {
+            let unit = next_unit(c, &mut chars);
+            let width = cell_width(&unit);
+            if row < rows && col.saturating_add(width) <= cols {
+                out.push_str(&unit);
+            }
+            col = col.saturating_add(width);
+        }
+    }
+    out.push_str(&format!("{E}[0m{E}[?2026l"));
+    out
+}
+
 fn framed_size(cols: usize, height: usize) -> Option<(usize, usize)> {
     if cols >= 4 && height >= 4 {
         Some((cols - 2, height - 2))
@@ -310,6 +385,30 @@ fn pane_frame_color(
 #[cfg(test)]
 mod pane_frame_tests {
     use super::*;
+
+    #[test]
+    fn viewport_projection_never_wraps_or_scrolls_a_shorter_pty() {
+        let frame = viewport_frame("\x1b[Habcdef\n123456\nhidden\n", 4, 2);
+        assert!(frame.contains("abcd\x1b[2;1H1234"));
+        assert!(!frame.contains("ef") && !frame.contains("56") && !frame.contains("hidden"));
+        assert!(!frame.contains('\n'));
+        assert!(frame.contains("\x1b[?7l"));
+        assert!(frame.ends_with("\x1b[?2026l"));
+    }
+
+    #[test]
+    fn viewport_projection_clips_absolute_borders_and_wide_characters() {
+        let frame = viewport_frame("\x1b[Hab一二\x1b[4G界\x1b[9;1Hhidden\x1b[2;1Hok", 4, 2);
+        assert!(frame.contains("ab一"));
+        assert!(!frame.contains('二') && !frame.contains('界') && !frame.contains("hidden"));
+        assert!(frame.contains("\x1b[2;1Hok"));
+        assert!(!frame.contains("\x1b[9;1H"));
+        for (cols, rows) in [(0, 0), (1, 1), (4, 1)] {
+            let frame = viewport_frame("abcdefgh\nnext", cols, rows);
+            assert!(!frame.contains('\n'));
+            assert!(!frame.contains("next"));
+        }
+    }
 
     #[test]
     fn wide_characters_are_clipped_by_cells_not_chars() {
@@ -1452,6 +1551,9 @@ mod tests {
                 ])
                 .env("AGENMUX_THEME_TEST_CHILD", "1")
                 .env("TMUX", format!("{socket},0,0"))
+                .env("AGENMUX_MUX", "tmux")
+                .env("AGENMUX_TMUX_ACTIVE_BORDER_STYLE", "fg=colour3,bg=default")
+                .env("AGENMUX_TMUX_WINDOW_STYLE", "bg=default")
                 .env("XDG_STATE_HOME", &state)
                 .output()
                 .unwrap();
@@ -1486,6 +1588,8 @@ mod tests {
         sb.daemon = Some(Daemon {
             keys_path: dir.join("keys"),
             keys_fd: -1,
+            input_path: dir.join("input"),
+            input_fd: -1,
             writers: PaneWriters::new(),
             size: (80, 40),
             seen_mirror: false,

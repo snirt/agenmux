@@ -128,6 +128,7 @@ use daemon::Daemon;
 mod filter;
 mod overlay;
 mod render;
+pub(crate) use render::viewport_frame;
 mod ui;
 use overlay::{update_available, Overlay};
 
@@ -402,7 +403,7 @@ fn uses_tmux_header_contrast(settings: &crate::app_config::AppConfig) -> bool {
 /// The daemon is headless and owns no pane, so it MUST pass "" — inheriting
 /// TMUX_PANE from whoever pressed the toggle key hid that pane's agent.
 fn new_sidebar(
-    mux: Box<dyn crate::mux::Multiplexer>,
+    mut mux: Box<dyn crate::mux::Multiplexer>,
     plugin_dir: PathBuf,
     cache_file: PathBuf,
     rows_file: PathBuf,
@@ -416,7 +417,9 @@ fn new_sidebar(
     let update_ready = update.is_some() && update == crate::autoupdate::ready_target(&plugin_dir);
     let adopted_show_all_panes = settings.show_all_panes;
     let config_show_all = settings.show_all_panes;
-    let tmux_active_border_fg = inherit_tmux_header(&mut settings);
+    let tmux_active_border_fg = mux
+        .as_tmux()
+        .and_then(|_| inherit_tmux_header(&mut settings));
     let header_inherited = uses_tmux_header_contrast(&settings);
     let palette = Palette::resolve(&settings.theme);
     let cached_rows = std::fs::read_to_string(&cache_file)
@@ -636,6 +639,8 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(300);
 /// Returns true when the loop ended because another daemon took ownership.
 fn event_loop(sb: &mut Sidebar) -> bool {
     let key_fd = sb.daemon.as_ref().map_or(0, |d| d.keys_fd);
+    // sidebar panes on a server that sends no keys forward their raw input
+    let raw_fd = sb.daemon.as_ref().map_or(-1, |d| d.input_fd);
     let mut scans = ScanSchedule::new(Instant::now());
     let mut next_tick = Instant::now();
     loop {
@@ -646,7 +651,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         let mut now = Instant::now();
         // Keys outrank scans: a scan blocks the loop for 30-200ms, and under
         // key repeat that queued presses which then replayed after release.
-        let key_waiting = key_pending(key_fd);
+        let key_waiting = key_pending(key_fd) || key_pending(raw_fd);
         let sequence_timeout = Duration::from_millis(sb.settings.settings.sequence_timeout_ms);
         if sb.key_sequence.expire(now, sequence_timeout) {
             sb.last_frame.clear();
@@ -765,8 +770,12 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         if let Some(deadline) = sb.key_sequence.deadline(sequence_timeout) {
             wake = wake.min(deadline.saturating_duration_since(now));
         }
-        let (key_ready, pipe_ready) =
-            poll_inputs(key_fd, sb.mux.notify_fd(), sb.mux.notify_buffered(), wake);
+        let (key_ready, pipe_ready) = poll_inputs(
+            [key_fd, raw_fd],
+            sb.mux.notify_fd(),
+            sb.mux.notify_buffered(),
+            wake,
+        );
         if pipe_ready {
             // focus notification (%window-pane-changed etc.) — rescan now so
             // the cursor snaps to the newly focused pane without the 2s wait
@@ -790,6 +799,13 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             let frame_deadline = Instant::now() + Duration::from_millis(16);
             let mut navigation = None;
             loop {
+                // raw input reads as tty mode reads stdin; the keys FIFO
+                // carries keys the server already resolved
+                let (fd, tty) = if key_pending(raw_fd) {
+                    (raw_fd, true)
+                } else {
+                    (key_fd, sb.daemon.is_none())
+                };
                 let overlay_editing = sb.overlay_editing();
                 let text_input = sb.search.editing
                     || overlay_editing
@@ -804,17 +820,17 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 };
                 let keys = if overlay_editing {
                     settings_keys()
-                } else if sb.daemon.is_some() {
+                } else if !tty {
                     protocol_keys(mode)
                 } else if text_input {
                     &sb.search_keys
                 } else {
                     &sb.normal_keys
                 };
-                let key = if text_input && sb.daemon.is_none() {
-                    read_search_key(key_fd, keys)
+                let key = if text_input && tty {
+                    read_search_key(fd, keys)
                 } else {
-                    let continuing: Vec<char> = if sb.daemon.is_none() {
+                    let continuing: Vec<char> = if tty {
                         sb.key_sequence
                             .continuations(&sb.settings.settings)
                             .into_iter()
@@ -823,7 +839,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                     } else {
                         Vec::new() // the FIFO carries resolved sequence packets
                     };
-                    read_key_continuing(key_fd, keys, &sb.settings.settings, &continuing)
+                    read_key_continuing(fd, keys, &sb.settings.settings, &continuing)
                 };
                 trace!("key {key:?}");
                 let navigation_step = if !overlay_editing && sb.overlay.is_none() {
@@ -852,7 +868,8 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                         }
                     }
                 }
-                if !key_pending(key_fd) || Instant::now() >= frame_deadline {
+                if !(key_pending(key_fd) || key_pending(raw_fd)) || Instant::now() >= frame_deadline
+                {
                     break;
                 }
             }
@@ -974,7 +991,7 @@ impl Sidebar {
             self.select_index(*index);
             // an embedded sidebar stays put, so a double-click goes to any
             // row, header or pane; elsewhere it folds a header
-            if matches!(key, Key::Open(_)) && self.daemon.is_none() && self.mux.embedded() {
+            if matches!(key, Key::Open(_)) && self.mux.embedded() {
                 self.jump();
             } else if matches!(key, Key::Open(_)) && self.on_branch_header() {
                 self.toggle_branch();
@@ -1320,26 +1337,14 @@ impl Sidebar {
         trace!("mutation input on for {client}");
         self.follow_selection = true;
         if self.daemon.is_some() {
-            let _ = crate::tmux::command_status(&[
-                "switch-client",
-                "-c",
-                client,
-                "-T",
-                crate::setup::SEARCH_TABLE,
-            ]);
+            self.mux.text_input(client, true);
         }
     }
 
-    fn restore_mutation_input(&self, client: &str) {
+    fn restore_mutation_input(&mut self, client: &str) {
         trace!("mutation input off for {client}");
         if self.daemon.is_some() {
-            let _ = crate::tmux::command_status(&[
-                "switch-client",
-                "-c",
-                client,
-                "-T",
-                crate::setup::NORMAL_TABLE,
-            ]);
+            self.mux.text_input(client, false);
         }
     }
 
@@ -1519,7 +1524,10 @@ impl Sidebar {
         if !refreshed.reloaded {
             return;
         }
-        self.tmux_active_border_fg = inherit_tmux_header(&mut self.settings.settings);
+        self.tmux_active_border_fg = self
+            .mux
+            .as_tmux()
+            .and_then(|_| inherit_tmux_header(&mut self.settings.settings));
         self.header_inherited = uses_tmux_header_contrast(&self.settings.settings);
         self.palette = Palette::resolve(&self.settings.settings.theme);
         self.normal_keys = self.settings.settings.normal.clone();
@@ -1645,7 +1653,7 @@ impl Sidebar {
             && !self.active_session.is_empty()
         {
             let sid = self.active_session.clone();
-            if self.mux.run(&format!("switch-client -t '{sid}'")).is_ok() {
+            if self.mux.follow_session(&sid) {
                 if let Some(daemon) = self.daemon.as_mut() {
                     daemon.attached = sid;
                 }

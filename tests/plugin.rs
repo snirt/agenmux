@@ -1708,7 +1708,7 @@ fn quick_launchers_open_selected_panes_safely_and_reload_transactionally() {
     // the executable path, and each argument contain spaces or shell syntax.
     select(&agent);
     send_sequence("e");
-    assert_launch(&nvim_log, &agent_cwd, &nvim_args[1..].to_vec());
+    assert_launch(&nvim_log, &agent_cwd, &nvim_args[1..]);
     assert!(
         !marker.exists(),
         "launcher arguments were interpreted by a shell"
