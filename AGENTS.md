@@ -7,7 +7,13 @@
 - Add real fixtures covering at least two working variants plus an idle/completed negative case. A completed summary line must not match a working rule.
 - Test through the public detector used by the runtime. Verify both the target state and the transition back out of it.
 - Before live verification, inspect `@agenmux-bin`, derive that binary's plugin root, and confirm its loaded `agents/*.conf`. Never assume the current checkout is deployed.
-- Restart the active daemon after config changes, then verify the monitored pane reports `working` during activity and `idle` after completion.
+- Restart the isolated test daemon after config changes, then verify the monitored pane reports `working` during activity and `idle` after completion. Restarting the user's main daemon requires explicit approval.
+
+## Live daemon safety
+
+- Never stop or replace the user's main Rex server or agenmux daemon during tests or cleanup without explicit approval.
+- Run Rex verification against a separate foreground server with an explicit scratch socket, state directory, and config. Clear inherited Rex context before starting it.
+- Cleanup may signal only a verified child PID spawned by that test. Never use an unscoped `rex server stop`, broad `pkill`, or inherited server selection for cleanup. If ownership is uncertain, leave the process running.
 
 ## Plans
 

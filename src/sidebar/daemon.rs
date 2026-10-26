@@ -1,5 +1,5 @@
 use crate::mux::{Owner, SidebarPane as M};
-use crate::pane_writers::PaneWriters;
+use crate::pane_writers::{PaneReports, PaneWriters};
 use crate::tmux::PendingChanges;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -107,6 +107,9 @@ pub(super) struct Daemon {
     pub(super) input_path: PathBuf,
     pub(super) input_fd: libc::c_int,
     pub(super) writers: PaneWriters,
+    pub(super) reports: Option<PaneReports>, // None: backend geometry only
+    pub(super) panes: Vec<M>,
+    pub(super) geometry_deadline: Option<Instant>,
     pub(super) size: (usize, usize), // watched pane's measured viewport
     pub(super) seen_mirror: bool,    // suicide only arms after the first pane appears
     pub(super) empty_ticks: u32,     // consecutive measurements that found no pane
@@ -122,6 +125,70 @@ pub(super) struct Daemon {
     // session the control client is attached to: layout/focus notifications
     // are session-scoped, so the client follows the user's active session
     pub(super) attached: String,
+}
+
+impl Daemon {
+    fn inventory(&mut self, panes: Vec<M>) {
+        if let Some(reports) = &mut self.reports {
+            reports.reconcile(panes.iter().map(|m| m.pane.clone()));
+        }
+        self.panes = panes;
+    }
+
+    fn viewport(&self, active_session: &str) -> (usize, usize) {
+        // Reports are render facts only. Never feed them into the layout/drag
+        // feedback state, which must pair a PTY measurement with its own layout.
+        let mut ms = self.panes.clone();
+        for m in &mut ms {
+            if let Some((w, h)) = self.reports.as_ref().and_then(|r| r.size(&m.pane)) {
+                m.w = w;
+                m.h = h;
+            }
+        }
+        (
+            watched_width(&ms, active_session),
+            watched_height(&ms, active_session),
+        )
+    }
+
+    pub(super) fn pump(&mut self, now: Instant, active_session: &str) -> bool {
+        self.writers.pump(now);
+        if let Some(reports) = &mut self.reports {
+            reports.pump(now);
+        }
+        let size = self.viewport(active_session);
+        if size == self.size {
+            self.geometry_deadline = None;
+            return false;
+        }
+        let deadline = *self
+            .geometry_deadline
+            .get_or_insert(now + Duration::from_millis(16));
+        if now < deadline {
+            return false;
+        }
+        self.geometry_deadline = None;
+        self.size = size;
+        trace!("viewport render {}x{}", size.0, size.1);
+        true
+    }
+
+    pub(super) fn interests(&self) -> Vec<libc::pollfd> {
+        let mut fds = self
+            .reports
+            .as_ref()
+            .map_or_else(Vec::new, PaneReports::interests);
+        fds.extend(self.writers.interests());
+        fds
+    }
+
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        self.geometry_deadline
+            .into_iter()
+            .chain(self.reports.as_ref().and_then(PaneReports::deadline))
+            .chain(self.writers.deadline())
+            .min()
+    }
 }
 
 /// A new FIFO at `path`, open for reading. O_RDWR: it never hits EOF as
@@ -215,12 +282,19 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     if control_client.is_empty() {
         return 1;
     }
+    // Reports only cut resize latency; backend polling still sizes frames.
+    let reports = PaneReports::bind(&tmp, format!("{}:{}", control_client, std::process::id()))
+        .inspect_err(|error| eprintln!("agenmux: cannot start pane reports: {error}"))
+        .ok();
     sb.daemon = Some(Daemon {
         keys_path,
         keys_fd,
         input_path,
         input_fd,
         writers: PaneWriters::new(),
+        reports,
+        panes: Vec::new(),
+        geometry_deadline: None,
         size: (30, 24),
         seen_mirror: false,
         empty_ticks: 0,
@@ -321,13 +395,11 @@ impl Sidebar {
         if ms.is_empty() {
             return false;
         };
-        let size = (
-            watched_width(&ms, &self.active_session),
-            watched_height(&ms, &self.active_session),
-        );
         let Some(daemon) = self.daemon.as_mut() else {
             return false;
         };
+        daemon.inventory(ms);
+        let size = daemon.viewport(&self.active_session);
         if daemon.size == size {
             return false;
         }
@@ -349,7 +421,10 @@ impl Sidebar {
         }
         self.sync_panes_view();
         let width_changed = refreshed.width_changed;
-        let mut ms = self.mux.sidebar_panes();
+        let wopt = self.settings.settings.sidebar_width as usize;
+        let native = self.mux.reconcile_sidebar_layout(wopt);
+        let native_layout = native.is_some();
+        let mut ms = native.unwrap_or_else(|| self.mux.sidebar_panes());
         if ms.is_empty() {
             let d = self.daemon.as_mut().unwrap();
             d.empty_ticks += 1;
@@ -357,88 +432,89 @@ impl Sidebar {
         }
         self.daemon.as_mut().unwrap().empty_ticks = 0;
         let wopt = self.settings.settings.sidebar_width as usize;
-        if width_changed {
-            for m in &mut ms {
-                let width = wopt.min(m.win_size.0.saturating_sub(2).max(1));
-                if self.mux.resize_panes(&[(m.pane.clone(), width)]) {
+        if !native_layout {
+            if width_changed {
+                for m in &mut ms {
+                    let width = wopt.min(m.win_size.0.saturating_sub(2).max(1));
+                    if self.mux.resize_panes(&[(m.pane.clone(), width)]) {
+                        m.settled = false;
+                    }
+                }
+            }
+            // One sidebar per window. mirror-add.sh claims atomically now, but servers
+            // that ran the old racy version still carry duplicates. Keep the first —
+            // a -hbf split takes index 0, so that's the newest and the one actually at
+            // the requested width (a right-hand -hf split is last, but the resize
+            // below fixes whichever survives); the squeezed leftovers go. This runs before the
+            // width fold and the drag probe below, and it puts the survivor back at
+            // wopt: every extra split squeezed it, and that squeezed width would
+            // otherwise look exactly like a border drag and get adopted globally.
+            let mut seen: HashSet<String> = HashSet::new();
+            let dup: Vec<usize> = (0..ms.len())
+                .filter(|&i| !seen.insert(ms[i].win.clone()))
+                .collect();
+            if !dup.is_empty() {
+                let hit: HashSet<String> = dup.iter().map(|&i| ms[i].win.clone()).collect();
+                let killed: Vec<String> = dup.iter().map(|&i| ms[i].pane.clone()).collect();
+                self.mux.close_panes(&killed);
+                for &i in dup.iter().rev() {
+                    ms.remove(i);
+                }
+                // unconditional: the survivor absorbs the columns the killed panes
+                // give back, so even one that measured wopt a moment ago ends up wide
+                let mut widths = Vec::new();
+                for m in ms.iter_mut().filter(|m| hit.contains(&m.win)) {
+                    widths.push((m.pane.clone(), wopt));
+                    m.settled = false;
+                }
+                self.mux.resize_panes(&widths);
+            }
+            let drag: Option<(String, usize)> = {
+                let d = self.daemon.as_ref().unwrap();
+                ms.iter()
+                    .find(|m| !width_changed && dragged(m, wopt, d.win_sizes.get(&m.win)))
+                    .map(|m| (m.pane.clone(), m.w))
+            };
+            if let Some((src_pane, width)) = drag {
+                trace!("sidebar {src_pane} dragged to {width}");
+                if (1..=10000).contains(&width) && self.mux.save_width(width) {
+                    self.settings.settings.sidebar_width = width as u16;
+                    self.settings.settings.popup_width = width as u16;
+                }
+                // only the OTHER sidebars: the dragged pane stays untouched so
+                // nothing ever fights the user's drag
+                let others = peer_widths(&ms, &src_pane, width);
+                self.mux.resize_panes(&others);
+                for m in ms.iter_mut().filter(|m| m.pane != src_pane) {
                     m.settled = false;
                 }
             }
-        }
-        // One sidebar per window. mirror-add.sh claims atomically now, but servers
-        // that ran the old racy version still carry duplicates. Keep the first —
-        // a -hbf split takes index 0, so that's the newest and the one actually at
-        // the requested width (a right-hand -hf split is last, but the resize
-        // below fixes whichever survives); the squeezed leftovers go. This runs before the
-        // width fold and the drag probe below, and it puts the survivor back at
-        // wopt: every extra split squeezed it, and that squeezed width would
-        // otherwise look exactly like a border drag and get adopted globally.
-        let mut seen: HashSet<String> = HashSet::new();
-        let dup: Vec<usize> = (0..ms.len())
-            .filter(|&i| !seen.insert(ms[i].win.clone()))
-            .collect();
-        if !dup.is_empty() {
-            let hit: HashSet<String> = dup.iter().map(|&i| ms[i].win.clone()).collect();
-            let killed: Vec<String> = dup.iter().map(|&i| ms[i].pane.clone()).collect();
-            self.mux.close_panes(&killed);
-            for &i in dup.iter().rev() {
-                ms.remove(i);
-            }
-            // unconditional: the survivor absorbs the columns the killed panes
-            // give back, so even one that measured wopt a moment ago ends up wide
+            // A killed neighbour hands its columns to the sidebar, a server that
+            // splits by ratio grows it with its window, and one that places by
+            // ratio misses by a few cells. The pane count or the window size
+            // changed, or the sidebar never had the width: the drag probe above
+            // stays quiet, so put the width back.
+            let wopt = self.settings.settings.sidebar_width as usize;
             let mut widths = Vec::new();
-            for m in ms.iter_mut().filter(|m| hit.contains(&m.win)) {
-                widths.push((m.pane.clone(), wopt));
+            for m in &mut ms {
+                let want = bound(wopt, m.win_size.0);
+                let counted = self.daemon.as_ref().unwrap().win_sizes.get(&m.win);
+                let reshaped = counted.is_none_or(|b| {
+                    b.panes != m.panes
+                        || b.size != m.win_size
+                        || b.width != want
+                        || m.width_drag == Some(false)
+                });
+                if m.w == want || !m.settled || !reshaped {
+                    continue;
+                }
+                widths.push((m.pane.clone(), want));
                 m.settled = false;
             }
-            self.mux.resize_panes(&widths);
-        }
-        let h = watched_height(&ms, &self.active_session);
-        let drag: Option<(String, usize)> = {
-            let d = self.daemon.as_ref().unwrap();
-            ms.iter()
-                .find(|m| !width_changed && dragged(m, wopt, d.win_sizes.get(&m.win)))
-                .map(|m| (m.pane.clone(), m.w))
-        };
-        if let Some((src_pane, width)) = drag {
-            trace!("sidebar {src_pane} dragged to {width}");
-            if (1..=10000).contains(&width) && self.mux.save_width(width) {
-                self.settings.settings.sidebar_width = width as u16;
-                self.settings.settings.popup_width = width as u16;
+            if !widths.is_empty() {
+                trace!("sidebar widths put back: {widths:?}");
+                self.mux.resize_panes(&widths);
             }
-            // only the OTHER sidebars: the dragged pane stays untouched so
-            // nothing ever fights the user's drag
-            let others = peer_widths(&ms, &src_pane, width);
-            self.mux.resize_panes(&others);
-            for m in ms.iter_mut().filter(|m| m.pane != src_pane) {
-                m.settled = false;
-            }
-        }
-        // A killed neighbour hands its columns to the sidebar, a server that
-        // splits by ratio grows it with its window, and one that places by
-        // ratio misses by a few cells. The pane count or the window size
-        // changed, or the sidebar never had the width: the drag probe above
-        // stays quiet, so put the width back.
-        let wopt = self.settings.settings.sidebar_width as usize;
-        let mut widths = Vec::new();
-        for m in &mut ms {
-            let want = bound(wopt, m.win_size.0);
-            let counted = self.daemon.as_ref().unwrap().win_sizes.get(&m.win);
-            let reshaped = counted.is_none_or(|b| {
-                b.panes != m.panes
-                    || b.size != m.win_size
-                    || b.width != want
-                    || m.width_drag == Some(false)
-            });
-            if m.w == want || !m.settled || !reshaped {
-                continue;
-            }
-            widths.push((m.pane.clone(), want));
-            m.settled = false;
-        }
-        if !widths.is_empty() {
-            trace!("sidebar widths put back: {widths:?}");
-            self.mux.resize_panes(&widths);
         }
         let visible_windows = self.mux.visible_windows();
         let visible_panes = if visible_windows.is_empty() {
@@ -478,26 +554,32 @@ impl Sidebar {
             })
             .collect();
         d.seen_mirror = true;
-        d.size = (watched_width(&ms, &self.active_session), h);
+        d.inventory(ms);
+        d.size = d.viewport(&self.active_session);
         true
     }
 
     /// Focus moved: write only to sidebar panes in windows real clients view.
-    pub(super) fn refocus_writers(&mut self) {
+    /// Returns whether the watched viewport changed and needs a full repaint.
+    pub(super) fn refocus_writers(&mut self) -> bool {
         let windows = self.mux.visible_windows();
         if windows.is_empty() {
-            return; // no real client: leave mirror_tick's warm-one fallback alone
+            return false; // no real client: leave mirror_tick's warm-one fallback alone
         }
-        let panes: Vec<String> = self
-            .mux
-            .sidebar_panes()
-            .into_iter()
+        let ms = self.mux.sidebar_panes();
+        let panes = ms
+            .iter()
             .filter(|m| windows.contains(&m.win))
-            .map(|m| m.pane)
-            .collect();
-        if self.daemon.as_mut().unwrap().writers.reconcile(panes) {
+            .map(|m| m.pane.clone())
+            .collect::<Vec<_>>();
+        let d = self.daemon.as_mut().unwrap();
+        d.inventory(ms);
+        let size = d.viewport(&self.active_session);
+        let resized = std::mem::replace(&mut d.size, size) != size;
+        if d.writers.reconcile(panes) {
             self.last_frame.clear();
         }
+        resized
     }
 
     /// Preserved-pane shutdown: close visible writers, kill sidebar panes and
@@ -571,6 +653,97 @@ mod tests {
             settled: true,
             width_drag: None,
         }
+    }
+
+    #[test]
+    fn reported_geometry_has_a_bounded_deadline_and_never_changes_layout_evidence() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let runtime = PathBuf::from(format!("/tmp/amx-geometry-{}", std::process::id()));
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let reports = Some(PaneReports::bind(&runtime, "test".into()).unwrap());
+        let mut d = Daemon {
+            keys_path: runtime.join("keys"),
+            keys_fd: -1,
+            input_path: runtime.join("input"),
+            input_fd: -1,
+            writers: PaneWriters::new(),
+            reports,
+            panes: Vec::new(),
+            geometry_deadline: None,
+            size: (30, 40),
+            seen_mirror: true,
+            empty_ticks: 0,
+            client: String::new(),
+            generation: String::new(),
+            started: Instant::now(),
+            win_sizes: HashMap::new(),
+            attached: String::new(),
+        };
+        d.inventory(vec![m("$0", 40, true)]);
+        let mut peer = std::os::unix::net::UnixStream::connect(
+            crate::pane_writers::report_path(&runtime).unwrap(),
+        )
+        .unwrap();
+        let now = Instant::now();
+        peer.write_all(
+            b"{\"type\":\"hello\",\"version\":1,\"pane\":\"%1\",\"cols\":35,\"rows\":50}\n",
+        )
+        .unwrap();
+        assert!(!d.pump(now, "$0"));
+        let deadline = d.geometry_deadline.unwrap();
+        peer.write_all(
+            b"{\"type\":\"resize\",\"generation\":\"test\",\"seq\":1,\"cols\":36,\"rows\":50}\n",
+        )
+        .unwrap();
+        assert!(!d.pump(now + Duration::from_millis(8), "$0"));
+        assert_eq!(
+            d.geometry_deadline,
+            Some(deadline),
+            "a drag must not postpone its first frame"
+        );
+        assert!(d.pump(deadline, "$0"));
+        assert_eq!(d.size, (36, 50));
+        assert_eq!(
+            d.panes[0].w, 30,
+            "report must not replace layout-paired drag evidence"
+        );
+        d.inventory(vec![m("$0", 40, true)]);
+        assert_eq!(
+            d.viewport("$0"),
+            (36, 50),
+            "backend polling cannot overwrite a connected report"
+        );
+        let mut hidden = m("$1", 10, false);
+        hidden.pane = "%2".into();
+        d.inventory(vec![m("$0", 40, true), hidden]);
+        let mut other = std::os::unix::net::UnixStream::connect(
+            crate::pane_writers::report_path(&runtime).unwrap(),
+        )
+        .unwrap();
+        other
+            .write_all(
+                b"{\"type\":\"hello\",\"version\":1,\"pane\":\"%2\",\"cols\":5,\"rows\":7}\n",
+            )
+            .unwrap();
+        assert!(!d.pump(deadline, "$0"));
+        assert_eq!(
+            d.size,
+            (36, 50),
+            "hidden reports cannot steal the watched geometry"
+        );
+        drop(peer);
+        assert!(!d.pump(deadline, "$0"));
+        assert!(d.pump(deadline + Duration::from_millis(16), "$0"));
+        assert_eq!(
+            d.size,
+            (30, 40),
+            "disconnect restores backend reconciliation"
+        );
+        drop(other);
+        drop(d);
+        std::fs::remove_dir_all(runtime).unwrap();
     }
 
     #[test]

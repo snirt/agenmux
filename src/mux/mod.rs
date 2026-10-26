@@ -7,7 +7,7 @@ mod rex;
 mod tmux;
 
 pub use rex::{
-    publish_reload, rex_close_sidebars, rex_reopen, rex_sidebars, rex_toggle,
+    publish_reload, rex_close_sidebars, rex_reload, rex_reopen, rex_sidebars, rex_toggle,
     runtime_dir as rex_runtime_dir, Rex,
 };
 
@@ -27,7 +27,7 @@ pub enum Kind {
 }
 
 /// A sidebar pane as the daemon measures it, in cells.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct SidebarPane {
     pub pane: String,
     pub win: String,
@@ -166,6 +166,11 @@ pub trait Multiplexer {
     // decides; these only report and act. The defaults suit a server no
     // daemon runs on.
 
+    /// Native layout owner, if any. Returning Some bypasses shared Rust width
+    /// policy entirely; geometry reporting remains available through sidebar_panes.
+    fn reconcile_sidebar_layout(&mut self, _width: usize) -> Option<Vec<SidebarPane>> {
+        None
+    }
     /// Every sidebar pane.
     fn sidebar_panes(&mut self) -> Vec<SidebarPane> {
         Vec::new()

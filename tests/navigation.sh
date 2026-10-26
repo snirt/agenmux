@@ -841,16 +841,22 @@ for _ in $(tries 80); do
   [ "$overflow_agents" -gt 32 ] && break
   sleep 0.1
 done
-scrollbar_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
-scrollbar_map_rows="$(wc -l <"$tmp/agenmux-rows" | tr -d ' ')"
-scrollbar_rows=$((scrollbar_map_rows > 3 ? scrollbar_map_rows - 3 : 0))
-scrollbar_glyph_rows="$(printf '%s\n' "$scrollbar_frame" |
-  awk -v last="$((scrollbar_map_rows - 1))" \
-    'NR >= 3 && NR <= last && /[│▐]│$/ { n++ } END { print n + 0 }')"
 scrollbar_works=0
-if [ "$scrollbar_rows" -gt 0 ] && [ "$scrollbar_glyph_rows" -eq "$scrollbar_rows" ]; then
-  scrollbar_works=1
-fi
+# Inventory publication is not a screen-presentation acknowledgement: frame
+# delivery is nonblocking. Wait for the matching visible scrollbar, not just cache.
+for _ in $(tries 80); do
+  scrollbar_frame="$(tmux -S "$sock" capture-pane -p -t "$sidebar")"
+  scrollbar_map_rows="$(wc -l <"$tmp/agenmux-rows" | tr -d ' ')"
+  scrollbar_rows=$((scrollbar_map_rows > 3 ? scrollbar_map_rows - 3 : 0))
+  scrollbar_glyph_rows="$(printf '%s\n' "$scrollbar_frame" |
+    awk -v last="$((scrollbar_map_rows - 1))" \
+      'NR >= 3 && NR <= last && /[│▐]│$/ { n++ } END { print n + 0 }')"
+  if [ "$scrollbar_rows" -gt 0 ] && [ "$scrollbar_glyph_rows" -eq "$scrollbar_rows" ]; then
+    scrollbar_works=1
+    break
+  fi
+  sleep 0.05
+done
 edge_first="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
 edge_top="$(top_row)"
 printf 'G' >&9
@@ -1717,7 +1723,7 @@ else
   echo "client-paste: works=$client_paste_works clear=[$client_paste_clear] result=[$client_paste_frame]"
   echo "edge-nav: long=$edge_long_list_works slow=$slow_gg_expires search=$search_edges_work"
   echo "sustained-input: keys=$sustained_navigation_works [$held_start->$held_mid->$held_boundary/$held_stable->$held_up_mid->$held_reset/$held_reset_stable] wheel=$wheel_burst_works [$wheel_burst_top->$wheel_burst_mid->$wheel_burst_reset/$wheel_burst_stable selected=$wheel_burst_selected/$wheel_burst_selected_after]"
-  echo "FAIL navigation-key-table: table=$table initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$settings_hint_visible/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] repeat-left=$repeat_left_works missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/reclick=$reclick_stays/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$attention_filter_works/$attention_targets/$attention_frame/$attention_hint/$all_filter_works/$all_targets/$all_frame] reload=[$reload_hint_follows/$reload_hint] ordinary=[$ordinary_keyboard_jump/$ordinary_first_click/reclick=$ordinary_reclick_stays/cross=$ordinary_cross_stays:$ordinary_cross/$ordinary_mouse_jump/$ordinary_restored_false target=$ordinary_target focus=$ordinary_focus table=$ordinary_table] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
+  echo "FAIL navigation-key-table: table=$table scrollbar=[$scrollbar_works/$scrollbar_map_rows/$scrollbar_glyph_rows] initial-focus=[$initial_focus] initial-hint=[$inactive_hint_hidden/$settings_hint_visible/$initial_hint] chooser=[$chooser_open_unzoomed/$chooser_state/$chooser_width] ctrl-l=[$ctrl_l_works/$ctrl_l_table/$ctrl_l_focus] repeat-left=$repeat_left_works missing-client=[$missing_client_noop/$missing_client_table/$missing_secondary_table/$missing_client_focus] empty-click=[$empty_click_works/$empty_click_table/$secondary_click_table/$empty_click_focus/green=$empty_click_green] stale-click=[$stale_click_works/$stale_click_table/$stale_click_focus] non-agent=[$non_agent_locations_work/$location_table/$location_focus] agent-missing-client=[$agent_missing_client_noop/$agent_missing_primary_table/$agent_missing_secondary_table/$agent_missing_focus] vanished-sidebar=[$vanished_sidebar_noop/$vanished_sidebar_table/$vanished_sidebar_focus] valid-click=[$valid_click_works/reclick=$reclick_stays/$valid_click_table/$valid_click_focus/$valid_target] picker=[$picker_open/click=$picker_click_works/$picker_click_table/$picker_click_focus/rows=$picker_click_rows/frame=$picker_click_first/$picker_reclaimed/$picker_table/$picker_before/$picker_return] after-j=$table_after_j control=[$control/$control_flags] first=[$first] second=[$second] third=[$third] wheel=[$wheel_down/$wheel_up/scroll=$wheel_delay_works/top=$wheel_top_before->$wheel_top_after->$wheel_top_restored/focus=$wheel_focus] return=[$return_table/$return_focus] fourth=[$fourth] search=[$search_works/$search_targets/$search_table/$search_frame/$search_hint/accept=$search_accept_works/$accept_table/$accept_frame/$accept_hint/jk=$search_jk_works/$accepted_cursor/$filtered_cursor/blur=$search_blur_works/$blur_table/$blur_targets] filters=[$attention_filter_works/$attention_targets/$attention_frame/$attention_hint/$all_filter_works/$all_targets/$all_frame] reload=[$reload_hint_follows/$reload_hint] ordinary=[$ordinary_keyboard_jump/$ordinary_first_click/reclick=$ordinary_reclick_stays/cross=$ordinary_cross_stays:$ordinary_cross/$ordinary_mouse_jump/$ordinary_restored_false target=$ordinary_target focus=$ordinary_focus table=$ordinary_table] q-leave=[$q_left/$exit_table/$exit_focus] escape=[$escape_ready/$escape_reset/$escape_left/$escape_table/$escape_focus/$escape_frame] Q-close=[$close_ready/$q_closed/$close_table] notification-open=[$notification_open_works/$notification_stale_noop/$notification_client]"
   echo "settings: open=$settings_open search=$settings_search backspace=$settings_backspace applied=$settings_search_applied navigation=$settings_search_navigation dropdown=$settings_dropdown cancelled=$settings_cancelled saved=$settings_saved responsive=$settings_responsive returned=$settings_returned popup=$settings_popup"
   diagnose
   exit 1

@@ -129,9 +129,6 @@ struct Block {
     title: Title,
     #[serde(default)]
     size: Size,
-    /// The client that sizes it; without one it keeps a default size.
-    #[serde(default)]
-    owner: Option<String>,
 }
 
 impl Block {
@@ -328,8 +325,6 @@ pub struct Rex {
     monitoring: bool,
     events: Option<Events>,
     pending: PendingChanges,
-    /// Sessions seen holding a window: only those count as emptied.
-    had_windows: std::collections::HashSet<String>,
     /// The split sidebar that speaks for all of them; see `elect`.
     leader: bool,
     /// No split sidebar runs: a popup is all there is.
@@ -340,186 +335,12 @@ pub struct Rex {
     acted: Option<String>,
     /// Last app preference observed; unchanged persisted data must not erase live focus.
     shown: Option<String>,
-    /// Each window's layout at the last measure.
-    shapes: HashMap<String, String>,
-    /// Last applied divider share and terminal width; a font/window resize alone is not a drag.
-    dividers: HashMap<String, (f64, usize)>,
-    /// Initial placement estimate only; never used as a render size.
-    app: Option<(usize, usize)>,
-    /// Window dimensions in each sidebar's cell units, with rounding noise removed.
-    window_sizes: HashMap<String, (usize, usize)>,
-    /// Ratio requests waiting for the client to resize its terminal.
-    resizing: HashMap<String, Resize>,
+    /// Opaque state owned by rex_place.lua; Rust never interprets resize policy.
+    layout_state: Value,
+    layout_started: Option<Instant>,
     /// agenmux's own blocks at the last scan, whose events `observe` skips.
     own_blocks: HashSet<String>,
 }
-/// One asynchronous, bounded width search in this terminal's own cell units.
-/// PTY columns remain authoritative. Unresponsive clients park after one probe.
-#[derive(Clone, Copy, Debug)]
-struct Resize {
-    target: usize,
-    from_columns: usize,
-    requested_share: f64,
-    lower: (f64, Option<usize>),
-    upper: (f64, Option<usize>),
-    requested: Instant,
-    probed: bool,
-    parked: bool,
-    measured_share: f64,
-}
-
-impl Resize {
-    fn plan(target: usize, columns: usize, seat: &Seat, previous: Option<Self>) -> Option<Self> {
-        let border = seat.border.as_ref()?;
-        if columns == 0 || seat.share <= 0.0 || target == columns {
-            return None;
-        }
-        let min = border.span * 0.05;
-        let max = border.span * 0.95;
-        let previous =
-            previous.filter(|p| p.target == target && !(p.parked && columns != p.from_columns));
-        let no_response = previous.is_some_and(|p| columns == p.from_columns);
-        if no_response && previous.is_some_and(|p| p.probed) {
-            return None; // one liveness probe only; wait for an actual PTY response
-        }
-        let mut lower = previous.map_or((min, None), |p| p.lower);
-        let mut upper = previous.map_or((max, None), |p| p.upper);
-        if columns < target {
-            lower = (seat.share, Some(columns));
-        } else {
-            upper = (seat.share, Some(columns));
-        }
-        if upper.0 - lower.0 < 1e-6 {
-            if ((seat.share - min).abs() < 1e-6 && columns > target)
-                || ((seat.share - max).abs() < 1e-6 && columns < target)
-            {
-                return None; // physical layout/client limit; never send no-op resizes
-            }
-            // The window/font changed during the search: discard obsolete bounds.
-            lower = (min, None);
-            upper = (max, None);
-        }
-        let share = if previous.is_none() {
-            // First estimate only. Minimum-size clamping can make it inaccurate.
-            (seat.share * (target as f64 + 0.5) / (columns as f64 + 0.5)).clamp(min, max)
-        } else if no_response {
-            // A minimum-size plateau and a hidden client look identical. Probe
-            // a known opposite bound (or halfway to an unknown one), then park
-            // if the client still sends no new cell count.
-            if columns < target {
-                if upper.1.is_some() {
-                    upper.0
-                } else {
-                    (seat.share + upper.0) / 2.0
-                }
-            } else if lower.1.is_some() {
-                lower.0
-            } else {
-                (seat.share + lower.0) / 2.0
-            }
-        } else {
-            let fraction = match (lower.1, upper.1) {
-                (Some(lo), Some(hi)) if hi > lo => {
-                    ((target as f64 - lo as f64) / (hi - lo) as f64).clamp(0.125, 0.875)
-                }
-                _ => 0.5,
-            };
-            lower.0 + (upper.0 - lower.0) * fraction
-        };
-        if (share - seat.share).abs() < 1e-6 {
-            return None;
-        }
-        Some(Self {
-            target,
-            from_columns: columns,
-            requested_share: share,
-            lower,
-            upper,
-            requested: Instant::now(),
-            probed: no_response,
-            parked: false,
-            measured_share: if no_response {
-                previous.unwrap().measured_share
-            } else {
-                seat.share
-            },
-        })
-    }
-}
-
-/// Where the sidebar sits in a tiled layout: its share of the window, and
-/// the border beside it when the split holding it is side by side.
-#[derive(Debug, PartialEq)]
-struct Seat {
-    share: f64,
-    border: Option<Border>,
-}
-
-#[derive(Debug, PartialEq)]
-struct Border {
-    before: String,
-    after: String,
-    sidebar_before: bool,
-    /// The holding split's share of the window.
-    span: f64,
-}
-
-/// Move the border beside a sidebar so it takes `share` of its window.
-fn fit(session: &str, seat: &Seat, share: f64) -> bool {
-    let Some(border) = &seat.border else {
-        return false;
-    };
-    let part = (share / border.span).clamp(0.05, 0.95);
-    let request = json!({
-        "session_id": session,
-        "direction": "horizontal",
-        "before_block_id": border.before,
-        "after_block_id": border.after,
-        "ratio": if border.sidebar_before { part } else { 1.0 - part },
-    });
-    Rex::call(Some(session), "session.resize_pane", request).is_ok()
-}
-
-fn seat(node: &Value, own: &str) -> Option<Seat> {
-    if node["block_id"].as_str() == Some(own) {
-        let share = node["rect"][2].as_f64()?;
-        return Some(Seat {
-            share,
-            border: None,
-        });
-    }
-    let split = node.get("split")?;
-    for (part, other, sidebar_before) in [
-        (&split["before"], &split["after"], true),
-        (&split["after"], &split["before"], false),
-    ] {
-        let Some(mut found) = seat(part, own) else {
-            continue;
-        };
-        if part["block_id"].as_str() == Some(own) && split["direction"] == "horizontal" {
-            // the other part's block on this border
-            let mut beside = other;
-            while let Some(split) = beside.get("split") {
-                beside = &split[if sidebar_before { "before" } else { "after" }];
-            }
-            let beside = beside["block_id"].as_str()?.to_string();
-            let (before, after) = if sidebar_before {
-                (own.to_string(), beside)
-            } else {
-                (beside, own.to_string())
-            };
-            found.border = Some(Border {
-                before,
-                after,
-                sidebar_before,
-                span: node["rect"][2].as_f64()?,
-            });
-        }
-        return Some(found);
-    }
-    None
-}
-
 impl Rex {
     pub fn connect(monitoring: bool) -> Result<Rex, TmuxError> {
         // a sidebar runs in a block, so the server is up: skip the round
@@ -636,44 +457,6 @@ impl Rex {
             .map(str::to_string)
     }
 
-    /// Closing works as in tmux. A window whose last real block closed
-    /// takes its sidebar with it, and a session whose last window closed is
-    /// destroyed: Rex would keep it empty, and an empty session has no row
-    /// to show. Undo still lists it. A session never seen with a window may
-    /// be one the app is still filling, so it is left alone.
-    fn reap(&mut self) {
-        for session in &self.listing.sessions {
-            if session.windows.is_empty() {
-                if self.had_windows.remove(&session.session_id) {
-                    let request = json!({"session_id": session.session_id});
-                    let _ = Self::call(None, "session.destroy", request);
-                }
-                continue;
-            }
-            self.had_windows.insert(session.session_id.clone());
-            let lone: Vec<&Window> = session
-                .windows
-                .iter()
-                .filter(|w| w.others == 0 && !w.blocks.is_empty())
-                .filter(|w| w.blocks.iter().all(Block::agenmux))
-                .collect();
-            // a sidebar is all these windows hold: closing them all ends the
-            // session
-            if lone.is_empty() {
-                continue;
-            } else if lone.len() == session.windows.len() {
-                let request = json!({"session_id": session.session_id});
-                let _ = Self::call(None, "session.destroy", request);
-            } else {
-                for window in lone {
-                    let request =
-                        json!({"session_id": session.session_id, "window_id": window.window_id});
-                    let _ = Self::call(Some(&session.session_id), "session.close_window", request);
-                }
-            }
-        }
-    }
-
     /// The daemon, which runs in no block, speaks for every sidebar: it
     /// places new windows' sidebars and sends the notifications. A popup
     /// sends them only while no sidebar is open.
@@ -736,219 +519,32 @@ impl Rex {
             .find(|s| Some(&s.session_id) == self.acted.as_ref())
     }
 
-    fn request_width(&mut self, block: &str, width: usize) -> bool {
-        let found = self.listing.sessions.iter().find_map(|s| {
-            s.windows.iter().find_map(|w| {
-                let b = w.blocks.iter().find(|b| b.block_id == block)?;
-                // Unowned terminals still carry the server's default geometry.
-                if b.owner.is_none() || s.active_window_id.as_ref() != Some(&w.window_id) {
-                    return None;
-                }
-                Some((
-                    s.session_id.clone(),
-                    seat(&w.layout, block)?,
-                    b.size.columns,
-                ))
-            })
-        });
-        let Some((session, seat, columns)) = found else {
-            return false;
-        };
-        if width == columns {
-            if let Some(mut pending) = self.resizing.get(block).copied() {
-                // A new preference can cancel a request while a hidden PTY
-                // still reports the old width. Restore its last measured ratio,
-                // not the unacknowledged ratio currently in the layout.
-                let share = if pending.from_columns == columns {
-                    pending.measured_share
-                } else {
-                    seat.share
-                };
-                if (share - seat.share).abs() > 1e-6 {
-                    if !fit(&session, &seat, share) {
-                        return false;
-                    }
-                    pending.target = width;
-                    pending.requested_share = share;
-                    pending.requested = Instant::now();
-                    pending.probed = false;
-                    pending.parked = false;
-                    self.resizing.insert(block.to_string(), pending);
-                    return true;
-                }
-            }
-            self.resizing.remove(block);
-            self.dividers
-                .insert(block.to_string(), (seat.share, columns));
-            return true;
-        }
-        let Some(plan) = Resize::plan(width, columns, &seat, self.resizing.get(block).copied())
-        else {
-            // Park unresponsive clients/physical constraints, keeping the
-            // desired target so a later real PTY resize can restart calibration.
-            if let Some(pending) = self.resizing.get_mut(block) {
-                if pending.from_columns != columns {
-                    pending.measured_share = seat.share;
-                    self.dividers
-                        .insert(block.to_string(), (seat.share, columns));
-                }
-                pending.parked = true;
-                pending.from_columns = columns;
-                pending.requested_share = seat.share;
-            }
-            return false;
-        };
-        if !fit(&session, &seat, plan.requested_share) {
-            return false;
-        }
-        self.resizing.insert(block.to_string(), plan);
-        true
-    }
-
-    fn measure_sidebars(&mut self) -> Vec<SidebarPane> {
-        let mut shapes = HashMap::new();
-        let mut panes = Vec::new();
-        let mut retry = Vec::new();
-        let mut live = HashSet::new();
-        for s in &self.listing.sessions {
-            for w in &s.windows {
-                let shape = format!(
-                    "{}{:?}",
-                    w.layout,
-                    w.blocks
-                        .iter()
-                        .map(|b| (&b.block_id, &b.size))
-                        .collect::<Vec<_>>()
-                );
-                let stable = self.shapes.get(&w.window_id) == Some(&shape);
-                shapes.insert(w.window_id.clone(), shape);
-                for b in w.blocks.iter().filter(|b| b.label == SIDEBAR) {
-                    let Some(seat) = seat(&w.layout, &b.block_id) else {
-                        continue;
-                    };
-                    live.insert(b.block_id.clone());
-                    if let Some(pending) = self.resizing.get(&b.block_id).copied() {
-                        if b.size.columns == pending.target {
-                            self.resizing.remove(&b.block_id);
-                            self.dividers
-                                .insert(b.block_id.clone(), (seat.share, b.size.columns));
-                        } else if (seat.share - pending.requested_share).abs() > 1e-6 {
-                            // An external layout change superseded our request.
-                            self.resizing.remove(&b.block_id);
-                        } else {
-                            if b.size.columns != pending.from_columns {
-                                // Every applied step is a new divider baseline,
-                                // even when the requested width cannot be granted.
-                                self.dividers
-                                    .insert(b.block_id.clone(), (seat.share, b.size.columns));
-                            }
-                            if stable
-                                && s.active_window_id.as_ref() == Some(&w.window_id)
-                                && (b.size.columns != pending.from_columns
-                                    || (!pending.parked
-                                        && pending.requested.elapsed()
-                                            >= Duration::from_millis(250)))
-                            {
-                                retry.push((b.block_id.clone(), pending.target));
-                            }
-                        }
-                    }
-                    let before = self.dividers.get(&b.block_id).copied();
-                    let width_drag = before.is_some_and(|(share, cols)| {
-                        (share - seat.share).abs() > 1e-6 && cols != b.size.columns
-                    });
-                    // A ratio can arrive before its PTY size. Do not publish a
-                    // settled baseline or recalibrate from this mixed snapshot.
-                    let waiting = before.is_some_and(|(share, cols)| {
-                        (share - seat.share).abs() > 1e-6 && cols == b.size.columns
-                    });
-                    let settled = stable
-                        && b.owner.is_some()
-                        && !self.resizing.contains_key(&b.block_id)
-                        && !waiting;
-                    // Window sizes are placement estimates only. In particular,
-                    // padding makes them change as shares change, even in a
-                    // fixed-size app window. Divider evidence is authoritative.
-                    let measured =
-                        window_cells_in(w, &b.size).unwrap_or((b.size.columns, b.size.rows));
-                    let size = self
-                        .window_sizes
-                        .entry(w.window_id.clone())
-                        .or_insert(measured);
-                    if settled
-                        && (size.0.abs_diff(measured.0) > 2 || size.1.abs_diff(measured.1) > 2)
-                    {
-                        *size = measured;
-                    }
-                    if settled && !width_drag {
-                        self.dividers
-                            .insert(b.block_id.clone(), (seat.share, b.size.columns));
-                    }
-                    panes.push(SidebarPane {
-                        pane: b.block_id.clone(),
-                        win: w.window_id.clone(),
-                        sess: s.session_id.clone(),
-                        w: b.size.columns,
-                        h: b.size.rows,
-                        win_size: *size,
-                        panes: w.blocks.len() + w.others,
-                        active: s.active_window_id.as_ref() == Some(&w.window_id),
-                        settled,
-                        width_drag: Some(width_drag),
-                    });
-                }
-            }
-        }
-        self.window_sizes.retain(|w, _| shapes.contains_key(w));
-        self.resizing.retain(|b, _| live.contains(b));
-        self.dividers.retain(|b, _| live.contains(b));
-        self.shapes = shapes;
-        for (block, target) in retry {
-            self.request_width(&block, target);
-        }
-        panes
-    }
-    /// While agenmux is on, the window the user moves to gets a sidebar, as
-    /// tmux gives every window one when a client visits it.
-    fn spread(&mut self) {
-        if !self.leader {
-            return;
-        }
-        let Some(session) = self.acting().map(|s| s.session_id.clone()) else {
-            return;
-        };
-        let session = self
-            .listing
+    /// Geometry only: report real terminal sizes, never mutate a split.
+    fn measure_sidebars(&self) -> Vec<SidebarPane> {
+        self.listing
             .sessions
             .iter()
-            .find(|s| s.session_id == session);
-        let window = session.and_then(|s| {
-            s.windows
-                .iter()
-                .find(|w| Some(&w.window_id) == s.active_window_id.as_ref())
-        });
-        let Some((session, window)) = session.zip(window) else {
-            return;
-        };
-        let real = window.others > 0 || window.blocks.iter().any(|b| !b.agenmux());
-        if !real || window.blocks.iter().any(|b| b.label == SIDEBAR) {
-            return;
-        }
-        let (session, window_id) = (session.session_id.clone(), window.window_id.clone());
-        let share = self.share();
-        let Ok(view) = Self::view(&session) else {
-            return;
-        };
-        if let Some(window) = view.windows.iter().find(|w| w.window_id == window_id) {
-            if window.sidebar().is_none() {
-                let _ = add_sidebar(&session, window, share, false, client().as_deref());
-            }
-        }
-    }
-
-    /// The sidebar's share of an app window.
-    fn share(&self) -> f64 {
-        share_of(self.app, 0)
+            .flat_map(|s| {
+                s.windows.iter().flat_map(move |w| {
+                    w.blocks
+                        .iter()
+                        .filter(|b| b.label == SIDEBAR)
+                        .map(move |b| SidebarPane {
+                            pane: b.block_id.clone(),
+                            win: w.window_id.clone(),
+                            sess: s.session_id.clone(),
+                            w: b.size.columns,
+                            h: b.size.rows,
+                            win_size: window_cells_in(w, &b.size)
+                                .unwrap_or((b.size.columns, b.size.rows)),
+                            panes: w.blocks.len() + w.others,
+                            active: s.active_window_id.as_ref() == Some(&w.window_id),
+                            settled: false,
+                            width_drag: Some(false),
+                        })
+                })
+            })
+            .collect()
     }
 
     fn new_window(session: &str, label: &str, block: Value) -> Result<String, TmuxError> {
@@ -1050,10 +646,6 @@ impl Multiplexer for Rex {
             .map(|b| b.block_id.clone())
             .collect();
         self.elect();
-        if self.monitoring && self.embedded() {
-            self.reap();
-            self.spread();
-        }
         self.places.clear();
         let mut panes = Vec::new();
         for session in &self.listing.sessions {
@@ -1441,7 +1033,7 @@ impl Multiplexer for Rex {
             }
             if Instant::now() >= deadline {
                 if self.embedded() {
-                    let share = self.share();
+                    let share = placement_share();
                     let _ = add_sidebar(&session, &window, share, true, client().as_deref());
                 }
                 return;
@@ -1661,8 +1253,6 @@ impl Multiplexer for Rex {
         if let Ok(listing) = Self::json(&["do", "-e", SCAN, "--json"]) {
             self.listing = listing;
         }
-        let acting = self.acting().map(|s| s.session_id.clone());
-        self.app = app_cells(&self.listing, acting.as_deref());
         self.measure_sidebars()
     }
 
@@ -1676,12 +1266,49 @@ impl Multiplexer for Rex {
             .collect()
     }
 
-    fn resize_panes(&mut self, widths: &[(String, usize)]) -> bool {
-        let mut ok = true;
-        for (block, width) in widths {
-            ok &= self.request_width(block, *width);
+    fn reconcile_sidebar_layout(&mut self, width: usize) -> Option<Vec<SidebarPane>> {
+        #[derive(Deserialize)]
+        struct Reconciled {
+            state: Value,
+            listing: Listing,
+            #[serde(default, deserialize_with = "list")]
+            panes: Vec<SidebarPane>,
+            saved_width: Option<usize>,
         }
-        ok
+        let args = json!({
+            "op": "reconcile",
+            "state": if self.layout_state.is_object() { self.layout_state.clone() } else { json!({}) },
+            "width": width,
+            "now": self.layout_started.get_or_insert_with(Instant::now).elapsed().as_secs_f64(),
+            "session": self.acting().map(|s| s.session_id.clone()),
+            "exe": std::env::current_exe().ok().map(|p| p.display().to_string()),
+            "client": client(),
+            "side": if config().is_some_and(|c| c.sidebar_position == SidebarPosition::Right) { "after" } else { "before" },
+        });
+        let script =
+            format!("local scan = function()\n{SCAN}\nend\nrex.args.listing = scan()\n{PLACE}");
+        match Self::json::<Reconciled>(&[
+            "do",
+            "-e",
+            &script,
+            "--args",
+            &args.to_string(),
+            "--json",
+        ]) {
+            Ok(result) => {
+                self.layout_state = result.state;
+                self.listing = result.listing;
+                if let Some(width) = result.saved_width.filter(|w| (1..=10000).contains(w)) {
+                    self.save_width(width);
+                }
+                Some(result.panes)
+            }
+            Err(error) => {
+                eprintln!("agenmux: Rex layout reconciliation failed: {error}");
+                // A failed Lua owner must never enable the shared Rust resize policy.
+                Some(self.measure_sidebars())
+            }
+        }
     }
 
     fn close_panes(&mut self, panes: &[String]) {
@@ -1701,9 +1328,6 @@ impl Multiplexer for Rex {
         if std::fs::write(state_file(WIDTH_FILE), format!("{width}\n")).is_err() {
             return false;
         }
-        // Geometry refreshes can run before the mirror tick handles a drag.
-        // Only acknowledging it here consumes the divider change.
-        self.dividers.clear();
         true
     }
 
@@ -2039,6 +1663,48 @@ fn add_sidebar(
     Rex::run(&args.iter().map(String::as_str).collect::<Vec<_>>()).map(drop)
 }
 
+/// Replace only the rendering daemon. Readers, block IDs and split ratios stay
+/// in place; Rex exposes no in-place terminal process replacement operation.
+pub fn rex_reload(client: &str) -> i32 {
+    use std::os::unix::process::CommandExt;
+    if daemon_pid().is_none() {
+        eprintln!("agenmux: no Rex sidebar daemon to reload");
+        return 1;
+    }
+    let result = (|| -> Result<(), TmuxError> {
+        let mut command = Command::new(std::env::current_exe()?);
+        command
+            .arg("daemon")
+            .env("AGENMUX_MUX", "rex")
+            .env("AGENMUX_STARTUP_ACK", "1")
+            .env_remove("AGENMUX_GENERATION")
+            .env_remove("REX_BLOCK")
+            .env_remove("REX_SESSION")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if !client.is_empty() {
+            command.env("AGENMUX_REX_CLIENT", client);
+        }
+        let mut child = command.spawn()?;
+        let mut ready = child.stdout.take().unwrap();
+        let mut ack = [0];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        if !crate::tmux::poll_by(ready.as_raw_fd(), libc::POLLIN, deadline)
+            || ready.read_exact(&mut ack).is_err()
+            || ack != *b"R"
+        {
+            // SIGTERM would tear down the preserved blocks. Failure must not.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::other("Rex sidebar reload did not become ready").into());
+        }
+        Ok(())
+    })();
+    report(result)
+}
+
 /// `rex-toggle <session> <block> [split|popup] [client]`, bound in Rex by
 /// `rex/agenmux.lua`: open or close the sidebar in `block`'s window, or show
 /// the popup over it. `display.mode = "popup"` makes the sidebar key a popup
@@ -2305,287 +1971,22 @@ mod tests {
     }
 
     #[test]
-    fn client_resizes_do_not_become_saved_drags_and_delayed_dividers_do() {
-        let mut rex = Rex {
+    fn render_geometry_is_actual_and_measurement_never_calibrates_a_split() {
+        let rex = Rex {
             listing: geometry_listing(),
             ..Rex::default()
         };
-        rex.measure_sidebars();
-        rex.measure_sidebars();
-        // A one-column client/font resize can fall within estimation rounding.
-        rex.listing.sessions[0].windows[0].blocks[0].size.columns = 35;
-        rex.measure_sidebars();
-        let p = rex.measure_sidebars()[0].clone();
-        assert!(p.settled);
-        assert_eq!(p.width_drag, Some(false));
-        // The divider moves first, but the terminal can lag by several scans.
-        let layout = &mut rex.listing.sessions[0].windows[0].layout;
-        layout["split"]["ratio"] = json!(0.25);
-        layout["split"]["before"]["rect"] = json!([0, 0, 0.25, 1]);
         for _ in 0..3 {
-            let p = rex.measure_sidebars()[0].clone();
-            assert_eq!(p.width_drag, Some(false));
-            assert!(
-                !p.settled,
-                "unchanged PTY columns cannot settle a moved ratio"
+            let panes = rex.measure_sidebars();
+            assert_eq!(
+                panes.iter().map(|p| (p.w, p.h)).collect::<Vec<_>>(),
+                [(34, 46), (24, 18)]
             );
+            assert!(panes
+                .iter()
+                .all(|p| !p.settled && p.width_drag == Some(false)));
+            assert!(rex.layout_state.is_null());
         }
-        rex.listing.sessions[0].windows[0].blocks[0].size.columns = 40;
-        assert!(!rex.measure_sidebars()[0].settled);
-        assert_eq!(rex.measure_sidebars()[0].width_drag, Some(true));
-        assert_eq!(
-            rex.measure_sidebars()[0].width_drag,
-            Some(true),
-            "refreshes cannot consume a drag before the mirror tick"
-        );
-        rex.dividers.clear(); // save_width acknowledges it after persisting
-        assert_eq!(rex.measure_sidebars()[0].width_drag, Some(false));
-    }
-
-    #[test]
-    fn render_geometry_is_the_actual_pty_even_with_identical_ratios() {
-        let mut rex = Rex {
-            listing: geometry_listing(),
-            app: Some((1000, 1000)),
-            ..Rex::default()
-        };
-        let first = rex.measure_sidebars();
-        assert_eq!(
-            first.iter().map(|p| (p.w, p.h)).collect::<Vec<_>>(),
-            [(34, 46), (24, 18)]
-        );
-        assert!(first.iter().all(|p| !p.settled));
-        assert!(rex.measure_sidebars().iter().all(|p| p.settled));
-        // Sidebar font changes do not calibrate unrelated windows.
-        let other = rex.window_sizes["window:1"];
-        rex.listing.sessions[0].windows[0].blocks[0]
-            .size
-            .cell_width_px = 20;
-        let changing = rex.measure_sidebars();
-        assert!(!changing[0].settled);
-        assert_eq!(changing[0].w, 34);
-        let changed = rex.measure_sidebars();
-        assert_ne!(changed[0].win_size, first[0].win_size);
-        assert_eq!(changed[1].win_size, other);
-        assert_eq!(changed[0].w, 34);
-    }
-
-    #[test]
-    fn pending_resize_never_promotes_a_requested_width_to_render_geometry() {
-        let mut rex = Rex {
-            listing: geometry_listing(),
-            ..Rex::default()
-        };
-        let pending = Resize {
-            target: 40,
-            from_columns: 34,
-            lower: (0.2, Some(34)),
-            upper: (0.95, None),
-            requested: Instant::now(),
-            probed: false,
-            parked: false,
-            measured_share: 0.2,
-            requested_share: 0.25,
-        };
-        rex.resizing.insert("side:0".into(), pending);
-        let layout = &mut rex.listing.sessions[0].windows[0].layout;
-        layout["split"]["ratio"] = json!(0.25);
-        layout["split"]["before"]["rect"] = json!([0, 0, 0.25, 1]);
-        for _ in 0..5 {
-            let p = &rex.measure_sidebars()[0];
-            assert_eq!(p.w, 34);
-            assert!(
-                !p.settled,
-                "two unchanged scans do not prove the client applied the ratio"
-            );
-        }
-        rex.listing.sessions[0].windows[0].blocks[0].size.columns = 40;
-        assert_eq!(rex.measure_sidebars()[0].w, 40);
-        assert!(!rex.resizing.contains_key("side:0"));
-        assert!(rex.measure_sidebars()[0].settled);
-    }
-
-    #[test]
-    fn an_applied_constrained_step_does_not_hide_a_later_user_drag() {
-        let mut rex = Rex {
-            listing: geometry_listing(),
-            ..Rex::default()
-        };
-        let initial = seat(&rex.listing.sessions[0].windows[0].layout, "side:0").unwrap();
-        rex.resizing.insert(
-            "side:0".into(),
-            Resize::plan(1, 34, &initial, None).unwrap(),
-        );
-        let w = &mut rex.listing.sessions[0].windows[0];
-        w.layout["split"]["before"]["rect"] = json!([0, 0, 0.05, 1]);
-        w.blocks[0].size.columns = 16;
-        rex.measure_sidebars();
-        assert_eq!(rex.dividers["side:0"], (0.05, 16));
-        // Dragging back to the original ratio must not look like "no change".
-        let w = &mut rex.listing.sessions[0].windows[0];
-        w.layout["split"]["before"]["rect"] = json!([0, 0, 0.2, 1]);
-        w.blocks[0].size.columns = 34;
-        rex.measure_sidebars();
-        let moved = rex.measure_sidebars()[0].clone();
-        assert!(moved.settled);
-        assert_eq!(moved.width_drag, Some(true));
-        assert!(!rex.resizing.contains_key("side:0"));
-    }
-
-    #[test]
-    fn a_client_minimum_is_acknowledged_without_restoring_an_obsolete_ratio() {
-        let mut rex = Rex {
-            listing: geometry_listing(),
-            ..Rex::default()
-        };
-        let initial = seat(&rex.listing.sessions[0].windows[0].layout, "side:0").unwrap();
-        let pending = Resize::plan(1, 34, &initial, None).unwrap();
-        assert_eq!(pending.requested_share, 0.05);
-        rex.resizing.insert("side:0".into(), pending);
-        let w = &mut rex.listing.sessions[0].windows[0];
-        w.layout["split"]["before"]["rect"] = json!([0, 0, 0.05, 1]);
-        w.blocks[0].size.columns = 16;
-        // This path parks without a CLI call: the border is already at its limit.
-        assert!(!rex.resize_panes(&[("side:0".into(), 1)]));
-        let parked = rex.resizing["side:0"];
-        assert!(parked.parked);
-        assert_eq!(parked.measured_share, 0.05);
-        // Choosing the realized minimum cancels the impossible target in place.
-        assert!(rex.resize_panes(&[("side:0".into(), 16)]));
-        assert!(!rex.resizing.contains_key("side:0"));
-        assert_eq!(rex.dividers["side:0"], (0.05, 16));
-    }
-
-    #[test]
-    fn unresponsive_width_search_parks_and_restarts_from_fresh_pty_data() {
-        let mut seat = Seat {
-            share: 0.2,
-            border: Some(Border {
-                before: "side".into(),
-                after: "shell".into(),
-                sidebar_before: true,
-                span: 1.0,
-            }),
-        };
-        let first = Resize::plan(17, 35, &seat, None).unwrap();
-        seat.share = first.requested_share;
-        let mut probe = Resize::plan(17, 35, &seat, Some(first)).unwrap();
-        assert!(probe.probed);
-        assert_eq!(
-            probe.measured_share, 0.2,
-            "unacknowledged ratios are not measurements"
-        );
-        seat.share = probe.requested_share;
-        assert!(Resize::plan(17, 35, &seat, Some(probe)).is_none());
-        probe.parked = true;
-        let width = |share: f64| ((174.0 * share - 3.2).floor() as usize).max(16);
-        let mut columns = width(seat.share);
-        let mut previous = Some(probe);
-        for _ in 0..40 {
-            if columns == 17 {
-                break;
-            }
-            let step = Resize::plan(17, columns, &seat, previous).unwrap();
-            seat.share = step.requested_share;
-            columns = width(seat.share);
-            previous = Some(step);
-        }
-        assert_eq!(columns, 17);
-    }
-
-    #[test]
-    fn width_feedback_crosses_minimum_size_plateaus_without_oscillation() {
-        for scale in [100.0, 174.0, 240.0] {
-            for start in [0.05, 0.08, 0.2, 0.7] {
-                for target in [17, 18, 30, 60] {
-                    let mut seat = Seat {
-                        share: start,
-                        border: Some(Border {
-                            before: "side".into(),
-                            after: "shell".into(),
-                            sidebar_before: true,
-                            span: 1.0,
-                        }),
-                    };
-                    let mut previous = None;
-                    let width = |share: f64| ((scale * share - 3.2_f64).floor() as usize).max(16);
-                    let mut columns = width(seat.share);
-                    for _ in 0..40 {
-                        if columns == target {
-                            break;
-                        }
-                        let plan = Resize::plan(target, columns, &seat, previous).unwrap();
-                        seat.share = plan.requested_share;
-                        columns = width(seat.share);
-                        previous = Some(plan);
-                    }
-                    assert_eq!(columns, target, "scale={scale}, start={start}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn width_feedback_converges_in_the_sidebars_own_font() {
-        for scale in [100.0, 174.0, 240.0] {
-            for target in [15, 30, 60] {
-                let mut seat = Seat {
-                    share: 0.2,
-                    border: Some(Border {
-                        before: "side".into(),
-                        after: "shell".into(),
-                        sidebar_before: true,
-                        span: 1.0,
-                    }),
-                };
-                let mut previous = None;
-                let mut columns = (scale * seat.share - 3.2_f64).floor() as usize;
-                for _ in 0..8 {
-                    if columns == target {
-                        break;
-                    }
-                    let p = Resize::plan(target, columns, &seat, previous).unwrap();
-                    seat.share = p.requested_share;
-                    columns = (scale * seat.share - 3.2_f64).floor() as usize;
-                    previous = Some(p);
-                }
-                assert_eq!(columns, target, "scale={scale}");
-            }
-        }
-    }
-
-    #[test]
-    fn the_sidebar_seat_names_the_border_beside_it() {
-        // ((side | a) | b): the sidebar's split covers 0.4 of the window
-        let layout = json!({"rect": [0, 0, 1, 1], "split": {"direction": "horizontal", "ratio": 0.4,
-            "before": {"rect": [0, 0, 0.4, 1], "split": {"direction": "horizontal", "ratio": 0.5,
-                "before": {"rect": [0, 0, 0.2, 1], "block_id": "side"},
-                "after": {"rect": [0.2, 0, 0.2, 1], "split": {"direction": "vertical", "ratio": 0.5,
-                    "before": {"rect": [0.2, 0, 0.2, 0.5], "block_id": "a"},
-                    "after": {"rect": [0.2, 0.5, 0.2, 0.5], "block_id": "c"}}}}},
-            "after": {"rect": [0.4, 0, 0.6, 1], "block_id": "b"}}});
-        let found = seat(&layout, "side").unwrap();
-        assert_eq!(found.share, 0.2);
-        let border = found.border.unwrap();
-        assert_eq!(
-            (border.before.as_str(), border.after.as_str()),
-            ("side", "a")
-        );
-        assert!(border.sidebar_before);
-        assert_eq!(border.span, 0.4);
-        // docked right
-        let layout = json!({"rect": [0, 0, 1, 1], "split": {"direction": "horizontal", "ratio": 0.8,
-            "before": {"rect": [0, 0, 0.8, 1], "block_id": "a"},
-            "after": {"rect": [0.8, 0, 0.2, 1], "block_id": "side"}}});
-        let border = seat(&layout, "side").unwrap().border.unwrap();
-        assert_eq!(
-            (
-                border.before.as_str(),
-                border.after.as_str(),
-                border.sidebar_before
-            ),
-            ("a", "side", false)
-        );
     }
 
     #[test]

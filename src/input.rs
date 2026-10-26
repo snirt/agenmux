@@ -79,14 +79,17 @@ impl Drop for RawMode {
     }
 }
 
-pub(crate) fn term_size() -> (usize, usize) {
+/// Real PTY geometry only; transport must never report a fabricated fallback.
+pub(crate) fn measured_size(fd: libc::c_int) -> Option<(usize, usize)> {
     unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
-        if libc::ioctl(0, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
-            return (ws.ws_col as usize, ws.ws_row as usize);
-        }
+        (libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0)
+            .then_some((ws.ws_col as usize, ws.ws_row as usize))
     }
-    (30, 24)
+}
+
+pub(crate) fn term_size() -> (usize, usize) {
+    measured_size(0).unwrap_or((30, 24))
 }
 
 /// poll one fd; returns true when readable. timeout None = wait forever.
@@ -105,11 +108,13 @@ pub(crate) fn key_pending(fd: libc::c_int) -> bool {
     poll_fd(fd, Some(Duration::ZERO))
 }
 
-/// poll the key fds + the tmux control pipe; returns (key_ready, pipe_ready).
+/// Poll keys, backend notifications, and extra wake sources.
+/// Returns (key_ready, pipe_ready); extra descriptors are drained by their owners.
 /// pipe_buffered short-circuits the wait — data is already in the BufReader.
 pub(crate) fn poll_inputs(
     key_fds: [libc::c_int; 2],
     pipe_fd: libc::c_int,
+    extra: &[libc::pollfd],
     pipe_buffered: bool,
     timeout: Duration,
 ) -> (bool, bool) {
@@ -118,14 +123,15 @@ pub(crate) fn poll_inputs(
         events: libc::POLLIN,
         revents: 0,
     };
-    let mut fds = [poll(pipe_fd), poll(key_fds[0]), poll(key_fds[1])];
+    let mut fds = vec![poll(pipe_fd), poll(key_fds[0]), poll(key_fds[1])];
+    fds.extend_from_slice(extra);
     let ms = if pipe_buffered {
         0
     } else {
         timeout.as_millis().min(i32::MAX as u128) as i32
     };
-    let n = unsafe { libc::poll(fds.as_mut_ptr(), 3, ms) };
-    let key = n > 0 && fds[1..].iter().any(|fd| fd.revents & libc::POLLIN != 0);
+    let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+    let key = n > 0 && fds[1..3].iter().any(|fd| fd.revents & libc::POLLIN != 0);
     // a dead pipe sets only HUP/ERR/NVAL — POLLIN alone never reports it, and
     // the loop then sleeps forever instead of reading its way to EOF
     let dead = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
@@ -1233,6 +1239,74 @@ pub fn wheel(pane: &str, direction: Direction) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn measured_geometry_never_substitutes_defaults_for_failed_or_zero_ioctls() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        assert_eq!(measured_size(-1), None);
+        let (mut master, mut slave) = (-1, -1);
+        let mut size = libc::winsize {
+            ws_col: 35,
+            ws_row: 46,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut size,
+                )
+            },
+            0
+        );
+        let master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+            assert_eq!(
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                0
+            );
+        }
+        assert_eq!(measured_size(slave.as_raw_fd()), Some((35, 46)));
+        let zero: libc::winsize = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCSWINSZ, &zero) },
+            0
+        );
+        assert_eq!(measured_size(slave.as_raw_fd()), None);
+    }
+
+    #[test]
+    fn pane_socket_readiness_wakes_poll_without_becoming_a_key_or_backend_event() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(b"report").unwrap();
+        let extra = [libc::pollfd {
+            fd: reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        let start = Instant::now();
+        assert_eq!(
+            poll_inputs([-1, -1], -1, &extra, false, Duration::from_secs(2)),
+            (false, false)
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            poll_inputs([reader.as_raw_fd(), -1], -1, &[], false, Duration::ZERO),
+            (true, false)
+        );
+        drop(writer);
+        assert_eq!(
+            poll_inputs([-1, -1], reader.as_raw_fd(), &[], false, Duration::ZERO),
+            (false, true)
+        );
+    }
 
     #[test]
     fn a_pending_sequence_outranks_single_key_bindings() {

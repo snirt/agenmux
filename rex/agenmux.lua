@@ -34,6 +34,13 @@ return function(opts)
     title = "Toggle agenmux popup",
     run = toggle("popup"),
   }
+  rex.action{
+    name = "agenmux_reload",
+    title = "Reload agenmux without changing layout",
+    run = function(ctx)
+      assert(rex.exec.start({bin, "rex-reload", ctx.client_id or ""}, {detach = true}))
+    end,
+  }
   rex.bind(opts.key or "alt+s", "agenmux_sidebar")
   if opts.popup_key ~= false then
     rex.bind(opts.popup_key or "alt+p", "agenmux_popup")

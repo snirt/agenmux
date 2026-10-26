@@ -14,6 +14,7 @@ RUN apt-get update \
         git \
         libevent-dev \
         libncurses-dev \
+        lua5.4 \
         pkg-config \
         procps \
     && rm -rf /var/lib/apt/lists/*

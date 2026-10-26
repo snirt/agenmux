@@ -649,6 +649,13 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             break;
         }
         let mut now = Instant::now();
+        if sb
+            .daemon
+            .as_mut()
+            .is_some_and(|d| d.pump(now, &sb.active_session))
+        {
+            sb.render(true);
+        }
         // Keys outrank scans: a scan blocks the loop for 30-200ms, and under
         // key repeat that queued presses which then replayed after release.
         let key_waiting = key_pending(key_fd) || key_pending(raw_fd);
@@ -657,10 +664,13 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             sb.last_frame.clear();
             sb.render(false);
         }
-        if let Some(periodic) = scans
-            .due(now, sb.screens.next_expiry())
-            .filter(|_| !key_waiting)
-        {
+        if let Some(periodic) = scans.due(now, sb.screens.next_expiry()).filter(|_| {
+            !key_waiting
+                && sb
+                    .daemon
+                    .as_ref()
+                    .is_none_or(|d| d.geometry_deadline.is_none() && d.writers.deadline().is_none())
+        }) {
             // Consume first: output observed by command-response reads during
             // this scan belongs to the next pass.
             let mut changes = sb.mux.take_pending_changes();
@@ -733,7 +743,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             // A focus change lands the user on a pane the writers may not be
             // feeding yet; retarget now instead of after the next periodic tick.
             if sb.daemon.is_some() && !periodic && changes.focus {
-                sb.refocus_writers();
+                geometry_changed |= sb.refocus_writers();
             }
             if sb.daemon.as_ref().is_some_and(|d| !d.keys_path.exists()) {
                 // Deaf to keys without the FIFO: better gone than a zombie.
@@ -761,8 +771,13 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             sb.render(false);
         }
         // animated states need ticks; all-idle sleeps until the next scan
-        let mut wake = scans
-            .next_deadline(sb.screens.next_expiry())
+        // Finish a geometry frame before entering blocking backend work. An
+        // overdue scan must not turn that short wait into a zero-timeout spin.
+        let mut wake = sb
+            .daemon
+            .as_ref()
+            .and_then(|d| d.geometry_deadline.or_else(|| d.writers.deadline()))
+            .unwrap_or_else(|| scans.next_deadline(sb.screens.next_expiry()))
             .saturating_duration_since(now);
         if animating {
             wake = wake.min(next_tick.saturating_duration_since(now));
@@ -770,9 +785,16 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         if let Some(deadline) = sb.key_sequence.deadline(sequence_timeout) {
             wake = wake.min(deadline.saturating_duration_since(now));
         }
+        let extra = sb.daemon.as_ref().map_or_else(Vec::new, |d| {
+            if let Some(deadline) = d.deadline() {
+                wake = wake.min(deadline.saturating_duration_since(now));
+            }
+            d.interests()
+        });
         let (key_ready, pipe_ready) = poll_inputs(
             [key_fd, raw_fd],
             sb.mux.notify_fd(),
+            &extra,
             sb.mux.notify_buffered(),
             wake,
         );

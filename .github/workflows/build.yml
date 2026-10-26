@@ -109,12 +109,12 @@ jobs:
         run: |
           apt_opts="-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3"
           sudo apt-get $apt_opts update
-          sudo apt-get $apt_opts install --yes musl-tools tmux expect
+          sudo apt-get $apt_opts install --yes musl-tools tmux expect lua5.4
           rustup target add "${{ matrix.target }}"
 
       - name: Install macOS test tools
         if: runner.os == 'macOS'
-        run: brew install tmux expect
+        run: brew install tmux expect lua
 
       - name: Cache cargo registry and build output
         uses: Swatinem/rust-cache@v2

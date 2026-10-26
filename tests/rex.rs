@@ -123,10 +123,16 @@ impl PtyPane {
     fn start() -> Self {
         use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::fs::OpenOptionsExt;
-        let dir = std::env::temp_dir().join(format!("agenmux-viewport-{}", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = PathBuf::from(format!(
+            "/tmp/amx-pty-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let runtime = dir.join(format!("agenmux-rex-{}", unsafe { libc::geteuid() }));
         std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut master = -1;
         let mut slave = -1;
         let mut size = libc::winsize {
@@ -309,4 +315,83 @@ fn sidebar_pane_reprojects_complete_frames_on_pty_resize_without_new_input() {
     );
     assert_ne!(terminal.c_lflag & libc::ICANON, 0);
     assert_ne!(terminal.c_lflag & libc::ECHO, 0);
+}
+
+#[test]
+fn sidebar_pane_reports_real_sizes_and_reconnects_without_another_resize() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::time::{Duration, Instant};
+    let mut pane = PtyPane::start();
+    pane.writer
+        .write_all(b"\x1b[?2026h\x1b[Hcached\x1b[?2026l")
+        .unwrap();
+    pane.read_until(b"\x1b[?2026l");
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let runtime = pane
+        .dir
+        .join(format!("agenmux-rex-{}", unsafe { libc::geteuid() }));
+    let meta = std::fs::metadata(runtime).unwrap();
+    let root = PathBuf::from(format!("/tmp/agenmux-ipc-{}", unsafe { libc::geteuid() }));
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(&root);
+    let path = root.join(format!("{:x}-{:x}.sock", meta.dev(), meta.ino()));
+    fn accept(listener: &UnixListener) -> BufReader<UnixStream> {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "pane did not reconnect");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("accept failed: {e}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        BufReader::new(stream)
+    }
+    fn record(reader: &mut BufReader<UnixStream>) -> serde_json::Value {
+        let mut line = String::new();
+        assert!(reader.read_line(&mut line).unwrap() > 0);
+        serde_json::from_str(&line).unwrap()
+    }
+    let listener = UnixListener::bind(&path).unwrap();
+    let mut reader = accept(&listener);
+    let hello = record(&mut reader);
+    assert_eq!(hello["type"], "hello");
+    assert_eq!(hello["pane"], "block:test");
+    assert_eq!(
+        (hello["cols"].as_u64(), hello["rows"].as_u64()),
+        (Some(4), Some(2))
+    );
+    reader
+        .get_mut()
+        .write_all(b"{\"type\":\"welcome\",\"version\":1,\"generation\":\"first\"}\n")
+        .unwrap();
+    assert_eq!(record(&mut reader)["generation"], "first");
+    pane.resize(20, 4);
+    let resize = record(&mut reader);
+    assert_eq!(resize["type"], "resize");
+    assert_eq!(
+        (resize["cols"].as_u64(), resize["rows"].as_u64()),
+        (Some(20), Some(4))
+    );
+    drop(reader);
+    drop(listener);
+    std::fs::remove_file(&path).unwrap();
+    let listener = UnixListener::bind(&path).unwrap();
+    let mut reader = accept(&listener);
+    let hello = record(&mut reader);
+    assert_eq!(hello["type"], "hello");
+    assert_eq!(
+        (hello["cols"].as_u64(), hello["rows"].as_u64()),
+        (Some(20), Some(4))
+    );
+    drop(reader);
+    drop(listener);
+    std::fs::remove_file(path).unwrap();
 }

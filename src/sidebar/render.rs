@@ -1570,6 +1570,8 @@ mod tests {
         }
         let dir = std::env::temp_dir().join(format!("agenmux-theme-frames-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("target/release")).unwrap();
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
         std::fs::write(dir.join("target/release/.agenmux-tags"), "v9.9.9\nv0.0.1\n").unwrap();
         // The fixture's first half is the agent-only, read-only sidebar.
         let file = crate::app_config::parse(
@@ -1591,6 +1593,9 @@ mod tests {
             input_path: dir.join("input"),
             input_fd: -1,
             writers: PaneWriters::new(),
+            reports: None,
+            panes: Vec::new(),
+            geometry_deadline: None,
             size: (80, 40),
             seen_mirror: false,
             empty_ticks: 0,

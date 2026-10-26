@@ -47,6 +47,16 @@ Everything in [usage](usage.md) works the same, except:
   bound the realized width without overwriting the saved preference. Frames
   are projected into each pane's current PTY viewport and repainted on resize,
   so a narrow or short pane cannot wrap rows or scroll the tree.
+  Rex's Lua integration owns placement, divider feedback, drag propagation, and
+  empty-window cleanup. Rust transports intent and renders measured geometry;
+  adopting existing sidebars does not reset their split ratios.
+- **Resize reporting**: each sidebar sends actual PTY dimensions to the daemon
+  over a private Unix-domain socket at startup and on `SIGWINCH`. Drag bursts
+  coalesce; the daemon redraws cached state without waiting for a geometry poll.
+  Frames still use per-pane FIFOs, with nonblocking delivery so a slow pane cannot
+  stall the others. Readers reconnect after daemon handover and retain local
+  clipping while sizes change. Native PTY resizing and in-flight backend work can
+  still add latency; the render cadence is not a 60 FPS guarantee.
 - **Popup**: `display.popup_width` and a fixed `popup_height` size it in
   cells; `popup_height = "auto"` takes 80% of the window.
 - **Focus**: the cursor follows the session the app shows. Rex does not
@@ -65,6 +75,11 @@ Everything in [usage](usage.md) works the same, except:
 - **Configuration** comes from `config.toml` alone; Rex has no
   `@agenmux-*` options. `agenmux config reload` reaches running sidebars
   through `$XDG_STATE_HOME/agenmux/reload-token`.
+- **Rendering-daemon reload**: `agenmux rex-reload` (or the Rex action
+  `agenmux_reload`) replaces the renderer without closing sidebar blocks or
+  changing existing split ratios. It does not restart the Rex server. Existing
+  pane readers reconnect; replacing their executable still requires reopening
+  those panes.
 - **Closing** works as in tmux. A window whose last pane closes takes its
   sidebar with it, and a session whose last window closes is closed too
   (Rex would keep it, empty). `u` lists it, so it can come back. `dd` still

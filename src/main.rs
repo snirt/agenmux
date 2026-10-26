@@ -57,7 +57,7 @@ Internal (called by the tmux integration):
   notification-open <socket> <pane> <bundle>
 
 Internal (called by the Rex integration, rex/agenmux.lua):
-  rex-toggle <session> <block> [split|popup] [client], rex-sidebars
+  rex-toggle <session> <block> [split|popup] [client], rex-sidebars, rex-reload [client]
 ";
 
 pub(crate) fn compat_env(name: &str, legacy: &str) -> Option<String> {
@@ -122,6 +122,8 @@ fn main() {
         }
         ["sidebar-pane"] => pane_writers::run_pane(),
         ["rex-sidebars"] => mux::rex_sidebars(),
+        ["rex-reload"] => mux::rex_reload(""),
+        ["rex-reload", client] => mux::rex_reload(client),
         ["rex-toggle", session, block] => mux::rex_toggle(session, block, "split", ""),
         ["rex-toggle", session, block, mode] => mux::rex_toggle(session, block, mode, ""),
         ["rex-toggle", session, block, mode, client] => {

@@ -9,7 +9,7 @@ export XDG_CONFIG_HOME="$config_home"
 export XDG_STATE_HOME="$config_home/state"
 trap 'rm -rf "$config_home"' EXIT
 # Stubbed checks must not resolve runtime files through the developer's server.
-unset TMUX TMUX_PANE
+unset TMUX TMUX_PANE REX_SERVER REX_SESSION REX_BLOCK REX_CLIENT AGENMUX_MUX AGENMUX_RUNTIME_DIR
 
 if [ -z "${AGENMUX_BIN:-}" ]; then
   BIN="$DIR/target/release/agenmux"
@@ -22,6 +22,11 @@ else
   }
 fi
 
+if (cd "$DIR" && lua tests/rex-layout.lua); then
+  echo "ok   rex-lua-layout-policy"
+else
+  fail=1
+fi
 if "$DIR/tests/no-stale-runtime-refs.sh"; then
   echo "ok   no-stale-runtime-references"
 else

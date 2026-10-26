@@ -3219,6 +3219,22 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
         "-T",
         "stable geometry title long enough to clip",
     ]);
+    // Stress the real daemon with captured synthetic-agent output while actual
+    // sidebar PTYs change size. Keep content stable so only clipping is asserted.
+    let busy = tmux.tmp.join("codex");
+    std::fs::write(&busy, "#!/bin/sh\nn=0\nwhile :; do n=$((n+1)); printf '\\rSynthetic tick %s   ' \"$n\"; sleep 0.03; done\n").unwrap();
+    std::fs::set_permissions(&busy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let agent = tmux.text(&[
+        "split-window",
+        "-v",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &sibling,
+        busy.to_str().unwrap(),
+    ]);
 
     let mut viewer = tmux.attach();
     tmux.wait_for(Duration::from_secs(2), || {
@@ -3279,6 +3295,78 @@ fn split_sidebar_redraws_after_pane_resize_before_the_next_periodic_tick() {
         "sidebar geometry did not redraw before periodic reconciliation: pane_width={pane_width}, @agenmux-width={configured_width}, frame_contains_wide_title={}, frame:\n{restored_frame}",
         restored_frame.contains(wide_title)
     );
+
+    use std::os::unix::fs::OpenOptionsExt;
+    let tty = tmux.text(&["display-message", "-p", "-t", &sidebar, "#{pane_tty}"]);
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY)
+        .open(tty)
+        .unwrap();
+    let mut pty_samples = Vec::new();
+    let mut delivery_samples = Vec::new();
+    // Time only after the kernel PTY has caught up with the restored layout.
+    tmux.wait_for(Duration::from_secs(4), || {
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::ioctl(tty.as_raw_fd(), libc::TIOCGWINSZ, &mut size);
+        }
+        size.ws_col == 30
+            && width() == "30"
+            && frame().contains(wide_title)
+            && std::fs::read_to_string(tmux.tmp.join("agenmux-scan-cache"))
+                .unwrap_or_default()
+                .contains(&agent)
+    });
+    let mut samples = Vec::new();
+    for i in 0..48 {
+        let want = if i % 2 == 0 { "18" } else { "30" };
+        let started = Instant::now();
+        tmux.assert_tmux(&["resize-pane", "-t", &sidebar, "-x", want]);
+        let mut pty_ready = None;
+        loop {
+            let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCGWINSZ, &mut size) },
+                0
+            );
+            if size.ws_col == want.parse::<u16>().unwrap() {
+                pty_ready.get_or_insert_with(Instant::now);
+            }
+            let visible = frame().contains(wide_title);
+            if pty_ready.is_some() && visible == (want == "30") && width() == want {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "resize frame stalled at {want} columns: kernel={} grid={} visible={visible} iteration={i}", size.ws_col, width()
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        samples.push(started.elapsed());
+        let ready = pty_ready.unwrap();
+        pty_samples.push(ready.duration_since(started));
+        delivery_samples.push(ready.elapsed());
+        // Let the narrow frame arrive before growing: otherwise cached-frame
+        // projection alone can satisfy both halves without exercising daemon IPC.
+        thread::sleep(Duration::from_millis(25));
+    }
+    for (label, mut values) in [
+        ("command-to-screen", samples),
+        ("command-to-PTY", pty_samples),
+        ("PTY-to-screen", delivery_samples),
+    ] {
+        values.sort_unstable();
+        let median = values[values.len() / 2];
+        let p95 = values[(values.len() * 95).div_ceil(100) - 1];
+        let worst = values.last().unwrap();
+        eprintln!("resize {label} with active captures: p50={median:?} p95={p95:?} max={worst:?}");
+        assert!(
+            p95 < Duration::from_millis(500),
+            "resize {label} regressed: {p95:?}"
+        );
+    }
+    tmux.assert_tmux(&["kill-pane", "-t", &agent]);
 
     assert_success(
         tmux.bin(&["key", "close", &client]),

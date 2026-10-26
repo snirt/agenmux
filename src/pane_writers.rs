@@ -22,36 +22,84 @@ pub(crate) fn input_path(runtime: &Path) -> PathBuf {
     runtime.join("agenmux-input")
 }
 
-struct PaneWriter(File);
+struct PendingFrame {
+    bytes: std::sync::Arc<[u8]>,
+    written: usize,
+}
+
+struct PaneWriter {
+    file: File,
+    current: Option<PendingFrame>,
+    latest: Option<std::sync::Arc<[u8]>>,
+    progress: Instant,
+}
 
 impl PaneWriter {
     fn open(runtime: &Path, pane: &str) -> std::io::Result<Self> {
-        // Nonblocking: neither a reader still starting nor one that stopped
-        // draining may stall the daemon.
         let file = OpenOptions::new()
             .write(true)
-            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(frame_path(runtime, pane))?;
         if !file.metadata()?.file_type().is_fifo() {
             return Err(std::io::Error::other("sidebar frame target is not a FIFO"));
         }
-        Ok(Self(file))
+        Ok(Self {
+            file,
+            current: None,
+            latest: None,
+            progress: Instant::now(),
+        })
     }
 
-    fn emit(&mut self, frame: &[u8], deadline: Instant) -> std::io::Result<()> {
-        let mut rest = frame;
-        while !rest.is_empty() {
-            // Chunks fit the 8 KiB FIFO buffer macOS starts with.
-            match self.0.write(&rest[..rest.len().min(4096)]) {
-                Ok(n) => rest = &rest[n..],
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        && crate::tmux::poll_by(self.0.as_raw_fd(), libc::POLLOUT, deadline) => {}
+    fn queue(&mut self, frame: std::sync::Arc<[u8]>, now: Instant) {
+        if self.current.as_ref().is_some_and(|f| f.written > 0) {
+            self.latest = Some(frame);
+        } else {
+            // Nothing from this frame reached the reader; replace it outright.
+            if self.current.is_none() {
+                self.progress = now;
+            }
+            self.current = Some(PendingFrame {
+                bytes: frame,
+                written: 0,
+            });
+            self.latest = None;
+        }
+    }
+
+    fn pump(&mut self, now: Instant) -> std::io::Result<()> {
+        // Fair, bounded work even when one pane or a frame is enormous. No poll
+        // or sleep here: the daemon's common event loop owns all waiting.
+        for _ in 0..8 {
+            let Some(frame) = self.current.as_mut() else {
+                return Ok(());
+            };
+            let rest = &frame.bytes[frame.written..];
+            match self.file.write(&rest[..rest.len().min(4096)]) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(n) => {
+                    frame.written += n;
+                    self.progress = now;
+                    if frame.written == frame.bytes.len() {
+                        self.current = self
+                            .latest
+                            .take()
+                            .map(|bytes| PendingFrame { bytes, written: 0 });
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => return Err(e),
             }
         }
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
         Ok(())
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.current.as_ref().map(|_| self.progress + WRITE_BUDGET)
     }
 }
 
@@ -86,13 +134,614 @@ impl PaneWriters {
     }
 
     pub fn emit(&mut self, frame: &str) {
-        let deadline = Instant::now() + WRITE_BUDGET;
+        if frame.is_empty() || frame.len() > MAX_FRAME {
+            return;
+        }
+        let now = Instant::now();
+        let bytes: std::sync::Arc<[u8]> = frame.as_bytes().into();
+        for writer in self.writers.values_mut() {
+            writer.queue(bytes.clone(), now);
+        }
+        self.pump(now);
+    }
+
+    pub(crate) fn pump(&mut self, now: Instant) {
+        self.writers.retain(|_, writer| writer.pump(now).is_ok());
+    }
+
+    pub(crate) fn interests(&self) -> Vec<libc::pollfd> {
         self.writers
-            .retain(|_, writer| writer.emit(frame.as_bytes(), deadline).is_ok());
+            .values()
+            .filter(|w| w.current.is_some())
+            .map(|w| libc::pollfd {
+                fd: w.file.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            })
+            .collect()
+    }
+
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.writers.values().filter_map(PaneWriter::deadline).min()
     }
 
     pub fn clear(&mut self) {
         self.writers.clear();
+    }
+}
+
+// Viewport messages travel toward the daemon; frames and input keep their FIFOs.
+const MAX_RECORD: usize = 1024;
+const HANDSHAKE: Duration = Duration::from_secs(3);
+const RETRY_MIN: Duration = Duration::from_millis(25);
+const RETRY_MAX: Duration = Duration::from_millis(500);
+type Size = (usize, usize);
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum PaneMessage {
+    Hello {
+        version: u8,
+        pane: String,
+        cols: u16,
+        rows: u16,
+    },
+    Welcome {
+        version: u8,
+        generation: String,
+    },
+    Resize {
+        generation: String,
+        seq: u64,
+        cols: u16,
+        rows: u16,
+    },
+}
+
+fn protocol_error() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid pane report")
+}
+
+struct Wire {
+    stream: std::os::unix::net::UnixStream,
+    input: Vec<u8>,
+    output: Vec<u8>,
+    written: usize,
+}
+
+impl Wire {
+    fn new(stream: std::os::unix::net::UnixStream) -> std::io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        if unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            stream,
+            input: Vec::new(),
+            output: Vec::new(),
+            written: 0,
+        })
+    }
+
+    fn interest(&self) -> libc::pollfd {
+        libc::pollfd {
+            fd: self.stream.as_raw_fd(),
+            events: libc::POLLIN
+                | if self.output.is_empty() {
+                    0
+                } else {
+                    libc::POLLOUT
+                },
+            revents: 0,
+        }
+    }
+
+    fn queue(&mut self, message: &PaneMessage) -> std::io::Result<()> {
+        if !self.output.is_empty() {
+            return Err(protocol_error());
+        }
+        self.output = serde_json::to_vec(message).map_err(|_| protocol_error())?;
+        if self.output.len() >= MAX_RECORD {
+            return Err(protocol_error());
+        }
+        self.output.push(b'\n');
+        self.written = 0;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        for _ in 0..8 {
+            if self.written == self.output.len() {
+                self.output.clear();
+                self.written = 0;
+                break;
+            }
+            match self.stream.write(&self.output[self.written..]) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(n) => self.written += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    fn receive(&mut self) -> std::io::Result<Vec<PaneMessage>> {
+        let mut messages = Vec::new();
+        // At most 4 KiB per peer per turn, with at most one partial record kept.
+        for _ in 0..4 {
+            let mut buf = [0; MAX_RECORD];
+            match self.stream.read(&mut buf) {
+                Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                Ok(n) => {
+                    for &byte in &buf[..n] {
+                        if byte == b'\n' {
+                            messages.push(
+                                serde_json::from_slice(&self.input)
+                                    .map_err(|_| protocol_error())?,
+                            );
+                            self.input.clear();
+                        } else {
+                            self.input.push(byte);
+                            if self.input.len() >= MAX_RECORD {
+                                return Err(protocol_error());
+                            }
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(messages)
+    }
+}
+
+fn private_identity(path: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(path)?;
+    if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "unsafe pane runtime",
+        ));
+    }
+    Ok((m.dev(), m.ino()))
+}
+
+/// sockaddr_un has a short fixed pathname even when the runtime directory is
+/// arbitrarily deep. Device/inode identify the existing private runtime without
+/// hashing paths or merging servers; the shared parent is itself owner-only.
+pub(crate) fn report_path(runtime: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let (dev, ino) = private_identity(runtime)?;
+    let root = PathBuf::from(format!("/tmp/agenmux-ipc-{}", unsafe { libc::geteuid() }));
+    match std::fs::DirBuilder::new().mode(0o700).create(&root) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    private_identity(&root)?;
+    Ok(root.join(format!("{dev:x}-{ino:x}.sock")))
+}
+
+// Unlink only our own inode: the successor can publish its endpoint before we exit.
+struct SocketPath {
+    path: PathBuf,
+    identity: (u64, u64),
+}
+
+impl Drop for SocketPath {
+    fn drop(&mut self) {
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::symlink_metadata(&self.path)
+            .is_ok_and(|m| m.file_type().is_socket() && (m.dev(), m.ino()) == self.identity)
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+struct ReportPeer {
+    wire: Wire,
+    id: u64,
+    pane: Option<String>,
+    size: Size,
+    seq: u64,
+    expires: Instant,
+}
+
+/// Owns the listener, bounded per-pane reports, and ownership-safe endpoint cleanup.
+/// Callers supply inventory; receiving a report never queries the multiplexer.
+pub(crate) struct PaneReports {
+    listener: std::os::unix::net::UnixListener,
+    _endpoint: SocketPath,
+    generation: String,
+    peers: Vec<ReportPeer>,
+    known: HashSet<String>,
+    sizes: HashMap<String, Size>,
+    next_id: u64,
+}
+
+impl PaneReports {
+    pub(crate) fn bind(runtime: &Path, generation: String) -> std::io::Result<Self> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let path = report_path(runtime)?;
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        for target in [&path, &temporary] {
+            match std::fs::symlink_metadata(target) {
+                Ok(m) if !m.file_type().is_socket() || m.uid() != unsafe { libc::geteuid() } => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "unsafe pane endpoint",
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        // The caller already owns the daemon claim. Publish atomically without
+        // destroying a working predecessor's pathname if bind/configuration fails.
+        let _ = std::fs::remove_file(&temporary);
+        let listener = std::os::unix::net::UnixListener::bind(&temporary)?;
+        let m = std::fs::symlink_metadata(&temporary)?;
+        let mut endpoint = SocketPath {
+            path: temporary,
+            identity: (m.dev(), m.ino()),
+        };
+        listener.set_nonblocking(true)?;
+        if unsafe { libc::fcntl(listener.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        std::fs::set_permissions(&endpoint.path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::rename(&endpoint.path, &path)?;
+        endpoint.path = path;
+        Ok(Self {
+            listener,
+            _endpoint: endpoint,
+            generation,
+            peers: Vec::new(),
+            known: HashSet::new(),
+            sizes: HashMap::new(),
+            next_id: 0,
+        })
+    }
+
+    pub(crate) fn reconcile(&mut self, panes: impl IntoIterator<Item = String>) {
+        self.known = panes.into_iter().collect();
+        self.peers
+            .retain(|p| p.pane.as_ref().is_none_or(|pane| self.known.contains(pane)));
+        self.sizes.retain(|pane, _| self.known.contains(pane));
+    }
+
+    pub(crate) fn size(&self, pane: &str) -> Option<Size> {
+        self.sizes.get(pane).copied()
+    }
+
+    pub(crate) fn interests(&self) -> Vec<libc::pollfd> {
+        let mut fds = vec![libc::pollfd {
+            fd: self.listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        fds.extend(self.peers.iter().map(|p| p.wire.interest()));
+        fds
+    }
+
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.peers
+            .iter()
+            .filter(|p| p.pane.is_none())
+            .map(|p| p.expires)
+            .min()
+    }
+
+    pub(crate) fn pump(&mut self, now: Instant) -> bool {
+        for _ in 0..16 {
+            match self.listener.accept() {
+                Ok((stream, _)) => {
+                    if self.peers.len() >= (self.known.len() * 2 + 8).min(256) {
+                        continue;
+                    }
+                    if let Ok(wire) = Wire::new(stream) {
+                        self.next_id += 1;
+                        self.peers.push(ReportPeer {
+                            wire,
+                            id: self.next_id,
+                            pane: None,
+                            size: (0, 0),
+                            seq: 0,
+                            expires: now + HANDSHAKE,
+                        });
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        self.peers.retain_mut(|peer| {
+            let result = (|| -> std::io::Result<()> {
+                if peer.pane.is_none() && now >= peer.expires {
+                    return Err(protocol_error());
+                }
+                for message in peer.wire.receive()? {
+                    match message {
+                        PaneMessage::Hello {
+                            version: 1,
+                            pane,
+                            cols,
+                            rows,
+                        } if peer.pane.is_none()
+                            && self.known.contains(&pane)
+                            && cols > 0
+                            && rows > 0 =>
+                        {
+                            peer.pane = Some(pane);
+                            peer.size = (cols as usize, rows as usize);
+                            peer.wire.queue(&PaneMessage::Welcome {
+                                version: 1,
+                                generation: self.generation.clone(),
+                            })?;
+                        }
+                        PaneMessage::Resize {
+                            generation,
+                            seq,
+                            cols,
+                            rows,
+                        } if peer.pane.is_some()
+                            && generation == self.generation
+                            && cols > 0
+                            && rows > 0 =>
+                        {
+                            if seq > peer.seq {
+                                peer.seq = seq;
+                                peer.size = (cols as usize, rows as usize);
+                                trace!("pane viewport received {cols}x{rows} seq={seq}");
+                            }
+                        }
+                        _ => return Err(protocol_error()),
+                    }
+                }
+                peer.wire.flush()
+            })();
+            result.is_ok()
+        });
+        // A replacement connection wins; late data from the retired one cannot
+        // overwrite it. Disconnection removes authority, allowing backend fallback.
+        let mut latest = HashMap::new();
+        for p in &self.peers {
+            if let Some(pane) = &p.pane {
+                latest
+                    .entry(pane.clone())
+                    .and_modify(|id: &mut u64| *id = (*id).max(p.id))
+                    .or_insert(p.id);
+            }
+        }
+        self.peers.retain(|p| {
+            p.pane
+                .as_ref()
+                .is_none_or(|pane| latest.get(pane) == Some(&p.id))
+        });
+        let sizes = self
+            .peers
+            .iter()
+            .filter_map(|p| Some((p.pane.clone()?, p.size)))
+            .collect();
+        let changed = self.sizes != sizes;
+        self.sizes = sizes;
+        changed
+    }
+}
+
+// A local Unix connect can block when the accept backlog fills. NONBLOCK must
+// be set before connect, not merely on the returned stream.
+fn connect_report(path: &Path) -> std::io::Result<(Wire, bool)> {
+    use std::os::unix::net::UnixStream;
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.contains(&0) || bytes.len() >= address.sun_path.len() {
+        return Err(protocol_error());
+    }
+    address.sun_family = libc::AF_UNIX as _;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let len =
+        (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    {
+        address.sun_len = len as _;
+    }
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let wire = Wire::new(unsafe { UnixStream::from_raw_fd(fd) })?;
+    if unsafe { libc::connect(fd, (&address as *const libc::sockaddr_un).cast(), len) } == 0 {
+        return Ok((wire, false));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EINPROGRESS) {
+        Ok((wire, true))
+    } else {
+        Err(error)
+    }
+}
+
+struct PaneReporter {
+    runtime: PathBuf,
+    pane: String,
+    size: Option<Size>,
+    wire: Option<Wire>,
+    connecting: bool,
+    generation: Option<String>,
+    seq: u64,
+    dirty: bool,
+    retry: Instant,
+    backoff: Duration,
+    handshake: Option<Instant>,
+}
+
+impl PaneReporter {
+    fn new(runtime: &Path, pane: String, size: Option<Size>, now: Instant) -> Self {
+        Self {
+            runtime: runtime.to_path_buf(),
+            pane,
+            size,
+            wire: None,
+            connecting: false,
+            generation: None,
+            seq: 0,
+            dirty: true,
+            retry: now,
+            backoff: RETRY_MIN,
+            handshake: None,
+        }
+    }
+
+    fn observe(&mut self, size: Option<Size>) {
+        if let Some(size) = size
+            .filter(|&(w, h)| w > 0 && h > 0 && w <= u16::MAX as usize && h <= u16::MAX as usize)
+        {
+            if self.size != Some(size) {
+                self.size = Some(size);
+                trace!(
+                    "pane viewport measured {}x{} pane={}",
+                    size.0,
+                    size.1,
+                    self.pane
+                );
+                self.dirty = true;
+            }
+        }
+    }
+
+    fn disconnect(&mut self, now: Instant) {
+        self.wire = None;
+        self.generation = None;
+        self.seq = 0;
+        self.connecting = false;
+        self.handshake = None;
+        self.dirty = true;
+        self.retry = now + self.backoff;
+        self.backoff = (self.backoff * 2).min(RETRY_MAX);
+    }
+
+    fn interest(&self) -> libc::pollfd {
+        let mut p = self.wire.as_ref().map_or(
+            libc::pollfd {
+                fd: -1,
+                events: 0,
+                revents: 0,
+            },
+            Wire::interest,
+        );
+        if self.connecting {
+            p.events |= libc::POLLOUT;
+        }
+        p
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        if self.size.is_none() {
+            None
+        } else if self.wire.is_none() {
+            Some(self.retry)
+        } else {
+            self.handshake
+        }
+    }
+
+    fn pump(&mut self, now: Instant) {
+        if self.wire.is_none() && self.size.is_some() && now >= self.retry {
+            match report_path(&self.runtime).and_then(|path| connect_report(&path)) {
+                Ok((wire, connecting)) => {
+                    self.wire = Some(wire);
+                    self.connecting = connecting;
+                    self.handshake = Some(now + HANDSHAKE);
+                }
+                Err(_) => {
+                    self.disconnect(now);
+                    return;
+                }
+            }
+        }
+        let result = self.exchange(now);
+        if result.is_err() {
+            self.disconnect(now);
+        }
+    }
+
+    fn exchange(&mut self, now: Instant) -> std::io::Result<()> {
+        let Some(wire) = self.wire.as_mut() else {
+            return Ok(());
+        };
+        if self.handshake.is_some_and(|deadline| now >= deadline) {
+            return Err(protocol_error());
+        }
+        if self.connecting {
+            let mut fd = wire.interest();
+            fd.events |= libc::POLLOUT;
+            if unsafe { libc::poll(&mut fd, 1, 0) } <= 0 {
+                return Ok(());
+            }
+            if let Some(error) = wire.stream.take_error()? {
+                return Err(error);
+            }
+            self.connecting = false;
+        }
+        // The first outbound record always carries a real snapshot.
+        if self.generation.is_none() && self.seq == 0 && self.dirty && wire.output.is_empty() {
+            let (cols, rows) = self.size.ok_or_else(protocol_error)?;
+            wire.queue(&PaneMessage::Hello {
+                version: 1,
+                pane: self.pane.clone(),
+                cols: cols as u16,
+                rows: rows as u16,
+            })?;
+            self.seq = 1; // hello queued, wait for welcome before sending sizes
+        }
+        wire.flush()?;
+        for message in wire.receive()? {
+            match message {
+                PaneMessage::Welcome {
+                    version: 1,
+                    generation,
+                } if self.generation.is_none()
+                    && !generation.is_empty()
+                    && generation.len() <= 128 =>
+                {
+                    self.generation = Some(generation);
+                    self.handshake = None;
+                    self.backoff = RETRY_MIN;
+                    self.seq = 0;
+                    self.dirty = true;
+                }
+                _ => return Err(protocol_error()),
+            }
+        }
+        if let Some(generation) = &self.generation {
+            if self.dirty && wire.output.is_empty() {
+                self.seq = self.seq.checked_add(1).ok_or_else(protocol_error)?;
+                let (cols, rows) = self.size.ok_or_else(protocol_error)?;
+                wire.queue(&PaneMessage::Resize {
+                    generation: generation.clone(),
+                    seq: self.seq,
+                    cols: cols as u16,
+                    rows: rows as u16,
+                })?;
+                self.dirty = false;
+            }
+        }
+        wire.flush()
     }
 }
 
@@ -242,7 +891,14 @@ pub(crate) fn run_pane() -> i32 {
         let _ = stdout.write_all(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[2J");
         let _ = stdout.flush();
     }
+    let mut reporter = PaneReporter::new(
+        &runtime,
+        pane.clone(),
+        crate::input::measured_size(0),
+        Instant::now(),
+    );
     while !PANE_STOP.load(Ordering::Relaxed) {
+        reporter.pump(Instant::now());
         let mut fds = [
             libc::pollfd {
                 fd: 0,
@@ -259,8 +915,15 @@ pub(crate) fn run_pane() -> i32 {
                 events: libc::POLLIN,
                 revents: 0,
             },
+            reporter.interest(),
         ];
-        if unsafe { libc::poll(fds.as_mut_ptr(), 3, -1) } < 0 {
+        let timeout = reporter.deadline().map_or(-1, |deadline| {
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+                .min(i32::MAX as u128) as i32
+        });
+        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) } < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
@@ -273,6 +936,8 @@ pub(crate) fn run_pane() -> i32 {
         if repaint {
             let mut buf = [0u8; 128];
             while wake.read(&mut buf).is_ok() {}
+            reporter.observe(crate::input::measured_size(0));
+            reporter.pump(Instant::now());
         }
         if PANE_STOP.load(Ordering::Relaxed) {
             break;
@@ -284,6 +949,7 @@ pub(crate) fn run_pane() -> i32 {
                 Ok(n) => {
                     if let Some(frame) = decoder.push(&buf[..n]) {
                         last_frame = Some(frame);
+                        trace!("pane frame received pane={pane}");
                         repaint = true;
                     }
                 }
@@ -357,6 +1023,154 @@ fn forward_input(runtime: &Path, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Runtime(PathBuf);
+    impl Runtime {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            // Unique private runtimes also exercise per-server endpoint identity.
+            let path = PathBuf::from(format!(
+                "/tmp/amx-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            Self(path)
+        }
+        fn server(&self, generation: &str) -> PaneReports {
+            let mut server = PaneReports::bind(&self.0, generation.into()).unwrap();
+            server.reconcile(["%1".into(), "%2".into()]);
+            server
+        }
+    }
+    impl Drop for Runtime {
+        fn drop(&mut self) {
+            if let Ok(path) = report_path(&self.0) {
+                let _ = std::fs::remove_file(path);
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn exchange(server: &mut PaneReports, reporter: &mut PaneReporter, now: Instant) {
+        for _ in 0..8 {
+            reporter.pump(now);
+            server.pump(now);
+        }
+    }
+
+    #[test]
+    fn viewport_wire_survives_every_record_split_and_rejects_oversize() {
+        let bytes = b"{\"type\":\"hello\",\"version\":1,\"pane\":\"%1\",\"cols\":35,\"rows\":46}\n";
+        for split in 0..bytes.len() {
+            let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+            let mut wire = Wire::new(reader).unwrap();
+            writer.write_all(&bytes[..split]).unwrap();
+            assert!(wire.receive().unwrap().is_empty());
+            writer.write_all(&bytes[split..]).unwrap();
+            let records = wire.receive().unwrap();
+            assert!(matches!(
+                &records[..],
+                [PaneMessage::Hello {
+                    version: 1,
+                    cols: 35,
+                    rows: 46,
+                    ..
+                }]
+            ));
+        }
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut wire = Wire::new(reader).unwrap();
+        writer.write_all(&vec![b'x'; MAX_RECORD]).unwrap();
+        assert!(wire.receive().is_err());
+        assert!(wire.input.len() <= MAX_RECORD);
+    }
+
+    #[test]
+    fn viewport_reports_coalesce_and_reconnect_with_latest_size_without_a_signal() {
+        let runtime = Runtime::new();
+        let now = Instant::now();
+        let mut reporter = PaneReporter::new(&runtime.0, "%1".into(), Some((35, 46)), now);
+        reporter.pump(now); // listener does not exist yet
+        assert!(reporter.wire.is_none());
+        let mut first = runtime.server("first");
+        exchange(&mut first, &mut reporter, now + RETRY_MAX);
+        assert_eq!(first.size("%1"), Some((35, 46)));
+        for width in 1..500 {
+            reporter.observe(Some((width, 24)));
+        }
+        exchange(&mut first, &mut reporter, now + RETRY_MAX);
+        assert_eq!(first.size("%1"), Some((499, 24)));
+        assert_eq!(reporter.interest().events, libc::POLLIN);
+        assert!(
+            reporter.deadline().is_none(),
+            "connected idle panes must sleep"
+        );
+        let mut next = runtime.server("second");
+        drop(first); // must not unlink the newly published endpoint
+        assert!(report_path(&runtime.0).unwrap().exists());
+        exchange(&mut next, &mut reporter, now + RETRY_MAX * 2);
+        exchange(&mut next, &mut reporter, now + RETRY_MAX * 3);
+        assert_eq!(next.size("%1"), Some((499, 24)));
+        assert_eq!(reporter.generation.as_deref(), Some("second"));
+        drop(reporter);
+        next.pump(now + RETRY_MAX * 4);
+        assert_eq!(
+            next.size("%1"),
+            None,
+            "disconnected peers lose geometry authority"
+        );
+    }
+
+    #[test]
+    fn viewport_reports_reject_unknown_and_stale_peers_without_harming_others() {
+        let runtime = Runtime::new();
+        let mut server = runtime.server("live");
+        let now = Instant::now();
+        let mut old = PaneReporter::new(&runtime.0, "%1".into(), Some((30, 40)), now);
+        exchange(&mut server, &mut old, now);
+        let mut replacement = PaneReporter::new(&runtime.0, "%1".into(), Some((50, 60)), now);
+        exchange(&mut server, &mut replacement, now);
+        assert_eq!(server.size("%1"), Some((50, 60)));
+        // A retired connection cannot publish a newer sequence over its replacement.
+        old.observe(Some((99, 99)));
+        old.pump(now);
+        server.pump(now);
+        assert_eq!(server.size("%1"), Some((50, 60)));
+        let mut unknown = PaneReporter::new(&runtime.0, "%999".into(), Some((99, 99)), now);
+        exchange(&mut server, &mut unknown, now);
+        assert_eq!(server.size("%999"), None);
+        assert_eq!(server.size("%1"), Some((50, 60)));
+        let wire = &mut replacement.wire.as_mut().unwrap();
+        wire.queue(&PaneMessage::Resize {
+            generation: "stale".into(),
+            seq: 100,
+            cols: 99,
+            rows: 99,
+        })
+        .unwrap();
+        wire.flush().unwrap();
+        server.pump(now);
+        assert_eq!(server.size("%1"), None);
+    }
+
+    #[test]
+    fn viewport_endpoint_refuses_regular_files_and_symlinks() {
+        let runtime = Runtime::new();
+        let path = report_path(&runtime.0).unwrap();
+        std::fs::write(&path, b"leave intact").unwrap();
+        assert!(PaneReports::bind(&runtime.0, "test".into()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"leave intact");
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(runtime.0.join("absent"), &path).unwrap();
+        assert!(PaneReports::bind(&runtime.0, "test".into()).is_err());
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 
     #[test]
     fn raw_input_reopens_the_daemons_fifo_after_handover() {
@@ -450,10 +1264,19 @@ mod tests {
         let frame = vec![b'x'; 20_000];
         let sent = frame.clone();
         let writer = std::thread::spawn(move || {
-            PaneWriter::open(&runtime, "%1")
-                .unwrap()
-                .emit(&sent, Instant::now() + Duration::from_secs(2))
-                .unwrap();
+            let mut writer = PaneWriter::open(&runtime, "%1").unwrap();
+            writer.queue(sent.into(), Instant::now());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while writer.current.is_some() {
+                writer.pump(Instant::now()).unwrap();
+                if writer.current.is_some() {
+                    assert!(crate::tmux::poll_by(
+                        writer.file.as_raw_fd(),
+                        libc::POLLOUT,
+                        deadline
+                    ));
+                }
+            }
             std::fs::remove_file(path).unwrap();
             std::fs::remove_dir(runtime).unwrap();
         });
@@ -475,6 +1298,87 @@ mod tests {
         }
         writer.join().unwrap();
         assert_eq!(received, frame);
+    }
+
+    #[test]
+    fn viewport_reports_bound_backpressure_and_ignore_old_sequences() {
+        let runtime = Runtime::new();
+        let now = Instant::now();
+        let mut server = runtime.server("live");
+        let mut reporter = PaneReporter::new(&runtime.0, "%1".into(), Some((30, 40)), now);
+        exchange(&mut server, &mut reporter, now);
+        let small: libc::c_int = 1024;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    reporter.wire.as_ref().unwrap().stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&small as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&small) as _,
+                )
+            },
+            0
+        );
+        for width in 1..5000 {
+            reporter.observe(Some((width, 40)));
+            reporter.pump(now); // daemon deliberately does not read
+        }
+        assert!(
+            !reporter.wire.as_ref().unwrap().output.is_empty(),
+            "test must fill socket capacity"
+        );
+        assert!(reporter.wire.as_ref().unwrap().output.len() <= MAX_RECORD);
+        for _ in 0..64 {
+            exchange(&mut server, &mut reporter, now);
+        }
+        assert_eq!(server.size("%1"), Some((4999, 40)));
+        let seq = reporter.seq + 1;
+        let wire = reporter.wire.as_mut().unwrap();
+        wire.queue(&PaneMessage::Resize {
+            generation: "live".into(),
+            seq,
+            cols: 45,
+            rows: 50,
+        })
+        .unwrap();
+        wire.flush().unwrap();
+        server.pump(now);
+        wire.queue(&PaneMessage::Resize {
+            generation: "live".into(),
+            seq: seq - 1,
+            cols: 99,
+            rows: 99,
+        })
+        .unwrap();
+        wire.flush().unwrap();
+        server.pump(now);
+        assert_eq!(server.size("%1"), Some((45, 50)));
+    }
+
+    #[test]
+    fn long_runtime_paths_and_distinct_servers_have_short_isolated_endpoints() {
+        use std::os::unix::fs::DirBuilderExt;
+        let runtime = Runtime::new();
+        let deep = runtime.0.join("deep".repeat(40));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&deep)
+            .unwrap();
+        assert!(deep.as_os_str().as_encoded_bytes().len() > 104);
+        let mut first = runtime.server("first");
+        let mut second = PaneReports::bind(&deep, "second".into()).unwrap();
+        second.reconcile(["%1".into()]);
+        let path = report_path(&deep).unwrap();
+        assert!(path.as_os_str().as_encoded_bytes().len() < 100);
+        assert_ne!(path, report_path(&runtime.0).unwrap());
+        let now = Instant::now();
+        let mut a = PaneReporter::new(&runtime.0, "%1".into(), Some((30, 40)), now);
+        let mut b = PaneReporter::new(&deep, "%1".into(), Some((50, 60)), now);
+        exchange(&mut first, &mut a, now);
+        exchange(&mut second, &mut b, now);
+        assert_eq!(first.size("%1"), Some((30, 40)));
+        assert_eq!(second.size("%1"), Some((50, 60)));
     }
 
     #[test]
@@ -503,13 +1407,71 @@ mod tests {
         assert!(writers.reconcile(["%1".to_string()]));
         let started = Instant::now();
         writers.emit(&"x".repeat(1 << 20));
+        assert!(started.elapsed() < WRITE_BUDGET, "{:?}", started.elapsed());
         assert!(
-            started.elapsed() < WRITE_BUDGET * 3,
-            "{:?}",
-            started.elapsed()
+            !writers.writers.is_empty(),
+            "emit queues rather than waiting for the reader"
         );
+        writers.pump(Instant::now() + WRITE_BUDGET);
         assert!(writers.writers.is_empty());
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(runtime).unwrap();
+    }
+
+    #[test]
+    fn a_stalled_fifo_does_not_block_a_healthy_pane_and_pending_frames_coalesce() {
+        let runtime = Runtime::new();
+        let open = |pane| {
+            let path = frame_path(&runtime.0, pane);
+            let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+            let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) };
+            assert!(fd >= 0);
+            unsafe { File::from_raw_fd(fd) }
+        };
+        let _stalled = open("%1");
+        let mut healthy = open("%2");
+        let mut writers = PaneWriters {
+            writers: HashMap::new(),
+            runtime: runtime.0.clone(),
+        };
+        assert!(writers.reconcile(["%1".into(), "%2".into()]));
+        let old = format!("\x1b[?2026h{}\x1b[?2026l", "x".repeat(1 << 20));
+        writers.emit(&old);
+        writers.emit("\x1b[?2026hmiddle\x1b[?2026l");
+        writers.emit("\x1b[?2026hlatest\x1b[?2026l");
+        assert!(writers
+            .writers
+            .values()
+            .all(|w| w.latest.as_deref() == Some(b"\x1b[?2026hlatest\x1b[?2026l")));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut received = Vec::new();
+        let mut decoder = FrameBuffer::default();
+        loop {
+            writers.pump(Instant::now());
+            let mut buf = [0; 8192];
+            match healthy.read(&mut buf) {
+                Ok(n) if n > 0 => {
+                    received.extend_from_slice(&buf[..n]);
+                    if decoder.push(&buf[..n]).as_deref() == Some("latest") {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                other => panic!("healthy FIFO failed: {other:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "healthy reader starved behind stalled reader"
+            );
+        }
+        assert!(!received.windows(6).any(|s| s == b"middle"));
+        writers.pump(Instant::now() + WRITE_BUDGET);
+        assert!(!writers.writers.contains_key("%1"));
+        assert!(writers.writers.contains_key("%2"));
+        assert!(
+            writers.interests().is_empty(),
+            "idle writers must not spin on writability"
+        );
     }
 }
