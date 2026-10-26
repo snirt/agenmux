@@ -1671,6 +1671,8 @@ pub fn rex_reload(client: &str) -> i32 {
         eprintln!("agenmux: no Rex sidebar daemon to reload");
         return 1;
     }
+    let owner = crate::tmux::runtime_dir().join(OWNER_FILE);
+    let previous = std::fs::read(&owner).ok();
     let result = (|| -> Result<(), TmuxError> {
         let mut command = Command::new(std::env::current_exe()?);
         command
@@ -1698,6 +1700,12 @@ pub fn rex_reload(client: &str) -> i32 {
             // SIGTERM would tear down the preserved blocks. Failure must not.
             let _ = child.kill();
             let _ = child.wait();
+            // The child may already have claimed the sidebars: hand them back,
+            // or restart rendering if the old daemon already stepped aside.
+            if let Some(previous) = &previous {
+                let _ = std::fs::write(&owner, previous);
+            }
+            let _ = ensure_daemon(Some(client).filter(|c| !c.is_empty()));
             return Err(std::io::Error::other("Rex sidebar reload did not become ready").into());
         }
         Ok(())
