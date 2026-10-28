@@ -867,6 +867,49 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   rm -rf "$tmp"
 fi
 if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
+  # A control-mode attach (the status fallback scan) must not run pane-add,
+  # and once the daemon dies without its teardown the next stale-cache status
+  # call reaps its frozen sidebars and ownership instead of leaving them on.
+  BIN_ABS="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
+  tmp="$(mktemp -d)"
+  T="tmux -S $tmp/sock -f /dev/null"
+  mkdir -p "$tmp/bin"
+  printf '#!/bin/sh\nexec %s -S %s "$@"\n' "$(command -v tmux)" "$tmp/sock" \
+    >"$tmp/bin/tmux"
+  chmod +x "$tmp/bin/tmux"
+  TMPDIR="$tmp" $T new-session -d -s t -x 200 -y 50 'exec sleep 60'
+  $T set-option -g @agenmux-bin "$BIN_ABS"
+  run() { env TMPDIR="$tmp" TMUX="$tmp/sock,0,0" PATH="$tmp/bin:$PATH" AGENMUX_DIR="$DIR" "$BIN_ABS" "$@"; }
+  run toggle split
+  sleep 2
+  # a session no real client has visited has no sidebar yet
+  $T new-session -d -s o 'exec sleep 60'
+  printf 'detach-client\n' | $T -C attach -f no-output -t o >/dev/null
+  sleep 1
+  control_split="$($T list-panes -t o: -F '#{pane_title}' | grep -cx agenmux)"
+  control="$($T show-option -gqv @agenmux-control-client)"
+  daemon="$(ps -o ppid= -p "$($T list-clients -F '#{client_name} #{client_pid}' |
+    awk -v c="$control" '$1 == c { print $2 }')" | tr -d ' ')"
+  kill -9 "$daemon" 2>/dev/null
+  for _ in $(tries 40); do
+    $T list-clients -F '#{client_name}' | grep -Fxq "$control" || break
+    sleep 0.05
+  done
+  find "$tmp" -name agenmux-scan-cache -exec rm -f {} +
+  run status >/dev/null
+  on_after="$($T show-option -gqv @agenmux-on)"
+  left="$($T list-panes -a -F '#{pane_title}' | grep -cx agenmux)"
+  if [ -n "$control" ] && [ -n "$daemon" ] && [ "$control_split" -eq 0 ] &&
+    [ -z "$on_after" ] && [ "$left" -eq 0 ]; then
+    echo "ok   dead-daemon-reaped-without-control-pane-add"
+  else
+    echo "FAIL dead-daemon-reaped-without-control-pane-add: control=$control daemon=$daemon control_split=$control_split on=$on_after left=$left"
+    fail=1
+  fi
+  $T kill-server 2>/dev/null || true
+  rm -rf "$tmp"
+fi
+if [ "$fail" -eq 0 ] && command -v tmux >/dev/null && [ -x "$BIN" ]; then
   # Full-screen overlays block the normal scan loop while waiting for a key.
   # They must still render through the visible pane writer and accept keys
   # through the daemon FIFO.

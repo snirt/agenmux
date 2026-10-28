@@ -636,6 +636,43 @@ pub fn stop_daemon() {
     }
 }
 
+/// A daemon that died without its own teardown leaves `@agenmux-on` naming a
+/// control client tmux no longer lists: frozen sidebars and pane-add hooks
+/// for nobody. Tear that generation down. An empty client is a daemon still
+/// starting; a changed generation is a newer activation.
+pub fn reap_dead_owner() {
+    let owner = || {
+        tmux::command(&[
+            "display-message",
+            "-p",
+            "#{@agenmux-on}|#{@agenmux-generation}|#{@agenmux-control-client}",
+        ])
+        .unwrap_or_default()
+        .trim_end()
+        .to_string()
+    };
+    let dead = |owner: &str| {
+        owner
+            .strip_prefix("1|")
+            .and_then(|rest| rest.split_once('|'))
+            .is_some_and(|(_, client)| {
+                !client.is_empty()
+                    && tmux::lines(&["list-clients", "-F", "#{client_name}"])
+                        .is_ok_and(|clients| !clients.iter().any(|c| c == client))
+            })
+    };
+    let seen = owner();
+    if !dead(&seen) {
+        return;
+    }
+    let Ok(_lock) = lifecycle_lock() else {
+        return;
+    };
+    if owner() == seen && dead(&seen) {
+        teardown();
+    }
+}
+
 pub(crate) fn teardown_panes() -> i32 {
     let sidebar_filter = ["#{||:", IS_SIDEBAR, ",#{==:#{pane_title},agents-mon}}"].concat();
     let panes = tmux::lines(&[

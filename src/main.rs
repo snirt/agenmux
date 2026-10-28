@@ -120,7 +120,10 @@ fn main() {
         ["wheel", pane, "down"] => input::wheel(pane, input::Direction::Down),
         ["pane-add"] => panes::pane_add(None),
         ["pane-add", window] => panes::pane_add(Some(window)),
-        ["pane-add", window, client] => panes::pane_add_for_client(window, client),
+        ["pane-add", window, client] => {
+            panes::reap_dead_owner();
+            panes::pane_add_for_client(window, client)
+        }
         ["pane-orphan"] => panes::pane_orphan(),
         ["pane-pin"] => panes::pane_pin(),
         ["teardown"] => match panes::lifecycle_lock() {
@@ -270,6 +273,8 @@ fn cmd_status() -> i32 {
     let rows = if fresh {
         scan::from_tsv(&std::fs::read_to_string(&cache).unwrap_or_default())
     } else {
+        // a stale cache can mean a dead daemon; don't keep its sidebars
+        panes::reap_dead_owner();
         match run_scan() {
             Ok(snapshot) => snapshot.agents,
             Err(_) => return 0, // no server -> empty segment, like bash
