@@ -1433,6 +1433,15 @@ mod tests {
                 .env("AGENMUX_THEME_TEST_CHILD", "1")
                 .env("TMUX", format!("{socket},0,0"))
                 .env("XDG_STATE_HOME", &state)
+                // Pin the inherited header styles: the fixture was generated
+                // against tmux's pre-3.8 default pane-active-border-style, and
+                // tmux 3.8 changed that default to a theme-conditional format
+                // that tmux_style_color cannot read.
+                .env(
+                    "AGENMUX_TMUX_ACTIVE_BORDER_STYLE",
+                    "#{?pane_in_mode,fg=yellow,#{?synchronize-panes,fg=red,fg=green}}",
+                )
+                .env("AGENMUX_TMUX_WINDOW_STYLE", "default")
                 .output()
                 .unwrap();
             let _ = Command::new("tmux")
