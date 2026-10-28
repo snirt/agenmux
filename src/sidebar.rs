@@ -297,6 +297,8 @@ pub struct Sidebar {
     rows_file: PathBuf,
     cache_file: PathBuf,
     last_frame: String,
+    // backend escape (e.g. OSC 52) that rides the next frame to the panes
+    terminal_escape: String,
     last_rows: String,
     update: Option<String>, // newer release to advertise in the header
     update_ready: bool,     // that release is prepared for the next start
@@ -484,6 +486,7 @@ fn new_sidebar(
         rows_file,
         cache_file,
         last_frame: String::new(),
+        terminal_escape: String::new(),
         last_rows: String::new(),
         update,
         update_ready,
@@ -1311,8 +1314,17 @@ impl Sidebar {
             .collect::<Vec<_>>()
             .join("\n");
         let message = match self.mux.copy(client.as_deref(), &reference) {
-            Ok(()) if ids.len() > 1 => format!("copied {} references", ids.len()),
-            Ok(()) => format!("copied {reference}"),
+            Ok(escape) => {
+                if let Some(escape) = escape {
+                    self.terminal_escape = escape;
+                    self.last_frame.clear();
+                }
+                if ids.len() > 1 {
+                    format!("copied {} references", ids.len())
+                } else {
+                    format!("copied {reference}")
+                }
+            }
             Err(error) => format!("copy failed: {error}"),
         };
         if let Some(client) = &client {

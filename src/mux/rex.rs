@@ -1047,12 +1047,8 @@ impl Multiplexer for Rex {
     }
 
     /// The sidebar's own terminal carries the clipboard escape to the app.
-    fn copy(&mut self, _client: Option<&str>, text: &str) -> Result<(), TmuxError> {
-        use std::io::Write;
-        let mut out = std::io::stdout();
-        write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()))?;
-        out.flush()?;
-        Ok(())
+    fn copy(&mut self, _client: Option<&str>, text: &str) -> Result<Option<String>, TmuxError> {
+        Ok(Some(format!("\x1b]52;c;{}\x07", base64(text.as_bytes()))))
     }
 
     fn reference(&self, id: &str) -> String {

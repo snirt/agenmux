@@ -307,13 +307,13 @@ impl Multiplexer for Tmux {
         true
     }
 
-    fn copy(&mut self, client: Option<&str>, text: &str) -> Result<(), TmuxError> {
+    fn copy(&mut self, client: Option<&str>, text: &str) -> Result<Option<String>, TmuxError> {
         let mut args = vec!["set-buffer", "-w"];
         if let Some(client) = client {
             args.extend(["-t", client]);
         }
         args.extend(["--", text]);
-        command_status(&args)
+        command_status(&args).map(|()| None)
     }
 
     fn reference(&self, id: &str) -> String {

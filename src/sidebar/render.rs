@@ -725,12 +725,13 @@ impl Sidebar {
                 self.last_rows = rows;
             }
         }
-        let changed = force || frame != self.last_frame;
+        let escape = std::mem::take(&mut self.terminal_escape);
+        let changed = force || !escape.is_empty() || frame != self.last_frame;
         // Synchronized output: tmux reads a frame in PTY-sized pieces and can
         // redraw between them, briefly showing the cursor on neither row.
         // Split panes never hide the terminal cursor on their own; left
         // visible, it hops across every redraw (cursor-trail shaders show it).
-        let synced = || format!("{E}[?2026h{E}[?25l{frame}{E}[?2026l");
+        let synced = || format!("{E}[?2026h{escape}{E}[?25l{frame}{E}[?2026l");
         match &mut self.daemon {
             None => {
                 if changed {

@@ -137,8 +137,9 @@ pub trait Multiplexer {
     fn focus_sidebar(&mut self, client: &str, expected_window: Option<&str>);
     /// Tell `client` something. false: the caller shows it in the sidebar.
     fn message(&mut self, client: &str, text: &str) -> bool;
-    /// Put `text` on the clipboard of the terminal that asked.
-    fn copy(&mut self, client: Option<&str>, text: &str) -> Result<(), TmuxError>;
+    /// Put `text` on the clipboard of the terminal that asked. `Some` is an
+    /// escape the sidebar's own terminal must write for the backend.
+    fn copy(&mut self, client: Option<&str>, text: &str) -> Result<Option<String>, TmuxError>;
     /// What `yy` copies for a session, window or pane id.
     fn reference(&self, id: &str) -> String;
 

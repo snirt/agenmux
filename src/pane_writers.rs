@@ -751,10 +751,17 @@ const MAX_FRAME: usize = 16 * 1024 * 1024;
 
 /// FIFO reads are not messages. Only complete synchronized frames may reach
 /// the terminal; a fresh start marker also recovers from a dropped writer.
+/// Clipboard escapes are lifted out: a resize replays the frame, not the copy.
 #[derive(Default)]
-struct FrameBuffer(Vec<u8>, usize);
+struct FrameBuffer(Vec<u8>, usize, String);
+
+const CLIPBOARD: &str = "\x1b]52;";
 
 impl FrameBuffer {
+    fn take_clipboard(&mut self) -> String {
+        std::mem::take(&mut self.2)
+    }
+
     fn push(&mut self, bytes: &[u8]) -> Option<String> {
         self.0.extend_from_slice(bytes);
         let mut latest = None;
@@ -789,7 +796,14 @@ impl FrameBuffer {
                 let end = FRAME_START.len() + end;
                 if end <= MAX_FRAME {
                     if let Ok(frame) = std::str::from_utf8(&self.0[FRAME_START.len()..end]) {
-                        latest = Some(frame.to_string());
+                        let mut frame = frame.to_string();
+                        while let Some(at) = frame.find(CLIPBOARD) {
+                            let Some(len) = frame[at..].find('\x07') else {
+                                break;
+                            };
+                            self.2.extend(frame.drain(at..at + len + 1));
+                        }
+                        latest = Some(frame);
                     }
                 }
                 self.0.drain(..end + FRAME_END.len());
@@ -947,7 +961,17 @@ pub(crate) fn run_pane() -> i32 {
             match frames.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if let Some(frame) = decoder.push(&buf[..n]) {
+                    let frame = decoder.push(&buf[..n]);
+                    let clipboard = decoder.take_clipboard();
+                    if !clipboard.is_empty()
+                        && stdout
+                            .write_all(clipboard.as_bytes())
+                            .and_then(|_| stdout.flush())
+                            .is_err()
+                    {
+                        break;
+                    }
+                    if let Some(frame) = frame {
                         last_frame = Some(frame);
                         trace!("pane frame received pane={pane}");
                         repaint = true;
@@ -1226,6 +1250,15 @@ mod tests {
             result = b.push(&[byte]).or(result);
         }
         assert_eq!(result.as_deref(), Some("\x1b[Hrow 一❤️\nnext"));
+    }
+
+    #[test]
+    fn clipboard_escapes_leave_the_replayed_frame() {
+        let mut b = FrameBuffer::default();
+        let frame = b.push(&envelope("\x1b]52;c;YQ==\x07\x1b[Hrow"));
+        assert_eq!(frame.as_deref(), Some("\x1b[Hrow"));
+        assert_eq!(b.take_clipboard(), "\x1b]52;c;YQ==\x07");
+        assert_eq!(b.take_clipboard(), "", "a copy is written once");
     }
 
     #[test]
