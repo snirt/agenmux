@@ -8,6 +8,10 @@ a daemon that wrote nothing removes the `.1` as well. Look there first when the 
 disappears or a configuration reload does nothing: every `agenmux: ...`
 message the daemon would have printed is in it.
 
+A daemon that exits without cleaning up leaves its sidebars frozen. The next
+status-line refresh or window switch notices the missing daemon and removes
+them; toggle the sidebar to start a new one.
+
 For detection bugs and timing questions, enable the trace. It is off by default
 and only costs anything when enabled:
 

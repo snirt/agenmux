@@ -463,9 +463,11 @@ fn install_hooks(_bin: &str) -> Result<(), TmuxError> {
         tmux::command_status(&["set-hook", "-g", hook, &command])?;
     }
 
-    // A control client never shows a pane, and the status fallback scan's own
-    // attach would otherwise trigger a pane-add. tmux names tty-less clients
-    // client-<pid>; client_control_mode would read the hook's best client
+    // A tty-less control client (tmux names it client-<pid>) never shows a
+    // pane, and the status fallback scan's own attach would otherwise trigger
+    // a pane-add. A tty control client (iTerm2 -CC) draws panes, and an empty
+    // hook_client is a clientless select-window such as a sidebar jump: both
+    // keep pane-add. client_control_mode would read the hook's best client
     // instead, often the daemon's own.
     let add = format!(
         "if -F '#{{&&:#{{!=:#{{@agenmux-on}},}},#{{!=:#{{m:client-*,#{{hook_client}}}},1}}}}' {{ run-shell -b \"{bin} pane-add #{{window_id}} #{{q:hook_client}}\" }}"
