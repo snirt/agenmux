@@ -995,4 +995,7 @@ fi
 if [ "$fail" -eq 0 ]; then
   AGENMUX_BIN="$BIN" bash "$DIR/tests/daemon-orphan.sh" || fail=1
 fi
+if [ "$fail" -eq 0 ]; then
+  AGENMUX_BIN="$BIN" bash "$DIR/tests/daemon-stall.sh" || fail=1
+fi
 exit $fail
