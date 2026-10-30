@@ -302,13 +302,14 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
 }
 
 impl Sidebar {
-    fn measure_panes(&mut self) -> Vec<M> {
+    /// None when tmux did not answer: a missed deadline, or the pipe still
+    /// failing fast while it waits for its sync marker. That says nothing
+    /// about the panes, so it must not count as an empty tick.
+    fn measure_panes(&mut self) -> Option<Vec<M>> {
         self.tmux
             .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}|#{window_id}|#{pane_width}|#{pane_height}|#{window_width} #{window_height}|#{window_panes}|#{window_active}|#{session_id}'")
-            .unwrap_or_default()
-            .lines()
-            .filter_map(parse_measurement)
-            .collect()
+            .ok()
+            .map(|out| out.lines().filter_map(parse_measurement).collect())
     }
 
     /// Refresh preserved-pane inventory: min pane size drives the render, zero
@@ -343,7 +344,9 @@ impl Sidebar {
     /// adoption and pane reconciliation stay on the periodic mirror tick.
     pub(super) fn refresh_geometry(&mut self) -> bool {
         let _ = self.tmux.sync();
-        let ms = self.measure_panes();
+        let Some(ms) = self.measure_panes() else {
+            return false;
+        };
         let Some(w) = ms.iter().map(|m| m.w).min() else {
             return false;
         };
@@ -382,7 +385,11 @@ impl Sidebar {
         self.sync_panes_view();
         let width_changed = refreshed.width_changed;
         let mut w = usize::MAX;
-        let mut ms = self.measure_panes();
+        // A stalled server (sleep, heavy load) fails every command until its
+        // sync marker returns; skip the tick instead of reading it as "gone".
+        let Some(mut ms) = self.measure_panes() else {
+            return true;
+        };
         if ms.is_empty() {
             let d = self.daemon.as_mut().unwrap();
             d.empty_ticks += 1;
