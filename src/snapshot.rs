@@ -238,16 +238,28 @@ pub struct Store {
 impl Store {
     pub fn open(mux: &mut dyn crate::mux::Multiplexer) -> Option<Store> {
         let (server, path) = mux.snapshot_home()?;
+        Some(Store::at(path, server, 20))
+    }
+
+    fn at(path: PathBuf, server: String, limit: usize) -> Store {
         let (collapsed, prev) = open(&path, &server);
-        Some(Store {
+        Store {
             path,
             server,
             pending: collapsed.into_iter().collect(),
             sessions: Vec::new(),
             saved: None,
             prev,
-            limit: 20,
-        })
+            limit,
+        }
+    }
+
+    /// A Rex daemon outlives its server: reopen for the new one before its
+    /// first scan overwrites the old layout, which then moves to `.prev`.
+    pub fn follow(&mut self, server: &str) {
+        if server != self.server {
+            *self = Store::at(self.path.clone(), server.into(), self.limit);
+        }
     }
 
     pub fn adopt(&mut self, collapsed: &mut HashSet<String>, panes: &[PaneMeta]) {
@@ -947,6 +959,31 @@ mod tests {
     }
 
     const WINDOWS: &str = "@4|1|1||L4|w2\n@6|2|1||L6|w3\n@7|1|1||L7|w0\n";
+
+    #[test]
+    fn a_daemon_outliving_its_server_keeps_the_old_layout_on_offer() {
+        let old = [
+            meta(("$1", "work"), ("@4", 2), "%1", None),
+            meta(("$2", "play"), ("@7", 0), "%4", None),
+        ];
+        let mut sb = store("follow");
+        sb.set_layout(&old, &[], WINDOWS, String::new);
+        sb.save(&HashSet::new(), &old);
+        let saved = sb.sessions.clone();
+        // the restarted server's scan shows one fresh session
+        let fresh = [meta(("$1", "new"), ("@4", 1), "%1", None)];
+        sb.follow("2|2");
+        sb.set_layout(&fresh, &[], WINDOWS, String::new);
+        sb.save(&HashSet::new(), &fresh);
+        assert_eq!(sb.prev.as_ref().map(|prev| &prev.sessions), Some(&saved));
+        let (_, prev) = open(&sb.path, "2|2");
+        assert_eq!(prev.map(|prev| prev.sessions), Some(saved));
+        assert!(
+            sb.closed().is_empty(),
+            "the old sessions are not logged as closes"
+        );
+        let _ = std::fs::remove_dir_all(sb.path.parent().unwrap());
+    }
 
     fn ids(log: &[Closed]) -> Vec<&str> {
         log.iter().map(|entry| entry.id.as_str()).collect()

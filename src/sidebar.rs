@@ -1698,6 +1698,9 @@ impl Sidebar {
         self.rows = update.rows;
         self.panes = panes;
         if let Some(store) = self.snapshot.as_mut() {
+            if let Some(server) = self.mux.server() {
+                store.follow(&server);
+            }
             store.limit = self.settings.settings.tmux_management_undo_history;
             store.adopt(&mut self.collapsed, &self.panes);
             // window layouts change without pane output; the 2s scan catches

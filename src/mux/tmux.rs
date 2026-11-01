@@ -436,6 +436,21 @@ impl Multiplexer for Tmux {
         );
     }
 
+    fn bind_keys(&mut self, plugin_dir: &std::path::Path, settings: &AppConfig) -> bool {
+        crate::setup::run_config(plugin_dir, settings) == 0
+    }
+
+    fn use_key_table(&mut self, table: &str) {
+        let clients = self
+            .run("list-clients -F '#{client_name}|#{pane_title}'")
+            .unwrap_or_default();
+        for line in clients.lines() {
+            if let Some((client, "agenmux")) = line.split_once('|') {
+                let _ = crate::tmux::command_spawn(&["switch-client", "-c", client, "-T", table]);
+            }
+        }
+    }
+
     fn dock_sidebars(&mut self, plugin_dir: &std::path::Path, settings: &AppConfig) {
         crate::panes::dock(settings.sidebar_position, settings.sidebar_width);
         // The default jump and fold keys follow the side. Reload and the

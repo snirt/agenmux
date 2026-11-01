@@ -87,6 +87,8 @@ fn list<'de, D: Deserializer<'de>, T: DeserializeOwned>(d: D) -> Result<Vec<T>, 
 /// What the scan script returns.
 #[derive(Deserialize, Default)]
 struct Listing {
+    #[serde(default)]
+    server: Option<String>,
     #[serde(default, deserialize_with = "list")]
     sessions: Vec<Session>,
 }
@@ -340,6 +342,10 @@ pub struct Rex {
     layout_started: Option<Instant>,
     /// agenmux's own blocks at the last scan, whose events `observe` skips.
     own_blocks: HashSet<String>,
+    /// Per window, the last real block focused: a focused sidebar's cursor row.
+    beside: HashMap<String, String>,
+    /// The launching pane identifies the initial session before sidebar focus.
+    origin: Option<String>,
 }
 impl Rex {
     pub fn connect(monitoring: bool) -> Result<Rex, TmuxError> {
@@ -350,6 +356,7 @@ impl Rex {
         }
         Ok(Rex {
             monitoring,
+            origin: std::env::var("AGENMUX_REX_ORIGIN").ok(),
             events: monitoring.then(Events::spawn).flatten(),
             pending: PendingChanges {
                 full: true,
@@ -481,6 +488,20 @@ impl Rex {
                 self.acted = Some(shown.clone());
             }
             self.shown = Some(shown);
+        }
+        // The app's saved selection can still name another session when the
+        // toggle launches us. Seed from the launching pane on the first scan,
+        // while still recording `shown` so stale preferences cannot undo it.
+        if self.foci.is_empty() {
+            if let Some(session) = self.listing.sessions.iter().find(|session| {
+                session.windows.iter().any(|window| {
+                    window.blocks.iter().any(|block| {
+                        self.origin.as_ref() == Some(&block.block_id) && !block.agenmux()
+                    })
+                })
+            }) {
+                self.acted = Some(session.session_id.clone());
+            }
         }
         let mut moved = None;
         for s in &self.listing.sessions {
@@ -721,6 +742,7 @@ impl Multiplexer for Rex {
     /// Rex clients do not say which session they show. The sidebar lives in
     /// one: what that session's active window focuses is what the user acts in.
     fn client_focus(&mut self) -> Option<crate::focus::ClientFocus> {
+        let origin = self.origin.clone();
         // a popup follows its own session; the daemon, where the user acts
         let own = std::env::var("REX_SESSION").ok();
         let session = match own {
@@ -752,8 +774,36 @@ impl Multiplexer for Rex {
             .blocks
             .iter()
             .any(|b| b.block_id == block && b.agenmux());
+        // Rex keeps no focus history; the toggle names the block it opened from.
+        let real_blocks: Vec<_> = window
+            .blocks
+            .iter()
+            .filter(|b| !b.agenmux())
+            .map(|b| b.block_id.clone())
+            .collect();
+        let origin = origin.filter(|origin| real_blocks.contains(origin));
+        let (session, window, block) = (
+            session.session_id.clone(),
+            window.window_id.clone(),
+            block.to_string(),
+        );
+        let block = if sidebar {
+            // A restarted daemon has no history or launching block. Keep its
+            // cursor in the current window rather than targeting the sidebar
+            // itself (which is deliberately absent from the inventory).
+            self.beside
+                .get(&window)
+                .filter(|id| real_blocks.contains(id))
+                .cloned()
+                .or(origin)
+                .or_else(|| real_blocks.into_iter().next())
+                .unwrap_or(block)
+        } else {
+            self.beside.insert(window, block.clone());
+            block
+        };
         let title = if sidebar { SIDEBAR } else { "" };
-        let row = format!("1|rex|{}|{block}|{title}|attached\n", session.session_id);
+        let row = format!("1|rex|{session}|{block}|{title}|attached\n");
         Some(crate::focus::parse_clients(&row, false))
     }
 
@@ -1065,6 +1115,10 @@ impl Multiplexer for Rex {
             server,
             crate::snapshot::state_file(&format!("snapshot-rex-{host}"))?,
         ))
+    }
+
+    fn server(&self) -> Option<String> {
+        self.listing.server.clone()
     }
 
     /// Rows shaped like `snapshot::WINDOWS_FMT`: the block count includes the
@@ -1589,7 +1643,7 @@ fn daemon_pid() -> Option<libc::pid_t> {
 /// Start the daemon that renders into the sidebar blocks, unless its owner
 /// record names a live one. Two racing starts are fine: the later claim
 /// wins and the earlier daemon leaves.
-fn ensure_daemon(client: Option<&str>) -> Result<(), TmuxError> {
+fn ensure_daemon(client: Option<&str>, origin: Option<&str>) -> Result<(), TmuxError> {
     if daemon_pid().is_some() {
         return Ok(());
     }
@@ -1609,6 +1663,9 @@ fn ensure_daemon(client: Option<&str>) -> Result<(), TmuxError> {
     if let Some(client) = client {
         daemon.env("AGENMUX_REX_CLIENT", client);
     }
+    if let Some(origin) = origin {
+        daemon.env("AGENMUX_REX_ORIGIN", origin);
+    }
     daemon.spawn()?;
     Ok(())
 }
@@ -1623,7 +1680,9 @@ fn add_sidebar(
     focus: bool,
     client: Option<&str>,
 ) -> Result<(), TmuxError> {
-    ensure_daemon(client)?;
+    // a focused sidebar's cursor starts on the block it was opened from
+    let origin = window.focused_block_id.as_deref().filter(|_| focus);
+    ensure_daemon(client, origin)?;
     let layout = &window
         .tiled()
         .ok_or_else(|| TmuxError::Error("window has no tiled layer".into()))?
@@ -1701,7 +1760,7 @@ pub fn rex_reload(client: &str) -> i32 {
             if let Some(previous) = &previous {
                 let _ = std::fs::write(&owner, previous);
             }
-            let _ = ensure_daemon(Some(client).filter(|c| !c.is_empty()));
+            let _ = ensure_daemon(Some(client).filter(|c| !c.is_empty()), None);
             return Err(std::io::Error::other("Rex sidebar reload did not become ready").into());
         }
         Ok(())
@@ -1972,6 +2031,79 @@ mod tests {
         rex.update_acting(Some("session:1".into()));
         assert_eq!(rex.acted.as_deref(), Some("session:2"));
         assert!(!rex.foci.contains_key("session:1"));
+    }
+
+    #[test]
+    fn a_focused_sidebar_keeps_the_cursor_on_the_block_beside_it() {
+        let mut rex = Rex {
+            listing: geometry_listing(),
+            acted: Some("session:1".into()),
+            ..Rex::default()
+        };
+        let mut focus = |block: &str| {
+            rex.listing.sessions[0].windows[0].focused_block_id = Some(block.into());
+            let focus = rex.client_focus().unwrap();
+            (focus.active_pane, focus.plugin_selected)
+        };
+        assert_eq!(focus("shell:0"), ("shell:0".into(), false));
+        assert_eq!(focus("side:0"), ("shell:0".into(), true));
+    }
+
+    #[test]
+    fn opening_sidebar_seeds_selection_from_origin_not_stale_app_session() {
+        let listing = serde_json::from_value(json!({"sessions": [
+            {"session_id": "session:1", "active_window_id": "window:1", "windows": [
+                {"window_id": "window:1", "focused_block_id": "shell:1", "blocks": [
+                    {"block_id": "shell:1", "label": "shell"}
+                ]}
+            ]},
+            {"session_id": "session:2", "active_window_id": "window:2", "windows": [
+                {"window_id": "window:2", "focused_block_id": "side:2", "blocks": [
+                    {"block_id": "side:2", "label": "agenmux"},
+                    {"block_id": "shell:2", "label": "shell"}
+                ]}
+            ]}
+        ]}))
+        .unwrap();
+        let mut rex = Rex {
+            listing,
+            origin: Some("shell:2".into()),
+            ..Rex::default()
+        };
+        rex.update_acting(Some("session:1".into()));
+        assert_eq!(rex.acted.as_deref(), Some("session:2"));
+        // An unchanged saved record must not move the cursor back to item one.
+        rex.update_acting(Some("session:1".into()));
+        assert_eq!(rex.acted.as_deref(), Some("session:2"));
+        // A later explicit app selection still takes effect.
+        rex.update_acting(Some("session:2".into()));
+        rex.update_acting(Some("session:1".into()));
+        assert_eq!(rex.acted.as_deref(), Some("session:1"));
+    }
+
+    #[test]
+    fn a_fresh_sidebar_follows_the_current_window_without_focus_history() {
+        let mut rex = Rex {
+            listing: geometry_listing(),
+            acted: Some("session:1".into()),
+            ..Rex::default()
+        };
+        rex.listing.sessions[0].active_window_id = Some("window:1".into());
+        rex.listing.sessions[0].windows[1].focused_block_id = Some("side:1".into());
+        let focus = rex.client_focus().unwrap();
+        assert_eq!(focus.active_pane, "shell:1");
+        assert!(focus.plugin_selected);
+
+        // A closed remembered block must not prevent the same fallback.
+        rex.beside.insert("window:1".into(), "closed:1".into());
+        assert_eq!(rex.client_focus().unwrap().active_pane, "shell:1");
+
+        // Leaving the sidebar follows actual focus again.
+        rex.listing.sessions[0].active_window_id = Some("window:0".into());
+        rex.listing.sessions[0].windows[0].focused_block_id = Some("shell:0".into());
+        let focus = rex.client_focus().unwrap();
+        assert_eq!(focus.active_pane, "shell:0");
+        assert!(!focus.plugin_selected);
     }
 
     #[test]

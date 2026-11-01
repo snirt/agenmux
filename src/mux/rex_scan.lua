@@ -47,4 +47,6 @@ for _, s in ipairs(assert(rex.call("session.list")).sessions or {}) do
     }
   end
 end
-return { sessions = sessions }
+-- tells a restarted server from the one the daemon started on
+local status = rex.call("server.status") or {}
+return { server = status.instance_id, sessions = sessions }

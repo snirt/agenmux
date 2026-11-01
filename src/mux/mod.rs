@@ -146,6 +146,11 @@ pub trait Multiplexer {
     /// This server's identity, which tells it from the one before a
     /// restart, and its snapshot file.
     fn snapshot_home(&mut self) -> Option<(String, std::path::PathBuf)>;
+    /// `snapshot_home`'s identity as of the last scan, where a daemon can
+    /// outlive its server; tmux's dies with its control connection.
+    fn server(&self) -> Option<String> {
+        None
+    }
     /// One `snapshot::WINDOWS_FMT` row per window, for `snapshot::layout`.
     fn windows(&mut self) -> Result<String, TmuxError>;
     /// Every live pane id, whitespace separated.
@@ -187,6 +192,13 @@ pub trait Multiplexer {
     fn close_panes(&mut self, _panes: &[String]) {}
     /// The settings moved the sidebars to the other side.
     fn dock_sidebars(&mut self, _plugin_dir: &Path, _settings: &AppConfig) {}
+    /// Install the key bindings `settings` implies. false: they could not be.
+    /// Rex binds its keys in init.lua.
+    fn bind_keys(&mut self, _plugin_dir: &Path, _settings: &AppConfig) -> bool {
+        true
+    }
+    /// Route keys typed in sidebar panes through the named key table.
+    fn use_key_table(&mut self, _table: &str) {}
     /// Close every sidebar pane, putting their windows' layouts back.
     fn close_sidebars(&mut self) {}
     /// Make the width a dragged sidebar settled on the configured one.
