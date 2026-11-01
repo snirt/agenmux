@@ -6,19 +6,18 @@ set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 . "$DIR/tests/helpers/poll.sh"
+. "$DIR/tests/helpers/daemon.sh"
 BIN="${AGENMUX_BIN:-$DIR/target/release/agenmux}"
 [ -x "$BIN" ] || exit 0
 command -v tmux >/dev/null || exit 0
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/agenmux-orphan.XXXXXX")"
 sock="$tmp/sock"
-daemon=''
 cleaned=0
 cleanup() {
   [ "$cleaned" -eq 0 ] || return
   cleaned=1
   tmux -S "$sock" kill-server 2>/dev/null || true
-  [ -z "$daemon" ] || kill "$daemon" 2>/dev/null || true
   rm -rf "$tmp" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -26,9 +25,6 @@ trap 'exit 130' HUP INT TERM
 
 printf '#!/bin/sh\nwhile :; do sleep 10; done\n' >"$tmp/codex"
 chmod +x "$tmp/codex"
-
-# only pids appearing after this are ours: other tmux servers run daemons too
-before="$(pgrep -f 'agenmux daemon' 2>/dev/null | sort)"
 
 TMPDIR="$tmp" tmux -S "$sock" -f /dev/null new-session \
   -d -s orphan -x 100 -y 30 "$tmp/codex"
@@ -39,9 +35,7 @@ env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" toggle split
 
 for _ in $(tries 60); do
-  after="$(pgrep -f 'agenmux daemon' 2>/dev/null | sort)"
-  daemon="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -n 1)"
-  [ -n "$daemon" ] && break
+  daemon="$(scratch_daemon "$sock")" && break
   sleep 0.1
 done
 [ -n "$daemon" ] || {
@@ -95,15 +89,11 @@ fi
 # A daemon whose runtime dir was deleted under it can never hear a key again.
 # It must exit with teardown so the next toggle starts fresh instead of
 # re-selecting a zombie sidebar.
-before="$(pgrep -f 'agenmux daemon' 2>/dev/null | sort)"
 env TMPDIR="$tmp" TMUX="$sock,$server_pid,0" AGENMUX_DIR="$DIR" \
   "$BIN" toggle split
 runtime="$(tmux -S "$sock" show-option -gqv @agenmux-runtime-dir)"
-daemon=''
 for _ in $(tries 60); do
-  after="$(pgrep -f 'agenmux daemon' 2>/dev/null | sort)"
-  daemon="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -n 1)"
-  [ -n "$daemon" ] && break
+  daemon="$(scratch_daemon "$sock")" && break
   sleep 0.1
 done
 [ -n "$daemon" ] && [ -p "$runtime/agenmux-keys" ] || {
