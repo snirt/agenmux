@@ -587,11 +587,14 @@ impl Sidebar {
             .take(cap.saturating_sub(1))
             .map(|r| format!("{r}\n"))
             .collect();
-        let rows = if framed.is_some() {
-            format!("-\n-\n{rows}")
-        } else {
-            rows
+        // Callers map the rows below the title; the map also names the title
+        // row, and the border above it when framed, so line y is screen row y.
+        let lead = match cap {
+            0 => "",
+            _ if framed.is_some() => "-\n-\n",
+            _ => "-\n",
         };
+        let rows = format!("{lead}{rows}");
         // Restore the normal foreground after glyph/attribute resets, including
         // inside filled rows. Inherited dark foreground adds no bytes.
         let fg = self.palette.text_fg.fg("");
@@ -2823,6 +2826,13 @@ mod tests {
         assert_eq!(unframed.len(), 40, "{}", sb.last_frame);
         assert!(unframed.last().unwrap().contains("s settings"));
         assert!(!sb.last_frame.contains('┌') && !sb.last_frame.contains('└'));
+        let unframed_rows = std::fs::read_to_string(&sb.rows_file).unwrap();
+        assert_eq!(unframed_rows.lines().count(), 40, "{unframed_rows}");
+        assert_eq!(
+            unframed_rows.lines().next(),
+            Some("-"),
+            "the header row is not clickable"
+        );
         sb.settings.settings.show_frame = true;
         sb.render(true);
 
