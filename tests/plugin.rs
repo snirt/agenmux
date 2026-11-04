@@ -754,14 +754,17 @@ fn returning_to_selected_sidebar_restores_its_key_table() {
         "#{pane_id}",
     ]);
     tmux.assert_tmux(&["select-pane", "-t", &sidebar]);
+    // Not `display-message -c`: without `-t` it can expand the pane of the
+    // default session instead of the one this client is switched to.
     let state = || {
         tmux.text(&[
-            "display-message",
-            "-p",
-            "-c",
-            &client,
-            "#{pane_title}|#{client_key_table}",
+            "list-clients",
+            "-F",
+            "#{client_name}|#{pane_title}|#{client_key_table}",
         ])
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{client}|")).map(str::to_string))
+        .unwrap_or_default()
     };
     tmux.wait_for(Duration::from_secs(2), || state() == "agenmux|agenmux");
 
@@ -2503,14 +2506,20 @@ fn recently_closed_forget_confirms_in_split_and_popup_input_modes() {
         shows("disposable-history");
         shows("? search");
         shows("Tab restore");
-        let before = std::fs::read(&snapshot).unwrap();
+        // The daemon rewrites the snapshot on its own schedule, so check the
+        // record itself rather than the bytes.
+        let kept = || {
+            std::fs::read_to_string(&snapshot)
+                .unwrap()
+                .contains("disposable-history")
+        };
         send("sequence-64", "d");
         shows("forget session disposable-history? y/N");
-        assert_eq!(std::fs::read(&snapshot).unwrap(), before);
+        assert!(kept(), "forget waits for confirmation");
         table_is("agenmux-settings-edit");
         send("escape", "Escape");
         shows("d forget");
-        assert_eq!(std::fs::read(&snapshot).unwrap(), before);
+        assert!(kept(), "escape cancels the forget");
         table_is("agenmux");
         send("sequence-64", "d");
         shows("forget session disposable-history? y/N");

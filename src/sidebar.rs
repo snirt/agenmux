@@ -1768,7 +1768,15 @@ impl Sidebar {
         // Yielded panes rejoin the dirty set: has_relevant_output then books
         // the next output scan under its usual 500ms throttle.
         self.tmux.defer_output(stats.deferred);
-        let _ = std::fs::write(&self.cache_file, scan::to_tsv(&scanned));
+        // `#{agenmux}` and popup sizing read the cache while scans rewrite
+        // it; a plain write lets them see it truncated. The staged name is
+        // per process: a popup sidebar and the daemon both scan.
+        let staged = self
+            .cache_file
+            .with_extension(format!("tmp-{}", std::process::id()));
+        if std::fs::write(&staged, scan::to_tsv(&scanned)).is_ok() {
+            let _ = std::fs::rename(&staged, &self.cache_file);
+        }
         let mut focus = self.client_focus().unwrap_or_default();
         // A popup owns the terminal's input even though tmux still reports the
         // pane underneath it as selected. That underlying agent is not being

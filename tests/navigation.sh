@@ -930,6 +930,10 @@ fi
 wheel_burst_works=0
 wheel_burst_selected="$(awk '$3 == 1 { print $1; exit }' "$tmp/agenmux-rows")"
 wheel_burst_top="$(top_row)"
+wheel_steps() {
+  grep -c '# key .*WheelDown' "$tmp/daemon-trace.log" || true
+}
+wheel_burst_before="$(wheel_steps)"
 (
   for _ in $(seq 1 40); do
     printf '\033[<65;5;5M' >&9
@@ -944,6 +948,12 @@ for _ in $(tries 40); do
   sleep 0.01
 done
 wait "$wheel_pid"
+# Wheel steps reach the daemon as control-mode buffer notifications, gg through
+# the key FIFO, so gg can overtake the tail of the burst. Let every step land.
+for _ in $(tries 100); do
+  [ "$(wheel_steps)" -ge $((wheel_burst_before + 40)) ] && break
+  sleep 0.02
+done
 printf 'gg' >&9
 for _ in $(tries 40); do
   wheel_burst_reset="$(top_row)"
