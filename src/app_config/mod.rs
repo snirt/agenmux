@@ -19,6 +19,15 @@ pub struct ConfigError {
     read_error: bool,
 }
 impl ConfigError {
+    /// The multiplexer named `server` could not list its live overrides.
+    pub(crate) fn unreadable_options(server: &str) -> Self {
+        Self {
+            location: format!("<{server}>"),
+            field: "options".into(),
+            reason: "cannot read application options".into(),
+            read_error: true,
+        }
+    }
     fn invalid(field: &str, reason: impl Into<String>) -> Self {
         Self {
             location: "<config>".into(),

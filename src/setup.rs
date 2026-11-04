@@ -1,8 +1,8 @@
 use crate::app_config::KeyChord;
-use crate::tmux::{self, TmuxError};
+use crate::mux::{self, tmux};
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub(crate) const NORMAL_TABLE: &str = "agenmux";
 pub(crate) const SEARCH_TABLE: &str = "agenmux-search";
@@ -26,20 +26,20 @@ fn key_arg(key: &str) -> &str {
 fn table_marker(table: &str) -> String {
     format!(" -T {table} ")
 }
-fn table_exists(table: &str) -> Result<bool, TmuxError> {
+fn table_exists(table: &str) -> Result<bool, mux::Error> {
     let marker = table_marker(table);
     Ok(tmux::command(&["list-keys"])?
         .lines()
         .any(|line| line.contains(&marker)))
 }
-fn clear_table(table: &str) -> Result<(), TmuxError> {
+fn clear_table(table: &str) -> Result<(), mux::Error> {
     if table_exists(table)? {
         tmux::command_status(&["unbind-key", "-a", "-T", table])
     } else {
         Ok(())
     }
 }
-fn remove_binding(table: &str, key: &str) -> Result<(), TmuxError> {
+fn remove_binding(table: &str, key: &str) -> Result<(), mux::Error> {
     if table_exists(table)? {
         tmux::command_status(&["unbind-key", "-T", table, key_arg(key)])
     } else {
@@ -53,7 +53,7 @@ fn remove_binding(table: &str, key: &str) -> Result<(), TmuxError> {
 /// a valid command and preserves `-r` and the command's own quoting. It omits
 /// notes, so a user's note on a snapshotted key is not restored. The plugin
 /// sets none of its own, and this only matters on a rollback path.
-fn bindings(table: &str) -> Result<std::collections::BTreeMap<String, String>, TmuxError> {
+fn bindings(table: &str) -> Result<std::collections::BTreeMap<String, String>, mux::Error> {
     if !table_exists(table)? {
         return Ok(Default::default());
     }
@@ -74,8 +74,8 @@ fn bindings(table: &str) -> Result<std::collections::BTreeMap<String, String>, T
     Ok(result)
 }
 
-fn source(text: &str) -> Result<(), TmuxError> {
-    let mut child = Command::new("tmux")
+fn source(text: &str) -> Result<(), mux::Error> {
+    let mut child = tmux::process()
         .args(["source-file", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -86,7 +86,7 @@ fn source(text: &str) -> Result<(), TmuxError> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(TmuxError::Error("restoring tmux binding failed".into()))
+        Err(mux::Error::Failed("restoring tmux binding failed".into()))
     }
 }
 
@@ -95,7 +95,7 @@ struct BindingBackup {
     keys: Vec<(&'static str, &'static str, String)>,
 }
 impl BindingBackup {
-    fn capture(picker: bool) -> Result<Self, TmuxError> {
+    fn capture(picker: bool) -> Result<Self, mux::Error> {
         // Check server connectivity before accepting an absent plugin table.
         tmux::command(&["list-keys", "-T", "root"])?;
         let mut tables = Vec::new();
@@ -119,7 +119,7 @@ impl BindingBackup {
         }
         Ok(Self { tables, keys })
     }
-    fn restore(&self) -> Result<(), TmuxError> {
+    fn restore(&self) -> Result<(), mux::Error> {
         let mut failures = Vec::new();
         for (table, text) in &self.tables {
             // Only plugin-owned tables may be bulk-cleared.
@@ -139,7 +139,7 @@ impl BindingBackup {
             }
         }
         if !failures.is_empty() {
-            Err(TmuxError::Error(format!(
+            Err(mux::Error::Failed(format!(
                 "binding rollback failed: {}",
                 failures.join(", ")
             )))
@@ -174,7 +174,7 @@ struct OptionBackup {
     hook: bool,
 }
 impl OptionBackup {
-    fn capture(window: Option<&str>, name: &str, hook: bool) -> Result<Self, TmuxError> {
+    fn capture(window: Option<&str>, name: &str, hook: bool) -> Result<Self, mux::Error> {
         let mut args = vec!["show-options", if window.is_some() { "-wq" } else { "-gq" }];
         if let Some(window) = window {
             args.extend(["-t", window]);
@@ -210,7 +210,7 @@ impl OptionBackup {
             hook,
         })
     }
-    fn restore(&self) -> Result<(), TmuxError> {
+    fn restore(&self) -> Result<(), mux::Error> {
         let mut args = vec![
             if self.hook { "set-hook" } else { "set-option" },
             match (self.window.is_some(), self.value.is_some()) {
@@ -255,6 +255,13 @@ pub fn run_if_needed(plugin_dir: &Path) -> i32 {
     run_config(plugin_dir, &config)
 }
 
+/// The installed key bindings predate `config`'s keymap or side.
+pub fn bindings_stale(config: &crate::app_config::AppConfig) -> bool {
+    let installed =
+        tmux::command(&["show-option", "-gqv", "@agenmux-nav-version"]).unwrap_or_default();
+    installed.trim_end() != nav_version(config)
+}
+
 fn installed_current(config: &crate::app_config::AppConfig) -> bool {
     let Ok(bin) = std::env::current_exe() else {
         return false;
@@ -278,7 +285,7 @@ pub fn run_config(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> i
     }
 }
 
-fn migrate_legacy_options() -> Result<(), TmuxError> {
+fn migrate_legacy_options() -> Result<(), mux::Error> {
     // Bootstrap identity only. Behavioral legacy values resolve on read.
     for suffix in ["bin"] {
         let canonical = format!("@agenmux-{suffix}");
@@ -300,7 +307,7 @@ fn migrate_legacy_options() -> Result<(), TmuxError> {
     }
     Ok(())
 }
-fn setup(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> Result<(), TmuxError> {
+fn setup(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> Result<(), mux::Error> {
     let bin = std::env::current_exe()?.to_string_lossy().into_owned();
     let backup = BindingBackup::capture(config.hide_windows.is_some())?;
     let mut options = Vec::new();
@@ -370,7 +377,7 @@ fn setup(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> Result<(),
             }
         }
         if binding_error.is_some() || !failures.is_empty() {
-            return Err(TmuxError::Error(format!("setup failed: {error}; rollback failed: bindings={}, options/hooks=[{}]; inspect and rerun setup", binding_error.map(|e| e.to_string()).unwrap_or_else(|| "restored".into()), failures.join(", "))));
+            return Err(mux::Error::Failed(format!("setup failed: {error}; rollback failed: bindings={}, options/hooks=[{}]; inspect and rerun setup", binding_error.map(|e| e.to_string()).unwrap_or_else(|| "restored".into()), failures.join(", "))));
         }
         return Err(error);
     }
@@ -414,7 +421,7 @@ pub fn release_client_tables() {
     }
 }
 
-fn clear_legacy_options_and_hooks(windows: &[String]) -> Result<(), TmuxError> {
+fn clear_legacy_options_and_hooks(windows: &[String]) -> Result<(), mux::Error> {
     for window in windows {
         // Best effort: the list is a snapshot, and a window the user closed
         // mid-setup has nothing left to clear. Failing here would roll back an
@@ -432,7 +439,7 @@ fn clear_legacy_options_and_hooks(windows: &[String]) -> Result<(), TmuxError> {
     Ok(())
 }
 
-fn install_hooks(_bin: &str) -> Result<(), TmuxError> {
+fn install_hooks(_bin: &str) -> Result<(), mux::Error> {
     let bin = ENGINE;
     for (hook, command) in [
         (
@@ -509,7 +516,7 @@ fn install_hooks(_bin: &str) -> Result<(), TmuxError> {
 /// root table, or `None` when repeating is disabled.
 // Global options read at setup; per-session or later changes to
 // repeat-time apply after the next setup.
-fn repeat_reset_delay() -> Result<Option<f64>, TmuxError> {
+fn repeat_reset_delay() -> Result<Option<f64>, mux::Error> {
     let mut ms = 0u32;
     // initial-repeat-time exists only on newer tmux; -q leaves it empty elsewhere.
     for name in ["repeat-time", "initial-repeat-time"] {
@@ -520,7 +527,7 @@ fn repeat_reset_delay() -> Result<Option<f64>, TmuxError> {
     Ok((ms > 0).then(|| f64::from(ms) / 1000.0 + 0.1))
 }
 
-fn clone_root_table(table: &str) -> Result<(), TmuxError> {
+fn clone_root_table(table: &str) -> Result<(), mux::Error> {
     clear_table(table)?;
     let replacement = format!("-T {table} ");
     let source = tmux::command(&["list-keys", "-T", "root"])?
@@ -531,7 +538,7 @@ fn clone_root_table(table: &str) -> Result<(), TmuxError> {
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
-    let mut child = Command::new("tmux")
+    let mut child = tmux::process()
         .args(["source-file", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -542,7 +549,7 @@ fn clone_root_table(table: &str) -> Result<(), TmuxError> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(TmuxError::Error(
+        Err(mux::Error::Failed(
             String::from_utf8_lossy(&output.stderr)
                 .trim_end()
                 .to_string(),
@@ -853,7 +860,7 @@ fn install_table_mouse_keys(commands: &mut Vec<Vec<String>>, _bin: &str) {
     }
 }
 
-fn install_mouse(_bin: &str) -> Result<(), TmuxError> {
+fn install_mouse(_bin: &str) -> Result<(), mux::Error> {
     if tmux::command(&["show-option", "-gv", "mouse"])?.trim_end() != "on" {
         return Ok(());
     }
@@ -898,7 +905,7 @@ fn install_mouse(_bin: &str) -> Result<(), TmuxError> {
     Ok(())
 }
 
-fn install_picker_filter(hide: Option<&str>) -> Result<(), TmuxError> {
+fn install_picker_filter(hide: Option<&str>) -> Result<(), mux::Error> {
     let Some(hide) = hide else {
         return Ok(());
     };
@@ -920,7 +927,7 @@ fn install_picker_filter(hide: Option<&str>) -> Result<(), TmuxError> {
     }
 }
 
-fn install_status(_bin: &str) -> Result<(), TmuxError> {
+fn install_status(_bin: &str) -> Result<(), mux::Error> {
     let segment = format!("#({ENGINE} status)");
     for option in ["status-left", "status-right"] {
         let value = tmux::command(&["show-option", "-gqv", option])?;

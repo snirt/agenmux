@@ -2,6 +2,7 @@
 //! and the tmux server. Keys use names, not `$n`/`@n` ids, so they still match
 //! sessions recreated after a restart.
 
+use crate::mux::{Multiplexer, WindowMeta};
 use crate::scan::{PaneMeta, PaneRow};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -10,14 +11,12 @@ use std::path::{Path, PathBuf};
 /// Keys of absent sessions are kept for when they come back; this bounds them.
 const MAX_COLLAPSED: usize = 256;
 
-/// The `list-windows` query `layout` reads. `window_name` goes last: it may
-/// contain the delimiter.
-/// The fourth field is 1 when the window's sidebar is on the right.
-pub const WINDOWS_FMT: &str = "list-windows -a -F '#{window_id}|#{window_panes}|#{automatic-rename}|#{P:#{?#{==:#{pane_title},agenmux},#{pane_at_right},}}|#{window_layout}|#{window_name}'";
+/// Agent conf name -> the command typed into its restored shell.
+pub type Resume = HashMap<String, String>;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
-    /// `#{pid}|#{start_time}`: tells this server from the one before a restart.
+    /// Tells this server from the one before a restart.
     pub server: String,
     /// Session names and `session:window_index` keys of collapsed branches.
     #[serde(default)]
@@ -84,17 +83,21 @@ pub struct Closed {
 pub struct Live {
     /// Every `(session name, window index)`.
     pub windows: HashSet<(String, u32)>,
-    /// Every window `@n` and pane `%n`.
+    /// Every window and pane id.
     pub ids: HashSet<String>,
 }
 
 impl Closed {
+    /// A window entry holds that window; a pane entry, the pane's window.
     pub fn is_session(&self) -> bool {
-        self.id.starts_with('$')
+        !self.is_pane() && !self.session.windows.iter().any(|w| w.id == self.id)
     }
 
     pub fn is_pane(&self) -> bool {
-        self.id.starts_with('%')
+        self.session
+            .windows
+            .first()
+            .is_some_and(|w| w.panes.iter().any(|p| p.id == self.id))
     }
 
     /// The closed pane of a pane entry.
@@ -143,16 +146,15 @@ pub fn agents(sessions: &[Session]) -> usize {
         .count()
 }
 
-/// `<state dir>/snapshot-<socket name>`: one file per tmux server socket.
-pub fn path(socket_path: &str) -> Option<PathBuf> {
-    let socket = Path::new(socket_path.trim()).file_name()?.to_str()?;
+/// `<state dir>/snapshot-<name>`: one file per server (`Identity::name`).
+pub fn path(name: &str) -> Option<PathBuf> {
     let xdg = std::env::var_os("XDG_STATE_HOME");
     let home = std::env::var_os("HOME");
     crate::diag::state_dir(
         xdg.as_deref().map(Path::new),
         home.as_deref().map(Path::new),
     )
-    .map(|dir| dir.join(format!("snapshot-{socket}")))
+    .map(|dir| dir.join(format!("snapshot-{name}")))
 }
 
 pub fn prev_path(path: &Path) -> PathBuf {
@@ -215,21 +217,10 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn open(tmux: &mut crate::tmux::Tmux) -> Option<Store> {
-        // A fresh control client answers empty until its attach completes.
-        let mut out = String::new();
-        for _ in 0..100 {
-            out = tmux
-                .run("display-message -p '#{pid}|#{start_time}|#{socket_path}'")
-                .ok()?;
-            if !out.trim().is_empty() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let mut fields = out.trim().splitn(3, '|');
-        let server = format!("{}|{}", fields.next()?, fields.next()?);
-        let path = path(fields.next()?)?;
+    pub fn open(mux: &mut dyn Multiplexer) -> Option<Store> {
+        let identity = mux.identity()?;
+        let path = path(&identity.name)?;
+        let server = identity.server;
         let (collapsed, prev) = open(&path, &server);
         Some(Store {
             path,
@@ -251,15 +242,15 @@ impl Store {
     // A branch gone since the last capture was closed. The first capture
     // after open has nothing to compare with: closes while no sidebar ran are
     // not logged. A pane also leaves the scan when it becomes a sidebar pane,
-    // so `open` (every live `%n`, queried only then) confirms pane closes.
+    // so `open` (every live id, queried only then) confirms pane closes.
     // Windows and sessions trust the scan: one left holding only a sidebar
     // pane is closing.
     pub fn set_layout(
         &mut self,
         panes: &[PaneMeta],
         agents: &[PaneRow],
-        windows: &str,
-        open: impl FnOnce() -> String,
+        windows: &[WindowMeta],
+        open: impl FnOnce() -> HashSet<String>,
     ) {
         if panes.is_empty() {
             return;
@@ -269,8 +260,7 @@ impl Store {
         self.sessions = sessions;
         if closed.iter().any(Closed::is_pane) {
             let open = open();
-            let open: HashSet<&str> = open.split_whitespace().collect();
-            closed.retain(|entry| !entry.is_pane() || !open.contains(entry.id.as_str()));
+            closed.retain(|entry| !entry.is_pane() || !open.contains(&entry.id));
         }
         if !closed.is_empty() {
             let limit = self.limit;
@@ -387,49 +377,6 @@ pub fn closed_between(old: &[Session], new: &[Session], time: u64) -> Vec<Closed
     closed
 }
 
-/// Split a closed pane back into its live window: after the nearest saved
-/// neighbour still open (before the next one when it was first), then the
-/// window's saved layout. tmux rejects that layout unless the window has its
-/// saved pane count again, which leaves tmux's own split in place.
-pub fn replay_pane(
-    entry: &Closed,
-    live: &Live,
-    resume: impl Fn(&str) -> Option<String>,
-    run: &mut impl FnMut(&[String]) -> Option<String>,
-) {
-    let (Some(window), Some(pane)) = (entry.session.windows.first(), entry.pane()) else {
-        return;
-    };
-    let at = window
-        .panes
-        .iter()
-        .position(|p| p.id == pane.id)
-        .unwrap_or(0);
-    let open = |p: &&Pane| live.ids.contains(&p.id);
-    let (before, target) = match window.panes[..at].iter().rev().find(open) {
-        Some(prev) => (false, prev.id.as_str()),
-        None => match window.panes[at + 1..].iter().find(open) {
-            Some(next) => (true, next.id.as_str()),
-            None => (false, window.id.as_str()),
-        },
-    };
-    let mut split = vec!["split-window", "-d"];
-    if before {
-        split.push("-b");
-    }
-    split.extend(["-t", target, "-c", &pane.path, "-P", "-F", "#{pane_id}"]);
-    let Some(id) = run(&split.iter().map(|s| s.to_string()).collect::<Vec<_>>()) else {
-        return;
-    };
-    if !window.layout.is_empty() {
-        run(&["select-layout", "-t", &window.id, &window.layout].map(String::from));
-    }
-    if let Some(command) = pane.agent.as_deref().and_then(resume) {
-        run(&["send-keys", "-t", &id, "-l", &command].map(String::from));
-        run(&["send-keys", "-t", &id, "Enter"].map(String::from));
-    }
-}
-
 /// Newest first, each close once (every running sidebar sees it), capped. A
 /// pane entry goes once its window closes: it can never be restored again.
 pub fn record(log: &mut Vec<Closed>, closed: Vec<Closed>, limit: usize) {
@@ -503,14 +450,8 @@ pub fn collapsed_keys(
 
 /// Sessions, windows and panes in scan order. `panes` excludes the sidebar,
 /// so a window reporting more panes than listed still holds an agenmux pane.
-pub fn layout(panes: &[PaneMeta], agents: &[PaneRow], windows: &str) -> Vec<Session> {
-    let windows: HashMap<&str, Vec<&str>> = windows
-        .lines()
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.splitn(6, '|').collect();
-            (fields.len() == 6).then(|| (fields[0], fields))
-        })
-        .collect();
+pub fn layout(panes: &[PaneMeta], agents: &[PaneRow], windows: &[WindowMeta]) -> Vec<Session> {
+    let windows: HashMap<&str, &WindowMeta> = windows.iter().map(|w| (w.id.as_str(), w)).collect();
     let mut listed: HashMap<&str, usize> = HashMap::new();
     for pane in panes {
         *listed.entry(pane.window_id.as_str()).or_default() += 1;
@@ -531,18 +472,15 @@ pub fn layout(panes: &[PaneMeta], agents: &[PaneRow], windows: &str) -> Vec<Sess
             .is_none_or(|w| w.index != pane.window_index)
         {
             let info = windows.get(pane.window_id.as_str());
-            let field = |i: usize| info.map_or("", |f| f[i]);
-            let sidebar = field(1)
-                .parse::<usize>()
-                .is_ok_and(|n| n > listed[pane.window_id.as_str()]);
+            let sidebar = info.is_some_and(|w| w.panes > listed[pane.window_id.as_str()]);
             session.windows.push(Window {
                 id: pane.window_id.clone(),
                 index: pane.window_index,
                 name: pane.window_name.clone(),
-                automatic_rename: field(2) != "0",
-                layout: field(4).to_string(),
+                automatic_rename: info.is_none_or(|w| w.automatic_rename),
+                layout: info.map_or_else(String::new, |w| w.layout.clone()),
                 sidebar,
-                sidebar_right: sidebar && field(3) == "1",
+                sidebar_right: sidebar && info.is_some_and(|w| w.sidebar_right),
                 panes: Vec::new(),
             });
         }
@@ -559,122 +497,8 @@ pub fn layout(panes: &[PaneMeta], agents: &[PaneRow], windows: &str) -> Vec<Sess
     sessions
 }
 
-/// Recreate `prev`'s missing sessions, and its missing windows inside existing
-/// sessions; never touch a live window. `live` is every live
-/// `(session name, window index)`. `run` executes one tmux command and returns
-/// its trimmed output, or `None` on failure. `resume` gives the command typed
-/// into an agent's restored shell, if any.
-pub fn replay(
-    prev: &Snapshot,
-    live: &HashSet<(String, u32)>,
-    resume: impl Fn(&str) -> Option<String>,
-    run: &mut impl FnMut(&[String]) -> Option<String>,
-) {
-    let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    for session in &prev.sessions {
-        let target = format!("={}", session.name);
-        let mut exists = live.iter().any(|(name, _)| *name == session.name);
-        for window in &session.windows {
-            if window.panes.is_empty() || live.contains(&(session.name.clone(), window.index)) {
-                continue;
-            }
-            let first = &window.panes[0].path;
-            let mut create = if exists {
-                args(&[
-                    "new-window",
-                    "-d",
-                    "-t",
-                    &format!("{target}:{}", window.index),
-                ])
-            } else {
-                args(&["new-session", "-d", "-s", &session.name])
-            };
-            create.extend(args(&[
-                "-c",
-                first,
-                "-P",
-                "-F",
-                "#{window_index} #{pane_id}",
-            ]));
-            if !window.automatic_rename {
-                create.extend(args(&["-n", &window.name]));
-            }
-            let Some(created) = run(&create) else {
-                continue;
-            };
-            let Some((index, p0)) = created.split_once(' ') else {
-                continue;
-            };
-            let p0 = p0.to_string();
-            if !exists && index != window.index.to_string() {
-                run(&args(&[
-                    "move-window",
-                    "-d",
-                    "-s",
-                    &p0,
-                    "-t",
-                    &format!("{target}:{}", window.index),
-                ]));
-            }
-            exists = true;
-            // The agenmux pane was the first pane (the last when on the right);
-            // a placeholder holds its cell until select-layout has placed the rest.
-            let left = window.sidebar && !window.sidebar_right;
-            let (split, mut resumes) = if left {
-                (&window.panes[..], Vec::new())
-            } else {
-                (&window.panes[1..], vec![(p0.clone(), &window.panes[0])])
-            };
-            let mut last = p0.clone();
-            for pane in split {
-                let Some(id) = run(&args(&[
-                    "split-window",
-                    "-t",
-                    &last,
-                    "-c",
-                    &pane.path,
-                    "-P",
-                    "-F",
-                    "#{pane_id}",
-                ])) else {
-                    break;
-                };
-                resumes.push((id.clone(), pane));
-                last = id;
-            }
-            let placeholder = if left {
-                Some(p0.clone())
-            } else if window.sidebar {
-                run(&args(&[
-                    "split-window",
-                    "-t",
-                    &last,
-                    "-P",
-                    "-F",
-                    "#{pane_id}",
-                ]))
-            } else {
-                None
-            };
-            if !window.layout.is_empty() {
-                run(&args(&["select-layout", "-t", &p0, &window.layout]));
-            }
-            if let Some(placeholder) = placeholder {
-                run(&args(&["kill-pane", "-t", &placeholder]));
-            }
-            // After the layout, so agents start at their final size.
-            for (id, pane) in resumes {
-                if let Some(command) = pane.agent.as_deref().and_then(&resume) {
-                    run(&args(&["send-keys", "-t", &id, "-l", &command]));
-                    run(&args(&["send-keys", "-t", &id, "Enter"]));
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn meta(
@@ -705,7 +529,7 @@ mod tests {
         dir.join("snapshot-default")
     }
 
-    fn sample(server: &str) -> Snapshot {
+    pub(crate) fn sample(server: &str) -> Snapshot {
         Snapshot {
             server: server.into(),
             collapsed: vec!["work".into(), "work:2".into()],
@@ -831,8 +655,11 @@ mod tests {
             meta(("$1", "work"), ("@4", 2), "%2", None),
             meta(("$1", "work"), ("@6", 3), "%3", None),
         ];
-        let windows = "@4|3|0|1|L4|my|name\n@6|1|1||L6|zsh\n";
-        let sessions = layout(&panes, &agents, windows);
+        let windows = [
+            window("@4", 3, false, true, "L4"),
+            window("@6", 1, true, false, "L6"),
+        ];
+        let sessions = layout(&panes, &agents, &windows);
         assert_eq!(sessions.len(), 1);
         let [w2, w3] = &sessions[0].windows[..] else {
             panic!()
@@ -859,73 +686,6 @@ mod tests {
         assert_eq!((w3.sidebar, w3.automatic_rename), (false, true));
     }
 
-    #[test]
-    fn replay_creates_only_missing_branches_in_order() {
-        let mut prev = sample("1|1");
-        prev.sessions[0].windows.push(Window {
-            index: 4,
-            name: "shell".into(),
-            automatic_rename: true,
-            layout: "efgh,80x24,0,0,9".into(),
-            sidebar: false,
-            panes: vec![
-                Pane {
-                    id: String::new(),
-                    path: "/a".into(),
-                    agent: Some("codex".into()),
-                },
-                Pane {
-                    id: String::new(),
-                    path: "/b".into(),
-                    agent: None,
-                },
-            ],
-            ..Window::default()
-        });
-        prev.sessions.push(Session {
-            name: "keep".into(),
-            windows: vec![Window {
-                index: 0,
-                panes: vec![Pane::default()],
-                ..Window::default()
-            }],
-            ..Session::default()
-        });
-        let live = HashSet::from([("keep".to_string(), 0)]);
-        let mut log = Vec::new();
-        let mut next = 10;
-        replay(
-            &prev,
-            &live,
-            |agent| (agent == "claude").then(|| "claude --continue".into()),
-            &mut |cmd: &[String]| {
-                log.push(cmd.join(" "));
-                next += 1;
-                Some(match cmd[0].as_str() {
-                    "new-session" => format!("0 %{next}"),
-                    "new-window" => format!("4 %{next}"),
-                    _ => format!("%{next}"),
-                })
-            },
-        );
-        assert_eq!(
-            log,
-            [
-                "new-session -d -s work -c /repo -P -F #{window_index} #{pane_id} -n editor",
-                "move-window -d -s %11 -t =work:2",
-                "split-window -t %11 -c /repo -P -F #{pane_id}",
-                "split-window -t %13 -c /tmp -P -F #{pane_id}",
-                "select-layout -t %11 abcd,80x24,0,0,1",
-                "kill-pane -t %11",
-                "send-keys -t %13 -l claude --continue",
-                "send-keys -t %13 Enter",
-                "new-window -d -t =work:4 -c /a -P -F #{window_index} #{pane_id}",
-                "split-window -t %19 -c /b -P -F #{pane_id}",
-                "select-layout -t %19 efgh,80x24,0,0,9",
-            ]
-        );
-    }
-
     fn store(name: &str) -> Store {
         Store {
             path: temp(name),
@@ -938,7 +698,27 @@ mod tests {
         }
     }
 
-    const WINDOWS: &str = "@4|1|1||L4|w2\n@6|2|1||L6|w3\n@7|1|1||L7|w0\n";
+    fn window(id: &str, panes: usize, auto: bool, right: bool, layout: &str) -> WindowMeta {
+        WindowMeta {
+            id: id.into(),
+            panes,
+            automatic_rename: auto,
+            sidebar_right: right,
+            layout: layout.into(),
+        }
+    }
+
+    fn windows() -> [WindowMeta; 3] {
+        [
+            window("@4", 1, true, false, "L4"),
+            window("@6", 2, true, false, "L6"),
+            window("@7", 1, true, false, "L7"),
+        ]
+    }
+
+    fn open_ids(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
 
     fn ids(log: &[Closed]) -> Vec<&str> {
         log.iter().map(|entry| entry.id.as_str()).collect()
@@ -954,8 +734,8 @@ mod tests {
         ];
         let mut a = store("closes");
         let mut b = store("closes");
-        a.set_layout(&all, &[], WINDOWS, String::new);
-        b.set_layout(&all, &[], WINDOWS, String::new);
+        a.set_layout(&all, &[], &windows(), HashSet::new);
+        b.set_layout(&all, &[], &windows(), HashSet::new);
         assert!(a.closed().is_empty(), "the first capture logs nothing");
 
         // renamed session and window keep their ids: not a close
@@ -964,18 +744,18 @@ mod tests {
             pane.session_name = pane.session_name.replace("work", "job");
             pane.window_name = "renamed".into();
         }
-        a.set_layout(&renamed, &[], WINDOWS, String::new);
+        a.set_layout(&renamed, &[], &windows(), HashSet::new);
         assert!(a.closed().is_empty());
 
         // close window @6, then session $2; an empty scan logs nothing
         a.set_layout(
             &[renamed[0].clone(), renamed[3].clone()],
             &[],
-            WINDOWS,
-            String::new,
+            &windows(),
+            HashSet::new,
         );
-        a.set_layout(&renamed[..1], &[], WINDOWS, String::new);
-        a.set_layout(&[], &[], WINDOWS, String::new);
+        a.set_layout(&renamed[..1], &[], &windows(), HashSet::new);
+        a.set_layout(&[], &[], &windows(), HashSet::new);
         let log = a.closed();
         assert_eq!(ids(&log), ["$2", "@6"], "newest first");
         let window = &log[1];
@@ -989,7 +769,7 @@ mod tests {
         assert_eq!(log[0].session.windows[0].index, 0);
 
         // a second sidebar seeing the same closes adds nothing
-        b.set_layout(&all[..1], &[], WINDOWS, String::new);
+        b.set_layout(&all[..1], &[], &windows(), HashSet::new);
         assert_eq!(b.closed().len(), 2);
 
         // a save keeps the log; forget removes an entry for every sidebar
@@ -1044,7 +824,7 @@ mod tests {
         session.windows[0].index = 3;
         let closed_window = Closed {
             time: 0,
-            id: "@6".into(),
+            id: "@4".into(),
             session,
         };
         let closed_pane = Closed {
@@ -1071,8 +851,8 @@ mod tests {
             meta(("$1", "work"), ("@4", 2), "%2", None),
             meta(("$1", "work"), ("@4", 2), "%3", None),
         ];
-        let before = layout(&old, &[], "@4|3|1|L|w\n");
-        let after = layout(&old[..1], &[], "@4|1|1|L|w\n");
+        let before = layout(&old, &[], &[]);
+        let after = layout(&old[..1], &[], &[]);
         let log = closed_between(&before, &after, 7);
         assert_eq!(ids(&log), ["%2", "%3"]);
         let entry = &log[0];
@@ -1083,130 +863,23 @@ mod tests {
         let mut moved = old.to_vec();
         moved[2].window_id = "@5".into();
         moved[2].window_index = 3;
-        assert!(closed_between(&before, &layout(&moved, &[], ""), 7).is_empty());
+        assert!(closed_between(&before, &layout(&moved, &[], &[]), 7).is_empty());
 
         // a pane that became a sidebar pane left the scan but is still open
         let mut store = store("sidebar-pane");
-        store.set_layout(&old, &[], "", String::new);
-        store.set_layout(&old[..2], &[], "", || "%1 %2 %3".into());
+        store.set_layout(&old, &[], &[], HashSet::new);
+        store.set_layout(&old[..2], &[], &[], || open_ids(&["%1", "%2", "%3"]));
         assert!(store.closed().is_empty());
-        store.set_layout(&old[..1], &[], "", || "%1 %3".into());
+        store.set_layout(&old[..1], &[], &[], || open_ids(&["%1", "%3"]));
         assert_eq!(ids(&store.closed()), ["%2"]);
         // once its window closes, the pane entry can never be restored
         store.set_layout(
             &[meta(("$1", "work"), ("@5", 3), "%4", None)],
             &[],
-            "",
-            String::new,
+            &[],
+            HashSet::new,
         );
         assert_eq!(ids(&store.closed()), ["@4"]);
         let _ = std::fs::remove_dir_all(store.path.parent().unwrap());
-    }
-
-    #[test]
-    fn pane_restore_splits_next_to_its_nearest_open_neighbour() {
-        let window = Window {
-            id: "@4".into(),
-            layout: "L".into(),
-            panes: ["%1", "%2", "%3"]
-                .map(|id| Pane {
-                    id: id.into(),
-                    path: format!("/p{id}"),
-                    agent: (id == "%2").then(|| "claude".into()),
-                })
-                .into(),
-            ..Window::default()
-        };
-        let restore = |id: &str, open: &[&str]| {
-            let entry = Closed {
-                id: id.into(),
-                session: Session {
-                    windows: vec![window.clone()],
-                    ..Session::default()
-                },
-                ..Closed::default()
-            };
-            let live = Live {
-                ids: open.iter().map(|id| id.to_string()).collect(),
-                ..Live::default()
-            };
-            let mut log = Vec::new();
-            replay_pane(&entry, &live, |_| Some("claude -c".into()), &mut |cmd| {
-                log.push(cmd.join(" "));
-                Some("%9".into())
-            });
-            log
-        };
-        assert_eq!(
-            restore("%2", &["@4", "%1", "%3"]),
-            [
-                "split-window -d -t %1 -c /p%2 -P -F #{pane_id}",
-                "select-layout -t @4 L",
-                "send-keys -t %9 -l claude -c",
-                "send-keys -t %9 Enter",
-            ]
-        );
-        assert_eq!(
-            restore("%1", &["@4", "%3"])[0],
-            "split-window -d -b -t %3 -c /p%1 -P -F #{pane_id}",
-            "first pane goes before the next open one"
-        );
-        assert_eq!(
-            restore("%3", &["@4"])[0],
-            "split-window -d -t @4 -c /p%3 -P -F #{pane_id}",
-            "no saved neighbour left: split the window"
-        );
-    }
-
-    #[test]
-    fn restore_replays_a_session_or_a_window_into_its_live_session() {
-        let replayed = |session: &Session, live: &HashSet<(String, u32)>| {
-            let mut log = Vec::new();
-            let snap = Snapshot {
-                sessions: vec![session.clone()],
-                ..Snapshot::default()
-            };
-            replay(&snap, live, |_| None, &mut |cmd: &[String]| {
-                log.push(cmd.join(" "));
-                Some(
-                    if cmd[0] == "split-window" {
-                        "%9"
-                    } else {
-                        "3 %8"
-                    }
-                    .into(),
-                )
-            });
-            log
-        };
-        let mut session = sample("1|1").sessions.remove(0);
-        session.windows[0].index = 3;
-        session.windows[0].sidebar = false;
-        assert_eq!(
-            replayed(&session, &HashSet::from([("work".to_string(), 0)])),
-            [
-                "new-window -d -t =work:3 -c /repo -P -F #{window_index} #{pane_id} -n editor",
-                "split-window -t %8 -c /tmp -P -F #{pane_id}",
-                "select-layout -t %8 abcd,80x24,0,0,1",
-            ]
-        );
-        // A right-hand sidebar's cell is last in layout order, so its
-        // placeholder is split off after the saved panes.
-        session.windows[0].sidebar = true;
-        session.windows[0].sidebar_right = true;
-        assert_eq!(
-            replayed(&session, &HashSet::from([("work".to_string(), 0)])),
-            [
-                "new-window -d -t =work:3 -c /repo -P -F #{window_index} #{pane_id} -n editor",
-                "split-window -t %8 -c /tmp -P -F #{pane_id}",
-                "split-window -t %9 -P -F #{pane_id}",
-                "select-layout -t %8 abcd,80x24,0,0,1",
-                "kill-pane -t %9",
-            ]
-        );
-        assert_eq!(
-            replayed(&session, &HashSet::new())[0],
-            "new-session -d -s work -c /repo -P -F #{window_index} #{pane_id} -n editor"
-        );
     }
 }

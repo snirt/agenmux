@@ -34,7 +34,8 @@ pub struct AppConfig {
     pub sources: BTreeMap<String, String>,
 }
 
-const OPTIONS: &[&str] = &[
+/// Setting names a live `@agenmux-<name>` override may carry.
+pub(crate) const OPTIONS: &[&str] = &[
     "display",
     "width",
     "height",
@@ -364,43 +365,9 @@ pub fn snapshot() -> Result<&'static FileConfig, ConfigError> {
     FILE.get_or_init(load).as_ref().map_err(Clone::clone)
 }
 
-/// The option `config reload` bumps. Long-lived views watch it rather than the
-/// file: one explicit signal beats polling the filesystem, and it reaches the
-/// daemon and any popup at once.
-pub const RELOAD_OPTION: &str = "@agenmux-reload";
-
-/// Presence is read separately from raw values: tmux's quoted list output is
-/// not a serialization format for arbitrary option values.
-pub fn read_options(
-    mut run: impl FnMut(&str) -> Result<String, crate::tmux::TmuxError>,
-) -> Result<BTreeMap<String, String>, ConfigError> {
-    let io = |_| ConfigError {
-        location: "<tmux>".into(),
-        field: "options".into(),
-        reason: "cannot read application options".into(),
-        read_error: true,
-    };
-    let listed = run("show-options -g").map_err(io)?;
-    let present: HashSet<_> = listed
-        .lines()
-        .filter_map(|l| l.split_whitespace().next())
-        .collect();
-    let mut options = BTreeMap::new();
-    for prefix in ["@agenmux-", "@agents-mon-"] {
-        for suffix in OPTIONS {
-            let name = format!("{prefix}{suffix}");
-            if present.contains(name.as_str()) {
-                let value = run(&format!("show-option -gqv {name}")).map_err(io)?;
-                options.insert(name, value.strip_suffix('\n').unwrap_or(&value).to_owned());
-            }
-        }
-    }
-    Ok(options)
-}
 pub fn current(cli: Option<&str>) -> Result<AppConfig, ConfigError> {
     let file = snapshot()?;
-    let options =
-        read_options(|cmd| crate::tmux::command(&cmd.split_whitespace().collect::<Vec<_>>()))?;
+    let options = crate::mux::options()?;
     resolve_cli(file, &options, cli)
 }
 
@@ -445,7 +412,7 @@ impl LiveConfig {
     }
     /// Invalid overrides retain the entire last valid snapshot. At most 16
     /// distinct diagnostics per process.
-    pub fn refresh(&mut self, tmux: &mut crate::tmux::Tmux) -> Refreshed {
+    pub fn refresh(&mut self, mux: &mut dyn crate::mux::Multiplexer) -> Refreshed {
         if self.last_read.elapsed() < std::time::Duration::from_millis(200) {
             return Refreshed::default();
         }
@@ -453,11 +420,7 @@ impl LiveConfig {
         // A bumped token means someone ran `config reload`: re-read the file
         // once for that token. A rejected file keeps the last valid one, and
         // the token still advances so one bad edit cannot re-report forever.
-        let token = tmux
-            .run(&format!("show-option -gqv {RELOAD_OPTION}"))
-            .ok()
-            .map(|value| value.trim_end_matches('\n').to_owned())
-            .filter(|value| !value.is_empty());
+        let token = mux.reload_token();
         let mut reloaded = false;
         if token != self.reload_token {
             self.reload_token = token;
@@ -469,12 +432,13 @@ impl LiveConfig {
                 Err(e) => self.report(&e),
             }
         }
-        let next = read_options(|cmd| tmux.run(cmd))
+        let next = mux
+            .options()
             .and_then(|options| resolve_cli(&self.file, &options, self.cli_mode.as_deref()));
         let reported = self.reported.len();
         let width_changed = self.accept(next);
-        if self.reported.len() != reported {
-            let _ = tmux.run("display-message 'agenmux: invalid live application configuration; keeping last valid settings. Run agenmux config check --effective for details.'");
+        if let Some(tmux) = mux.as_tmux().filter(|_| self.reported.len() != reported) {
+            tmux.display("agenmux: invalid live application configuration; keeping last valid settings. Run agenmux config check --effective for details.");
         }
         Refreshed {
             width_changed,
@@ -528,15 +492,13 @@ pub fn reload(plugin_dir: &Path) -> i32 {
             return e.exit_code();
         }
     };
-    let options =
-        match read_options(|cmd| crate::tmux::command(&cmd.split_whitespace().collect::<Vec<_>>()))
-        {
-            Ok(options) => options,
-            Err(e) => {
-                eprintln!("agenmux: {e}");
-                return e.exit_code();
-            }
-        };
+    let options = match crate::mux::options() {
+        Ok(options) => options,
+        Err(e) => {
+            eprintln!("agenmux: {e}");
+            return e.exit_code();
+        }
+    };
     let config = match resolve(&file, &options) {
         Ok(config) => config,
         Err(e) => {
@@ -544,9 +506,7 @@ pub fn reload(plugin_dir: &Path) -> i32 {
             return e.exit_code();
         }
     };
-    let installed =
-        crate::tmux::command(&["show-option", "-gqv", "@agenmux-nav-version"]).unwrap_or_default();
-    let reinstalled = installed.trim_end() != crate::setup::nav_version(&config);
+    let reinstalled = crate::setup::bindings_stale(&config);
     if reinstalled {
         if crate::setup::run_config(plugin_dir, &config) != 0 {
             return 1;
@@ -558,7 +518,7 @@ pub fn reload(plugin_dir: &Path) -> i32 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos().to_string())
         .unwrap_or_else(|_| "reload".into());
-    if crate::tmux::command_status(&["set-option", "-g", RELOAD_OPTION, &token]).is_err() {
+    if crate::mux::publish_reload(&token).is_err() {
         eprintln!("agenmux: cannot publish the reload signal");
         return 1;
     }
@@ -781,5 +741,15 @@ mod tests {
         let candidate = live.resolve(&file, &Default::default()).unwrap();
         assert_eq!(candidate.mode, DisplayMode::Popup);
         assert_eq!(candidate.sources["display.mode"], "CLI");
+    }
+
+    #[test]
+    fn live_settings_follow_the_backend_overrides() {
+        let mut mux = crate::mux::fake::FakeMux::default();
+        mux.options.insert("@agenmux-width".into(), "42".into());
+        let mut live = LiveConfig::new(resolve(&Default::default(), &BTreeMap::new()).unwrap());
+        let refreshed = live.refresh(&mut mux);
+        assert_eq!(live.settings.sidebar_width, 42);
+        assert!(refreshed.width_changed && !refreshed.reloaded);
     }
 }

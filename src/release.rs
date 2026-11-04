@@ -1,4 +1,5 @@
-use crate::{panes, tmux};
+use crate::mux::tmux;
+use crate::panes;
 use std::cmp::Ordering;
 use std::ffi::OsStr;
 use std::fs;
@@ -233,7 +234,7 @@ pub(crate) fn manifest_tag(plugin_dir: &Path) -> Option<String> {
 }
 
 pub(crate) fn note(message: &str) {
-    if !success("tmux", &["display-message", &format!("agenmux: {message}")]) {
+    if tmux::command_status(&["display-message", &format!("agenmux: {message}")]).is_err() {
         println!("agenmux: {message}");
     }
 }
@@ -550,7 +551,7 @@ fn tmux_option(name: &str) -> String {
 }
 
 fn tmux_running() -> bool {
-    success("tmux", &["info"])
+    tmux::command_status(&["info"]).is_ok()
 }
 
 fn wait_for_client(name: &str) {

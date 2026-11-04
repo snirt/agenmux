@@ -109,3 +109,30 @@ startup cost does not grow with hidden-window count. Each pane runs a lightweigh
 input reader for terminal paste; the single daemon scans the global inventory
 and sends frames only to panes visible in attached clients. With every client
 detached, one active pane stays warm for the next attach.
+
+## Multiplexer backends
+
+The scan, sidebar, daemon, overlays, snapshot and live settings reach the
+server only through the `Multiplexer` trait in `src/mux/mod.rs`. tmux is the
+one implementation (`src/mux/tmux.rs`, with its control-mode client in
+`src/mux/tmux/control.rs`). A backend answers questions and performs primitive
+actions; deciding what to scan, when to rescan, widths, ownership and undo
+stays in shared code.
+
+To add a backend:
+
+- Implement every trait method. None has a default except `as_tmux`, so a
+  missing feature fails to compile instead of silently doing nothing. Ids are
+  opaque strings; only the backend that issued one reads meaning into it.
+- Answer the connectionless functions next to the trait (`runtime_dir`,
+  `own_pane`, `options`, `publish_reload`, `owner`) for commands that hold no
+  connection.
+- Return `None` from `as_tmux`: tmux-only features (key tables, popups,
+  header colors, docking) then skip themselves.
+- Test only the translation: commands built, replies parsed. Shared behaviour
+  is tested once against the in-memory backend in `src/mux/fake.rs`.
+
+The modules that run only from tmux bindings and hooks (`setup.rs`,
+`toggle.rs`, `panes.rs`, and the tmux entry points in `input.rs`, `release.rs`
+and `notifications.rs`) call `mux::tmux` directly. `tests/mux-boundary.sh`
+keeps every other module off tmux.

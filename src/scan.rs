@@ -2,8 +2,8 @@
 // Output contract: byte-identical to `scan.sh list` / `scan.sh status`.
 use crate::app_config::Glyphs;
 use crate::conf::AgentConf;
+use crate::mux::{self, Multiplexer};
 use crate::procs::{self, IdentCache, Snapshot};
-use crate::tmux::{Tmux, TmuxError};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -52,8 +52,8 @@ impl ScreenCache {
         key: ScreenKey,
         force: bool,
         now: Instant,
-        capture: impl FnOnce() -> Result<String, TmuxError>,
-    ) -> Result<(String, bool), TmuxError> {
+        capture: impl FnOnce() -> Result<String, mux::Error>,
+    ) -> Result<(String, bool), mux::Error> {
         let reusable = !force
             && self.panes.get(&key.pane).is_some_and(|cached| {
                 cached.key == key
@@ -149,84 +149,25 @@ pub struct ScanSnapshot {
     pub agents: Vec<PaneRow>,
 }
 
-struct ParsedPane {
-    meta: PaneMeta,
-    pid: u32,
-    width: usize,
-    height: usize,
-}
-
-// tmux 3.7 can render tabs and non-ASCII format separators as underscores; keep
-// machine-readable tmux formats on a printable ASCII delimiter.
-const LIST_FMT: &str = "list-panes -a -F '#{session_id}|#{session_name}|#{window_id}|#{window_index}|#{window_name}|#{pane_id}|#{pane_index}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_title}|#{@agenmux}'";
-
-fn valid_tmux_id(value: &str, prefix: char) -> bool {
-    value
-        .strip_prefix(prefix)
-        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
-}
-
-fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
-    rows.lines()
-        .filter_map(|line| {
-            let separator = if line.contains('|') { '|' } else { '\t' };
-            let fields = line.splitn(13, separator).collect::<Vec<_>>();
-            let [session_id, session_name, window_id, window_index, window_name, pane, pane_index, pid, command, path, width, height, title_and_marked] =
-                fields.as_slice()
-            else {
-                return None;
-            };
-            let (pane_title, marked) = title_and_marked.rsplit_once(separator)?;
-            if !valid_tmux_id(session_id, '$')
-                || !valid_tmux_id(window_id, '@')
-                || !valid_tmux_id(pane, '%')
-            {
-                return None;
-            }
-            let window_index = window_index.parse().ok()?;
-            let pane_index = pane_index.parse().ok()?;
-            let pid = pid.parse().ok()?;
-            let width = width.parse().ok()?;
-            let height = height.parse().ok()?;
-            if self_pane == Some(*pane)
-                || marked == "1"
-                || (pid == 0 && pane_title == "agenmux")
-            {
-                return None;
-            }
-            Some(ParsedPane {
-                meta: PaneMeta {
-                    pane: (*pane).to_string(),
-                    pane_index,
-                    pane_title: pane_title.to_string(),
-                    command: (*command).to_string(),
-                    path: (*path).to_string(),
-                    window_id: (*window_id).to_string(),
-                    window_index,
-                    window_name: (*window_name).to_string(),
-                    session_id: (*session_id).to_string(),
-                    session_name: (*session_name).to_string(),
-                    agent_index: None,
-                },
-                pid,
-                width,
-                height,
-            })
-        })
-        .collect()
+/// One pane as a backend lists it.
+pub struct ParsedPane {
+    pub meta: PaneMeta,
+    pub pid: u32,
+    pub width: usize,
+    pub height: usize,
 }
 
 pub fn scan(
-    tmux: &mut Tmux,
+    mux: &mut dyn Multiplexer,
     confs: &[AgentConf],
     cache: &mut IdentCache,
     subj: &mut SubjectCache,
     self_pane: Option<&str>,
-) -> Result<ScanSnapshot, TmuxError> {
+) -> Result<ScanSnapshot, mux::Error> {
     let mut screens = ScreenCache::default();
     let dirty = std::collections::HashSet::new();
     scan_cached(
-        tmux,
+        mux,
         confs,
         cache,
         subj,
@@ -245,27 +186,23 @@ pub fn scan(
 }
 
 pub fn scan_cached(
-    tmux: &mut Tmux,
+    mux: &mut dyn Multiplexer,
     confs: &[AgentConf],
     cache: &mut IdentCache,
     subj: &mut SubjectCache,
     self_pane: Option<&str>,
     screens: &mut ScreenCache,
     policy: ScanPolicy<'_>,
-) -> Result<(ScanSnapshot, ScanStats), TmuxError> {
+) -> Result<(ScanSnapshot, ScanStats), mux::Error> {
     crate::diag::begin_scan();
-    tmux.sync()?;
-    let rows = tmux.run(LIST_FMT)?;
+    let listed = mux.panes(self_pane)?;
     let mut snap: Option<Snapshot> = None;
     let mut panes = Vec::new();
     let mut agents = Vec::new();
     let mut seen = IdentCache::new();
-    let buf = format!("agenmux-{}", std::process::id());
-    let cap = std::env::temp_dir().join(&buf);
-    let mut used_buffer = false;
     let mut stats = ScanStats::default();
-    let result: Result<ScanSnapshot, TmuxError> = (|| {
-        for parsed in parse_panes(&rows, self_pane) {
+    let result: Result<ScanSnapshot, mux::Error> = (|| {
+        for parsed in listed {
             let ParsedPane {
                 mut meta,
                 pid,
@@ -309,23 +246,7 @@ pub fn scan_cached(
                 stats.deferred.insert(pane.to_string());
                 (stale.unwrap_or_default(), true)
             } else {
-                // pane content must never travel over the control pipe: a pane
-                // displaying literal "%end <t> <num>" text (logs, this plugin's
-                // own docs...) would terminate the response block early and
-                // desync every later command. Route it through a buffer + file.
-                screens.get_or_capture(key, force, policy.now, || {
-                    tmux.run(&format!("capture-pane -b '{buf}' -t '{pane}'"))?;
-                    used_buffer = true;
-                    tmux.run(&format!("save-buffer -b '{buf}' '{}'", cap.display()))?;
-                    // only pipe failures are Io: the daemon exits on Io as a desync
-                    std::fs::read(&cap)
-                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                        .map_err(|e| {
-                            let message = format!("capture file {}: {e}", cap.display());
-                            trace!("{message}");
-                            TmuxError::Error(message)
-                        })
-                })?
+                screens.get_or_capture(key, force, policy.now, || mux.capture(pane))?
             };
             if reused {
                 stats.reused += 1;
@@ -392,10 +313,6 @@ pub fn scan_cached(
         );
         Ok(ScanSnapshot { panes, agents })
     })();
-    if used_buffer {
-        let _ = tmux.run(&format!("delete-buffer -b '{buf}'"));
-        let _ = std::fs::remove_file(&cap);
-    }
     let snapshot = result?;
     subj.retain(|pane, _| seen.keys().any(|k| &k.0 == pane)); // dead panes pruned
     screens
@@ -478,67 +395,6 @@ mod tests {
     }
 
     #[test]
-    fn pane_inventory_parser_skips_malformed_and_sidebar_rows() {
-        let rows = [
-            "$1\twork\t@1\t0\teditor\t%1\t0\t101\tcodex\t/repo\t80\t24\trepo\t",
-            "$1\twork\t@1\t0\teditor\t%2\t1\t0\t\t/repo\t80\t24\tordinary\t",
-            "missing\tfields",
-            "$1\twork\t@1\tx\teditor\t%3\t2\t102\tsleep\t/repo\t80\t24\tbad window\t",
-            "$1\twork\t@1\t0\teditor\t%4\tx\t103\tsleep\t/repo\t80\t24\tbad pane\t",
-            "$1\twork\t@1\t0\teditor\t%5\t3\tnot-a-pid\tsleep\t/repo\t80\t24\tbad pid\t",
-            "1\twork\t@1\t0\teditor\t%13\t3\t109\tsleep\t/repo\t80\t24\tbad session prefix\t",
-            "$x\twork\t@1\t0\teditor\t%14\t3\t110\tsleep\t/repo\t80\t24\tbad session digits\t",
-            "$1\twork\t1\t0\teditor\t%15\t3\t111\tsleep\t/repo\t80\t24\tbad window prefix\t",
-            "$1\twork\t@x\t0\teditor\t%16\t3\t112\tsleep\t/repo\t80\t24\tbad window digits\t",
-            "$1\twork\t@1\t0\teditor\t17\t3\t113\tsleep\t/repo\t80\t24\tbad pane prefix\t",
-            "$1\twork\t@1\t0\teditor\t%x\t3\t114\tsleep\t/repo\t80\t24\tbad pane digits\t",
-            "$\twork\t@1\t0\teditor\t%18\t3\t115\tsleep\t/repo\t80\t24\tempty session id\t",
-            "$1\twork\t@\t0\teditor\t%19\t3\t116\tsleep\t/repo\t80\t24\tempty window id\t",
-            "$1\twork\t@1\t0\teditor\t%\t3\t117\tsleep\t/repo\t80\t24\tempty pane id\t",
-            "$1\twork\t@1\t0\teditor\t%6\t4\t104\tsleep\t/repo\t80\t24\ttab\tfragment\t",
-            "$1\twork\t@1\t0\teditor\t%7\t5\t105\tbroken",
-            "fragment\t/repo\tnewline\t",
-            "$1\twork\t@1\t0\teditor\t%8\t6\t106\tsleep\t/repo\t80\t24\tself\t",
-            "$1\twork\t@1\t0\teditor\t%9\t7\t0\t\t/repo\t80\t24\tmarked\t1",
-            "$1\twork\t@1\t0\teditor\t%10\t8\t0\t\t/repo\t80\t24\tagenmux\t",
-            "$1\twork\t@1\t0\teditor\t%11\t9\t107\tsleep\t/repo\t80\t24\tagenmux\t",
-            "$2\tother\t@2\t3\tserver\t%12\t4\t108\tsleep\t/tmp\t90\t25\tlater valid\t",
-        ]
-        .join("\n");
-
-        let parsed = parse_panes(&rows, Some("%8"));
-
-        assert_eq!(
-            parsed
-                .iter()
-                .map(|pane| {
-                    (
-                        pane.meta.pane.as_str(),
-                        pane.pid,
-                        pane.meta.command.as_str(),
-                    )
-                })
-                .collect::<Vec<_>>(),
-            vec![
-                ("%1", 101, "codex"),
-                ("%2", 0, ""),
-                ("%6", 104, "sleep"),
-                ("%11", 107, "sleep"),
-                ("%12", 108, "sleep"),
-            ]
-        );
-        assert_eq!(parsed[0].meta.session_id, "$1");
-        assert_eq!(parsed[0].meta.session_name, "work");
-        assert_eq!(parsed[0].meta.window_id, "@1");
-        assert_eq!(parsed[0].meta.window_index, 0);
-        assert_eq!(parsed[0].meta.window_name, "editor");
-        assert_eq!(parsed[0].meta.pane_index, 0);
-        assert_eq!(parsed[0].meta.path, "/repo");
-        assert_eq!(parsed[0].meta.pane_title, "repo");
-        assert_eq!(parsed[0].meta.agent_index, None);
-    }
-
-    #[test]
     fn segment_counts_and_omits_zeros() {
         assert_eq!(status_segment(&[], Glyphs::Rich), "");
         assert_eq!(
@@ -564,15 +420,6 @@ mod tests {
         let parsed = from_tsv(&to_tsv(&rows));
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].state, "idle");
-    }
-
-    #[test]
-    fn pane_title_keeps_embedded_tabs_as_the_final_field() {
-        let parsed = parse_panes(
-            "$1\twork\t@2\t3\twindow\t%1\t0\t42\tagent\t/work\t80\t24\ttitle\twith\ttabs\t",
-            None,
-        );
-        assert_eq!(parsed[0].meta.pane_title, "title\twith\ttabs");
     }
 
     #[test]
@@ -691,12 +538,55 @@ mod tests {
     fn failed_capture_is_returned_and_never_cached() {
         let mut cache = ScreenCache::default();
         let result = cache.get_or_capture(screen_key(), false, Instant::now(), || {
-            Err(TmuxError::Io(std::io::Error::new(
+            Err(mux::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "synthetic missing capture",
             )))
         });
-        assert!(matches!(result, Err(TmuxError::Io(_))));
+        assert!(matches!(result, Err(mux::Error::Io(_))));
         assert!(cache.panes.is_empty());
+    }
+
+    #[test]
+    fn a_scan_detects_agents_from_any_backend_and_skips_its_own_pane() {
+        use crate::mux::fake::{pane, FakeMux};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let confs = crate::conf::load_all(root);
+        let fixture = |ext| {
+            std::fs::read_to_string(
+                root.join("tests/fixtures/claude-working")
+                    .with_extension(ext),
+            )
+            .unwrap()
+        };
+        let agent = PaneMeta {
+            pane_title: fixture("title").trim_end().to_string(),
+            ..pane("$1", "@1", "%1", "claude")
+        };
+        let mut mux = FakeMux {
+            panes: vec![
+                (agent, 101),
+                (pane("$1", "@1", "%2", "agenmux"), 102),
+                (pane("$1", "@2", "%3", "zsh"), 0),
+            ],
+            screens: [("%1".to_string(), fixture("txt"))].into(),
+            ..FakeMux::default()
+        };
+        let mut idents = IdentCache::new();
+        idents.insert(("%1".into(), 101, "claude".into()), "claude".into());
+        let snapshot = scan(
+            &mut mux,
+            &confs,
+            &mut idents,
+            &mut SubjectCache::new(),
+            Some("%2"),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let panes: Vec<&str> = snapshot.panes.iter().map(|p| p.pane.as_str()).collect();
+        assert_eq!(panes, ["%1", "%3"]);
+        let [row] = &snapshot.agents[..] else {
+            panic!("{:?}", snapshot.agents.len())
+        };
+        assert_eq!((row.pane.as_str(), row.state.as_str()), ("%1", "working"));
     }
 }

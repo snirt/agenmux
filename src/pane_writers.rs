@@ -42,7 +42,7 @@ impl PaneWriter {
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
-                        && crate::tmux::poll_by(self.0.as_raw_fd(), libc::POLLOUT, deadline) => {}
+                        && crate::input::poll_by(self.0.as_raw_fd(), libc::POLLOUT, deadline) => {}
                 Err(e) => return Err(e),
             }
         }
@@ -59,7 +59,7 @@ impl PaneWriters {
     pub fn new() -> PaneWriters {
         PaneWriters {
             writers: HashMap::new(),
-            runtime: crate::tmux::runtime_dir(),
+            runtime: crate::mux::runtime_dir(),
         }
     }
 
@@ -100,16 +100,10 @@ extern "C" fn stop_pane(_: libc::c_int) {
 /// One idle reader per split pane: tmux sends terminal paste to its PTY, not
 /// to key bindings. Frames arrive on a separate FIFO from the shared daemon.
 pub(crate) fn run_pane() -> i32 {
-    let Ok(pane) = std::env::var("TMUX_PANE") else {
+    let Some(pane) = crate::mux::own_pane() else {
         return 1;
     };
-    if !pane
-        .strip_prefix('%')
-        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
-    {
-        return 1;
-    }
-    let runtime = crate::tmux::runtime_dir();
+    let runtime = crate::mux::runtime_dir();
     let path = frame_path(&runtime, &pane);
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
         return 1;

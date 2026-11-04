@@ -11,9 +11,9 @@
 use crate::app_config::{Color, KeyMode, Keymap, Palette};
 use crate::attention::Tracker;
 use crate::conf::AgentConf;
+use crate::mux::{self, Changes, Ids, Kind, Multiplexer, New};
 use crate::procs::IdentCache;
 use crate::scan::{self, PaneMeta, PaneRow};
-use crate::tmux::{command, command_status, PendingChanges, Tmux, TmuxError};
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
@@ -175,31 +175,6 @@ enum VisiblePane {
     Window(usize),
 }
 
-/// `$n`/`@n`/`%n` (see `visible_id`) as `tmux session $3` and so on.
-fn item_reference(id: &str) -> String {
-    let kind = match id.as_bytes().first() {
-        Some(b'$') => "session",
-        Some(b'@') => "window",
-        _ => "pane",
-    };
-    format!("tmux {kind} {id}")
-}
-
-/// display-message expands formats and strftime, which would eat `%12`.
-fn client_message(client: &str, message: &str) {
-    let message = format!("agenmux: {message}")
-        .replace('%', "%%")
-        .replace('#', "##");
-    let _ = command_status(&["display-message", "-c", client, "-d", "3000", &message]);
-}
-
-/// Restore's tmux runner. Plain tmux forks, like jump: their hooks' output
-/// must not reach the control pipe.
-fn run_tmux(args: &[String]) -> Option<String> {
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    command(&args).ok().map(|out| out.trim().to_string())
-}
-
 fn dispatch_mode(overlay: Option<&Overlay>, search_focused: bool) -> DispatchMode {
     if overlay.is_some() {
         DispatchMode::Overlay
@@ -223,7 +198,7 @@ fn mutation_owner(overlay: &Overlay) -> Option<&str> {
 }
 
 pub struct Sidebar {
-    tmux: Tmux,
+    mux: Box<dyn Multiplexer>,
     settings: crate::app_config::LiveConfig,
     adopted_show_all_panes: bool,
     /// Last config-derived show_all_panes value; a change means the user
@@ -288,91 +263,12 @@ pub struct Sidebar {
     overlay: Option<Overlay>,
 }
 
-fn tmux_style_color(style: &str, role: &str) -> Option<Color> {
-    let prefix = format!("{role}=");
-    let value = &style[style.find(&prefix)? + prefix.len()..];
-    if value.starts_with("default") {
-        return Some(Color::Default);
-    }
-    if let Some(index) = [
-        "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
-    ]
-    .iter()
-    .position(|name| value.starts_with(name))
-    {
-        return Some(Color::Indexed(index as u8));
-    }
-    if let Some(rest) = value
-        .strip_prefix("colour")
-        .or_else(|| value.strip_prefix("color"))
-    {
-        let digits = rest
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>();
-        return digits.parse().ok().map(Color::Indexed);
-    }
-    if value.starts_with('#')
-        && value.len() >= 7
-        && value[1..7].bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        let rgb = u32::from_str_radix(&value[1..7], 16).ok()?;
-        return Some(Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8));
-    }
-    None
-}
-
-fn apply_tmux_header(settings: &mut crate::app_config::AppConfig, active: &str, pane: &str) {
-    if settings
-        .theme
-        .colors
-        .as_ref()
-        .and_then(|colors| colors.header_bg.as_ref())
-        .is_none()
-    {
-        if let Some(color) = tmux_style_color(active, "fg") {
-            settings
-                .theme
-                .colors
-                .get_or_insert_with(Default::default)
-                .header_bg = Some(color);
-            settings.sources.insert(
-                "theme.colors.header_bg".into(),
-                "tmux pane-active-border-style fg".into(),
-            );
-        }
-    }
-    if settings
-        .theme
-        .colors
-        .as_ref()
-        .and_then(|colors| colors.header_fg.as_ref())
-        .is_none()
-    {
-        let (color, source) = tmux_style_color(active, "bg")
-            .map(|color| (color, "tmux pane-active-border-style bg"))
-            .or_else(|| tmux_style_color(pane, "bg").map(|color| (color, "tmux window-style bg")))
-            .unwrap_or((Color::Default, "terminal background"));
-        settings
-            .theme
-            .colors
-            .get_or_insert_with(Default::default)
-            .header_fg = Some(color);
-        settings
-            .sources
-            .insert("theme.colors.header_fg".into(), source.into());
-    }
-}
-
-fn inherit_tmux_header(settings: &mut crate::app_config::AppConfig) -> Option<Color> {
-    let active = std::env::var("AGENMUX_TMUX_ACTIVE_BORDER_STYLE").unwrap_or_else(|_| {
-        command(&["show-option", "-gv", "pane-active-border-style"]).unwrap_or_default()
-    });
-    let pane = std::env::var("AGENMUX_TMUX_WINDOW_STYLE")
-        .unwrap_or_else(|_| command(&["show-option", "-gv", "window-style"]).unwrap_or_default());
-    let active_border_fg = tmux_style_color(&active, "fg");
-    apply_tmux_header(settings, &active, &pane);
-    active_border_fg
+/// The tmux theme's header colors; other servers have none to inherit.
+fn inherit_tmux_header(
+    settings: &mut crate::app_config::AppConfig,
+    mux: &mut dyn Multiplexer,
+) -> Option<Color> {
+    mux.as_tmux()?.inherit_header(settings)
 }
 
 fn uses_tmux_header_contrast(settings: &crate::app_config::AppConfig) -> bool {
@@ -386,7 +282,7 @@ fn uses_tmux_header_contrast(settings: &crate::app_config::AppConfig) -> bool {
 /// The daemon is headless and owns no pane, so it MUST pass "" — inheriting
 /// TMUX_PANE from whoever pressed the toggle key hid that pane's agent.
 fn new_sidebar(
-    tmux: Tmux,
+    mut mux: Box<dyn Multiplexer>,
     plugin_dir: PathBuf,
     cache_file: PathBuf,
     rows_file: PathBuf,
@@ -400,7 +296,7 @@ fn new_sidebar(
     let update_ready = update.is_some() && update == crate::autoupdate::ready_target(&plugin_dir);
     let adopted_show_all_panes = settings.show_all_panes;
     let config_show_all = settings.show_all_panes;
-    let tmux_active_border_fg = inherit_tmux_header(&mut settings);
+    let tmux_active_border_fg = inherit_tmux_header(&mut settings, mux.as_mut());
     let header_inherited = uses_tmux_header_contrast(&settings);
     let palette = Palette::resolve(&settings.theme);
     let cached_rows = std::fs::read_to_string(&cache_file)
@@ -415,7 +311,7 @@ fn new_sidebar(
         .map(|row| (row.pane.clone(), (row.cwd.clone(), row.title.clone())))
         .collect();
     let mut sb = Sidebar {
-        tmux,
+        mux,
         palette,
         tmux_active_border_fg,
         header_inherited,
@@ -493,7 +389,7 @@ pub fn run(plugin_dir: PathBuf) -> i32 {
     };
     // Runtime paths query tmux, so resolve them only after the handlers exist.
     let cache_file = crate::scan_cache_path();
-    let self_pane = std::env::var("TMUX_PANE").unwrap_or_default();
+    let self_pane = crate::mux::own_pane().unwrap_or_default();
     let pin = crate::compat_env("AGENMUX_PIN", "AGENTS_MON_PIN").filter(|p| !p.is_empty());
     // A popup's launching toggle holds the lease; a direct sidebar takes one.
     let _lease = match pin {
@@ -506,9 +402,9 @@ pub fn run(plugin_dir: PathBuf) -> i32 {
             }
         },
     };
-    let rows_file = crate::tmux::runtime_dir().join(format!(
+    let rows_file = crate::mux::runtime_dir().join(format!(
         "agenmux-rows-{}",
-        self_pane.trim_start_matches('%')
+        self_pane.replace(|c: char| !c.is_ascii_alphanumeric(), "")
     ));
 
     if QUIT.load(Ordering::Relaxed) {
@@ -519,16 +415,16 @@ pub fn run(plugin_dir: PathBuf) -> i32 {
     print!("{E}[?25l{E}[2J");
     let _ = std::io::stdout().flush();
 
-    let tmux = match Tmux::connect_monitoring() {
+    let mux = match mux::connect(true) {
         Ok(t) => t,
         Err(_) => {
             cleanup(&rows_file, &pin);
             return 0;
         }
     };
-    let mut sb = new_sidebar(tmux, plugin_dir, cache_file, rows_file, self_pane, settings);
+    let mut sb = new_sidebar(mux, plugin_dir, cache_file, rows_file, self_pane, settings);
     crate::autoupdate::spawn_scheduler(sb.plugin_dir.clone());
-    sb.snapshot = crate::snapshot::Store::open(&mut sb.tmux);
+    sb.snapshot = crate::snapshot::Store::open(sb.mux.as_mut());
     sb.pin = pin;
     // tty mode is the popup: while it is visible it owns input.
     sb.plugin_selected = true;
@@ -614,7 +510,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         {
             // Consume first: output observed by command-response reads during
             // this scan belongs to the next pass.
-            let mut changes = sb.tmux.take_pending_changes();
+            let mut changes = sb.mux.take_changes();
             let mut geometry_changed = false;
             // Repaint for layout changes before scanning pane screens. Screen
             // capture can take long enough to leave the old geometry visible.
@@ -632,17 +528,17 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             // cursor must not wait behind them. Deferred panes stay pending
             // and reach the next output scan under its usual throttle.
             if !periodic && changes.focus && !changes.full {
-                sb.tmux.defer_output(std::mem::take(&mut changes.panes));
+                sb.mux.defer_output(std::mem::take(&mut changes.panes));
             }
             match sb.scan_tick(periodic, &changes) {
                 Ok(()) => {}
                 // a pipe I/O error can leave a response block half-read —
                 // the pipe is desynced, restarting is the only safe move
-                Err(e @ TmuxError::Exited) | Err(e @ TmuxError::Io(_)) => {
+                Err(e @ mux::Error::Exited) | Err(e @ mux::Error::Io(_)) => {
                     trace!("scan ended the daemon: {e}");
                     break;
                 }
-                Err(TmuxError::Error(_)) => {} // e.g. pane died mid-scan
+                Err(mux::Error::Failed(_)) => {} // e.g. pane died mid-scan
             }
             if sb.daemon.is_some() && sb.superseded() {
                 return true; // a newer daemon owns the panes now
@@ -710,11 +606,16 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         if let Some(deadline) = sb.key_sequence.deadline(sequence_timeout) {
             wake = wake.min(deadline.saturating_duration_since(now));
         }
-        let (key_ready, pipe_ready) = poll_inputs(key_fd, sb.tmux.fd(), sb.tmux.buffered(), wake);
+        let (key_ready, pipe_ready) = poll_inputs(
+            key_fd,
+            sb.mux.events_fd().unwrap_or(-1),
+            sb.mux.events_buffered(),
+            wake,
+        );
         if pipe_ready {
             // focus notification (%window-pane-changed etc.) — rescan now so
             // the cursor snaps to the newly focused pane without the 2s wait
-            match sb.tmux.drain_notifications() {
+            match sb.mux.drain_events() {
                 Ok(true) => scans.request_immediate(),
                 Ok(false) => {}
                 Err(_) => break,
@@ -1158,21 +1059,36 @@ impl Sidebar {
         }
         let reference = ids
             .iter()
-            .map(|id| item_reference(id))
+            .map(|id| self.mux.reference(self.kind_of(id), id))
             .collect::<Vec<_>>()
             .join("\n");
-        let mut args = vec!["set-buffer", "-w"];
-        if let Some(client) = &client {
-            args.extend(["-t", client]);
-        }
-        args.extend(["--", &reference]);
-        let message = match command_status(&args) {
-            Ok(()) if ids.len() > 1 => format!("copied {} references", ids.len()),
-            Ok(()) => format!("copied {reference}"),
+        let message = match self.mux.copy(client.as_deref(), &reference) {
+            Ok(escape) => {
+                if let Some(escape) = escape {
+                    print!("{escape}");
+                    let _ = std::io::stdout().flush();
+                }
+                if ids.len() > 1 {
+                    format!("copied {} references", ids.len())
+                } else {
+                    format!("copied {reference}")
+                }
+            }
             Err(error) => format!("copy failed: {error}"),
         };
         if let Some(client) = &client {
-            client_message(client, &message);
+            self.mux.message(client, &message);
+        }
+    }
+
+    /// Which record a row id names.
+    fn kind_of(&self, id: &str) -> Kind {
+        if self.panes.iter().any(|pane| pane.session_id == id) {
+            Kind::Session
+        } else if self.panes.iter().any(|pane| pane.window_id == id) {
+            Kind::Window
+        } else {
+            Kind::Pane
         }
     }
 
@@ -1214,112 +1130,21 @@ impl Sidebar {
     fn enter_mutation_input(&mut self, client: &str) {
         trace!("mutation input on for {client}");
         self.follow_selection = true;
-        if self.daemon.is_some() {
-            let _ = crate::tmux::command_status(&[
-                "switch-client",
-                "-c",
-                client,
-                "-T",
-                crate::setup::SEARCH_TABLE,
-            ]);
+        if let Some(tmux) = self.daemon.as_ref().and(self.mux.as_tmux()) {
+            tmux.key_table(client, crate::setup::SEARCH_TABLE);
         }
     }
 
-    fn restore_mutation_input(&self, client: &str) {
+    fn restore_mutation_input(&mut self, client: &str) {
         trace!("mutation input off for {client}");
-        if self.daemon.is_some() {
-            let _ = crate::tmux::command_status(&[
-                "switch-client",
-                "-c",
-                client,
-                "-T",
-                crate::setup::NORMAL_TABLE,
-            ]);
+        if let Some(tmux) = self.daemon.as_ref().and(self.mux.as_tmux()) {
+            tmux.key_table(client, crate::setup::NORMAL_TABLE);
         }
     }
 
     fn mutation_error(&mut self, client: &str, message: &str) {
         self.refresh_requested = true;
-        client_message(client, message);
-    }
-
-    fn revalidated_launcher_cwd(target: &LauncherTarget) -> Result<String, TmuxError> {
-        let response = crate::tmux::command(&[
-            "display-message",
-            "-p",
-            "-t",
-            &target.pane_id,
-            "#{pane_id}|#{window_id}|#{session_id}|#{pane_current_path}",
-        ])?;
-        Self::parse_launcher_cwd(target, &response)
-    }
-
-    fn launcher_session_cwd(target: &LauncherTarget) -> Result<String, TmuxError> {
-        let cwd = crate::tmux::command(&[
-            "display-message",
-            "-p",
-            "-t",
-            &target.session_id,
-            "#{session_path}",
-        ])?;
-        let cwd = cwd.trim_end_matches(['\n', '\r']);
-        if cwd.is_empty() {
-            return Err(TmuxError::Error(
-                "target session has no working directory".into(),
-            ));
-        }
-        Ok(cwd.to_string())
-    }
-
-    fn parse_launcher_cwd(target: &LauncherTarget, response: &str) -> Result<String, TmuxError> {
-        let response = response.strip_suffix('\n').unwrap_or(response);
-        let mut fields = response.splitn(4, '|');
-        let (Some(pane), Some(window), Some(session), Some(cwd)) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
-            return Err(TmuxError::Error(
-                "selected pane changed before launcher start".into(),
-            ));
-        };
-        if pane != target.pane_id || window != target.window_id || session != target.session_id {
-            return Err(TmuxError::Error(
-                "selected pane changed before launcher start".into(),
-            ));
-        }
-        if cwd.is_empty() {
-            return Err(TmuxError::Error(
-                "selected pane has no working directory".into(),
-            ));
-        }
-        Ok(cwd.to_string())
-    }
-
-    fn show_created_launcher(&self, client: &str, pane: &str) -> Result<(), TmuxError> {
-        let location = crate::tmux::command(&[
-            "display-message",
-            "-p",
-            "-t",
-            pane,
-            "#{session_id}|#{window_id}|#{pane_id}",
-        ])?;
-        let mut fields = location.trim_end_matches(['\n', '\r']).split('|');
-        let (Some(session), Some(window), Some(actual_pane)) =
-            (fields.next(), fields.next(), fields.next())
-        else {
-            return Err(TmuxError::Error(
-                "created launcher has no tmux location".into(),
-            ));
-        };
-        if actual_pane != pane {
-            return Err(TmuxError::Error(
-                "launcher target changed before client switch".into(),
-            ));
-        }
-        crate::tmux::command_status(&["switch-client", "-c", client, "-t", session])?;
-        crate::tmux::command_status(&["select-window", "-t", window])?;
-        crate::tmux::command_status(&["select-pane", "-t", pane])?;
-        crate::tmux::command_status(&["switch-client", "-c", client, "-T", "root"])?;
-        Ok(())
+        self.mux.message(client, message);
     }
 
     fn execute_quick_launcher(
@@ -1327,7 +1152,12 @@ impl Sidebar {
         target: &LauncherTarget,
         launcher: &crate::app_config::QuickLauncher,
     ) -> DispatchResult {
-        let selected_cwd = match Self::revalidated_launcher_cwd(target) {
+        let ids = Ids {
+            session: &target.session_id,
+            window: &target.window_id,
+            pane: &target.pane_id,
+        };
+        let selected_cwd = match self.mux.pane_cwd(ids) {
             Ok(cwd) => cwd,
             Err(error) => {
                 self.mutation_error(&target.client, &error.to_string());
@@ -1337,7 +1167,7 @@ impl Sidebar {
         let cwd = match launcher.working_directory {
             crate::app_config::LauncherWorkingDirectory::Selected => selected_cwd,
             crate::app_config::LauncherWorkingDirectory::Tmux => {
-                match Self::launcher_session_cwd(target) {
+                match self.mux.session_cwd(&target.session_id) {
                     Ok(cwd) => cwd,
                     Err(error) => {
                         self.mutation_error(&target.client, &error.to_string());
@@ -1346,13 +1176,15 @@ impl Sidebar {
                 }
             }
         };
-        let session = format!("{}:", target.session_id);
-        let mut args = vec!["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", &session];
-        args.extend(["-c", cwd.as_str()]);
-        args.push(&launcher.command);
-        args.extend(launcher.args.iter().map(String::as_str));
-        let pane = match crate::tmux::command(&args) {
-            Ok(output) => output.trim().to_string(),
+        let mut argv = vec![launcher.command.as_str()];
+        argv.extend(launcher.args.iter().map(String::as_str));
+        let launch = New::Launch {
+            session: &target.session_id,
+            cwd: &cwd,
+            argv: &argv,
+        };
+        let pane = match self.mux.create(launch) {
+            Ok(pane) => pane,
             Err(error) => {
                 self.mutation_error(&target.client, &error.to_string());
                 return DispatchResult::Continue;
@@ -1360,7 +1192,7 @@ impl Sidebar {
         };
         self.refresh_requested = true;
         self.pending_select = Some((pane.clone(), Instant::now()));
-        if let Err(error) = self.show_created_launcher(&target.client, &pane) {
+        if let Err(error) = self.mux.show(&target.client, &pane, false) {
             self.mutation_error(
                 &target.client,
                 &format!("launched, but could not focus the new window: {error}"),
@@ -1374,124 +1206,37 @@ impl Sidebar {
         }
     }
 
-    fn target_is_live(target: &MutationTarget) -> bool {
-        let (tmux_target, format, expected) = match target.action {
+    /// What `target` must still name for its action to run.
+    fn live_kind(action: SequenceAction) -> Option<Option<Kind>> {
+        match action {
             SequenceAction::CreateWindow
             | SequenceAction::CreateSession
-            | SequenceAction::Rename => (
-                target.pane_id.as_str(),
-                "#{pane_id}|#{window_id}|#{session_id}",
-                format!(
-                    "{}|{}|{}",
-                    target.pane_id, target.window_id, target.session_id
-                ),
-            ),
-            SequenceAction::DeletePane | SequenceAction::RenamePane => (
-                target.pane_id.as_str(),
-                "#{pane_id}",
-                target.pane_id.clone(),
-            ),
-            SequenceAction::DeleteWindow | SequenceAction::RenameWindow => (
-                target.window_id.as_str(),
-                "#{window_id}",
-                target.window_id.clone(),
-            ),
-            SequenceAction::DeleteSession | SequenceAction::RenameSession => (
-                target.session_id.as_str(),
-                "#{session_id}",
-                target.session_id.clone(),
-            ),
-            SequenceAction::First | SequenceAction::Delete | SequenceAction::Copy => return false,
-        };
-        crate::tmux::command(&["display-message", "-p", "-t", tmux_target, format])
-            .is_ok_and(|actual| actual.trim() == expected)
+            | SequenceAction::Rename => Some(None),
+            SequenceAction::DeletePane | SequenceAction::RenamePane => Some(Some(Kind::Pane)),
+            SequenceAction::DeleteWindow | SequenceAction::RenameWindow => Some(Some(Kind::Window)),
+            SequenceAction::DeleteSession | SequenceAction::RenameSession => {
+                Some(Some(Kind::Session))
+            }
+            SequenceAction::First | SequenceAction::Delete | SequenceAction::Copy => None,
+        }
     }
 
     /// Show the created target in the client without leaving the sidebar:
     /// the client moves to its session and window, then lands on the sidebar
     /// pane there so the next key still navigates the plugin.
-    fn show_created_pane(&self, client: &str, pane: &str) -> Result<(), crate::tmux::TmuxError> {
-        let location = crate::tmux::command(&[
-            "display-message",
-            "-p",
-            "-t",
-            pane,
-            "#{session_id}|#{window_id}|#{pane_id}",
-        ])?;
-        let mut fields = location.trim().split('|');
-        let (Some(session), Some(window), Some(actual_pane)) =
-            (fields.next(), fields.next(), fields.next())
-        else {
-            return Err(crate::tmux::TmuxError::Error(
-                "created target has no tmux location".into(),
-            ));
-        };
-        if actual_pane != pane {
-            return Err(crate::tmux::TmuxError::Error(
-                "created target changed before client switch".into(),
-            ));
-        }
-        crate::tmux::command_status(&["switch-client", "-c", client, "-t", session])?;
-        crate::tmux::command_status(&["select-window", "-t", window])?;
-        self.focus_sidebar(client, Some(window));
+    fn show_created_pane(&mut self, client: &str, pane: &str) -> Result<(), mux::Error> {
+        let window = self.mux.show(client, pane, true)?;
+        self.focus_sidebar(client, Some(&window));
         Ok(())
     }
 
     /// Put the client on the sidebar pane of its current window and back in
-    /// the plugin key table. A window this sidebar just created gets its pane
-    /// from the background pane-add hook, so wait briefly for it to appear.
-    fn focus_sidebar(&self, client: &str, expected_window: Option<&str>) {
+    /// the plugin key table.
+    fn focus_sidebar(&mut self, client: &str, expected_window: Option<&str>) {
         if self.daemon.is_none() {
             return; // the popup already owns the client's input
         }
-        let deadline = Instant::now() + Duration::from_millis(1500);
-        let location = format!("#{{window_id}}|#{{?{},1,0}}", crate::panes::IS_SIDEBAR);
-        let client_filter = format!("#{{==:#{{client_name}},{client}}}");
-        let mut reached_expected = expected_window.is_none();
-        loop {
-            let Ok(location) =
-                crate::tmux::command(&["list-clients", "-f", &client_filter, "-F", &location])
-            else {
-                break;
-            };
-            let (window, on_sidebar) = location.trim().split_once('|').unwrap_or(("", "0"));
-            // Creation names the exact destination. Wait for tmux to publish the
-            // completed switch; only treat a later move away as user intent.
-            if let Some(expected) = expected_window {
-                if window == expected {
-                    reached_expected = true;
-                } else if reached_expected {
-                    break;
-                } else if Instant::now() >= deadline {
-                    break;
-                } else {
-                    std::thread::sleep(Duration::from_millis(50));
-                    continue;
-                }
-            }
-            if expected_window.is_none() && on_sidebar == "1" {
-                break; // already there: never fight a newer focus change
-            }
-            let sidebar = crate::tmux::command(&[
-                "list-panes",
-                "-t",
-                window,
-                "-f",
-                crate::panes::IS_SIDEBAR,
-                "-F",
-                "#{pane_id}",
-            ])
-            .ok()
-            .and_then(|panes| panes.lines().next().map(str::to_string));
-            if let Some(pane) = sidebar {
-                let _ = crate::tmux::command_status(&["switch-client", "-c", client, "-t", &pane]);
-                break;
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        self.mux.focus_sidebar(client, expected_window);
         self.restore_mutation_input(client);
     }
 
@@ -1501,118 +1246,47 @@ impl Sidebar {
             self.refresh_requested = true;
             return DispatchResult::Continue;
         }
-        if !Self::target_is_live(target) {
+        let ids = Ids {
+            session: &target.session_id,
+            window: &target.window_id,
+            pane: &target.pane_id,
+        };
+        let live = Self::live_kind(target.action).is_some_and(|kind| self.mux.is_live(kind, ids));
+        if !live {
             self.mutation_error(&target.client, "target changed; nothing was modified");
             return DispatchResult::Continue;
         }
         let name = name.trim();
         let result = match target.action {
-            SequenceAction::CreateWindow => {
-                let session = format!("{}:", target.session_id);
-                let mut args = vec!["new-window", "-d", "-P", "-F", "#{pane_id}"];
-                if !name.is_empty() {
-                    args.extend(["-n", name]);
-                }
-                args.extend(["-t", session.as_str(), "-c", target.cwd.as_str()]);
-                crate::tmux::command(&args)
-            }
-            SequenceAction::CreateSession => {
-                let mut args = vec!["new-session", "-d", "-P", "-F", "#{pane_id}"];
-                if !name.is_empty() {
-                    args.extend(["-s", name]);
-                }
-                args.extend(["-c", target.cwd.as_str()]);
-                crate::tmux::command(&args)
-            }
-            SequenceAction::RenamePane => {
+            SequenceAction::CreateWindow => self.mux.create(New::Window {
+                session: &target.session_id,
+                name,
+                cwd: &target.cwd,
+            }),
+            SequenceAction::CreateSession => self.mux.create(New::Session {
+                name,
+                cwd: &target.cwd,
+            }),
+            SequenceAction::RenamePane
+            | SequenceAction::RenameWindow
+            | SequenceAction::RenameSession => {
                 if name.is_empty() {
                     return DispatchResult::Continue;
                 }
-                crate::tmux::command(&["select-pane", "-t", &target.pane_id, "-T", name])
+                let kind = match target.action {
+                    SequenceAction::RenamePane => Kind::Pane,
+                    SequenceAction::RenameWindow => Kind::Window,
+                    _ => Kind::Session,
+                };
+                self.mux.rename(kind, ids, name).map(|()| String::new())
             }
-            SequenceAction::RenameWindow => {
-                if name.is_empty() {
-                    return DispatchResult::Continue;
-                }
-                let _ = crate::tmux::command_status(&[
-                    "set-window-option",
-                    "-t",
-                    &target.window_id,
-                    "automatic-rename",
-                    "off",
-                ]);
-                crate::tmux::command(&["rename-window", "-t", &target.window_id, name])
+            SequenceAction::DeletePane => self.mux.delete(Kind::Pane, ids).map(|()| String::new()),
+            SequenceAction::DeleteWindow => {
+                self.mux.delete(Kind::Window, ids).map(|()| String::new())
             }
-            SequenceAction::RenameSession => {
-                if name.is_empty() {
-                    return DispatchResult::Continue;
-                }
-                crate::tmux::command(&["rename-session", "-t", &target.session_id, name])
+            SequenceAction::DeleteSession => {
+                self.mux.delete(Kind::Session, ids).map(|()| String::new())
             }
-            SequenceAction::DeletePane => (|| -> Result<String, TmuxError> {
-                let not_sidebar = format!("#{{?{},0,1}}", crate::panes::IS_SIDEBAR);
-                let panes = crate::tmux::command(&[
-                    "list-panes",
-                    "-s",
-                    "-t",
-                    &target.session_id,
-                    "-f",
-                    &not_sidebar,
-                    "-F",
-                    "#{pane_id}",
-                ])?;
-                if panes.lines().count() <= 1 {
-                    return Err(TmuxError::Error(
-                        "cannot delete the last pane in a tmux session; delete the session explicitly"
-                            .into(),
-                    ));
-                }
-                crate::tmux::command(&["kill-pane", "-t", &target.pane_id])
-            })(),
-            SequenceAction::DeleteWindow => (|| -> Result<String, TmuxError> {
-                let windows = crate::tmux::command(&[
-                    "list-windows",
-                    "-t",
-                    &target.session_id,
-                    "-F",
-                    "#{window_id}",
-                ])?;
-                if windows.lines().count() <= 1 {
-                    return Err(TmuxError::Error(
-                        "cannot delete the last window in a tmux session; delete the session explicitly"
-                            .into(),
-                    ));
-                }
-                crate::tmux::command(&["kill-window", "-t", &target.window_id])
-            })(),
-            SequenceAction::DeleteSession => (|| -> Result<String, TmuxError> {
-                let sessions = crate::tmux::command(&["list-sessions", "-F", "#{session_id}"])?;
-                let fallback = sessions
-                    .lines()
-                    .find(|session| *session != target.session_id)
-                    .ok_or_else(|| {
-                        TmuxError::Error(
-                            "cannot delete the last tmux session; nothing was modified".into(),
-                        )
-                    })?;
-                let clients =
-                    crate::tmux::command(&["list-clients", "-F", "#{client_name}|#{session_id}"])?;
-                for line in clients.lines() {
-                    let Some((client, session)) = line.split_once('|') else {
-                        continue;
-                    };
-                    if session == target.session_id {
-                        crate::tmux::command_status(&[
-                            "switch-client",
-                            "-c",
-                            client,
-                            "-t",
-                            fallback,
-                        ])?;
-                    }
-                }
-                crate::tmux::command(&["kill-session", "-t", &target.session_id])
-            })(),
             SequenceAction::First
             | SequenceAction::Rename
             | SequenceAction::Delete
@@ -1664,7 +1338,8 @@ impl Sidebar {
         if !refreshed.reloaded {
             return;
         }
-        self.tmux_active_border_fg = inherit_tmux_header(&mut self.settings.settings);
+        self.tmux_active_border_fg =
+            inherit_tmux_header(&mut self.settings.settings, self.mux.as_mut());
         self.header_inherited = uses_tmux_header_contrast(&self.settings.settings);
         self.palette = Palette::resolve(&self.settings.settings.theme);
         self.normal_keys = self.settings.settings.normal.clone();
@@ -1718,16 +1393,16 @@ impl Sidebar {
         }
     }
 
-    fn scan_tick(&mut self, periodic: bool, changes: &PendingChanges) -> Result<(), TmuxError> {
+    fn scan_tick(&mut self, periodic: bool, changes: &Changes) -> Result<(), mux::Error> {
         if self.daemon.is_none() {
-            let refreshed = self.settings.refresh(&mut self.tmux);
+            let refreshed = self.settings.refresh(self.mux.as_mut());
             self.adopt_reload(refreshed);
             self.sync_panes_view();
         }
         let t0 = Instant::now();
-        let covered_session = self.tmux.attached_session().map(str::to_string);
+        let covered_session = self.mux.covered_session().map(str::to_string);
         let (snapshot, stats) = scan::scan_cached(
-            &mut self.tmux,
+            self.mux.as_mut(),
             &self.confs,
             &mut self.ident,
             &mut self.subj,
@@ -1767,7 +1442,7 @@ impl Sidebar {
         );
         // Yielded panes rejoin the dirty set: has_relevant_output then books
         // the next output scan under its usual 500ms throttle.
-        self.tmux.defer_output(stats.deferred);
+        self.mux.defer_output(stats.deferred);
         // `#{agenmux}` and popup sizing read the cache while scans rewrite
         // it; a plain write lets them see it truncated. The staged name is
         // per process: a popup sidebar and the daemon both scan.
@@ -1777,7 +1452,7 @@ impl Sidebar {
         if std::fs::write(&staged, scan::to_tsv(&scanned)).is_ok() {
             let _ = std::fs::rename(&staged, &self.cache_file);
         }
-        let mut focus = self.client_focus().unwrap_or_default();
+        let mut focus = self.mux.focus().unwrap_or_default();
         // A popup owns the terminal's input even though tmux still reports the
         // pane underneath it as selected. That underlying agent is not being
         // viewed while the popup is open.
@@ -1798,7 +1473,7 @@ impl Sidebar {
             && !self.active_session.is_empty()
         {
             let sid = self.active_session.clone();
-            if self.tmux.run(&format!("switch-client -t '{sid}'")).is_ok() {
+            if self.mux.follow_session(&sid) {
                 if let Some(daemon) = self.daemon.as_mut() {
                     daemon.attached = sid;
                 }
@@ -1815,12 +1490,8 @@ impl Sidebar {
             // them. Close notifications force a full scan, which logs the close;
             // a split's layout notification keeps a soon-closed window current.
             if periodic || changes.full || changes.layout {
-                if let Ok(windows) = self.tmux.run(crate::snapshot::WINDOWS_FMT) {
-                    store.set_layout(&self.panes, &self.rows, &windows, || {
-                        self.tmux
-                            .run("list-panes -a -F '#{pane_id}'")
-                            .unwrap_or_default()
-                    });
+                if let Ok(windows) = self.mux.windows() {
+                    store.set_layout(&self.panes, &self.rows, &windows, || self.mux.live().ids);
                 }
             }
             store.save(&self.collapsed, &self.panes);
@@ -1862,8 +1533,9 @@ impl Sidebar {
         let Some(prev) = self.snapshot.as_mut().and_then(|store| store.dismiss()) else {
             return;
         };
-        let live = self.live();
-        crate::snapshot::replay(&prev, &live.windows, self.resume(), &mut run_tmux);
+        let live = self.mux.live();
+        let resume = self.resume();
+        self.mux.restore(&prev, &live, &resume);
         self.refresh_requested = true;
     }
 
@@ -1873,18 +1545,19 @@ impl Sidebar {
         if !self.settings.settings.tmux_management_enabled {
             return false;
         }
-        let live = self.live();
+        let live = self.mux.live();
         if entry.blocked(&live) {
             return false;
         }
+        let resume = self.resume();
         if entry.is_pane() {
-            crate::snapshot::replay_pane(entry, &live, self.resume(), &mut run_tmux);
+            self.mux.restore_pane(entry, &live, &resume);
         } else {
             let snap = crate::snapshot::Snapshot {
                 sessions: vec![entry.session.clone()],
                 ..Default::default()
             };
-            crate::snapshot::replay(&snap, &live.windows, self.resume(), &mut run_tmux);
+            self.mux.restore(&snap, &live, &resume);
         }
         self.refresh_requested = true;
         if let Some(store) = self.snapshot.as_mut() {
@@ -1893,65 +1566,29 @@ impl Sidebar {
         true
     }
 
-    /// Every live session name and window index, window id and pane id.
-    fn live(&mut self) -> crate::snapshot::Live {
-        let mut live = crate::snapshot::Live::default();
-        let panes = self
-            .tmux
-            .run("list-panes -a -F '#{window_index}|#{window_id}|#{pane_id}|#{session_name}'")
-            .unwrap_or_default();
-        for line in panes.lines() {
-            let fields: Vec<&str> = line.splitn(4, '|').collect();
-            let [index, window, pane, session] = fields[..] else {
-                continue;
-            };
-            if let Ok(index) = index.parse() {
-                live.windows.insert((session.to_string(), index));
-            }
-            live.ids.insert(window.to_string());
-            live.ids.insert(pane.to_string());
-        }
-        live
-    }
-
     /// The command typed into a restored agent's shell, when resuming is on.
-    fn resume(&self) -> impl Fn(&str) -> Option<String> + '_ {
-        let resume = self.settings.settings.tmux_management_resume_agents;
-        move |agent| {
-            resume
-                .then(|| self.confs.iter().find(|c| c.name == agent)?.resume.clone())
-                .flatten()
+    fn resume(&self) -> crate::snapshot::Resume {
+        if !self.settings.settings.tmux_management_resume_agents {
+            return Default::default();
         }
+        let resumes = self
+            .confs
+            .iter()
+            .filter_map(|c| Some((c.name.clone(), c.resume.clone()?)));
+        resumes.collect()
     }
 
     fn has_relevant_output(&self) -> bool {
-        self.tmux
-            .pending_changes()
+        self.mux
+            .changes()
             .panes
             .iter()
             .any(|pane| self.rows.iter().any(|row| &row.pane == pane))
     }
 
     fn has_immediate_change(&self) -> bool {
-        let pending = self.tmux.pending_changes();
+        let pending = self.mux.changes();
         pending.full || pending.focus || pending.layout
-    }
-
-    fn client_focus(&mut self) -> Option<crate::focus::ClientFocus> {
-        // scan() only syncs at its START; a hook's run-shell block landing
-        // during the capture loop leaves every later command paired with the
-        // wrong response. Re-barrier before reading anything we act on.
-        self.tmux.sync().ok()?;
-        let focus_events = self
-            .tmux
-            .run("show-option -gqv focus-events")
-            .ok()
-            .is_some_and(|value| value.trim() == "on");
-        let out = self
-            .tmux
-            .run("list-clients -F '#{client_activity}|#{client_name}|#{session_id}|#{pane_id}|#{pane_title}|#{client_flags}'")
-            .ok()?;
-        Some(crate::focus::parse_clients(&out, focus_events))
     }
 
     /// true = exit the loop (popup jump hands off to native toggle)
@@ -1963,7 +1600,7 @@ impl Sidebar {
         else {
             return false;
         };
-        if !target.starts_with('%') {
+        if target.is_empty() {
             return false;
         }
         // This sidebar stays mounted after a jump, so clear its transient
@@ -1975,54 +1612,7 @@ impl Sidebar {
             let _ = std::fs::write(format!("{pin}.jump"), &target);
             return true;
         }
-        // switch/select MUST NOT go over the control pipe: they fire the
-        // plugin's select-window/session hooks, and tmux delivers each hook's
-        // run-shell result to the triggering client as an extra %begin/%end
-        // block — desyncing every later response. Fork plain tmux instead
-        // (jump is rare and user-initiated).
-        // pick the most recently active client — with several terminals
-        // attached, the first listed one may not be the one the user is
-        // looking at (and the 'focused' flag sticks on all of them)
-        let client = self
-            .tmux
-            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{client_activity} #{client_name}'")
-            .ok()
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| {
-                        let (act, name) = l.split_once(' ')?;
-                        Some((act.parse::<u64>().ok()?, name.to_string()))
-                    })
-                    .max_by_key(|(act, _)| *act)
-                    .map(|(_, name)| name)
-            });
-        let mut args = Vec::new();
-        if let Some(client) = &client {
-            args.extend([
-                "switch-client",
-                "-c",
-                client,
-                "-t",
-                target.as_str(),
-                ";",
-                "switch-client",
-                "-c",
-                client,
-                "-T",
-                "root",
-                ";",
-            ]);
-        }
-        args.extend([
-            "select-window",
-            "-t",
-            target.as_str(),
-            ";",
-            "select-pane",
-            "-t",
-            target.as_str(),
-        ]);
-        let _ = command_status(&args);
+        let _ = self.mux.jump(&target);
         false
     }
 }
@@ -2030,13 +1620,6 @@ impl Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn item_reference_names_the_selected_record_by_tmux_id() {
-        assert_eq!(item_reference("$3"), "tmux session $3");
-        assert_eq!(item_reference("@7"), "tmux window @7");
-        assert_eq!(item_reference("%12"), "tmux pane %12");
-    }
 
     #[test]
     fn navigation_runs_coalesce_only_same_target_and_direction() {
@@ -2051,72 +1634,6 @@ mod tests {
         assert_eq!(
             navigation_key(&Key::Owned(Box::new(Key::Down), "client".into())),
             Some((NavigationTarget::Selection, 1))
-        );
-    }
-
-    #[test]
-    fn launcher_revalidation_rejects_stale_identity_without_using_another_pane_cwd() {
-        let target = LauncherTarget {
-            pane_id: "%4".into(),
-            window_id: "@2".into(),
-            session_id: "$1".into(),
-            client: "client".into(),
-        };
-        assert_eq!(
-            Sidebar::parse_launcher_cwd(&target, "%4|@2|$1|/path/with|pipe\n")
-                .ok()
-                .as_deref(),
-            Some("/path/with|pipe")
-        );
-        for stale in [
-            "%9|@2|$1|/different/pane\n",
-            "%4|@8|$1|/different/window\n",
-            "%4|@2|$9|/different/session\n",
-            "%4|@2|$1|\n",
-        ] {
-            let error = Sidebar::parse_launcher_cwd(&target, stale).unwrap_err();
-            assert!(
-                error.to_string().contains("selected pane")
-                    || error.to_string().contains("working directory"),
-                "unexpected stale-target error: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn tmux_style_colors_drive_default_header_contrast() {
-        assert_eq!(
-            tmux_style_color("fg=#f5a97f,bg=default", "fg"),
-            Some(Color::Rgb(245, 169, 127))
-        );
-        assert_eq!(
-            tmux_style_color("fg=colour42,bg=color7", "bg"),
-            Some(Color::Indexed(7))
-        );
-        assert_eq!(
-            tmux_style_color("fg=#f5a97f,bg=default", "bg"),
-            Some(Color::Default)
-        );
-        assert_eq!(tmux_style_color("fg=red", "fg"), Some(Color::Indexed(1)));
-        assert_eq!(
-            tmux_style_color("pane-active-border-style fg=colour202,bg=default", "fg",),
-            Some(Color::Indexed(202))
-        );
-        let mut settings =
-            crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
-        apply_tmux_header(&mut settings, "fg=#f5a97f,bg=colour236", "bg=colour235");
-        let palette = Palette::resolve(&settings.theme);
-        assert_eq!(
-            palette.header_bg,
-            crate::app_config::Ink::Typed(Color::Rgb(245, 169, 127))
-        );
-        assert_eq!(
-            palette.header_fg,
-            crate::app_config::Ink::Typed(Color::Indexed(236))
-        );
-        assert_eq!(
-            settings.sources["theme.colors.header_bg"],
-            "tmux pane-active-border-style fg"
         );
     }
 
@@ -2226,5 +1743,50 @@ mod tests {
             .due(expiry - Duration::from_millis(1), Some(expiry))
             .is_none());
         assert_eq!(schedule.due(expiry, Some(expiry)), Some(false));
+    }
+
+    #[test]
+    fn management_acts_on_the_backend_records_it_still_has() {
+        use crate::mux::fake::{pane, FakeMux};
+        let dir = std::env::temp_dir().join(format!("agenmux-fake-mux-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = crate::app_config::parse("[tmux_management]\nenabled=true").unwrap();
+        let settings = crate::app_config::resolve(&file, &Default::default()).unwrap();
+        let mux = FakeMux {
+            panes: vec![(pane("$1", "@1", "%1", "zsh"), 0)],
+            ..FakeMux::default()
+        };
+        let log = mux.log.clone();
+        let mut sb = new_sidebar(
+            Box::new(mux),
+            dir.clone(),
+            dir.join("cache"),
+            dir.join("rows"),
+            String::new(),
+            settings,
+        );
+        let target = |action, pane_id: &str| MutationTarget {
+            action,
+            pane_id: pane_id.into(),
+            window_id: "@1".into(),
+            session_id: "$1".into(),
+            cwd: "/work".into(),
+            client: "c".into(),
+        };
+        sb.execute_mutation(&target(SequenceAction::RenameWindow, "%1"), "build");
+        sb.execute_mutation(&target(SequenceAction::CreateWindow, "%1"), "");
+        sb.execute_mutation(&target(SequenceAction::DeleteSession, "%1"), "");
+        sb.execute_mutation(&target(SequenceAction::RenamePane, "%9"), "gone");
+        assert_eq!(
+            *log.borrow(),
+            [
+                "rename Window @1 build",
+                "create window $1  in /work",
+                "show %new to c stay=true",
+                "delete Session $1",
+                "message c: target changed; nothing was modified",
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

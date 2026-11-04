@@ -1337,9 +1337,9 @@ impl Sidebar {
 mod tests {
     use super::*;
     use crate::app_config::KeyChord;
+    use crate::mux::tmux::Tmux;
     use crate::pane_writers::PaneWriters;
     use crate::scan::{PaneMeta, PaneRow};
-    use crate::tmux::Tmux;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -1439,7 +1439,7 @@ mod tests {
                 // Pin the inherited header styles: the fixture was generated
                 // against tmux's pre-3.8 default pane-active-border-style, and
                 // tmux 3.8 changed that default to a theme-conditional format
-                // that tmux_style_color cannot read.
+                // that the tmux backend cannot read.
                 .env(
                     "AGENMUX_TMUX_ACTIVE_BORDER_STYLE",
                     "#{?pane_in_mode,fg=yellow,#{?synchronize-panes,fg=red,fg=green}}",
@@ -1468,7 +1468,7 @@ mod tests {
         .unwrap();
         let settings = crate::app_config::resolve(&file, &Default::default()).unwrap();
         let mut sb = new_sidebar(
-            Tmux::connect().unwrap_or_else(|e| panic!("{e}")),
+            Box::new(Tmux::connect().unwrap_or_else(|e| panic!("{e}"))),
             dir.clone(),
             dir.join("cache"),
             dir.join("rows"),
@@ -2296,7 +2296,7 @@ mod tests {
         sb.marked = ["%31", "@2"].map(String::from).into();
         sb.copy_reference(None);
         assert_eq!(
-            crate::tmux::command(&["show-buffer"]).unwrap_or_default(),
+            crate::mux::tmux::command(&["show-buffer"]).unwrap_or_default(),
             "tmux window @2\ntmux pane %31",
             "yy copies the selection in tree order"
         );
@@ -2423,16 +2423,13 @@ mod tests {
         sb.settings.settings = crate::app_config::resolve(&file, &Default::default()).unwrap();
         sb.normal_keys = sb.settings.settings.normal.clone();
         sb.daemon.as_mut().unwrap().size = (120, 40);
-        let identity = sb
-            .tmux
-            .run("display-message -p '#{pid}|#{start_time}|#{socket_path}'")
-            .unwrap_or_else(|error| panic!("{error}"));
-        let fields: Vec<_> = identity.trim().split('|').collect();
-        let path = snapshot::path(fields[2]).unwrap();
+        let identity = sb.mux.identity().unwrap();
+        let path = snapshot::path(&identity.name).unwrap();
         let closed = |id: &str, name: &str| Closed {
             id: id.into(),
             time: 1,
             session: Session {
+                id: id.into(),
                 name: name.into(),
                 ..Default::default()
             },
@@ -2445,13 +2442,13 @@ mod tests {
         snapshot::write(
             &path,
             &Snapshot {
-                server: format!("{}|{}", fields[0], fields[1]),
+                server: identity.server.clone(),
                 closed: entries.clone(),
                 ..Default::default()
             },
         )
         .unwrap();
-        sb.snapshot = Store::open(&mut sb.tmux);
+        sb.snapshot = Store::open(sb.mux.as_mut());
         assert!(sb.snapshot.is_some());
         let open = |sb: &mut Sidebar, query: &str, sel| {
             let search = super::super::ui::Search {

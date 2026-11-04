@@ -1,10 +1,10 @@
 use crate::app_config::SidebarPosition;
-use crate::tmux::{self, TmuxError};
+use crate::mux::{self, tmux};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 pub const IS_SIDEBAR: &str = "#{||:#{==:#{pane_title},agenmux},#{==:#{@agenmux},1}}";
@@ -113,7 +113,7 @@ pub(crate) fn lifecycle_lock() -> io::Result<ServerLock> {
 }
 
 #[allow(dead_code)] // native toggle consumes this in the next migration task
-pub fn newest_real_client(format: &str) -> Result<Option<String>, TmuxError> {
+pub fn newest_real_client(format: &str) -> Result<Option<String>, mux::Error> {
     let output_format = format!("#{{client_activity}}|{format}");
     let rows = tmux::lines(&[
         "list-clients",
@@ -324,7 +324,7 @@ pub(crate) fn pane_add_record(
         Ok(dir) => format!("AGENMUX_RUNTIME_DIR={}", dir.display()),
         Err(_) => return 1,
     };
-    let output = Command::new("tmux")
+    let output = tmux::process()
         .args([
             "split-window",
             if right { "-hf" } else { "-hbf" },

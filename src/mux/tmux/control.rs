@@ -8,6 +8,9 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::input::poll_by;
+use crate::mux::{Changes, Error};
+
 const MAX_DRAIN_LINES: usize = 256;
 const MAX_DRAIN_BYTES: usize = 64 * 1024;
 /// Replies take milliseconds; a busy server's heavy capture ~100ms. Past
@@ -15,16 +18,8 @@ const MAX_DRAIN_BYTES: usize = 64 * 1024;
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
-pub struct PendingChanges {
-    pub panes: HashSet<String>,
-    pub full: bool,
-    pub focus: bool,
-    pub layout: bool,
-}
-
-#[derive(Default)]
 struct Notifications {
-    pending: PendingChanges,
+    pending: Changes,
     attached_session: Option<String>,
     /// Daemon key FIFO (O_RDWR): buffer-delivered navigation keys land here
     /// the moment their notification is read, even mid-scan, so the
@@ -98,40 +93,16 @@ impl Notifications {
     }
 }
 
-pub enum TmuxError {
-    /// Server gone or client detached — caller must clean up and exit 0
-    /// (toggle.sh's popup loop relies on a clean sidebar exit).
-    Exited,
-    Error(String),
-    Io(std::io::Error),
-}
-
-impl std::fmt::Display for TmuxError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            TmuxError::Exited => write!(f, "tmux exited"),
-            TmuxError::Error(e) => write!(f, "tmux: {e}"),
-            TmuxError::Io(e) => write!(f, "tmux pipe: {e}"),
-        }
-    }
-}
-
-impl From<std::io::Error> for TmuxError {
-    fn from(e: std::io::Error) -> Self {
-        TmuxError::Io(e)
-    }
-}
-
-pub fn command(args: &[&str]) -> Result<String, TmuxError> {
+pub fn command(args: &[&str]) -> Result<String, Error> {
     let output = Command::new("tmux").args(args).output()?;
     if !output.status.success() {
-        return Err(TmuxError::Error(
+        return Err(Error::Failed(
             String::from_utf8_lossy(&output.stderr)
                 .trim_end()
                 .to_string(),
         ));
     }
-    String::from_utf8(output.stdout).map_err(|e| TmuxError::Error(e.to_string()))
+    String::from_utf8(output.stdout).map_err(|e| Error::Failed(e.to_string()))
 }
 
 /// Where this tmux server keeps its key FIFO, row map, and pane frames. The
@@ -184,11 +155,17 @@ pub fn prepare_runtime_dir() -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
-pub fn command_status(args: &[&str]) -> Result<(), TmuxError> {
+/// A tmux process to configure and run, for what the helpers here cannot
+/// express (stdin, a socket of its own, a child to wait on).
+pub fn process() -> Command {
+    Command::new("tmux")
+}
+
+pub fn command_status(args: &[&str]) -> Result<(), Error> {
     command(args).map(drop)
 }
 
-pub fn command_batch(commands: &[Vec<String>]) -> Result<(), TmuxError> {
+pub fn command_batch(commands: &[Vec<String>]) -> Result<(), Error> {
     const MAX_BYTES: usize = 8 * 1024;
     let mut start = 0;
     let mut bytes = 0;
@@ -204,7 +181,7 @@ pub fn command_batch(commands: &[Vec<String>]) -> Result<(), TmuxError> {
     command_batch_chunk(&commands[start..])
 }
 
-fn command_batch_chunk(commands: &[Vec<String>]) -> Result<(), TmuxError> {
+fn command_batch_chunk(commands: &[Vec<String>]) -> Result<(), Error> {
     if commands.is_empty() {
         return Ok(());
     }
@@ -219,7 +196,7 @@ fn command_batch_chunk(commands: &[Vec<String>]) -> Result<(), TmuxError> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(TmuxError::Error(
+        Err(Error::Failed(
             String::from_utf8_lossy(&output.stderr)
                 .trim_end()
                 .to_string(),
@@ -227,13 +204,13 @@ fn command_batch_chunk(commands: &[Vec<String>]) -> Result<(), TmuxError> {
     }
 }
 
-pub fn command_spawn(args: &[&str]) -> Result<(), TmuxError> {
+pub fn command_spawn(args: &[&str]) -> Result<(), Error> {
     Command::new("tmux").args(args).spawn()?;
     Ok(())
 }
 
 #[allow(dead_code)] // setup/pane commands added in the next migration tasks consume this
-pub fn lines(args: &[&str]) -> Result<Vec<String>, TmuxError> {
+pub fn lines(args: &[&str]) -> Result<Vec<String>, Error> {
     command(args).map(|output| output.lines().map(str::to_string).collect())
 }
 
@@ -263,17 +240,17 @@ pub struct Tmux {
 impl Tmux {
     /// Attach a control-mode client. -f no-output: no %output notification
     /// per pane write — the key to staying idle between polls.
-    pub fn connect() -> Result<Tmux, TmuxError> {
+    pub fn connect() -> Result<Tmux, Error> {
         Self::connect_with_output(false)
     }
 
     /// Attach the long-lived sidebar control client with pane output enabled.
     /// Output bytes remain in tmux; only pane IDs are retained as invalidations.
-    pub fn connect_monitoring() -> Result<Tmux, TmuxError> {
+    pub fn connect_monitoring() -> Result<Tmux, Error> {
         Self::connect_with_output(true)
     }
 
-    fn connect_with_output(output: bool) -> Result<Tmux, TmuxError> {
+    fn connect_with_output(output: bool) -> Result<Tmux, Error> {
         let mut cmd = Command::new("tmux");
         // A stale $TMUX socket must not start a new server while attaching.
         cmd.arg("-N");
@@ -326,7 +303,7 @@ impl Tmux {
         self.notifications.attached_session.as_deref()
     }
 
-    pub fn pending_changes(&self) -> &PendingChanges {
+    pub fn pending_changes(&self) -> &Changes {
         &self.notifications.pending
     }
 
@@ -337,7 +314,7 @@ impl Tmux {
 
     /// Take before scanning so notifications observed by `run` during the
     /// scan remain pending for the following pass.
-    pub fn take_pending_changes(&mut self) -> PendingChanges {
+    pub fn take_pending_changes(&mut self) -> Changes {
         let mut pending = std::mem::take(&mut self.notifications.pending);
         if self.notifications.attached_session.is_none() {
             pending.full = true;
@@ -350,7 +327,7 @@ impl Tmux {
     ///
     /// A missed deadline is a soft error: the late reply is discarded by a
     /// sync marker, and commands fail fast until that marker echoes back.
-    pub fn run(&mut self, cmd: &str) -> Result<String, TmuxError> {
+    pub fn run(&mut self, cmd: &str) -> Result<String, Error> {
         let t0 = Instant::now();
         if self.sync_marker.is_some() {
             self.await_sync(t0)?;
@@ -359,7 +336,7 @@ impl Tmux {
         self.stdin.write_all(b"\n")?;
         self.stdin.flush()?;
         let r = match self.read_block(t0 + self.reply_timeout) {
-            Err(TmuxError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
                 self.send_sync().and(Err(timed_out()))
             }
             r => r,
@@ -371,7 +348,7 @@ impl Tmux {
     /// Resync barrier: discard any stale/unsolicited response blocks (hook
     /// run-shell results, etc.) until our marker echoes back. Makes the pipe
     /// self-healing — an off-by-one can survive at most one poll cycle.
-    pub fn sync(&mut self) -> Result<(), TmuxError> {
+    pub fn sync(&mut self) -> Result<(), Error> {
         // An outstanding marker means the server already missed a deadline:
         // check for it without stalling again.
         let deadline = if self.sync_marker.is_some() {
@@ -385,7 +362,7 @@ impl Tmux {
 
     /// Numbered so a marker still queued from an earlier barrier cannot end
     /// this one early.
-    fn send_sync(&mut self) -> Result<(), TmuxError> {
+    fn send_sync(&mut self) -> Result<(), Error> {
         self.sync_seq += 1;
         let marker = format!("am-sync-{}", self.sync_seq);
         self.stdin
@@ -397,12 +374,12 @@ impl Tmux {
 
     /// Matches the marker line itself, not its block: a timed-out read can
     /// leave the pipe mid-block.
-    fn await_sync(&mut self, deadline: Instant) -> Result<(), TmuxError> {
+    fn await_sync(&mut self, deadline: Instant) -> Result<(), Error> {
         let mut line = String::new();
         loop {
             line.clear();
             match self.read_line_retry(&mut line, deadline) {
-                Ok(0) => return Err(TmuxError::Exited),
+                Ok(0) => return Err(Error::Exited),
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Err(timed_out()),
                 Err(e) => return Err(e.into()),
@@ -413,7 +390,7 @@ impl Tmux {
                 return Ok(());
             }
             if l.starts_with("%exit") {
-                return Err(TmuxError::Exited);
+                return Err(Error::Exited);
             }
             self.notifications.observe(l);
         }
@@ -434,7 +411,7 @@ impl Tmux {
     /// them signals a focus change (active pane/window/session moved).
     /// Stale %begin blocks (hook run-shell results) are consumed line by
     /// line here too — the next sync() barrier realigns the pipe anyway.
-    pub fn drain_notifications(&mut self) -> Result<bool, TmuxError> {
+    pub fn drain_notifications(&mut self) -> Result<bool, Error> {
         let focus_before = self.notifications.pending.focus;
         let mut bytes_left = MAX_DRAIN_BYTES;
         for _ in 0..MAX_DRAIN_LINES {
@@ -443,7 +420,7 @@ impl Tmux {
             };
             let l = line.trim_end_matches(['\n', '\r']);
             if l.starts_with("%exit") {
-                return Err(TmuxError::Exited);
+                return Err(Error::Exited);
             }
             if Some(l) == self.sync_marker.as_deref() {
                 self.sync_marker = None;
@@ -456,7 +433,7 @@ impl Tmux {
 
     /// Nonblocking line reader for event draining. Partial lines are retained
     /// without waiting for a newline; output payload storage is bounded.
-    fn try_read_line(&mut self, bytes_left: &mut usize) -> Result<Option<String>, TmuxError> {
+    fn try_read_line(&mut self, bytes_left: &mut usize) -> Result<Option<String>, Error> {
         loop {
             if *bytes_left == 0 {
                 return Ok(None);
@@ -490,7 +467,7 @@ impl Tmux {
                 return Ok(None);
             }
             if self.rdr.fill_buf()?.is_empty() {
-                return Err(TmuxError::Exited);
+                return Err(Error::Exited);
             }
         }
     }
@@ -536,20 +513,20 @@ impl Tmux {
 
     /// Read until a complete %begin..%end/%error block; returns its body.
     /// Lines outside a block are notifications (%exit => Exited).
-    fn read_block(&mut self, deadline: Instant) -> Result<String, TmuxError> {
+    fn read_block(&mut self, deadline: Instant) -> Result<String, Error> {
         let mut line = String::new();
         // wait for %begin
         let tag = loop {
             line.clear();
             if self.read_line_retry(&mut line, deadline)? == 0 {
-                return Err(TmuxError::Exited);
+                return Err(Error::Exited);
             }
             let l = line.trim_end_matches(['\n', '\r']);
             if let Some(rest) = l.strip_prefix("%begin ") {
                 break block_tag(rest).to_string();
             }
             if l.starts_with("%exit") {
-                return Err(TmuxError::Exited);
+                return Err(Error::Exited);
             }
             self.notifications.observe(l);
         };
@@ -559,7 +536,7 @@ impl Tmux {
         loop {
             line.clear();
             if self.read_line_retry(&mut line, deadline)? == 0 {
-                return Err(TmuxError::Exited);
+                return Err(Error::Exited);
             }
             let l = line.trim_end_matches(['\n', '\r']);
             if let Some(rest) = l.strip_prefix("%end ") {
@@ -568,7 +545,7 @@ impl Tmux {
                 }
             } else if let Some(rest) = l.strip_prefix("%error ") {
                 if block_tag(rest) == tag {
-                    return Err(TmuxError::Error(body.trim_end().to_string()));
+                    return Err(Error::Failed(body.trim_end().to_string()));
                 }
             }
             if !self.notifications.observe(l) {
@@ -605,45 +582,14 @@ fn append_line_prefix(dst: &mut Vec<u8>, src: &[u8]) {
     }
 }
 
-fn poll_ready(revents: libc::c_short) -> bool {
-    let terminal = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
-    revents & (libc::POLLIN | terminal) != 0
-}
-
 /// fd readable or terminal right now (0ms poll)? A drained pipe may report
 /// only HUP on Linux; ERR/NVAL must likewise reach read() and surface as I/O.
 fn fd_ready(fd: libc::c_int) -> bool {
     poll_by(fd, libc::POLLIN, Instant::now())
 }
 
-/// fd ready for `events`, or terminal, before `deadline`? A deadline already
-/// past still checks once.
-pub(crate) fn poll_by(fd: libc::c_int, events: libc::c_short, deadline: Instant) -> bool {
-    if fd < 0 {
-        return false;
-    }
-    loop {
-        let mut p = libc::pollfd {
-            fd,
-            events,
-            revents: 0,
-        };
-        let ms = deadline
-            .saturating_duration_since(Instant::now())
-            .as_micros()
-            .div_ceil(1000)
-            .min(i32::MAX as u128) as i32;
-        match unsafe { libc::poll(&mut p, 1, ms) } {
-            0 => return false,
-            n if n > 0 => return p.revents & events != 0 || poll_ready(p.revents),
-            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
-            _ => return false,
-        }
-    }
-}
-
-fn timed_out() -> TmuxError {
-    TmuxError::Error("reply timed out".into())
+fn timed_out() -> Error {
+    Error::Failed("reply timed out".into())
 }
 
 /// "%begin <time> <num> <flags>" -> num
@@ -652,7 +598,7 @@ fn block_tag(rest: &str) -> &str {
 }
 
 /// Trace every command/response pair with timing when the trace is enabled.
-fn debug_log(cmd: &str, r: &Result<String, TmuxError>, took: std::time::Duration) {
+fn debug_log(cmd: &str, r: &Result<String, Error>, took: std::time::Duration) {
     if !crate::diag::enabled() {
         return;
     }
@@ -783,7 +729,7 @@ mod tests {
     fn invalid_utf8_command_body_remains_an_error() {
         let mut tmux =
             scripted_tmux("read _; printf '%%begin 1 2 0\\ninvalid \\377\\n%%end 1 2 0\\n'");
-        assert!(matches!(tmux.run("synthetic"), Err(TmuxError::Io(error))
+        assert!(matches!(tmux.run("synthetic"), Err(Error::Io(error))
             if error.kind() == std::io::ErrorKind::InvalidData));
     }
 
@@ -805,7 +751,7 @@ mod tests {
         let mut notifications = Notifications::default();
         assert!(notifications.observe("%session-changed $1 watched"));
         assert_eq!(notifications.attached_session.as_deref(), Some("$1"));
-        notifications.pending = PendingChanges::default();
+        notifications.pending = Changes::default();
 
         assert!(notifications.observe("%client-session-changed /dev/pts/1 $2 other"));
         assert_eq!(notifications.attached_session.as_deref(), Some("$1"));
@@ -902,12 +848,12 @@ mod tests {
         );
         tmux.reply_timeout = Duration::from_millis(100);
         let started = Instant::now();
-        assert!(matches!(tmux.run("slow"), Err(TmuxError::Error(_))));
+        assert!(matches!(tmux.run("slow"), Err(Error::Failed(_))));
         assert!(started.elapsed() < Duration::from_millis(300));
 
         // Still waiting on the marker: fail fast instead of stalling again.
         let started = Instant::now();
-        assert!(matches!(tmux.run("early"), Err(TmuxError::Error(_))));
+        assert!(matches!(tmux.run("early"), Err(Error::Failed(_))));
         assert!(started.elapsed() < Duration::from_millis(50));
 
         std::thread::sleep(Duration::from_millis(600));
@@ -926,16 +872,7 @@ mod tests {
         while !fd_ready(tmux.fd()) && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
-        assert!(matches!(tmux.drain_notifications(), Err(TmuxError::Exited)));
-    }
-
-    #[test]
-    fn terminal_poll_flags_are_ready_for_eof_or_io_error() {
-        assert!(poll_ready(libc::POLLIN));
-        assert!(poll_ready(libc::POLLHUP));
-        assert!(poll_ready(libc::POLLERR));
-        assert!(poll_ready(libc::POLLNVAL));
-        assert!(!poll_ready(0));
+        assert!(matches!(tmux.drain_notifications(), Err(Error::Exited)));
     }
 
     #[test]

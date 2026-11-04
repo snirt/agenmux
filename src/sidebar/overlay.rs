@@ -1,7 +1,7 @@
 use crate::app_config::{action_for, Action, KeyChord};
 use crate::input::{Key, SequenceAction};
+use crate::mux::{Ids, Kind};
 use crate::release;
-use crate::tmux::{command, command_spawn};
 use std::path::{Path, PathBuf};
 
 use super::render::{back_hint, clip_frame, clip_width, cursor_mark, join, key_hint, nav_label};
@@ -1032,16 +1032,20 @@ impl Sidebar {
 
     pub(super) fn open_rename_input(&mut self, mut target: MutationTarget, action: SequenceAction) {
         target.action = action;
-        let (id, format) = match action {
-            SequenceAction::RenamePane => (target.pane_id.as_str(), "#{pane_title}"),
-            SequenceAction::RenameWindow => (target.window_id.as_str(), "#{window_name}"),
-            SequenceAction::RenameSession => (target.session_id.as_str(), "#{session_name}"),
+        let kind = match action {
+            SequenceAction::RenamePane => Kind::Pane,
+            SequenceAction::RenameWindow => Kind::Window,
+            SequenceAction::RenameSession => Kind::Session,
             _ => return,
         };
-        match command(&["display-message", "-p", "-t", id, format]) {
+        let ids = Ids {
+            session: &target.session_id,
+            window: &target.window_id,
+            pane: &target.pane_id,
+        };
+        match self.mux.name(kind, ids) {
             Ok(name) => {
                 let name = name
-                    .trim_end_matches(['\r', '\n'])
                     .chars()
                     .filter(|character| !character.is_control())
                     .collect();
@@ -1297,20 +1301,8 @@ impl Sidebar {
     }
 
     fn use_key_table(&mut self, table: &str) {
-        if self.daemon.is_none() {
-            return;
-        }
-        let clients = self
-            .tmux
-            .run("list-clients -F '#{client_name}|#{pane_title}'")
-            .unwrap_or_default();
-        for line in clients.lines() {
-            let Some((client, title)) = line.split_once('|') else {
-                continue;
-            };
-            if title == "agenmux" {
-                let _ = command_spawn(&["switch-client", "-c", client, "-T", table]);
-            }
+        if let Some(tmux) = self.daemon.as_ref().and(self.mux.as_tmux()) {
+            tmux.sidebar_key_table(table);
         }
     }
 
@@ -1327,8 +1319,7 @@ impl Sidebar {
             return Err("configuration changed on disk; reopen settings".into());
         }
         let file = crate::app_config::parse(source).map_err(|error| error.to_string())?;
-        let options = crate::app_config::read_options(|command| self.tmux.run(command))
-            .map_err(|error| error.to_string())?;
+        let options = self.mux.options().map_err(|error| error.to_string())?;
         let next = self
             .settings
             .resolve(&file, &options)
@@ -1339,6 +1330,10 @@ impl Sidebar {
             .resolve(&old_file, &options)
             .map_err(|error| error.to_string())?;
         crate::app_config::save_document(path, source).map_err(|error| error.to_string())?;
+        // tmux key tables follow the keymap; other servers bind keys themselves.
+        let tmux_keys = self.mux.as_tmux().is_some();
+        let install =
+            |config| !tmux_keys || crate::setup::run_config(&self.plugin_dir, config) == 0;
         let rollback = || -> Result<(), String> {
             if old_existed {
                 crate::app_config::save_document(path, old_source)
@@ -1348,12 +1343,12 @@ impl Sidebar {
                     return Err(error.to_string());
                 }
             }
-            if crate::setup::run_config(&self.plugin_dir, &old) != 0 {
+            if !install(&old) {
                 return Err("could not restore previous key tables".into());
             }
             Ok(())
         };
-        if crate::setup::run_config(&self.plugin_dir, &next) != 0 {
+        if !install(&next) {
             return Err(match rollback() {
                 Ok(()) => "could not apply settings; previous settings restored".into(),
                 Err(error) => format!("could not apply settings; rollback failed: {error}"),
@@ -1363,14 +1358,7 @@ impl Sidebar {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos().to_string())
             .unwrap_or_else(|_| "settings".into());
-        if self
-            .tmux
-            .run(&format!(
-                "set-option -g {} {token}",
-                crate::app_config::RELOAD_OPTION
-            ))
-            .is_err()
-        {
+        if self.mux.publish_reload(&token).is_err() {
             return Err(match rollback() {
                 Ok(()) => "could not publish settings; previous settings restored".into(),
                 Err(error) => format!("could not publish settings; rollback failed: {error}"),
@@ -1383,29 +1371,18 @@ impl Sidebar {
         let position_changed = next.sidebar_position != self.settings.settings.sidebar_position;
         self.settings.replace(file, next);
         // Popups leave this to the daemon, which sees the reload.
-        if position_changed && self.daemon.is_some() {
+        // tmux docks by moving its panes; this overlay reinstalled the keys.
+        if position_changed && self.daemon.is_some() && self.mux.as_tmux().is_some() {
             crate::panes::dock(
                 self.settings.settings.sidebar_position,
                 self.settings.settings.sidebar_width,
             );
         }
         if width_changed && self.daemon.is_some() {
-            let panes = self
-                .tmux
-                .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}|#{window_width}'")
-                .unwrap_or_default();
-            for line in panes.lines() {
-                let Some((pane, window_width)) = line.split_once('|') else {
-                    continue;
-                };
-                let width = window_width
-                    .parse::<usize>()
-                    .unwrap_or(usize::MAX)
-                    .saturating_sub(2)
-                    .max(1)
-                    .min(self.settings.settings.sidebar_width as usize)
-                    .to_string();
-                let _ = crate::tmux::command_status(&["resize-pane", "-t", pane, "-x", &width]);
+            let wopt = self.settings.settings.sidebar_width as usize;
+            for m in self.mux.sidebar_panes().unwrap_or_default() {
+                let width = m.win_size.0.saturating_sub(2).max(1).min(wopt);
+                self.mux.resize_panes(&[(m.pane, width)]);
             }
         }
         self.adopt_reload(crate::app_config::Refreshed {
@@ -1724,7 +1701,10 @@ mod tests {
             id: "@7".into(),
             session: Session {
                 name: "play".into(),
-                windows: vec![window(2, &[None, None])],
+                windows: vec![Window {
+                    id: "@7".into(),
+                    ..window(2, &[None, None])
+                }],
                 ..Session::default()
             },
             ..Closed::default()
