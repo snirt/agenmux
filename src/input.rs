@@ -1852,18 +1852,29 @@ mod tests {
         use std::os::fd::AsRawFd;
         for text_mode in [false, true] {
             let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
-            let sender = std::thread::spawn(move || {
-                for byte in b"\x1b[1;5A\x1b[200~" {
-                    writer.write_all(&[*byte]).unwrap();
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-                std::thread::sleep(Duration::from_millis(150));
-                for byte in "xuR\rddé\x1b[201~j".as_bytes() {
-                    writer.write_all(&[*byte]).unwrap();
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-            });
             let fd = reader.as_raw_fd();
+            // Each byte goes out once the reader has taken the previous one,
+            // so the parser waits on bytes still in flight. A fixed sleep per
+            // byte could outlast its timeouts on a slow runner.
+            let unread = move || {
+                let mut n: libc::c_int = 0;
+                assert_eq!(unsafe { libc::ioctl(fd, libc::FIONREAD, &mut n) }, 0);
+                n
+            };
+            let sender = std::thread::spawn(move || {
+                let mut send = |bytes: &[u8]| {
+                    for byte in bytes {
+                        while unread() > 0 {
+                            std::thread::yield_now();
+                        }
+                        writer.write_all(&[*byte]).unwrap();
+                    }
+                };
+                send(b"\x1b[1;5A\x1b[200~");
+                // Inside a paste, well within its 1s idle limit.
+                std::thread::sleep(Duration::from_millis(150));
+                send("xuR\rddé\x1b[201~j".as_bytes());
+            });
             let keys = default_keys(if text_mode {
                 KeyMode::Search
             } else {

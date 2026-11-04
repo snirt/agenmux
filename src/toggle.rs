@@ -450,18 +450,6 @@ fn popup(
         return 1;
     }
 
-    let dimension = |format| {
-        let mut args = vec!["display-message", "-p"];
-        if let Some(c) = client.as_deref() {
-            args.extend(["-c", c]);
-        }
-        args.push(format);
-        tmux::command(&args)
-            .ok()
-            .and_then(|s| s.trim().parse::<u16>().ok())
-            .unwrap_or(10000)
-            .max(1)
-    };
     let mut settings = crate::app_config::LiveConfig::new(config.clone());
     let bin = binary(plugin_dir);
     // Multiple shell-command arguments use tmux's direct exec form. No shell
@@ -472,16 +460,18 @@ fn popup(
         // A popup jump reopens native geometry, not a render frame. Reuse this
         // process's file snapshot and keep last-valid live overrides on errors.
         settings.accept(crate::app_config::current(cli_mode(config)));
+        let size = client_size(client.as_deref());
+        let (client_width, client_height) = size.unwrap_or((10000, 10000));
         let width = settings
             .settings
             .popup_width
-            .min(dimension("#{client_width}"))
+            .min(client_width.max(1))
             .to_string();
         let height = match settings.settings.popup_height {
             crate::app_config::PopupHeight::Cells(n) => n as usize,
-            _ => popup_height(&scan_cache(), client.as_deref()),
+            _ => popup_height(&scan_cache(), size.map(|(_, height)| height.into())),
         }
-        .min(dimension("#{client_height}") as usize)
+        .min(client_height.max(1).into())
         .to_string();
         let pin_env = format!("AGENMUX_PIN={}", pin.to_string_lossy());
         let mut args = vec![
@@ -592,17 +582,30 @@ fn scan_cache() -> PathBuf {
     tmux::runtime_dir().join("agenmux-scan-cache")
 }
 
-fn popup_height(cache: &Path, client: Option<&str>) -> usize {
+/// Width and height of `client`, else of the current client. Without `-t`,
+/// `display-message -c` expands `#{client_*}` for a client of the default
+/// session rather than the named one; `list-clients` reports each as itself.
+fn client_size(client: Option<&str>) -> Option<(u16, u16)> {
+    let format = "#{client_name}\t#{client_width}\t#{client_height}";
+    let lines = match client {
+        Some(_) => tmux::lines(&["list-clients", "-F", format]),
+        None => tmux::lines(&["display-message", "-p", format]),
+    }
+    .ok()?;
+    lines.iter().find_map(|line| {
+        let mut fields = line.split('\t');
+        let name = fields.next()?;
+        if client.is_some_and(|client| client != name) {
+            return None;
+        }
+        Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+    })
+}
+
+fn popup_height(cache: &Path, client_height: Option<usize>) -> usize {
     let text = std::fs::read_to_string(cache).unwrap_or_default();
     let height = cache_height(&text).unwrap_or(15);
-    let client_height = client
-        .and_then(|client| {
-            tmux::command(&["display-message", "-p", "-c", client, "#{client_height}"]).ok()
-        })
-        .or_else(|| tmux::command(&["display-message", "-p", "#{client_height}"]).ok())
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(height + 2);
-    cap_popup_height(height, client_height)
+    cap_popup_height(height, client_height.unwrap_or(height + 2))
 }
 
 fn cap_popup_height(height: usize, client_height: usize) -> usize {

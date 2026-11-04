@@ -234,6 +234,21 @@ impl TestTmux {
             .unwrap()
     }
 
+    fn attach_sized(&self, session: &str, cols: u16, rows: u16) -> Child {
+        let program = format!(
+            "log_user 0; set timeout -1; set stty_init {{rows {rows} columns {cols}}}; spawn tmux -L {{{}}} attach-session -t {{{session}}}; expect eof",
+            self.socket
+        );
+        Command::new("expect")
+            .args(["-c", &program])
+            .env("TERM", "xterm")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
     fn attach_control(&self) -> Child {
         Command::new("tmux")
             .args(["-L", &self.socket, "-C", "attach-session", "-t", "plugin"])
@@ -739,14 +754,17 @@ fn returning_to_selected_sidebar_restores_its_key_table() {
         "#{pane_id}",
     ]);
     tmux.assert_tmux(&["select-pane", "-t", &sidebar]);
+    // Not `display-message -c`: without `-t` it can expand the pane of the
+    // default session instead of the one this client is switched to.
     let state = || {
         tmux.text(&[
-            "display-message",
-            "-p",
-            "-c",
-            &client,
-            "#{pane_title}|#{client_key_table}",
+            "list-clients",
+            "-F",
+            "#{client_name}|#{pane_title}|#{client_key_table}",
         ])
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{client}|")).map(str::to_string))
+        .unwrap_or_default()
     };
     tmux.wait_for(Duration::from_secs(2), || state() == "agenmux|agenmux");
 
@@ -2488,14 +2506,20 @@ fn recently_closed_forget_confirms_in_split_and_popup_input_modes() {
         shows("disposable-history");
         shows("? search");
         shows("Tab restore");
-        let before = std::fs::read(&snapshot).unwrap();
+        // The daemon rewrites the snapshot on its own schedule, so check the
+        // record itself rather than the bytes.
+        let kept = || {
+            std::fs::read_to_string(&snapshot)
+                .unwrap()
+                .contains("disposable-history")
+        };
         send("sequence-64", "d");
         shows("forget session disposable-history? y/N");
-        assert_eq!(std::fs::read(&snapshot).unwrap(), before);
+        assert!(kept(), "forget waits for confirmation");
         table_is("agenmux-settings-edit");
         send("escape", "Escape");
         shows("d forget");
-        assert_eq!(std::fs::read(&snapshot).unwrap(), before);
+        assert!(kept(), "escape cancels the forget");
         table_is("agenmux");
         send("sequence-64", "d");
         shows("forget session disposable-history? y/N");
@@ -4240,6 +4264,55 @@ fn public_popup_launch_errors_remove_pin_and_jump() {
     }
     let _ = client.kill();
     let _ = client.wait();
+}
+
+/// A fixed popup size is clamped to the client the toggle names, not to the
+/// client of the command's default session: here a larger one on `plugin`.
+#[test]
+fn fixed_popup_size_clamps_to_the_named_client() {
+    let tmux = TestTmux::new("popup-clamp");
+    tmux.assert_tmux(&["new-session", "-d", "-s", "small", "exec sleep 3600"]);
+    let sidebar = tmux.tmp.join("sidebar-stub");
+    std::fs::write(&sidebar, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&sidebar, std::fs::Permissions::from_mode(0o755)).unwrap();
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agenmux-bin",
+        sidebar.to_str().unwrap(),
+    ]);
+    tmux.assert_tmux(&["set-option", "-g", "@agenmux-width", "100"]);
+    tmux.assert_tmux(&["set-option", "-g", "@agenmux-height", "26"]);
+    let client = |attached: &str| {
+        tmux.text(&[
+            "list-clients",
+            "-F",
+            "#{client_name}\t#{session_name}\t#{client_width}x#{client_height}",
+        ])
+        .lines()
+        .find(|line| line.ends_with(attached))
+        .and_then(|line| line.split('\t').next())
+        .map(str::to_string)
+    };
+    // Attached last, `plugin` is the most recently active session: the
+    // default target of a command that names no session.
+    let mut clients = vec![tmux.attach_sized("small", 80, 24)];
+    tmux.wait_for(Duration::from_secs(3), || {
+        client("\tsmall\t80x24").is_some()
+    });
+    clients.push(tmux.attach_sized("plugin", 200, 60));
+    tmux.wait_for(Duration::from_secs(3), || {
+        client("\tplugin\t200x60").is_some()
+    });
+    let small = client("\tsmall\t80x24").unwrap();
+    assert_success(
+        tmux.bin(&["toggle", "popup", &small]),
+        "fixed popup on the smaller client",
+    );
+    for client in &mut clients {
+        let _ = client.kill();
+        let _ = client.wait();
+    }
 }
 
 /// A keymap edit must reach the private tables without a manual `setup`: the
