@@ -46,17 +46,18 @@ engine for your platform downloads and verifies in the background.
 ### Rex
 
 agenmux also runs in [Rex](https://www.superlogical.com/rex/) (beta), on macOS:
-Rex has no Linux client yet. With the `rex`
-CLI installed, the installer asks for the Rex keys (`alt+s` and `alt+p` by
-default), adds the `init.lua` line that loads agenmux once you confirm, and
-reloads Rex. Rex alone needs no tmux;
-`AGENMUX_MUX=tmux`, `rex` or `both` picks the setup. See [docs/rex.md](docs/rex.md).
+Rex has no Linux client yet. With Rex installed, the installer asks for the Rex
+keys (`alt+s` and `alt+p` by default), adds the `init.lua` line that loads
+agenmux once you confirm, and reloads Rex. Rex alone needs no tmux;
+`AGENMUX_MUX=tmux`, `rex` or `both` picks the setup. See [docs/rex.md](docs/rex.md)
+for setup by hand and what differs from tmux.
 
 ### Manual install
 
 Clone the repo, add `run-shell /path/to/agenmux/agenmux.tmux` to `~/.tmux.conf`,
-and reload tmux. Requirements, release archives, and updating are in
-[docs/installation.md](docs/installation.md).
+and reload tmux. For Rex, add the `init.lua` line from
+[docs/rex.md](docs/rex.md#setup). Requirements, release archives, and updating
+are in [docs/installation.md](docs/installation.md).
 
 ### Upgrading from agents-mon
 
@@ -66,17 +67,18 @@ variables, and config paths are still accepted; see
 
 ## Usage
 
-Press `prefix + A` to open the sidebar. Move with `j`/`k`, jump with `Enter`,
-and press `?` for every key. Add `#{agenmux}` to `status-right` for a compact
-count of agents by state.
+Press `prefix + A` in tmux, or `alt+s` in Rex, to open the sidebar. Move with
+`j`/`k`, jump with `Enter`, and press `?` for every key. In tmux, add
+`#{agenmux}` to `status-right` for a compact count of agents by state.
 
 [docs/usage.md](docs/usage.md) has the full key table, search, tmux management,
 quick launchers, popup mode, the status line, and the agent-only view.
 
 ## Configuration
 
-tmux options (`@agenmux-*`) set launcher keys and overrides; `config.toml`
-holds display, behavior, theme, and keymap settings. Press `s` in the sidebar to
+tmux options (`@agenmux-*`) set launcher keys and overrides; in Rex, keys live
+in the `init.lua` line. `config.toml` holds display, behavior, theme, and keymap
+settings for both. Press `s` in the sidebar to
 edit settings in place, or edit the file and run `agenmux config reload`.
 `agenmux config --help` lists every key; [`examples/config.toml`](examples/config.toml)
 is a complete annotated example. See [docs/configuration.md](docs/configuration.md).

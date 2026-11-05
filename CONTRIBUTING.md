@@ -43,10 +43,13 @@ config format.
   output are contracts consumed by the sidebar and tmux status segment.
 - Runtime tmux integration lives in `src/input.rs`, `src/panes.rs`,
   `src/setup.rs`, and `src/toggle.rs`; preserve option names, hook indexes,
-  processless panes, and exact-client targeting.
+  processless panes, and exact-client targeting. Rex integration lives in
+  `src/mux/rex.rs`, the Lua scripts in `src/mux/rex/`, and `rex/agenmux.lua`.
+  Shared code reaches either only through the `Multiplexer` trait; see
+  [Multiplexer backends](docs/development.md#multiplexer-backends).
 - The only shell boundary is `agenmux.tmux`, `scripts/install-bin.sh`,
-  `scripts/install-app.sh`, and `scripts/version.sh`. Do not put runtime logic
-  back into shell wrappers.
+  `scripts/install-app.sh`, and `scripts/version.sh`; Rex's boundary is
+  `rex/agenmux.lua`. Do not put runtime logic back into shell wrappers.
 - Match existing Rust and shell style, quote shell expansions, and prefer tmux
   format strings over extra subprocesses on hot paths.
 

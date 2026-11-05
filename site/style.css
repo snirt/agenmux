@@ -297,6 +297,7 @@ pre .copy:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; 
   padding: 1rem 1.2rem;
   background: #121212;
 }
+.features > .wide { grid-column: 1 / -1; }
 .features p { margin: 0.5rem 0 0; color: var(--fg); line-height: 1.6; }
 .feat-head { color: var(--green); font-weight: 600; font-size: 1.1rem; }
 .feat-head::before { content: "▸ "; color: var(--faint); }

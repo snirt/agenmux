@@ -7,15 +7,17 @@ The sidebar is a terminal block at the side of a window.
 
 ## Setup
 
-The [installer](../README.md#quick-start) does this for you. By hand, add one
-line to `~/.config/rex/init.lua` (or `$REX_CONFIG`), with the full paths to
-your agenmux checkout or install:
+You need Rex on macOS. The [installer](installation.md#installer) does this for
+you. By hand, add one line to `~/.config/rex/init.lua` (or `$REX_CONFIG`), with
+the full paths to your agenmux checkout or install:
 
 ```lua
 dofile("/path/to/agenmux/rex/agenmux.lua"){ bin = "/path/to/agenmux/target/release/agenmux" }
 ```
 
-Then run `rex config reload`. Options:
+The installer writes the same line with its keys spelled out, for example
+`{ bin = "…", key = "alt+s", popup_key = "alt+p" }`. Then run
+`rex config reload`. Options:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -47,7 +49,7 @@ Everything in [usage](usage.md) works the same, except:
   cells; `popup_height = "auto"` takes 80% of the window.
 - **Focus**: the cursor follows the session the app shows. Rex does not report
   it, so agenmux reads the app's own record of it from its macOS preferences,
-  and newer focus changes in Rex while that record lags. A popup follows the
+  and focus changes Rex reports win while that record lags. A popup follows the
   block it opened over.
 - **Mouse**: click selects a row, double-click opens it, the wheel scrolls.
 - **Messages** (copy confirmations, errors) show in the sidebar's hint line;
@@ -68,6 +70,11 @@ Everything in [usage](usage.md) works the same, except:
   neighbour.
 - **Version switching** (`U`) closes every Rex sidebar and popup and reopens
   the sidebars on the new release.
+- **Notifications** work as in tmux. Clicking one brings Rex forward and
+  focuses the agent's block. Turn them off with `notifications = false` under
+  `[behavior]` in `config.toml`; there is no `@agenmux-notifications`.
+- **Quick launchers**: `working_directory = "tmux"` means the directory of
+  the session's first block, or your home directory.
 - **Status line**: Rex has none. `agenmux status` prints plain counts.
 - **Refresh**: Rex reports layout, focus, title and process changes as events,
   but not terminal output. A screen that changes without its title waits for
@@ -82,3 +89,17 @@ process actually runs in. Outside both, it uses whichever server is running;
 with both running, pass `--mux rex` or `--mux tmux`, or set `AGENMUX_MUX`.
 `REX_SERVER` picks the Rex server, as for the `rex` CLI; sidebar blocks carry
 it, and each server gets its own runtime directory.
+
+## Removing
+
+Run the installer again and uncheck Rex: it removes the `init.lua` line after
+asking, reloads Rex and closes the open sidebars. By hand, close the sidebars
+with the toggle key, delete the line, and run `rex config reload`.
+
+## Troubleshooting
+
+The daemon log is the same as in tmux, `$XDG_STATE_HOME/agenmux/daemon.log`;
+see [Troubleshooting](troubleshooting.md). Rex has no `@agenmux-debug`: to
+trace, run `AGENMUX_DEBUG=/tmp/agenmux-trace.log agenmux rex-reload` from a
+Rex block, which replaces the daemon with one that writes the trace. Run
+`agenmux rex-reload` again without the variable to stop.

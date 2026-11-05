@@ -3,6 +3,9 @@
 Press `prefix + A` to open the sidebar, or to move into it when it is already
 open. It lists every tmux session, window, and pane, with agent state inline.
 
+This page describes tmux. Rex (beta, macOS) works the same with its own keys
+(`alt+s` sidebar, `alt+p` popup); [Rex](rex.md) lists what differs there.
+
 ## Keys
 
 | Input | Action |
@@ -175,8 +178,8 @@ installer sets it from its font check. Change an icon with `AGENT_ICON`; see
 
 ## Mouse
 
-Requires `set -g mouse on`, and works in the sidebar only (tmux does not send
-mouse events into a popup).
+In tmux, requires `set -g mouse on`, and works in the sidebar only (tmux does
+not send mouse events into a popup). Rex needs no setting.
 
 - Click a row to select it. Double-click it to jump to its pane.
 - Double-click a header to collapse or expand it.
@@ -187,7 +190,8 @@ mouse events into a popup).
 
 ## Status line
 
-Add `#{agenmux}` to `status-right` or `status-left`:
+In tmux, add `#{agenmux}` to `status-right` or `status-left` (Rex has no status
+line):
 
 ```tmux
 set -g status-right '#{agenmux} | %H:%M'
@@ -317,4 +321,6 @@ set `AGENMUX_MUX`.
 
 The tmux integration also calls internal commands (`sidebar`, `daemon`, `key`,
 `click`, `wheel`, `setup`, `toggle`, `pane-*`, `teardown`,
-`notification-open`); don't call them yourself.
+`notification-open`); don't call them yourself. `rex/agenmux.lua` calls
+`rex-toggle` and `rex-reload`; `rex-reload` and `rex-sidebars` are also for
+you to run in Rex (see [Rex](rex.md)).

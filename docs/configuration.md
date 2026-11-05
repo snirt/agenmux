@@ -9,6 +9,11 @@ agenmux reads two layers:
 A tmux option wins over the file when both set the same thing; see
 [Precedence](#precedence).
 
+In Rex, `config.toml` is the only layer: there are no `@agenmux-*` options, and
+the launcher keys live in the `init.lua` line ([Rex › Setup](rex.md#setup)).
+Despite its name, `[tmux_management]` applies to Rex too, and a width you drag
+in Rex is kept for later sidebars.
+
 ## tmux options
 
 | Option | Default | Purpose |
