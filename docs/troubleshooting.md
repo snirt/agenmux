@@ -45,8 +45,10 @@ it) and what it is doing: a prepared release (`v0.7.1 ready · next start`), why
 it skips this install, or the last failure.
 
 - **Ready but never applied:** a release switches only when no agenmux view
-  from this install is running on any tmux server. Close every sidebar and
-  popup (including on other tmux servers), then open one.
+  from this install is running on any tmux server. An open sidebar view
+  restarts itself for it, but an open popup or a view on another tmux server
+  keeps the old release running. Close every sidebar and popup (including on
+  other tmux servers), then open one.
 - **Run a check now:** `target/release/agenmux internal auto-update` from the
   plugin directory (the daily throttle still applies; it prints the outcome).
 - **A release failed to start:** the previous release was restored and kept.
