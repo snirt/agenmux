@@ -1025,7 +1025,7 @@ pub(crate) fn send_text_to(runtime: &std::path::Path, text: &str) -> i32 {
     0
 }
 
-fn send_bytes_to(runtime: &std::path::Path, bytes: &[u8]) -> i32 {
+pub(crate) fn send_bytes_to(runtime: &std::path::Path, bytes: &[u8]) -> i32 {
     write_fifo(runtime, bytes).is_err() as i32
 }
 

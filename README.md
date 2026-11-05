@@ -4,9 +4,10 @@
 
 Website: <https://snirt.github.io/agenmux/>
 
-A tmux manager in a sidebar that also follows your AI coding agents. Every
-session, window, and pane appears in tmux order; jump, create, rename, and
-delete from the keyboard or mouse.
+A terminal multiplexer manager in a sidebar that also follows your AI coding
+agents. Every session, window, and pane appears in order; jump, create, rename,
+and delete from the keyboard or mouse. It currently supports tmux and
+[Rex](https://www.superlogical.com/rex/) (beta).
 
 https://github.com/user-attachments/assets/3e27f143-3fb3-474a-8cfd-3568112fe2af
 
@@ -28,11 +29,12 @@ when an agent needs you.
 curl -fsSL https://snirt.github.io/agenmux/install.sh | sh
 ```
 
-The installer clones the plugin, runs a Nerd Font check, asks for launcher keys,
-adds the plugin to your tmux.conf once you confirm, and reloads tmux. Run it
-again to update.
+The installer clones agenmux once to `~/.local/share/agenmux` for every
+supported multiplexer, runs a Nerd Font check, lets you pick the multiplexers,
+asks for launcher keys, adds agenmux to each one's config once you confirm, and
+reloads it. Run it again to update, or to add or remove a multiplexer.
 
-Or install with [TPM](https://github.com/tmux-plugins/tpm):
+For tmux alone, [TPM](https://github.com/tmux-plugins/tpm) works too:
 
 ```tmux
 set -g @plugin 'snirt/agenmux'
@@ -41,11 +43,21 @@ set -g @plugin 'snirt/agenmux'
 Press `prefix + I` to install, then `prefix + A` to open the sidebar. The native
 engine for your platform downloads and verifies in the background.
 
+### Rex
+
+agenmux also runs in [Rex](https://www.superlogical.com/rex/) (beta), on macOS:
+Rex has no Linux client yet. With Rex installed, the installer asks for the Rex
+keys (`alt+s` and `alt+p` by default), adds the `init.lua` line that loads
+agenmux once you confirm, and reloads Rex. Rex alone needs no tmux;
+`AGENMUX_MUX=tmux`, `rex` or `both` picks the setup. See [docs/rex.md](docs/rex.md)
+for setup by hand and what differs from tmux.
+
 ### Manual install
 
 Clone the repo, add `run-shell /path/to/agenmux/agenmux.tmux` to `~/.tmux.conf`,
-and reload tmux. Requirements, release archives, and updating are in
-[docs/installation.md](docs/installation.md).
+and reload tmux. For Rex, add the `init.lua` line from
+[docs/rex.md](docs/rex.md#setup). Requirements, release archives, and updating
+are in [docs/installation.md](docs/installation.md).
 
 ### Upgrading from agents-mon
 
@@ -55,17 +67,18 @@ variables, and config paths are still accepted; see
 
 ## Usage
 
-Press `prefix + A` to open the sidebar. Move with `j`/`k`, jump with `Enter`,
-and press `?` for every key. Add `#{agenmux}` to `status-right` for a compact
-count of agents by state.
+Press `prefix + A` in tmux, or `alt+s` in Rex, to open the sidebar. Move with
+`j`/`k`, jump with `Enter`, and press `?` for every key. In tmux, add
+`#{agenmux}` to `status-right` for a compact count of agents by state.
 
 [docs/usage.md](docs/usage.md) has the full key table, search, tmux management,
 quick launchers, popup mode, the status line, and the agent-only view.
 
 ## Configuration
 
-tmux options (`@agenmux-*`) set launcher keys and overrides; `config.toml`
-holds display, behavior, theme, and keymap settings. Press `s` in the sidebar to
+tmux options (`@agenmux-*`) set launcher keys and overrides; in Rex, keys live
+in the `init.lua` line. `config.toml` holds display, behavior, theme, and keymap
+settings for both. Press `s` in the sidebar to
 edit settings in place, or edit the file and run `agenmux config reload`.
 `agenmux config --help` lists every key; [`examples/config.toml`](examples/config.toml)
 is a complete annotated example. See [docs/configuration.md](docs/configuration.md).
@@ -88,6 +101,7 @@ limits are in [docs/troubleshooting.md](docs/troubleshooting.md).
 - [Usage](docs/usage.md)
 - [Configuration](docs/configuration.md)
 - [Desktop notifications](docs/notifications.md)
+- [Rex](docs/rex.md)
 - [Adding / overriding agents](docs/custom-agents.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Development](docs/development.md): tests, dev harnesses, runtime architecture

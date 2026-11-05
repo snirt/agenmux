@@ -8,9 +8,9 @@ a daemon that wrote nothing removes the `.1` as well. Look there first when the 
 disappears or a configuration reload does nothing: every `agenmux: ...`
 message the daemon would have printed is in it.
 
-A daemon that exits without cleaning up leaves its sidebars frozen. The next
-status-line refresh or window switch notices the missing daemon and removes
-them; toggle the sidebar to start a new one.
+A daemon that exits without cleaning up leaves its sidebars frozen. In tmux,
+the next status-line refresh or window switch notices the missing daemon and
+removes them; toggle the sidebar to start a new one.
 
 For detection bugs and timing questions, enable the trace. It is off by default
 and only costs anything when enabled:
@@ -20,8 +20,9 @@ set -g @agenmux-debug /tmp/agenmux-trace.log   # then reopen the sidebar
 ```
 
 `AGENMUX_DEBUG=<file>` does the same for direct commands (`agenmux scan`) and
-wins over the option when both are set. Each line carries the writing process,
-a UTC clock, and the number of the scan it belongs to:
+wins over the option when both are set. Rex has no `@agenmux-debug`; see
+[Rex › Troubleshooting](rex.md#troubleshooting). Each line carries the writing
+process, a UTC clock, and the number of the scan it belongs to:
 
 ```text
 [4242] 12:34:56.789 s17 # scan 23ms reason=output captured=1 reused=3
@@ -30,8 +31,9 @@ a UTC clock, and the number of the scan it belongs to:
 ```
 
 Per-scan lines record the trigger, duration, and how many screens were
-captured versus reused; per-command lines record every tmux round trip; `state`
-lines record each pane's detected state, what the sidebar shows, and the
+captured versus reused; per-command lines record every tmux round trip (Rex
+calls are not traced); `state` lines record each pane's detected state, what
+the sidebar shows, and the
 debounce tick that held a transition back. Release builds never write captured
 screen text to the trace. Debug builds (`make dev-use`) add `detect` lines with the
 pane title and the last two screen lines, which is what tuning an
@@ -45,17 +47,19 @@ it) and what it is doing: a prepared release (`v0.7.1 ready · next start`), why
 it skips this install, or the last failure.
 
 - **Ready but never applied:** a release switches only when no agenmux view
-  from this install is running on any tmux server. An open sidebar view
-  restarts itself for it, but an open popup or a view on another tmux server
-  keeps the old release running. Close every sidebar and popup (including on
-  other tmux servers), then open one.
+  from this install is running in any tmux server or Rex. An open tmux
+  sidebar view restarts itself for it, but an open popup, a view on another
+  tmux server, or a view in Rex keeps the old release running. Close every
+  sidebar and popup (including on other tmux servers and in Rex), then open
+  one.
 - **Run a check now:** `target/release/agenmux internal auto-update` from the
-  plugin directory (the daily throttle still applies; it prints the outcome).
+  install directory (the daily throttle still applies; it prints the outcome).
 - **A release failed to start:** the previous release was restored and kept.
   That release is not retried until a newer one appears; turning auto-update
   off and on (in the picker or settings) retries it.
 - **Start over:** with agenmux closed, delete
-  `<plugins dir>/.agenmux-state/<plugin dir name>/`. An interrupted switch is
+  `<install parent>/.agenmux-state/<install dir name>/` (by default
+  `~/.local/share/.agenmux-state/agenmux/`). An interrupted switch is
   recovered from that directory on the next start, so delete it only after a
   start has opened normally.
 
@@ -66,7 +70,11 @@ it skips this install, or the last failure.
   the sidebar. The original per-window layout cannot be recovered.
 - State is inferred from what's on screen; transient redraws can flicker
   (the sidebar debounces transitions to idle by one tick).
-- Pane titles are only used when the agent's OSC title escapes reach tmux.
-- Desktop notifications are local to the tmux host; headless and remote hosts
-  without a desktop notification service silently skip delivery.
+- Pane titles are only used when the agent's OSC title escapes reach the
+  multiplexer.
+- Desktop notifications are local to the multiplexer host; headless and remote
+  hosts without a desktop notification service silently skip delivery.
+- Rex support is in beta and macOS only. Rex reports no terminal output, so a
+  screen that changes without its title waits for the periodic scan; see
+  [Rex](rex.md) for the other differences.
 - No Windows support.

@@ -633,6 +633,32 @@ pub fn own_pane() -> Option<String> {
         .filter(|pane| valid_tmux_id(pane, '%'))
 }
 
+/// The shell of `TMUX_PANE`, for telling nested multiplexers apart.
+pub fn pane_pid() -> Option<u32> {
+    let pane = own_pane()?;
+    quiet(&["display-message", "-p", "-t", &pane, "#{pane_pid}"])?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// A tmux server answers.
+pub fn running() -> bool {
+    quiet(&["list-sessions"]).is_some()
+}
+
+fn quiet(args: &[&str]) -> Option<String> {
+    let out = process()
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// The owner record, without a connection.
 pub fn owner() -> Option<Owner> {
     let query = OWNER_QUERY
@@ -665,6 +691,7 @@ fn parse_measurement(line: &str) -> Option<SidebarPane> {
         win_size: (window_width, window_height),
         panes,
         active: *active == "1",
+        self_sized: false,
     })
 }
 
