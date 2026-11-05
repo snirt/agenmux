@@ -6,14 +6,16 @@
 curl -fsSL https://snirt.github.io/agenmux/install.sh | sh
 ```
 
-The script clones the plugin to `~/.tmux/plugins/agenmux` at the latest
+The script clones agenmux once to `~/.local/share/agenmux` (under
+`$XDG_DATA_HOME` when set; an existing `~/.tmux/plugins/agenmux` install keeps
+updating there), where every supported multiplexer loads it, at the latest
 stable release tag (`AGENMUX_REF=<branch|tag>` picks another ref), creates
 `~/.config/agenmux/agents/`, shows a Nerd Font sample and asks whether it
 renders (yes sets `display.agent_label = "icon"`, no sets `"text"`; an existing
 `agent_label` is kept, and `AGENMUX_AGENT_LABEL` answers without a prompt),
 asks for the launcher keys (default `prefix + A`
 sidebar, `prefix + a` popup), shows the lines it wants in your tmux.conf (a
-`@plugin` entry if you use TPM, `run-shell` otherwise), writes them once you
+`run-shell` line, also with TPM), writes them once you
 confirm, and reloads tmux. It also offers to symlink the `agenmux` command into
 `~/.local/bin` and prints the PATH line to add if that directory is not on
 your PATH. When tmux is running, it first installs the native
@@ -22,9 +24,17 @@ the engine installs in the background when tmux starts. Run it again to
 update: a release checkout moves to the newest stable tag, a branch checkout
 fast-forwards. An existing agenmux entry is left alone.
 
+On a terminal it starts with a checklist of the multiplexers it integrates
+with (currently tmux and Rex), checked as they stand now: arrows or `j`/`k` move, space
+toggles, enter applies. Checking one adds its lines; unchecking one removes
+them after asking, unbinds its keys and closes its open sidebars. Without a
+terminal, or with `AGENMUX_MUX`, every chosen multiplexer is set up and none
+is removed.
+
 ## TPM
 
-Install with [TPM](https://github.com/tmux-plugins/tpm) directly:
+For tmux alone, [TPM](https://github.com/tmux-plugins/tpm) can install it
+into its own plugin directory instead:
 
 ```tmux
 set -g @plugin 'snirt/agenmux'

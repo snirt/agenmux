@@ -139,7 +139,11 @@ pub fn runtime_dir() -> PathBuf {
 }
 
 pub fn prepare_runtime_dir() -> std::io::Result<PathBuf> {
-    let path = runtime_dir();
+    prepare_dir(runtime_dir())
+}
+
+/// `path`, created private to this user.
+pub fn prepare_dir(path: PathBuf) -> std::io::Result<PathBuf> {
     match std::fs::DirBuilder::new().mode(0o700).create(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}

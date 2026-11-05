@@ -7,20 +7,20 @@
       name="google-site-verification"
       content="OnIVypIV57HTxa0Z1PIkRBDGppc45tJ0cpldN3qgCH0"
     />
-    <title>agenmux — monitor AI coding agents and manage tmux from one sidebar</title>
+    <title>agenmux — monitor AI coding agents and manage your multiplexer from one sidebar</title>
     <meta
       name="description"
-      content="agenmux (formerly tmux-agents-mon) is a tmux plugin that monitors Claude Code, Codex, OpenCode, Pi, and other AI coding agents — and doubles as a tmux navigator and manager: every session, window and pane in one sidebar."
+      content="agenmux (formerly tmux-agents-mon) is a terminal multiplexer sidebar (currently tmux and Rex, in beta) that monitors Claude Code, Codex, OpenCode, Pi, and other AI coding agents — and doubles as a navigator and manager: every session, window and pane in one sidebar."
     />
     <link rel="canonical" href="https://snirt.github.io/agenmux/" />
     <meta property="og:type" content="website" />
     <meta
       property="og:title"
-      content="agenmux — monitor AI coding agents and manage tmux from one sidebar"
+      content="agenmux — monitor AI coding agents and manage your multiplexer from one sidebar"
     />
     <meta
       property="og:description"
-      content="agenmux (formerly tmux-agents-mon) is a tmux plugin that monitors Claude Code, Codex, OpenCode, Pi, and other AI coding agents — and doubles as a tmux navigator and manager: every session, window and pane in one sidebar."
+      content="agenmux (formerly tmux-agents-mon) is a terminal multiplexer sidebar (currently tmux and Rex, in beta) that monitors Claude Code, Codex, OpenCode, Pi, and other AI coding agents — and doubles as a navigator and manager: every session, window and pane in one sidebar."
     />
     <meta property="og:url" content="https://snirt.github.io/agenmux/" />
     <meta
@@ -60,7 +60,7 @@
     </nav>
 
     <section class="hero">
-      <h1 class="tagline">Monitor AI agents. Manage tmux.</h1>
+      <h1 class="tagline">Monitor AI agents. Manage your multiplexer.</h1>
       <p class="hero-copy">
         See who's <span class="c-red">blocked</span>,
         <span class="c-yellow">working</span>, or
@@ -196,12 +196,14 @@ confirm_delete = true</code></pre>
           <p>Paste this command into your terminal:</p>
           <pre><code>curl -fsSL https://snirt.github.io/agenmux/install.sh | sh</code></pre>
           <p>
-            Recommended. Clones or updates agenmux, asks for the launcher keys,
-            updates your tmux config after confirmation, and reloads tmux.
+            Recommended. Installs agenmux once for every supported
+            multiplexer, asks for the launcher keys, updates each config after
+            confirmation, and reloads it. Run it again to update, or to add or remove an
+            integration.
           </p>
         </div>
         <div class="install-panel install-panel-manual">
-          <p>With TPM, add this line to <code>~/.tmux.conf</code>:</p>
+          <p>For tmux alone, with TPM, add this line to <code>~/.tmux.conf</code>:</p>
           <pre><code>set -g @plugin 'snirt/agenmux'</code></pre>
           <p>
             Put it before TPM initializes, reload your tmux config, then press

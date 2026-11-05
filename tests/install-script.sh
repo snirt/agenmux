@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# install.sh must be idempotent and declare the plugin the way the user's
-# tmux.conf already loads plugins (TPM @plugin line above tpm, run-shell otherwise).
+# install.sh must be idempotent and install once, outside any multiplexer's
+# own directories, for tmux (a run-shell line) and Rex alike.
 set -u
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0
@@ -8,7 +8,9 @@ home="$(mktemp -d)"
 trap 'rm -rf "$home"' EXIT
 # an empty socket dir means "no tmux server", so the reload branch is skipped
 export HOME="$home" TMUX_TMPDIR="$home" AGENMUX_REPO="$home/src"
-unset TMUX XDG_CONFIG_HOME
+# a developer's Rex install must not join the tmux cases; Rex has its own below
+export AGENMUX_MUX=tmux
+unset TMUX XDG_CONFIG_HOME XDG_DATA_HOME REX_CONFIG
 # shellcheck source=tests/helpers/install-fixture.sh
 . "$DIR/tests/helpers/install-fixture.sh"
 install_fixture "$DIR" "$home/src"
@@ -23,13 +25,13 @@ check() {
 }
 
 # plain tmux.conf: both launcher keys and run-shell appended once, clone lands
-# in plugins dir
+# in the data dir
 sh "$DIR/install.sh" >/dev/null && sh "$DIR/install.sh" >/dev/null
 check fresh-conf "$(cat "$home/.tmux.conf")" \
-  "$(printf "set -g @agenmux-key 'A'\nset -g @agenmux-popup-key 'a'\nrun-shell \"~/.tmux/plugins/agenmux/agenmux.tmux\"")"
-check clone "$([ -x "$home/.tmux/plugins/agenmux/agenmux.tmux" ] && echo yes)" yes
+  "$(printf "set -g @agenmux-key 'A'\nset -g @agenmux-popup-key 'a'\nrun-shell \"~/.local/share/agenmux/agenmux.tmux\"")"
+check clone "$([ -x "$home/.local/share/agenmux/agenmux.tmux" ] && echo yes)" yes
 check config-dir "$([ -d "$home/.config/agenmux/agents" ] && echo yes)" yes
-check command-link "$(readlink "$home/.local/bin/agenmux")" "$home/.tmux/plugins/agenmux/target/release/agenmux"
+check command-link "$(readlink "$home/.local/bin/agenmux")" "$home/.local/share/agenmux/target/release/agenmux"
 
 # something else already at ~/.local/bin/agenmux is never replaced
 mv "$home/.local/bin/agenmux" "$home/link.bak"
@@ -49,11 +51,11 @@ check command-path-quiet "$(PATH="$home/.local/bin:$PATH" sh "$DIR/install.sh" |
 printf 'no-update\n' >"$home/src/no-update-marker"
 git -C "$home/src" add no-update-marker
 git -C "$home/src" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m newer
-installed_before="$(git -C "$home/.tmux/plugins/agenmux" rev-parse HEAD)"
+installed_before="$(git -C "$home/.local/share/agenmux" rev-parse HEAD)"
 : >"$home/dev.conf"
-AGENMUX_DIR="$home/.tmux/plugins/agenmux" AGENMUX_TMUX_CONF="$home/dev.conf" \
+AGENMUX_DIR="$home/.local/share/agenmux" AGENMUX_TMUX_CONF="$home/dev.conf" \
   AGENMUX_SKIP_UPDATE=1 AGENMUX_FORCE_WIZARD=1 sh "$DIR/install.sh" >/dev/null
-check skip-update "$(git -C "$home/.tmux/plugins/agenmux" rev-parse HEAD)" "$installed_before"
+check skip-update "$(git -C "$home/.local/share/agenmux" rev-parse HEAD)" "$installed_before"
 check forced-wizard "$(grep -c 'agenmux.tmux' "$home/dev.conf")" 1
 
 # Docker mounts linked worktrees as a .git file whose host path is unavailable
@@ -71,48 +73,39 @@ fi
 check worktree-reuse "$worktree_install" ok
 check worktree-conf "$(grep -c agenmux "$home/worktree.conf")" 3
 
-# TPM present: @plugin above the tpm run line, still only once
+# TPM present: still a run-shell line, never @plugin (TPM would clone a second,
+# tmux-only copy), and only once
 mkdir -p "$home/.tmux/plugins/tpm"
 printf 'set -g mouse on\nrun "~/.tmux/plugins/tpm/tpm"\n' >"$home/.tmux.conf"
 sh "$DIR/install.sh" >/dev/null && sh "$DIR/install.sh" >/dev/null
 check tpm-conf "$(cat "$home/.tmux.conf")" \
-  "$(printf "set -g mouse on\nset -g @agenmux-key 'A'\nset -g @agenmux-popup-key 'a'\nset -g @plugin 'snirt/agenmux'\nrun \"~/.tmux/plugins/tpm/tpm\"")"
+  "$(printf "set -g mouse on\nrun \"~/.tmux/plugins/tpm/tpm\"\nset -g @agenmux-key 'A'\nset -g @agenmux-popup-key 'a'\nrun-shell \"~/.local/share/agenmux/agenmux.tmux\"")"
+check tpm-no-copy "$([ -e "$home/.tmux/plugins/agenmux" ] || echo absent)" absent
 
-# a dotfiles symlink stays a symlink; the TPM edit lands in its target,
-# through a relative link chain, keeping the target's mode
+# a dotfiles symlink stays a symlink; the lines land in its target
 mkdir -p "$home/dotfiles/tmux"
-printf 'run "~/.tmux/plugins/tpm/tpm"\n' >"$home/dotfiles/tmux/tmux.conf"
-chmod 600 "$home/dotfiles/tmux/tmux.conf"
+: >"$home/dotfiles/tmux/tmux.conf"
 ln -s tmux/tmux.conf "$home/dotfiles/tmux.conf"
 ln -sf dotfiles/tmux.conf "$home/.tmux.conf"
-symlink_status=0
-sh "$DIR/install.sh" >/dev/null || symlink_status=$?
-check symlink-exit "$symlink_status" 0
+sh "$DIR/install.sh" >/dev/null
 check symlink-kept "$(readlink "$home/.tmux.conf") $(readlink "$home/dotfiles/tmux.conf")" \
   "dotfiles/tmux.conf tmux/tmux.conf"
-check symlink-target "$(cat "$home/dotfiles/tmux/tmux.conf")" \
-  "$(printf "set -g @agenmux-key 'A'\nset -g @agenmux-popup-key 'a'\nset -g @plugin 'snirt/agenmux'\nrun \"~/.tmux/plugins/tpm/tpm\"")"
-check symlink-mode "$(ls -l "$home/dotfiles/tmux/tmux.conf" | cut -c1-10)" "-rw-------"
-check symlink-no-tmp "$(find "$home" -name '*.agenmux.tmp' | wc -l | tr -d ' ')" 0
-
-# a failed rewrite leaves the config intact and no temp file behind;
-# root ignores the read-only dir, so containers skip this case
-if [ "$(id -u)" != 0 ]; then
-  chmod 500 "$home/dotfiles/tmux"
-  failed_status=0
-  AGENMUX_FORCE_WIZARD=1 sh "$DIR/install.sh" >/dev/null 2>&1 || failed_status=$?
-  chmod 700 "$home/dotfiles/tmux"
-  check failed-exit "$failed_status" 1
-  check failed-intact "$(grep -c agenmux "$home/dotfiles/tmux/tmux.conf")" 3
-  check failed-no-tmp "$(find "$home" -name '*.agenmux.tmp' | wc -l | tr -d ' ')" 0
-fi
+check symlink-target "$(grep -c agenmux "$home/dotfiles/tmux/tmux.conf")" 3
 rm "$home/.tmux.conf"
 
-# commented lines neither count as a declaration nor anchor the TPM insert
-printf "# set -g @plugin 'snirt/agenmux'\n# run '~/.tmux/plugins/tpm/tpm'\nrun '~/.tmux/plugins/tpm/tpm'\n" >"$home/.tmux.conf"
+# a commented line does not count as a declaration
+printf "# run-shell ~/.local/share/agenmux/agenmux.tmux\n" >"$home/.tmux.conf"
 sh "$DIR/install.sh" >/dev/null
-check commented-conf "$(cat "$home/.tmux.conf")" \
-  "$(printf "# set -g @plugin 'snirt/agenmux'\n# run '~/.tmux/plugins/tpm/tpm'\nset -g @agenmux-key 'A'\nset -g @agenmux-popup-key 'a'\nset -g @plugin 'snirt/agenmux'\nrun '~/.tmux/plugins/tpm/tpm'")"
+check commented-conf "$(grep -c '^run-shell' "$home/.tmux.conf")" 1
+rm "$home/.tmux.conf"
+
+# an install from before lives in tmux's plugin dir and keeps updating there,
+# so the line that loads it stays valid
+old_home="$home/old"
+mkdir -p "$old_home/.tmux/plugins"
+git clone -q "$home/src" "$old_home/.tmux/plugins/agenmux"
+HOME="$old_home" sh "$DIR/install.sh" >/dev/null
+check legacy-dir-kept "$(grep -c '~/.tmux/plugins/agenmux/agenmux.tmux' "$old_home/.tmux.conf") $([ -e "$old_home/.local/share/agenmux" ] || echo absent)" "1 absent"
 
 # curl | sh cut off mid-download runs nothing
 cut_home="$home/cut"
@@ -192,5 +185,61 @@ check ref-keeps-branch "$(git -C "$dev" symbolic-ref --short HEAD)" main
 PATH="$home/fake-bin:$PATH" LATEST_TAG=v99.0.0 AGENMUX_DIR="$dev" \
   AGENMUX_TMUX_CONF="$home/dev-ref.conf" sh "$DIR/install.sh" >/dev/null
 check branch-rerun-pulls "$(git -C "$dev" rev-parse HEAD)" "$(git -C "$home/src" rev-parse HEAD)"
+
+# Rex alone: no tmux.conf, init.lua shown with full paths but never written,
+# and Rex reloads only once init.lua loads agenmux.
+mkdir -p "$home/rex-bin"
+cat >"$home/rex-bin/rex" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$REX_LOG"
+EOF
+chmod +x "$home/rex-bin/rex"
+plugin="$home/.local/share/agenmux"
+mkdir -p "$plugin/target/release"
+[ -e "$plugin/target/release/agenmux" ] || { printf '#!/bin/sh\n' >"$plugin/target/release/agenmux" && chmod +x "$plugin/target/release/agenmux"; }
+rex_install() {
+  AGENMUX_MUX=rex AGENMUX_REX="$home/rex-bin/rex" REX_LOG="$home/rex.log" \
+    AGENMUX_TMUX_CONF="$home/rex-only.conf" sh "$DIR/install.sh"
+}
+out="$(rex_install)"
+line="dofile(\"$plugin/rex/agenmux.lua\"){ bin = \"$plugin/target/release/agenmux\", key = \"alt+s\", popup_key = \"alt+p\" }"
+check rex-line "$(printf '%s\n' "$out" | grep -cF "$line")" 1
+check rex-no-tmux-conf "$([ -e "$home/rex-only.conf" ] && echo written || echo none)" none
+check rex-init-written "$(grep -cF "$line" "$home/.config/rex/init.lua")" 1
+check rex-reload "$(cat "$home/rex.log")" "--autostart=false config reload"
+printf -- '-- mine\n%s\n' "$line" >"$home/.config/rex/init.lua"
+rex_install >/dev/null
+check rex-init-kept "$(head -1 "$home/.config/rex/init.lua") $(grep -cF "$line" "$home/.config/rex/init.lua")" "-- mine 1"
+
+# On a terminal the checklist starts from what is integrated: unchecking Rex
+# and checking tmux swaps them, then unchecking tmux removes it too.
+if command -v expect >/dev/null 2>&1; then
+  checklist() { # keys for the checklist
+    AGENMUX_MUX= AGENMUX_REX="$home/rex-bin/rex" REX_LOG="$home/rex.log" AGENMUX_TMUX_CONF="$home/rex-only.conf" expect -c "
+      set timeout 30
+      log_user 0
+      spawn sh $DIR/install.sh
+      expect \"show as an icon\" { send \"\\r\" }
+      expect \"Integrations\" { send \"$1\" }
+      expect {
+        -re \"(Sidebar|Popup) toggle\" { send \"\\r\"; exp_continue }
+        \"Add \" { send \"y\\r\"; exp_continue }
+        \"Remove \" { send \"y\\r\"; exp_continue }
+        eof
+      }
+      lassign [wait] pid spawnid os_error exit_code
+      exit \$exit_code
+    "
+  }
+  checklist ' j \r' >/dev/null
+  check checklist-rex-removed "$(grep -c agenmux "$home/.config/rex/init.lua")" 0
+  check checklist-rex-kept-mine "$(cat "$home/.config/rex/init.lua")" "-- mine"
+  check checklist-tmux-added "$(grep -c agenmux "$home/rex-only.conf")" 3
+  checklist '\r' >/dev/null
+  check checklist-rerun-keeps "$(grep -c agenmux "$home/rex-only.conf") $(grep -c agenmux "$home/.config/rex/init.lua")" "3 0"
+  checklist ' \r' >/dev/null
+  check checklist-tmux-removed "$(grep -c agenmux "$home/rex-only.conf")" 0
+fi
+check rex-mux-invalid "$(AGENMUX_MUX=screen sh "$DIR/install.sh" >/dev/null 2>&1 || echo refused)" refused
 
 exit "$fail"

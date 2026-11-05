@@ -85,6 +85,19 @@ pub struct Live {
     pub windows: HashSet<(String, u32)>,
     /// Every window and pane id.
     pub ids: HashSet<String>,
+    /// Windows are live by id alone: the server renumbers the windows after
+    /// a closed one (Rex), so an index says nothing about which window it is.
+    pub by_id: bool,
+}
+
+impl Live {
+    pub fn has_window(&self, session: &str, window: &Window) -> bool {
+        if self.by_id {
+            self.ids.contains(&window.id)
+        } else {
+            self.windows.contains(&(session.to_string(), window.index))
+        }
+    }
 }
 
 impl Closed {
@@ -126,7 +139,7 @@ impl Closed {
             self.session
                 .windows
                 .iter()
-                .any(|w| live.windows.contains(&(name.clone(), w.index)))
+                .any(|w| live.has_window(name, w))
         }
     }
 }
@@ -834,6 +847,7 @@ pub(crate) mod tests {
         let live = |windows: &[(&str, u32)], ids: &[&str]| Live {
             windows: windows.iter().map(|(s, i)| (s.to_string(), *i)).collect(),
             ids: ids.iter().map(|id| id.to_string()).collect(),
+            by_id: false,
         };
         let work2 = live(&[("work", 2)], &["@9"]);
         assert!(closed_session.blocked(&work2));
@@ -842,6 +856,17 @@ pub(crate) mod tests {
         assert!(!closed_session.blocked(&Live::default()));
         assert!(closed_pane.blocked(&work2), "its window @4 is gone");
         assert!(!closed_pane.blocked(&live(&[], &["@4"])));
+
+        // Rex renumbers the windows after a closed one: only its id counts
+        let by_id = |live: Live| Live {
+            by_id: true,
+            ..live
+        };
+        let index = closed_window.session.windows[0].index;
+        let renumbered = by_id(live(&[("work", index)], &["@9"]));
+        assert!(!closed_window.blocked(&renumbered));
+        let id = closed_window.session.windows[0].id.clone();
+        assert!(closed_window.blocked(&by_id(live(&[], &[id.as_str()]))));
     }
 
     #[test]

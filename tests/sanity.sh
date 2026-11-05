@@ -326,7 +326,7 @@ install_out="$(TMUX="$install_path,$install_pid,0" AGENMUX_REPO="$root/src" \
   printf 'FAIL installer: %s\n' "$install_out" >&2
   exit 1
 }
-has_line "$(cat "$HOME/.tmux.conf")" 'run-shell "~/.tmux/plugins/agenmux/agenmux.tmux"'
+has_line "$(cat "$HOME/.tmux.conf")" 'run-shell "~/.local/share/agenmux/agenmux.tmux"'
 [ -d "$XDG_CONFIG_HOME/agenmux/agents" ]
 has "$(tmux -L "$install_socket" list-keys -T prefix)" '/agenmux.tmux'
 has "$install_out" 'reloaded'
@@ -337,7 +337,7 @@ tmux -L "$install_socket" wait-for -L agenmux-install
 tmux -L "$install_socket" wait-for -U agenmux-install
 tmux -L "$install_socket" kill-server
 active_socket=""
-rm -rf "$HOME/.tmux" "$HOME/.tmux.conf"
+rm -rf "$HOME/.tmux" "$HOME/.local/share/agenmux" "$HOME/.tmux.conf"
 printf 'ok   one-line installer wrote conf, config root, and reloaded a live server\n'
 
 # The same installer on a terminal: prompts read /dev/tty, so drive them with
@@ -358,6 +358,7 @@ wizard() { # answers...
 mkdir -p "$root/no-server"
 wizard '
     expect "show as an icon" { send "n\r" }
+    expect "Integrations" { send "\r" }
     expect "Sidebar toggle" { send "\r" }
     expect "Popup toggle" { send "\r" }
     expect "Add them to" { send "n\r" }
@@ -366,6 +367,7 @@ wizard '
 has_line "$(cat "$XDG_CONFIG_HOME/agenmux/config.toml")" 'agent_label = "text"'
 wizard '
     expect "show as an icon" { send "\r" }
+    expect "Integrations" { send "\r" }
     expect "Sidebar toggle" { send "C g\r" }
     expect "one key name" {}
     expect "Sidebar toggle" { send "C-g\r" }
@@ -374,10 +376,17 @@ wizard '
 '
 has_line "$(cat "$HOME/.tmux.conf")" "set -g @agenmux-key 'C-g'"
 has_line "$(cat "$HOME/.tmux.conf")" "set -g @agenmux-popup-key 'F5'"
-has_line "$(cat "$HOME/.tmux.conf")" 'run-shell "~/.tmux/plugins/agenmux/agenmux.tmux"'
+has_line "$(cat "$HOME/.tmux.conf")" 'run-shell "~/.local/share/agenmux/agenmux.tmux"'
 [ "$(wc -l <"$HOME/.tmux.conf")" -eq 3 ]
-rm -rf "$HOME/.tmux" "$HOME/.tmux.conf" "$XDG_CONFIG_HOME/agenmux/config.toml"
-printf 'ok   installer prompts: decline leaves conf empty, custom keys written once\n'
+# A re-run starts checked; unchecking tmux removes its lines.
+wizard '
+    expect "show as an icon" { send "\r" }
+    expect "Integrations" { send " \r" }
+    expect "Remove them" { send "y\r" }
+'
+[ ! -s "$HOME/.tmux.conf" ]
+rm -rf "$HOME/.tmux" "$HOME/.local/share/agenmux" "$HOME/.tmux.conf" "$XDG_CONFIG_HOME/agenmux/config.toml"
+printf 'ok   installer prompts: decline leaves conf empty, custom keys written once, uncheck removes\n'
 
 phase=$SECONDS
 bash "$plugin/scripts/install-bin.sh"
