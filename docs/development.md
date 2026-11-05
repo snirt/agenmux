@@ -95,7 +95,9 @@ than every 500 ms. Inventory and background sessions are still reconciled every
 two seconds, and attached-session screens are recaptured at least every ten
 seconds; silence is never treated as an agent state. A key arriving mid-scan
 stops the capture loop: panes not yet recaptured keep their last screen and
-are refreshed on the next output scan. Direct `scan`/`list`
+are refreshed on the next output scan. In Rex the daemon follows Rex's event
+stream instead (layout, focus, title and process changes); Rex reports no
+terminal output, so screens refresh on the periodic scan. Direct `scan`/`list`
 commands always take a fresh snapshot. The plugin downloads and verifies a
 prebuilt binary automatically; if one is unavailable and
 [cargo](https://rustup.rs) is installed, it builds the engine in the background. `make build` does the same
