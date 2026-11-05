@@ -310,6 +310,11 @@ agenmux update [latest | vX.Y.Z]
 agenmux releases refresh
 ```
 
+Each command works with the multiplexer it runs in: the tmux pane or Rex block
+around it, even nested. Outside both, it uses whichever server is running. If
+both are, pass `--mux tmux` or `--mux rex` (anywhere on the command line), or
+set `AGENMUX_MUX`.
+
 The tmux integration also calls internal commands (`sidebar`, `daemon`, `key`,
 `click`, `wheel`, `setup`, `toggle`, `pane-*`, `teardown`,
 `notification-open`); don't call them yourself.

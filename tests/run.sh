@@ -8,8 +8,10 @@ config_home="$(mktemp -d)"
 export XDG_CONFIG_HOME="$config_home"
 export XDG_STATE_HOME="$config_home/state"
 trap 'rm -rf "$config_home"' EXIT
-# Stubbed checks must not resolve runtime files through the developer's server.
-unset TMUX TMUX_PANE
+# Stubbed checks must not resolve runtime files through the developer's server,
+# and run against tmux even from inside a Rex block.
+unset TMUX TMUX_PANE REX_SESSION REX_BLOCK REX_SERVER AGENMUX_RUNTIME_DIR
+export AGENMUX_MUX=tmux
 
 if [ -z "${AGENMUX_BIN:-}" ]; then
   BIN="$DIR/target/release/agenmux"
@@ -33,7 +35,16 @@ else
   fail=1
 fi
 if "$DIR/tests/mux-boundary.sh"; then
-  echo "ok   tmux-only-behind-the-multiplexer-seam"
+  echo "ok   multiplexers-behind-the-seam"
+else
+  fail=1
+fi
+lua="$(command -v lua || command -v lua5.4 || true)"
+if [ -z "$lua" ]; then
+  echo "FAIL rex-lua-layout-policy: lua is not installed"
+  fail=1
+elif (cd "$DIR" && "$lua" tests/rex-layout.lua); then
+  echo "ok   rex-lua-layout-policy"
 else
   fail=1
 fi

@@ -4,9 +4,10 @@
 
 Website: <https://snirt.github.io/agenmux/>
 
-A tmux manager in a sidebar that also follows your AI coding agents. Every
-session, window, and pane appears in tmux order; jump, create, rename, and
-delete from the keyboard or mouse.
+A terminal multiplexer manager in a sidebar that also follows your AI coding
+agents. Every session, window, and pane appears in order; jump, create, rename,
+and delete from the keyboard or mouse. It currently supports tmux and
+[Rex](https://www.superlogical.com/rex/) (beta).
 
 https://github.com/user-attachments/assets/3e27f143-3fb3-474a-8cfd-3568112fe2af
 
@@ -28,11 +29,12 @@ when an agent needs you.
 curl -fsSL https://snirt.github.io/agenmux/install.sh | sh
 ```
 
-The installer clones the plugin, runs a Nerd Font check, asks for launcher keys,
-adds the plugin to your tmux.conf once you confirm, and reloads tmux. Run it
-again to update.
+The installer clones agenmux once to `~/.local/share/agenmux` for every
+supported multiplexer, runs a Nerd Font check, lets you pick the multiplexers,
+asks for launcher keys, adds agenmux to each one's config once you confirm, and
+reloads it. Run it again to update, or to add or remove a multiplexer.
 
-Or install with [TPM](https://github.com/tmux-plugins/tpm):
+For tmux alone, [TPM](https://github.com/tmux-plugins/tpm) works too:
 
 ```tmux
 set -g @plugin 'snirt/agenmux'
@@ -40,6 +42,15 @@ set -g @plugin 'snirt/agenmux'
 
 Press `prefix + I` to install, then `prefix + A` to open the sidebar. The native
 engine for your platform downloads and verifies in the background.
+
+### Rex
+
+agenmux also runs in [Rex](https://www.superlogical.com/rex/) (beta), on macOS:
+Rex has no Linux client yet. With the `rex`
+CLI installed, the installer asks for the Rex keys (`alt+s` and `alt+p` by
+default), adds the `init.lua` line that loads agenmux once you confirm, and
+reloads Rex. Rex alone needs no tmux;
+`AGENMUX_MUX=tmux`, `rex` or `both` picks the setup. See [docs/rex.md](docs/rex.md).
 
 ### Manual install
 
@@ -88,6 +99,7 @@ limits are in [docs/troubleshooting.md](docs/troubleshooting.md).
 - [Usage](docs/usage.md)
 - [Configuration](docs/configuration.md)
 - [Desktop notifications](docs/notifications.md)
+- [Rex](docs/rex.md)
 - [Adding / overriding agents](docs/custom-agents.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Development](docs/development.md): tests, dev harnesses, runtime architecture

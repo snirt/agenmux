@@ -1247,12 +1247,15 @@ impl Sidebar {
     }
 
     /// nohup + no wait: update kills the panes this engine renders into, and a
-    /// pane kill would otherwise SIGHUP the switch halfway through.
+    /// pane kill would otherwise SIGHUP the switch halfway through. Its own
+    /// process group: closing a Rex block ends the block's whole group.
     fn switch_version(&mut self, tag: &str) {
+        use std::os::unix::process::CommandExt;
         let Ok(exe) = std::env::current_exe() else {
             return;
         };
         let _ = std::process::Command::new("nohup")
+            .process_group(0)
             .arg(exe)
             .arg("update")
             .arg(tag)

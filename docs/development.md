@@ -113,11 +113,19 @@ detached, one active pane stays warm for the next attach.
 ## Multiplexer backends
 
 The scan, sidebar, daemon, overlays, snapshot and live settings reach the
-server only through the `Multiplexer` trait in `src/mux/mod.rs`. tmux is the
-one implementation (`src/mux/tmux.rs`, with its control-mode client in
-`src/mux/tmux/control.rs`). A backend answers questions and performs primitive
-actions; deciding what to scan, when to rescan, widths, ownership and undo
-stays in shared code.
+server only through the `Multiplexer` trait in `src/mux/mod.rs`. tmux
+(`src/mux/tmux.rs`, with its control-mode client in `src/mux/tmux/control.rs`)
+and Rex (`src/mux/rex.rs`, with the Lua scripts it runs in `src/mux/rex/`)
+implement it; `mux::backend()` picks one per process. A backend answers
+questions and performs primitive actions; deciding what to scan, when to
+rescan, widths, ownership and undo stays in shared code.
+
+Rex differs where its server does: it routes no keys, so each sidebar block's
+reader forwards its terminal input (`mux::routes_keys`); it sizes splits by
+ratio, so `rex/place.lua` places sidebars and settles their widths, and its
+panes report `SidebarPane::self_sized`; it renumbers windows after a close,
+so restore matches them by id (`Live::by_id`). The Lua policy has its own test,
+`tests/rex-layout.lua`, which `tests/run.sh` runs.
 
 To add a backend:
 
@@ -134,5 +142,8 @@ To add a backend:
 
 The modules that run only from tmux bindings and hooks (`setup.rs`,
 `toggle.rs`, `panes.rs`, and the tmux entry points in `input.rs`, `release.rs`
-and `notifications.rs`) call `mux::tmux` directly. `tests/mux-boundary.sh`
-keeps every other module off tmux.
+and `notifications.rs`) call `mux::tmux` directly; the Rex entry points
+(`rex-*` in `main.rs`, `update` in `release.rs`, notification clicks) call
+`mux::rex`. `tests/mux-boundary.sh` keeps every other module off both, and
+`tests/run.sh` pins `AGENMUX_MUX=tmux` so the suites run against tmux even
+from a Rex block.

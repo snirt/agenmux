@@ -675,7 +675,14 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
 
     // This server's view releases its installation lease first; a lease still
     // held afterwards belongs to another tmux server or an open popup.
-    let running = tmux_running();
+    // Rex sidebars close with their blocks and reopen on the installed release.
+    let rex = crate::mux::is_rex();
+    let running = !rex && tmux_running();
+    let rex_sidebars = if rex {
+        crate::mux::rex::close_sidebars()
+    } else {
+        Vec::new()
+    };
     if running {
         teardown_runtime(&old_control);
     }
@@ -700,6 +707,7 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
     if running {
         reenter(plugin_dir, was_open);
     }
+    crate::mux::rex::reopen(&rex_sidebars);
     if let Err(reason) = result {
         if let Some(pause) = pause {
             pause.undo();

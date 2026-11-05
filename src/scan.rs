@@ -334,14 +334,19 @@ pub fn to_tsv(rows: &[PaneRow]) -> String {
 }
 
 /// `#[fg=red]⣿#[default]N #[fg=yellow]⣾#[default]N #[fg=green]⣿#[default]N`,
-/// zero counts omitted, no trailing space. Empty when no agents.
-pub fn status_segment(rows: &[PaneRow], glyphs: Glyphs) -> String {
+/// zero counts omitted, no trailing space. Empty when no agents. `markup`:
+/// tmux status-line colors; without them, plain counts for any status bar.
+pub fn status_segment(rows: &[PaneRow], glyphs: Glyphs, markup: bool) -> String {
     let n = |s: &str| rows.iter().filter(|r| r.state == s).count();
     [("blocked", "red"), ("working", "yellow"), ("idle", "green")]
         .into_iter()
         .filter_map(|(state, color)| {
             let count = n(state);
-            (count > 0).then(|| format!("#[fg={color}]{}#[default]{count}", glyphs.state(state)))
+            let glyph = glyphs.state(state);
+            (count > 0).then(|| match markup {
+                true => format!("#[fg={color}]{glyph}#[default]{count}"),
+                false => format!("{glyph}{count}"),
+            })
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -396,22 +401,25 @@ mod tests {
 
     #[test]
     fn segment_counts_and_omits_zeros() {
-        assert_eq!(status_segment(&[], Glyphs::Rich), "");
+        assert_eq!(status_segment(&[], Glyphs::Rich, true), "");
         assert_eq!(
-            status_segment(&[row("working"), row("idle"), row("idle")], Glyphs::Rich),
+            status_segment(
+                &[row("working"), row("idle"), row("idle")],
+                Glyphs::Rich,
+                true
+            ),
             "#[fg=yellow]⣾#[default]1 #[fg=green]⣿#[default]2"
         );
         assert_eq!(
-            status_segment(&[row("blocked")], Glyphs::Rich),
+            status_segment(&[row("blocked")], Glyphs::Rich, true),
             "#[fg=red]⣿#[default]1"
         );
+        let all = [row("blocked"), row("working"), row("idle")];
         assert_eq!(
-            status_segment(
-                &[row("blocked"), row("working"), row("idle")],
-                Glyphs::Plain
-            ),
+            status_segment(&all, Glyphs::Plain, true),
             "#[fg=red]!#[default]1 #[fg=yellow]>#[default]1 #[fg=green].#[default]1"
         );
+        assert_eq!(status_segment(&all, Glyphs::Plain, false), "!1 >1 .1");
     }
 
     #[test]

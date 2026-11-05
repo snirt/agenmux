@@ -631,8 +631,9 @@ impl Sidebar {
                 }
             }
             Some(d) => {
-                if changed {
-                    d.writers.emit(&synced());
+                if changed || !self.escape.is_empty() {
+                    let escape = std::mem::take(&mut self.escape);
+                    d.writers.emit(&format!("{escape}{}", synced()));
                 }
             }
         }
@@ -1053,8 +1054,15 @@ impl Sidebar {
             ])),
             _ => None,
         };
+        let flash = self
+            .flash
+            .as_ref()
+            .filter(|(_, until)| std::time::Instant::now() < *until)
+            .map(|(text, _)| text.clone());
         let hint = if let Some(inline_hint) = inline_hint {
             inline_hint
+        } else if let Some(flash) = flash {
+            flash
         } else if !sequence_hint.is_empty() {
             sequence_hint
         } else if self.search.editing {
