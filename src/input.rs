@@ -1,5 +1,5 @@
 use crate::app_config::{action_for, Action, KeyChord, KeyMode, Keymap};
-use crate::tmux;
+use crate::mux::tmux;
 use std::time::{Duration, Instant};
 
 pub(crate) struct RawMode(bool);
@@ -98,6 +98,37 @@ fn poll_fd(fd: libc::c_int, timeout: Option<Duration>) -> bool {
     };
     let ms = timeout.map_or(-1, |d| d.as_millis().min(i32::MAX as u128) as i32);
     unsafe { libc::poll(&mut fds, 1, ms) > 0 && fds.revents & libc::POLLIN != 0 }
+}
+
+fn poll_ready(revents: libc::c_short) -> bool {
+    let terminal = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+    revents & (libc::POLLIN | terminal) != 0
+}
+
+/// fd ready for `events`, or terminal, before `deadline`? A deadline already
+/// past still checks once.
+pub(crate) fn poll_by(fd: libc::c_int, events: libc::c_short, deadline: Instant) -> bool {
+    if fd < 0 {
+        return false;
+    }
+    loop {
+        let mut p = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_micros()
+            .div_ceil(1000)
+            .min(i32::MAX as u128) as i32;
+        match unsafe { libc::poll(&mut p, 1, ms) } {
+            0 => return false,
+            n if n > 0 => return p.revents & events != 0 || poll_ready(p.revents),
+            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+            _ => return false,
+        }
+    }
 }
 
 /// Is a key already waiting on `fd`? Never blocks.
@@ -960,7 +991,7 @@ pub(crate) fn buffer_key_bytes(action: &str) -> Option<&'static [u8]> {
 }
 
 fn send_bytes(bytes: &[u8]) -> i32 {
-    match write_fifo(&crate::tmux::runtime_dir(), bytes) {
+    match write_fifo(&crate::mux::tmux::runtime_dir(), bytes) {
         Ok(()) => 0,
         // Named so a dropped key is diagnosable: ENXIO/ENOENT mean no daemon
         // reads the FIFO, EAGAIN that it has not drained it
@@ -1156,6 +1187,15 @@ pub fn wheel(pane: &str, direction: Direction) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_poll_flags_are_ready_for_eof_or_io_error() {
+        assert!(poll_ready(libc::POLLIN));
+        assert!(poll_ready(libc::POLLHUP));
+        assert!(poll_ready(libc::POLLERR));
+        assert!(poll_ready(libc::POLLNVAL));
+        assert!(!poll_ready(0));
+    }
 
     // Run terminal ownership in a separate process: hooks and stdin are global.
     #[test]

@@ -1,4 +1,5 @@
 use crate::attention::{AttentionEvent, AttentionKind};
+use crate::mux::tmux;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -335,7 +336,7 @@ fn activation_command(bundle: &str) -> Option<CommandSpec> {
 }
 
 fn tmux_command(socket: &str) -> Command {
-    let mut command = Command::new("tmux");
+    let mut command = tmux::process();
     command.args(["-S", socket]).env_remove("TMUX");
     command
 }

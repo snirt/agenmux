@@ -1,50 +1,10 @@
+use crate::mux::{Changes, Owner, SidebarPane as M};
 use crate::pane_writers::PaneWriters;
-use crate::panes;
-use crate::tmux::{command_status, PendingChanges, Tmux};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::{event_loop, new_sidebar, on_term, Sidebar};
-
-/// One preserved pane as measured by mirror_tick.
-struct M {
-    pane: String,
-    win: String,
-    sess: String,
-    w: usize,
-    h: usize,
-    win_size: (usize, usize),
-    panes: usize,
-    active: bool,
-}
-
-fn parse_measurement(line: &str) -> Option<M> {
-    let fields: Vec<&str> = line.split('|').collect();
-    let [pane, win, pw, ph, ws, wp, active, sess] = fields.as_slice() else {
-        return None;
-    };
-    let (Ok(w), Ok(h), Ok(panes)) = (
-        pw.parse::<usize>(),
-        ph.parse::<usize>(),
-        wp.parse::<usize>(),
-    ) else {
-        return None;
-    };
-    let (window_width, window_height) = ws
-        .split_once(' ')
-        .and_then(|(width, height)| Some((width.parse().ok()?, height.parse().ok()?)))?;
-    Some(M {
-        pane: (*pane).into(),
-        win: (*win).into(),
-        sess: (*sess).into(),
-        w,
-        h,
-        win_size: (window_width, window_height),
-        panes,
-        active: *active == "1",
-    })
-}
 
 /// Height to render the shared frame at. NOT the minimum: every visible pane
 /// shows the same frame, so folding to the shortest let one stale 23-row window
@@ -88,20 +48,10 @@ fn superseded(mine: &str, current: &str) -> bool {
     !mine.is_empty() && !current.is_empty() && current != mine
 }
 
-/// Both owner options arrive in one tagged reply: a stray hook block read in
-/// its place lacks the tag, and cannot shift one value into the other.
-const OWNER_QUERY: &str =
-    "display-message -p 'am-owner|#{@agenmux-generation}|#{@agenmux-control-client}'";
-
-fn claimed_elsewhere(generation: &str, client: &str, reply: &str) -> bool {
-    let Some((current_generation, current_client)) = reply
-        .trim_end()
-        .strip_prefix("am-owner|")
-        .and_then(|rest| rest.split_once('|'))
-    else {
-        return false;
-    };
-    superseded(generation, current_generation) || superseded(client, current_client)
+fn claimed_elsewhere(generation: &str, client: &str, owner: Option<Owner>) -> bool {
+    owner.is_some_and(|owner| {
+        superseded(generation, &owner.generation) || superseded(client, &owner.client)
+    })
 }
 
 /// Headless-mode state: frames → visible panes, keys ← FIFO, size ← panes.
@@ -151,8 +101,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     };
     let generation = std::env::var("AGENMUX_GENERATION").unwrap_or_default();
     if !generation.is_empty()
-        && !crate::tmux::command(&["show-option", "-gqv", "@agenmux-generation"])
-            .is_ok_and(|current| current.trim() == generation)
+        && !crate::mux::owner().is_some_and(|owner| owner.generation.trim() == generation)
     {
         return 1;
     }
@@ -160,7 +109,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
     }
-    let tmp = match crate::tmux::prepare_runtime_dir() {
+    let tmp = match crate::mux::prepare_runtime_dir() {
         Ok(dir) => dir,
         Err(error) => {
             eprintln!("agenmux: cannot prepare runtime directory: {error}");
@@ -180,57 +129,34 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
     if keys_fd < 0 {
         return 1;
     }
-    let mut tmux = match Tmux::connect_monitoring() {
-        Ok(t) => t,
+    let mut mux = match crate::mux::connect(true) {
+        Ok(mux) => mux,
         Err(_) => return 1,
     };
-    tmux.set_key_sink(keys_fd);
+    if let Some(tmux) = mux.as_tmux() {
+        tmux.set_key_sink(keys_fd);
+    }
     // "" not TMUX_PANE: toggle.sh launches the daemon from the pane the user
     // pressed the key in, and adopting that pane would hide its agent
     let mut sb = new_sidebar(
-        tmux,
+        mux,
         plugin_dir,
         cache_file,
         tmp.join("agenmux-rows"),
         String::new(),
         settings,
     );
-    sb.snapshot = crate::snapshot::Store::open(&mut sb.tmux);
-    // The command runs on this control connection, so it identifies the exact
-    // client even when tmux forks and reports a different OS PID. It can briefly
-    // be empty while a busy server finishes attaching; retry below.
-    // Unescaped: show-option hands the value back unescaped too.
+    sb.snapshot = crate::snapshot::Store::open(sb.mux.as_mut());
+    // A busy server can name the connection only once it finishes attaching.
     let mut control_client = String::new();
     for _ in 0..100 {
-        let client = sb
-            .tmux
-            .run("display-message -p '#{client_name}'")
-            .ok()
-            .map(|client| client.trim().to_string())
-            .filter(|client| !client.is_empty());
-        if let Some(client) = client {
-            let quoted = client.replace('\'', "\\'");
-            if sb
-                .tmux
-                .run(&format!("set-option -g @agenmux-control-client '{quoted}'"))
-                .is_err()
-            {
-                return 1;
-            }
+        if let Some(client) = sb.mux.connection() {
             control_client = client;
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let quoted_tmp = tmp.to_string_lossy().replace('\'', "\\'");
-    if control_client.is_empty()
-        || sb
-            .tmux
-            .run(&format!(
-                "set-option -g @agenmux-runtime-dir '{quoted_tmp}'"
-            ))
-            .is_err()
-    {
+    if control_client.is_empty() || sb.mux.claim(&control_client, &tmp).is_err() {
         return 1;
     }
     sb.daemon = Some(Daemon {
@@ -262,9 +188,9 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         && sb
             .scan_tick(
                 false,
-                &PendingChanges {
+                &Changes {
                     full: true,
-                    ..PendingChanges::default()
+                    ..Changes::default()
                 },
             )
             .is_ok();
@@ -302,14 +228,19 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
 }
 
 impl Sidebar {
+    /// Reading zero panes off a desynced tmux control pipe used to tear the
+    /// whole mirror set down: discard stale replies before measuring.
+    fn barrier(&mut self) {
+        if let Some(tmux) = self.mux.as_tmux() {
+            let _ = tmux.sync();
+        }
+    }
+
     /// None when the query failed. A dead server is caught by `scan_tick`,
     /// which hits EOF on the next pass and ends the loop, so a failure here
     /// only skips the tick.
     fn measure_panes(&mut self) -> Option<Vec<M>> {
-        self.tmux
-            .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}|#{window_id}|#{pane_width}|#{pane_height}|#{window_width} #{window_height}|#{window_panes}|#{window_active}|#{session_id}'")
-            .ok()
-            .map(|out| out.lines().filter_map(parse_measurement).collect())
+        self.mux.sidebar_panes().ok()
     }
 
     /// Refresh preserved-pane inventory: min pane size drives the render, zero
@@ -329,21 +260,15 @@ impl Sidebar {
         else {
             return false;
         };
-        // Ownership decides whether we abandon every pane without teardown.
-        // A stale hook response must not look like a newer daemon's claim.
-        if self.tmux.sync().is_err() {
-            return false;
-        }
-        // a broken pipe is not a takeover; the loop exits elsewhere
-        self.tmux
-            .run(OWNER_QUERY)
-            .is_ok_and(|reply| claimed_elsewhere(&generation, &client, &reply))
+        // Ownership decides whether we abandon every pane without teardown;
+        // an unread record is not a takeover.
+        claimed_elsewhere(&generation, &client, self.mux.owner())
     }
 
     /// Refresh only render dimensions after a layout notification. Drag
     /// adoption and pane reconciliation stay on the periodic mirror tick.
     pub(super) fn refresh_geometry(&mut self) -> bool {
-        let _ = self.tmux.sync();
+        self.barrier();
         let Some(ms) = self.measure_panes() else {
             return false;
         };
@@ -362,24 +287,14 @@ impl Sidebar {
     }
 
     pub(super) fn mirror_tick(&mut self) -> bool {
-        // same barrier as active_pane: reading zero panes off a desynced
-        // pipe used to tear the whole mirror set down
-        let _ = self.tmux.sync();
+        self.barrier();
         let position = self.settings.settings.sidebar_position;
-        let refreshed = self.settings.refresh(&mut self.tmux);
+        let refreshed = self.settings.refresh(self.mux.as_mut());
         self.adopt_reload(refreshed);
         // Before measuring, so the moved panes are what the drag probe sees.
         if self.settings.settings.sidebar_position != position {
-            let settings = &self.settings.settings;
-            panes::dock(settings.sidebar_position, settings.sidebar_width);
-            // The default jump and fold keys follow the side. Reload and the
-            // settings overlay reinstall already; a bare tmux option does not.
-            let installed = crate::tmux::command(&["show-option", "-gqv", "@agenmux-nav-version"])
-                .unwrap_or_default();
-            if installed.trim_end() != crate::setup::nav_version(settings)
-                && crate::setup::run_config(&self.plugin_dir, settings) == 0
-            {
-                crate::setup::reclaim_client_tables();
+            if let Some(tmux) = self.mux.as_tmux() {
+                tmux.dock(&self.plugin_dir, &self.settings.settings);
             }
         }
         self.sync_panes_view();
@@ -398,8 +313,7 @@ impl Sidebar {
         if width_changed {
             for m in &mut ms {
                 let width = wopt.min(m.win_size.0.saturating_sub(2).max(1));
-                if command_status(&["resize-pane", "-t", &m.pane, "-x", &width.to_string()]).is_ok()
-                {
+                if self.mux.resize_panes(&[(m.pane.clone(), width)]) {
                     m.w = width;
                 }
             }
@@ -418,33 +332,19 @@ impl Sidebar {
             .collect();
         if !dup.is_empty() {
             let hit: HashSet<String> = dup.iter().map(|&i| ms[i].win.clone()).collect();
-            // forked tmux: kill-pane fires hooks whose run-shell output would
-            // desync the control pipe (same reason as the drag resize below)
-            let mut argv: Vec<String> = Vec::new();
-            for &i in &dup {
-                if !argv.is_empty() {
-                    argv.push(";".into());
-                }
-                argv.extend(["kill-pane".into(), "-t".into(), ms[i].pane.clone()]);
-            }
+            let killed: Vec<String> = dup.iter().map(|&i| ms[i].pane.clone()).collect();
             for &i in dup.iter().rev() {
                 ms.remove(i);
             }
             // unconditional: the survivor absorbs the columns the killed panes
             // give back, so even one that measured wopt a moment ago ends up wide
+            let mut widths = Vec::new();
             for m in ms.iter_mut().filter(|m| hit.contains(&m.win)) {
-                argv.push(";".into());
-                argv.extend([
-                    "resize-pane".into(),
-                    "-t".into(),
-                    m.pane.clone(),
-                    "-x".into(),
-                    wopt.to_string(),
-                ]);
+                widths.push((m.pane.clone(), wopt));
                 m.w = wopt;
             }
-            let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-            let _ = command_status(&args);
+            self.mux.close_panes(&killed);
+            self.mux.resize_panes(&widths);
         }
         // Width DOES fold to the minimum: mirror::draw clips rows but NOT
         // columns, so a frame wider than some pane would wrap and shift every
@@ -461,64 +361,36 @@ impl Sidebar {
                 .map(|m| (m.pane.clone(), m.w))
         };
         if let Some((src_pane, width)) = drag {
-            if (1..=10000).contains(&width)
-                && self
-                    .tmux
-                    .run(&format!("set-option -g @agenmux-width {width}"))
-                    .is_ok()
-            {
+            if (1..=10000).contains(&width) && self.mux.remember_width(width) {
                 self.settings.settings.sidebar_width = width as u16;
                 self.settings.settings.popup_width = width as u16;
             }
-            // resize the OTHER sidebars via forked tmux (hook run-shell
-            // echoes on the control pipe would desync it); the dragged pane
-            // stays untouched so nothing ever fights the user's drag
-            let mut argv = Vec::new();
-            for m in ms.iter().filter(|m| m.pane != src_pane && m.w != width) {
-                if !argv.is_empty() {
-                    argv.push(";".to_string());
-                }
-                argv.extend([
-                    "resize-pane".to_string(),
-                    "-t".to_string(),
-                    m.pane.clone(),
-                    "-x".to_string(),
-                    width.to_string(),
-                ]);
-            }
-            if !argv.is_empty() {
-                let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-                let _ = command_status(&args);
-            }
+            // the dragged pane stays untouched so nothing ever fights the drag
+            let others: Vec<_> = ms
+                .iter()
+                .filter(|m| m.pane != src_pane && m.w != width)
+                .map(|m| (m.pane.clone(), width))
+                .collect();
+            self.mux.resize_panes(&others);
             w = width; // render for the adopted width now, not the stale min
         }
         // A killed neighbour hands its columns to the sidebar. The pane count
         // changed, so the drag probe above stays quiet; put the width back.
-        let mut argv: Vec<String> = Vec::new();
+        let mut put_back = Vec::new();
         for m in &mut ms {
             let want = wopt.min(m.win_size.0.saturating_sub(2).max(1));
             let counted = self.daemon.as_ref().unwrap().win_sizes.get(&m.win);
             if m.w == want || counted.is_none_or(|&(_, n)| n == m.panes) {
                 continue;
             }
-            if !argv.is_empty() {
-                argv.push(";".into());
-            }
-            argv.extend([
-                "resize-pane".into(),
-                "-t".into(),
-                m.pane.clone(),
-                "-x".into(),
-                want.to_string(),
-            ]);
+            put_back.push((m.pane.clone(), want));
             m.w = want;
         }
-        if !argv.is_empty() {
-            let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-            let _ = command_status(&args);
+        if !put_back.is_empty() {
+            self.mux.resize_panes(&put_back);
             w = ms.iter().map(|m| m.w).min().unwrap_or(w);
         }
-        let visible_windows = self.visible_windows();
+        let visible_windows = self.mux.visible_windows();
         let visible_panes = if visible_windows.is_empty() {
             // Detached startup and integration tests have no real client yet.
             // Keep one active pane warm until a real client appears.
@@ -547,31 +419,19 @@ impl Sidebar {
         true
     }
 
-    /// Windows a real (non control-mode) client is looking at.
-    fn visible_windows(&mut self) -> HashSet<String> {
-        self.tmux
-            .run("list-clients -f '#{?#{m:*control-mode*,#{client_flags}},0,1}' -F '#{window_id}'")
-            .unwrap_or_default()
-            .lines()
-            .map(String::from)
-            .collect()
-    }
-
     /// Focus moved: write only to sidebar panes in windows real clients view.
     pub(super) fn refocus_writers(&mut self) {
-        let windows = self.visible_windows();
+        let windows = self.mux.visible_windows();
         if windows.is_empty() {
             return; // no real client: leave mirror_tick's warm-one fallback alone
         }
-        let out = self
-            .tmux
-            .run("list-panes -a -f '#{==:#{pane_title},agenmux}' -F '#{pane_id}|#{window_id}'")
-            .unwrap_or_default();
-        let panes: Vec<String> = out
-            .lines()
-            .filter_map(|line| line.split_once('|'))
-            .filter(|(_, window)| windows.contains(*window))
-            .map(|(pane, _)| pane.to_string())
+        let panes: Vec<String> = self
+            .mux
+            .sidebar_panes()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| windows.contains(&m.win))
+            .map(|m| m.pane)
             .collect();
         if self.daemon.as_mut().unwrap().writers.reconcile(panes) {
             self.last_frame.clear();
@@ -600,15 +460,13 @@ impl Sidebar {
         else {
             return;
         };
-        let owns = if generation.is_empty() {
-            self.tmux
-                .run("show-option -gqv @agenmux-control-client")
-                .is_ok_and(|current| current.trim() == client)
-        } else {
-            self.tmux
-                .run("show-option -gqv @agenmux-generation")
-                .is_ok_and(|current| current.trim() == generation)
-        };
+        let owns = self.mux.owner().is_some_and(|owner| {
+            if generation.is_empty() {
+                owner.client.trim() == client
+            } else {
+                owner.generation.trim() == generation
+            }
+        });
         if !owns {
             self.quiet_exit();
             return;
@@ -616,13 +474,14 @@ impl Sidebar {
         if let Some(d) = &mut self.daemon {
             d.writers.clear();
         }
-        let _ = panes::teardown_panes();
+        self.mux.close_sidebars();
         if let Some(d) = &self.daemon {
             let _ = std::fs::remove_file(&d.keys_path);
             unsafe { libc::close(d.keys_fd) };
         }
         let _ = std::fs::remove_file(&self.rows_file);
-        let _ = panes::clear_ownership((!generation.is_empty()).then_some(generation.as_str()));
+        self.mux
+            .release((!generation.is_empty()).then_some(generation.as_str()));
     }
 }
 
@@ -690,6 +549,23 @@ mod tests {
     }
 
     #[test]
+    fn only_a_claim_by_someone_else_supersedes() {
+        let owner = |generation: &str, client: &str| {
+            Some(Owner {
+                generation: generation.into(),
+                client: client.into(),
+            })
+        };
+        let mine = |owner| claimed_elsewhere("g1", "client-7", owner);
+        assert!(!mine(owner("g1", "client-7")));
+        assert!(mine(owner("g2", "client-7")));
+        assert!(mine(owner("g1", "client-9")));
+        assert!(!mine(owner("", ""))); // unset is not a claim
+        assert!(!mine(None)); // nor is an unread record
+        assert!(!claimed_elsewhere("", "client-7", owner("g2", "client-7")));
+    }
+
+    #[test]
     fn a_replaced_daemon_stops_owning_the_panes() {
         assert!(!superseded("client-7", "client-7"));
         assert!(!superseded("client-7", "client-7\n")); // show-option keeps the newline
@@ -697,19 +573,6 @@ mod tests {
         assert!(!superseded("client-7", "")); // unset is not a claim
         assert!(!superseded("", "client-9")); // we never published a name
         assert!(!superseded("", ""));
-    }
-
-    #[test]
-    fn only_a_tagged_owner_reply_counts_as_a_claim() {
-        let mine = |reply: &str| claimed_elsewhere("g1", "client-7", reply);
-        assert!(!mine("am-owner|g1|client-7\n"));
-        assert!(mine("am-owner|g2|client-7\n"));
-        assert!(mine("am-owner|g1|client-9\n"));
-        assert!(!mine("am-owner||\n")); // unset is not a claim
-                                        // A stray block read in the reply's place: empty, or another value.
-        assert!(!mine(""));
-        assert!(!mine("g2\n"));
-        assert!(!claimed_elsewhere("", "client-7", "am-owner|g2|client-7"));
     }
 
     #[test]

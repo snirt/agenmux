@@ -1,4 +1,5 @@
-use crate::{panes, setup, tmux};
+use crate::mux::tmux;
+use crate::{panes, setup};
 use std::collections::HashSet;
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -515,7 +516,7 @@ fn popup(
             None => tmux::command_status(&refs).is_ok(),
             // display-popup blocks until the popup closes; confirm the
             // activation as soon as the sidebar inside reports its first frame.
-            Some(pending) => match Command::new("tmux")
+            Some(pending) => match tmux::process()
                 .args(&refs)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())

@@ -7,6 +7,7 @@ mod conf;
 mod detect;
 mod focus;
 mod input;
+mod mux;
 mod notifications;
 mod pane_writers;
 mod panes;
@@ -16,7 +17,6 @@ mod scan;
 mod setup;
 mod sidebar;
 mod snapshot;
-mod tmux;
 mod toggle;
 
 use std::path::{Path, PathBuf};
@@ -176,20 +176,20 @@ fn plugin_dir() -> PathBuf {
 }
 
 fn scan_cache_path() -> PathBuf {
-    tmux::runtime_dir().join("agenmux-scan-cache")
+    mux::runtime_dir().join("agenmux-scan-cache")
 }
 
 fn self_pane() -> Option<String> {
     compat_env("AGENMUX_SELF", "AGENTS_MON_SELF").filter(|s| !s.is_empty())
 }
 
-fn run_scan() -> Result<scan::ScanSnapshot, tmux::TmuxError> {
+fn run_scan() -> Result<scan::ScanSnapshot, mux::Error> {
     let confs = conf::load_all(&plugin_dir());
-    let mut t = tmux::Tmux::connect()?;
+    let mut mux = mux::connect(false)?;
     let mut cache = procs::IdentCache::new();
     let mut subj = scan::SubjectCache::new();
     scan::scan(
-        &mut t,
+        mux.as_mut(),
         &confs,
         &mut cache,
         &mut subj,

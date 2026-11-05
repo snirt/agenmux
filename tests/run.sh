@@ -32,6 +32,11 @@ if "$DIR/tests/no-stale-runtime-refs-self-test.sh"; then
 else
   fail=1
 fi
+if "$DIR/tests/mux-boundary.sh"; then
+  echo "ok   tmux-only-behind-the-multiplexer-seam"
+else
+  fail=1
+fi
 if ! "$DIR/tests/make-release.sh"; then
   fail=1
 fi

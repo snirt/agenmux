@@ -1,5 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
+/// A client of the server, as the backend reports it.
+pub struct Client {
+    /// Orders clients by last use.
+    pub activity: u64,
+    pub name: String,
+    pub session: String,
+    pub pane: String,
+    /// It shows a sidebar pane.
+    pub on_sidebar: bool,
+    /// It has input focus, or the server cannot tell.
+    pub focused: bool,
+}
+
 #[derive(Default)]
 pub struct ClientFocus {
     pub active_pane: String,
@@ -11,6 +24,29 @@ pub struct ClientFocus {
 }
 
 impl ClientFocus {
+    /// The most recently used client acts; every focused one looks.
+    pub fn from_clients(clients: &[Client]) -> ClientFocus {
+        let focused = clients.iter().filter(|client| client.focused);
+        let focused_counts: HashMap<String, usize> =
+            focused.clone().fold(HashMap::new(), |mut counts, client| {
+                *counts.entry(client.pane.clone()).or_default() += 1;
+                counts
+            });
+        let focused_by_client = focused
+            .map(|client| (client.name.clone(), client.pane.clone()))
+            .collect();
+        let focused_panes = focused_counts.keys().cloned().collect();
+        let active = clients.iter().max_by_key(|client| client.activity);
+        ClientFocus {
+            active_pane: active.map(|c| c.pane.clone()).unwrap_or_default(),
+            active_session: active.map(|c| c.session.clone()).unwrap_or_default(),
+            plugin_selected: active.is_some_and(|c| c.on_sidebar),
+            focused_panes,
+            focused_counts,
+            focused_by_client,
+        }
+    }
+
     /// A tmux popup owns its client's input while tmux continues to report the
     /// pane underneath it. Remove only that client's focus contribution; a
     /// second real client viewing the same pane must still suppress alerts.
@@ -31,125 +67,50 @@ impl ClientFocus {
     }
 }
 
-/// Parse rows formatted as activity, client, session, pane, title, flags.
-pub fn parse_clients(rows: &str, focus_events: bool) -> ClientFocus {
-    let mut parsed = Vec::new();
-    for line in rows.lines() {
-        let separator = if line.contains('|') { '|' } else { '\t' };
-        let mut fields = line.splitn(6, separator);
-        let (Some(activity), Some(client), Some(session), Some(pane), Some(title), Some(flags)) = (
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-        ) else {
-            continue;
-        };
-        let Ok(activity) = activity.parse::<u64>() else {
-            continue;
-        };
-        let has_flag = |wanted: &str| flags.split(',').any(|flag| flag == wanted);
-        if has_flag("control-mode") {
-            continue;
-        }
-        parsed.push((
-            activity,
-            client.to_string(),
-            session.to_string(),
-            pane.to_string(),
-            title.to_string(),
-            has_flag("focused"),
-        ));
-    }
-
-    let focused_counts: HashMap<String, usize> = parsed
-        .iter()
-        .filter(|(_, _, _, _, _, focused)| !focus_events || *focused)
-        .fold(HashMap::new(), |mut counts, (_, _, _, pane, _, _)| {
-            *counts.entry(pane.clone()).or_default() += 1;
-            counts
-        });
-    let focused_by_client = parsed
-        .iter()
-        .filter(|(_, _, _, _, _, focused)| !focus_events || *focused)
-        .map(|(_, client, _, pane, _, _)| (client.clone(), pane.clone()))
-        .collect();
-    let focused_panes = focused_counts.keys().cloned().collect();
-    let Some((_, _, active_session, active_pane, title, _)) = parsed
-        .iter()
-        .max_by_key(|(activity, _, _, _, _, _)| *activity)
-        .cloned()
-    else {
-        return ClientFocus {
-            focused_panes,
-            focused_counts,
-            focused_by_client,
-            ..ClientFocus::default()
-        };
-    };
-    ClientFocus {
-        active_pane,
-        active_session,
-        plugin_selected: title == "agenmux",
-        focused_panes,
-        focused_counts,
-        focused_by_client,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn focus_events_require_the_focused_flag_and_ignore_control_clients() {
-        let rows = concat!(
-            "20\tclient-1\t$1\t%2\twork\tattached,focused,utf8\n",
-            "30\tclient-2\t$2\t%3\twork\tattached,utf8\n",
-            "40\tcontrol\t$3\t%4\tagenmux\tattached,focused,control-mode,utf8\n",
-        );
-        let focus = parse_clients(rows, true);
-
-        assert_eq!(focus.active_pane, "%3");
-        assert_eq!(focus.active_session, "$2");
-        assert!(!focus.plugin_selected);
-        assert_eq!(focus.focused_panes, HashSet::from(["%2".to_string()]));
+    fn client(activity: u64, name: &str, pane: &str, focused: bool) -> Client {
+        Client {
+            activity,
+            name: name.into(),
+            session: format!("s-{name}"),
+            pane: pane.into(),
+            on_sidebar: false,
+            focused,
+        }
     }
 
     #[test]
-    fn focus_events_off_treat_every_selected_real_client_pane_as_focused() {
-        let rows = concat!(
-            "20\tclient-1\t$1\t%2\twork\tattached,utf8\n",
-            "30\tclient-2\t$2\t%3\tagenmux\tattached,utf8\n",
-        );
-        let focus = parse_clients(rows, false);
-
-        assert_eq!(focus.active_pane, "%3");
-        assert!(focus.plugin_selected);
+    fn the_latest_client_acts_and_every_focused_one_looks() {
+        let mut sidebar = client(30, "b", "p3", false);
+        sidebar.on_sidebar = true;
+        let focus = ClientFocus::from_clients(&[client(20, "a", "p2", true), sidebar]);
         assert_eq!(
-            focus.focused_panes,
-            HashSet::from(["%2".to_string(), "%3".to_string()])
+            (focus.active_pane.as_str(), focus.active_session.as_str()),
+            ("p3", "s-b")
         );
+        assert!(focus.plugin_selected);
+        assert_eq!(focus.focused_panes, HashSet::from(["p2".to_string()]));
+        let none = ClientFocus::from_clients(&[]);
+        assert!(none.active_pane.is_empty() && none.focused_panes.is_empty());
     }
 
     #[test]
     fn popup_discounts_its_explicit_owner_and_preserves_other_viewers() {
-        let rows = concat!(
-            "20\tpopup\t$1\t%2\twork\tattached,focused,utf8\n",
-            "30\tother\t$2\t%3\twork\tattached,focused,utf8\n",
-        );
-        let mut focus = parse_clients(rows, true);
+        let mut focus = ClientFocus::from_clients(&[
+            client(20, "popup", "p2", true),
+            client(30, "other", "p3", true),
+        ]);
         focus.discount_client("popup");
-        assert_eq!(focus.focused_panes, HashSet::from(["%3".to_string()]));
+        assert_eq!(focus.focused_panes, HashSet::from(["p3".to_string()]));
 
-        let same_pane = concat!(
-            "20\tpopup\t$1\t%2\twork\tattached,focused,utf8\n",
-            "30\tother\t$2\t%2\twork\tattached,focused,utf8\n",
-        );
-        let mut focus = parse_clients(same_pane, true);
+        let mut focus = ClientFocus::from_clients(&[
+            client(20, "popup", "p2", true),
+            client(30, "other", "p2", true),
+        ]);
         focus.discount_client("popup");
-        assert_eq!(focus.focused_panes, HashSet::from(["%2".to_string()]));
+        assert_eq!(focus.focused_panes, HashSet::from(["p2".to_string()]));
     }
 }
