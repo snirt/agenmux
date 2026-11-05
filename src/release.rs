@@ -588,6 +588,27 @@ fn reenter(plugin_dir: &Path, was_open: bool) {
     }
 }
 
+/// An open split view never makes the fresh start that activates a prepared
+/// update. Close it, wait for its daemon's lease, and reopen it through the
+/// launch gate, which switches first. An open popup keeps its lease: leave the
+/// update to its next start rather than close it under the user.
+pub(crate) fn restart_view(plugin_dir: &Path) {
+    if !tmux_running()
+        || tmux_option("@agenmux-on") != "1"
+        || tmux::runtime_dir().join("agenmux-pin").exists()
+    {
+        return;
+    }
+    teardown_runtime(&tmux_option("@agenmux-control-client"));
+    // Still busy (another tmux server): the gate reopens this release.
+    let _ = crate::autoupdate::exclusive(plugin_dir, Duration::from_secs(20));
+    let entrypoint = plugin_dir.join(format!("{}.tmux", runtime_name(plugin_dir)));
+    let _ = Command::new("bash")
+        .arg(entrypoint)
+        .args(["activate", "split", ""])
+        .status();
+}
+
 /// Switch source and engine to a release, then re-enter through that release's
 /// own public entrypoint so rollbacks do not assume new commands exist.
 pub fn update(plugin_dir: &Path, requested: &str) -> i32 {

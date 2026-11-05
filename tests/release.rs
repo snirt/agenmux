@@ -1395,3 +1395,86 @@ fn launch_that_waited_out_a_switch_hands_over_to_the_installed_release() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+impl Auto {
+    /// A daily worker run inside a (fake) tmux server, with its split view
+    /// open or not. The view's relaunch runs the installed engine, as
+    /// agenmux.tmux does; the target's re-entry only logs, since its
+    /// readiness is covered above.
+    fn worker_in_server(&self, view_open: bool) -> String {
+        let runtime = self.tmp.path().join("runtime");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        script(
+            &self.bin.join("tmux"),
+            r#"printf 'tmux %s\n' "$*" >> "$RESTART_LOG"
+case "$*" in
+  info) exit 0 ;;
+  "show-option -gqv @agenmux-on") [ -z "${VIEW_OPEN:-}" ] || printf '1\n' ;;
+esac
+exit 0"#,
+        );
+        let launch = self.bin.join("launch");
+        script(
+            &launch,
+            r#"if [ -n "${AGENMUX_UPDATE_TXN_FD:-}" ]; then
+  printf 'target %s\n' "$*" >> "$RESTART_LOG"
+  exit 0
+fi
+exec "$AGENMUX_DIR/target/release/agenmux" "$@""#,
+        );
+        let _ = fs::remove_file(self.state().join("last-attempt"));
+        let mut command = self.command("v99.0.0", &["internal", "auto-update"]);
+        command
+            .env("TMUX", format!("{}/socket,1,0", self.tmp.path().display()))
+            .env("AGENMUX_RUNTIME_DIR", &runtime)
+            .env("AGENMUX_REAL", &launch);
+        if view_open {
+            command.env("VIEW_OPEN", "1");
+        }
+        let out = command.output().unwrap();
+        assert!(out.status.success());
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        stdout.lines().next().unwrap_or_default().to_string()
+    }
+}
+
+#[test]
+fn ready_update_restarts_the_open_split_view_into_the_target() {
+    for git_install in [true, false] {
+        let auto = activation_fixture("restart-view", git_install);
+        assert_eq!(auto.worker_in_server(true), "agenmux: v99.0.0 ready");
+        assert_eq!(auto.installed(), "v99.0.0");
+        // The view closed first; its relaunch switched, ran the target's
+        // setup and re-entered the target's bootstrap in split mode.
+        let log = auto.log();
+        let closed = log.find("tmux set-option -gu @agenmux-on").unwrap();
+        assert!(closed < log.find("entrypoint").unwrap(), "{log}");
+        let steps: String = log
+            .lines()
+            .filter(|line| !line.starts_with("tmux "))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert_eq!(
+            steps,
+            "entrypoint activate split \nentrypoint \nentrypoint activate split \ntarget toggle split \n",
+            "{log}"
+        );
+    }
+}
+
+#[test]
+fn ready_update_leaves_a_closed_view_or_open_popup_alone() {
+    let auto = activation_fixture("restart-skip", true);
+    let before = auto.snapshot();
+    assert_eq!(auto.worker_in_server(false), "agenmux: v99.0.0 ready");
+    fs::write(auto.tmp.path().join("runtime/agenmux-pin"), "").unwrap();
+    assert_eq!(auto.worker_in_server(true), "agenmux: v99.0.0 ready");
+    assert_eq!(auto.snapshot(), before);
+    assert!(auto.state().join("pending").is_file());
+    let log = auto.log();
+    assert!(
+        !log.contains("set-option -gu") && !log.contains("entrypoint"),
+        "{log}"
+    );
+}

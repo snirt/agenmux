@@ -86,12 +86,14 @@ shows `↑0.7.1 ready`, and the version picker says `v0.7.1 ready · next start`
 
 The prepared release is switched to on the **next fresh start**: the next
 sidebar or popup launch while no agenmux view is running from this install on
-any tmux server. Adding a sidebar to a running view, moving within a popup,
-`config reload`, `list`, `status` and closing the view never switch. The switch
-is local (no network) and swaps source, engine and notification helper
-together. If the new release fails to start, the previous one is restored and
-opened instead, and that release is not retried automatically until a newer
-one appears or auto-update is turned back on.
+any tmux server. An open sidebar view does not wait for one: once the release
+is ready, it closes and reopens itself on the new release. An open popup is
+left alone and switches on its next launch. Adding a sidebar to a running view,
+moving within a popup, `config reload`, `list`, `status` and closing the view
+never switch. The switch is local (no network) and swaps source, engine and
+notification helper together. If the new release fails to start, the previous
+one is restored and opened instead, and that release is not retried
+automatically until a newer one appears or auto-update is turned back on.
 
 Auto-update skips, with the reason shown in the version picker:
 

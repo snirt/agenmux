@@ -1,5 +1,6 @@
 //! Default-on auto-update: prepare a newer stable release in the background,
-//! switch to it on the next fresh start. See docs/plans/2026-10-07-default-on-auto-update.md.
+//! switch to it on the next fresh start, which an open split view makes by
+//! restarting itself. See docs/plans/2026-10-07-default-on-auto-update.md.
 //!
 //! Lock order: server lifecycle lock → install.lock → prepare.lock → state.lock.
 //! Preparation never takes install.lock, so it never waits on a runtime.
@@ -1404,7 +1405,11 @@ pub(crate) fn ready_target(plugin_dir: &Path) -> Option<String> {
 
 /// `agenmux internal auto-update`: the detached worker kick() starts..
 pub fn run(plugin_dir: &Path) -> i32 {
-    println!("agenmux: {}", prepare(plugin_dir));
+    let outcome = prepare(plugin_dir);
+    println!("agenmux: {outcome}");
+    if outcome.ends_with(" ready") {
+        release::restart_view(plugin_dir);
+    }
     0
 }
 
