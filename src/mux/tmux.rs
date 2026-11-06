@@ -1116,6 +1116,7 @@ fn parse_panes(rows: &str, self_pane: Option<&str>) -> Vec<ParsedPane> {
                 pid,
                 width,
                 height,
+                reported: None,
             })
         })
         .collect()

@@ -12,6 +12,8 @@ pub struct FakeMux {
     /// Each pane and the pid of its process; 0 is a plain shell.
     pub panes: Vec<(PaneMeta, u32)>,
     pub screens: HashMap<String, String>,
+    /// The state a pane's program reports of itself.
+    pub reported: HashMap<String, &'static str>,
     pub options: BTreeMap<String, String>,
     pub changes: Changes,
     /// Actions taken, shared so a test can read them after handing the fake off.
@@ -70,6 +72,7 @@ impl Multiplexer for FakeMux {
                 pid: *pid,
                 width: 80,
                 height: 24,
+                reported: self.reported.get(&meta.pane).copied(),
             })
             .collect())
     }

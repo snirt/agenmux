@@ -201,6 +201,8 @@ struct Block {
     title: Title,
     #[serde(default)]
     size: Size,
+    #[serde(default)]
+    status: ProgramStatus,
 }
 
 impl Block {
@@ -216,6 +218,34 @@ impl Block {
             .and_then(|p| p.cwd.as_deref())
             .filter(|cwd| !cwd.is_empty())
     }
+    /// The state the program reports, the most urgent of its records. Rex
+    /// drops a record when the program that wrote it exits.
+    fn reported(&self) -> Option<&'static str> {
+        let states = self
+            .status
+            .records
+            .iter()
+            .filter_map(|r| match r.state.as_str() {
+                "idle" | "done" | "error" => Some((0, "idle")),
+                "working" => Some((1, "working")),
+                "blocked" => Some((2, "blocked")),
+                _ => None,
+            });
+        states.max().map(|(_, state)| state)
+    }
+}
+
+/// `program_status`: one record per reporter, the program and its subagents.
+#[derive(Deserialize, Default)]
+struct ProgramStatus {
+    #[serde(default, deserialize_with = "list")]
+    records: Vec<StatusRecord>,
+}
+
+#[derive(Deserialize)]
+struct StatusRecord {
+    #[serde(default)]
+    state: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -972,6 +1002,7 @@ impl Multiplexer for Rex {
                         pid: block.process.child.as_ref().or(fg).map_or(0, |p| p.pid),
                         width: block.size.columns,
                         height: block.size.rows,
+                        reported: block.reported(),
                     });
                 }
             }
@@ -2062,6 +2093,29 @@ mod tests {
         );
         assert!(seen.layout && seen.focus);
         assert!(see(r#"{"type":"session_created","payload":{}}"#).full);
+    }
+
+    #[test]
+    fn a_block_reports_its_most_urgent_program_status() {
+        let block = |status: Value| -> Block {
+            serde_json::from_value(json!({"block_id": "block:1", "status": status})).unwrap()
+        };
+        let records = |states: &[&str]| {
+            let records: Vec<Value> = states.iter().map(|s| json!({"state": s})).collect();
+            json!({ "records": records })
+        };
+        assert_eq!(block(json!({})).reported(), None);
+        assert_eq!(block(json!({"records": {}})).reported(), None);
+        assert_eq!(block(records(&["done"])).reported(), Some("idle"));
+        assert_eq!(block(records(&["error", "bogus"])).reported(), Some("idle"));
+        assert_eq!(
+            block(records(&["idle", "working"])).reported(),
+            Some("working")
+        );
+        assert_eq!(
+            block(records(&["working", "blocked"])).reported(),
+            Some("blocked")
+        );
     }
 
     #[test]

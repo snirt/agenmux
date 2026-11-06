@@ -1,5 +1,6 @@
 -- One `rex do` per scan: every session's windows and terminal blocks, with
--- each block's process, title and size, instead of three CLI forks per block.
+-- each block's process, title, size and program status, instead of four CLI
+-- forks per block.
 local terminal = "com.superlogical.terminal"
 local sessions = {}
 for _, s in ipairs(assert(rex.call("session.list")).sessions or {}) do
@@ -23,6 +24,8 @@ for _, s in ipairs(assert(rex.call("session.list")).sessions or {}) do
               process = rex.block.call(terminal, "process", q),
               title = rex.block.call(terminal, "title", q),
               size = rex.block.call(terminal, "size", q),
+              -- what the program reports of itself (OSC 7501)
+              status = rex.block.call(terminal, "program_status", q),
             }
           else
             others = others + 1

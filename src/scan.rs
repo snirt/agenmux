@@ -155,6 +155,8 @@ pub struct ParsedPane {
     pub pid: u32,
     pub width: usize,
     pub height: usize,
+    /// The state the agent reports of itself, where the backend carries it.
+    pub reported: Option<&'static str>,
 }
 
 pub fn scan(
@@ -208,6 +210,7 @@ pub fn scan_cached(
                 pid,
                 width,
                 height,
+                reported,
             } = parsed;
             let pane = meta.pane.as_str();
             let cmd = meta.command.as_str();
@@ -253,7 +256,10 @@ pub fn scan_cached(
             } else {
                 stats.captured += 1;
             }
-            let state = crate::detect::detect_state(&confs[idx], title, &screen);
+            let state = crate::detect::reported_or(
+                reported,
+                crate::detect::detect_state(&confs[idx], title, &screen),
+            );
             // Pane content never leaves a release binary: title and screen
             // tail are dev-build evidence for tuning agents/*.conf rules.
             if cfg!(debug_assertions) && !reused {
@@ -264,7 +270,7 @@ pub fn scan_cached(
                     .take(2)
                     .map(|line| line.chars().take(80).collect::<String>())
                     .collect::<Vec<_>>();
-                trace!("detect {pane} {name} state={state} title={title:?} tail={tail:?}");
+                trace!("detect {pane} {name} state={state} reported={reported:?} title={title:?} tail={tail:?}");
             }
             let mut subject = crate::detect::subject(&confs[idx], title, &screen, path);
             if state != "idle" {
@@ -596,5 +602,43 @@ mod tests {
             panic!("{:?}", snapshot.agents.len())
         };
         assert_eq!((row.pane.as_str(), row.state.as_str()), ("%1", "working"));
+    }
+
+    #[test]
+    fn a_reported_state_beats_the_screen_unless_the_screen_is_blocked() {
+        use crate::mux::fake::{pane, FakeMux};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let confs = crate::conf::load_all(root);
+        let screen = |name: &str| {
+            std::fs::read_to_string(root.join(format!("tests/fixtures/{name}.txt"))).unwrap()
+        };
+        let state = |fixture: &str, reported: Option<&'static str>| {
+            let mut mux = FakeMux {
+                panes: vec![(pane("$1", "@1", "%1", "pi"), 101)],
+                screens: [("%1".to_string(), screen(fixture))].into(),
+                reported: reported
+                    .map(|r| ("%1".to_string(), r))
+                    .into_iter()
+                    .collect(),
+                ..FakeMux::default()
+            };
+            let mut idents = IdentCache::new();
+            idents.insert(("%1".into(), 101, "pi".into()), "pi".into());
+            let snapshot = scan(
+                &mut mux,
+                &confs,
+                &mut idents,
+                &mut SubjectCache::new(),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            snapshot.agents[0].state.clone()
+        };
+        assert_eq!(state("pi-idle", None), "idle");
+        assert_eq!(state("pi-idle", Some("working")), "working");
+        assert_eq!(state("pi-working", Some("idle")), "idle");
+        assert_eq!(state("pi-working", Some("blocked")), "blocked");
+        // Pi reports working while its question waits on screen
+        assert_eq!(state("pi-blocked", Some("working")), "blocked");
     }
 }

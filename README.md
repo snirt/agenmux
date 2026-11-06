@@ -20,7 +20,8 @@ Each agent shows its state inline:
 Supported out of the box: **Claude Code, Codex, Hermes, Oh My Pi, OpenCode, and
 Pi**. Adding an agent is one small config file — no code. Detection reads each
 pane's process tree, screen, and title; no hooks to install, nothing runs
-inside your agents. A status-line segment and desktop notifications tell you
+inside your agents. In Rex, agents that report their own state are read from
+that report. A status-line segment and desktop notifications tell you
 when an agent needs you.
 
 ## Quick start
