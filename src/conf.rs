@@ -21,6 +21,8 @@ pub struct AgentConf {
     pub working_title: Option<Regex>,
     pub working_screen: Option<Regex>,
     pub idle_screen: Option<Regex>,
+    /// Bottom screen lines the *_SCREEN rules see.
+    pub screen_lines: usize,
     pub check_order: Vec<Check>,
     pub title_strip: Option<Regex>,
     pub subject_screen: Option<Regex>,
@@ -108,6 +110,8 @@ fn parse_value(src: &str, start: usize) -> (String, usize) {
     (String::from_utf8_lossy(&val).into_owned(), i)
 }
 
+const SCREEN_LINES: usize = 20;
+
 /// grep -Ei semantics: case-insensitive, ^/$ anchor per line.
 fn re_grep(name: &str, key: &str, val: &str) -> Option<Regex> {
     compile(name, key, &format!("(?im){val}"))
@@ -150,6 +154,7 @@ pub fn load_conf(path: &Path) -> std::io::Result<AgentConf> {
         working_title: None,
         working_screen: None,
         idle_screen: None,
+        screen_lines: SCREEN_LINES,
         check_order: vec![Check::Bt, Check::Wt, Check::Bs, Check::Ws],
         title_strip: None,
         subject_screen: None,
@@ -176,6 +181,7 @@ fn apply(c: &mut AgentConf, src: &str) {
                 "WORKING_TITLE" => c.working_title = None,
                 "WORKING_SCREEN" => c.working_screen = None,
                 "IDLE_SCREEN" => c.idle_screen = None,
+                "SCREEN_LINES" => c.screen_lines = SCREEN_LINES,
                 "CHECK_ORDER" => c.check_order = vec![Check::Bt, Check::Wt, Check::Bs, Check::Ws],
                 "TITLE_STRIP" => c.title_strip = None,
                 "SUBJECT_SCREEN" => c.subject_screen = None,
@@ -194,6 +200,10 @@ fn apply(c: &mut AgentConf, src: &str) {
             "WORKING_TITLE" => c.working_title = re_grep(&name, &key, &val),
             "WORKING_SCREEN" => c.working_screen = re_grep(&name, &key, &val),
             "IDLE_SCREEN" => c.idle_screen = re_grep(&name, &key, &val),
+            "SCREEN_LINES" => match val.trim().parse() {
+                Ok(n) if n > 0 => c.screen_lines = n,
+                _ => crate::diag::error(&format!("{name}.conf {key}: not a positive line count")),
+            },
             "CHECK_ORDER" => {
                 c.check_order = val
                     .split_whitespace()
