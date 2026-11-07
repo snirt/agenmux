@@ -1,0 +1,44 @@
+  placeholder-one, placeholder-two
+  placeholder-one, placeholder-two
+
+[Prompts]
+  placeholder-one, placeholder-two
+
+[Extensions]
+  placeholder-one, placeholder-two
+  placeholder-one, placeholder-two
+  placeholder-one, placeholder-two
+
+
+ Extension enabled
+
+ Warning: tmux extended-keys is off. Modified Enter keys may not work. Add `set -g extended-keys on` to ~/.tmux.conf and restart tmux.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Package Updates Available
+ Package updates are available. Run pi update --extensions
+ Packages:
+ - pi-lens
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+ Run the shell command: sleep 20 . Then reply with only the word done.
+
+
+                                                                                                                                                        18:48:30
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                                                              │
+│ $ sleep 20 (timeout 30s)                                                                                                                                     │
+│                                                                                                                                                              │
+│ Elapsed 3.0s                                                                                                                                                 │
+│                                                                                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ⠼ Working
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/work/project
+↑19k ↓24 $0.038 (sub) 6.9%/272k (auto)                                                                                             (openai) gpt-6.1-sol • medium

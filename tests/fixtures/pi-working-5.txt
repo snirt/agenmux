@@ -1,0 +1,45 @@
+ █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+[Context]
+  placeholder-one, placeholder-two
+
+[Skills]
+  placeholder-one, placeholder-two
+  placeholder-one, placeholder-two
+  placeholder-one, placeholder-two
+  placeholder-one, placeholder-two
+  placeholder-one, placeholder-two
+  placeholder-one, placeholder-two
+
+[Prompts]
+  placeholder-one, placeholder-two
+
+
+ Warning: tmux extended-keys is off. Modified Enter keys may not work. Add `set -g extended-keys on` to ~/.tmux.conf and restart tmux.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Package Updates Available
+ Package updates are available. Run pi update --extensions
+ Packages:
+ - pi-lens
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+ Run the shell command: sleep 15 . Then reply with only the word done.
+
+
+
+ $ sleep 15 (timeout 30s)
+
+ Elapsed 4.0s
+
+
+── ⠋ Working ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/work/project
+↑5.9k ↓24 $0.012 (sub) 2.2%/272k (auto)                                                                                            (openai) gpt-6.1-sol • medium

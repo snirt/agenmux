@@ -1,0 +1,44 @@
+│                                                                                                                                                              │
+│ codemode                                                                                                                                                     │
+│ for (let i = 1; i <= 9; i++) {                                                                                                                               │
+│   text(await tools.todo({action:"create", subject:`step ${i}`, status:"pending"}));                                                                          │
+│ }                                                                                                                                                            │
+│ text(await tools.bash({command:"sleep 25",timeout:35}));                                                                                                     │
+│                                                                                                                                                              │
+│ ... (2 earlier calls, ctrl+o to expand)                                                                                                                      │
+│ ✓ todo {"action":"create","subject":"step 3","status":"pending"} 4ms                                                                                         │
+│ ✓ todo {"action":"create","subject":"step 4","status":"pending"} 17ms                                                                                        │
+│ ✓ todo {"action":"create","subject":"step 5","status":"pending"} 2ms                                                                                         │
+│ ✓ todo {"action":"create","subject":"step 6","status":"pending"} 1ms                                                                                         │
+│ ✓ todo {"action":"create","subject":"step 7","status":"pending"} 1ms                                                                                         │
+│ ✓ todo {"action":"create","subject":"step 8","status":"pending"} 1ms                                                                                         │
+│ ✓ todo {"action":"create","subject":"step 9","status":"pending"} 2ms                                                                                         │
+│ … bash {"command":"sleep 25","timeout":35}                                                                                                                   │
+│                                                                                                                                                              │
+│ Elapsed 9.1s                                                                                                                                                 │
+│                                                                                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ⠋ Working
+
+╭ Recap · Alt+R minimize ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ The goal was to run sleep 20 and then reply only “done.”                                                                                                     │
+│ The assistant replied “done,” but command execution is not verified.                                                                                         │
+│ The next step is to confirm execution or run the command if still needed.                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+● Todos (0/9)
+├─ ○ step 1
+├─ ○ step 2
+├─ ○ step 3
+├─ ○ step 4
+├─ ○ step 5
+├─ ○ step 6
+├─ ○ step 7
+├─ ○ step 8
+└─ ○ step 9
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/work/project
+↑22k ↓94 R38k CH87.7% $0.048 (sub) 7.9%/272k (auto)                                                                                (openai) gpt-6.1-sol • medium

@@ -17,10 +17,11 @@ A new file name adds a custom agent. Example:
 AGENT_BINS="aider"                 # process names that identify the agent
 AGENT_PATH_HINTS=""                # optional: substring of a wrapped script path
 BLOCKED_TITLE=''                   # grep -Ei pattern against #{pane_title}
-BLOCKED_SCREEN='\(Y\)es/\(N\)o'    # grep -Ei pattern against the pane's bottom 20 lines
+BLOCKED_SCREEN='\(Y\)es/\(N\)o'    # grep -Ei pattern against the pane's bottom SCREEN_LINES lines
 WORKING_TITLE=''
 WORKING_SCREEN='esc to interrupt'
 IDLE_SCREEN=''                     # explicit idle marker (rarely needed)
+SCREEN_LINES=20                    # bottom screen lines the *_SCREEN rules see
 CHECK_ORDER="bt wt bs ws"          # rule order; first hit wins, fallback is idle
 TITLE_STRIP='^aider: '              # optional regex removed from the pane title
 SUBJECT_SCREEN=''                   # optional sed -E capture used as the subject line

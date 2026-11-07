@@ -1,0 +1,45 @@
+
+
+[Context]
+  placeholder-one, placeholder-two
+
+[Skills]
+  placeholder-one, placeholder-two
+  placeholder-one, placeholder-two
+  placeholder-one, placeholder-two
+  placeholder-one, placeholder-two
+  placeholder-one, placeholder-two
+  placeholder-one, placeholder-two
+
+[Prompts]
+  placeholder-one, placeholder-two
+
+
+ Warning: tmux extended-keys is off. Modified Enter keys may not work. Add `set -g extended-keys on` to ~/.tmux.conf and restart tmux.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Package Updates Available
+ Package updates are available. Run pi update --extensions
+ Packages:
+ - pi-lens
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+ Run the shell command: sleep 15 . Then reply with only the word done.
+
+
+
+ $ sleep 15 (timeout 30s)
+
+ (no output)
+
+ Took 15.0s
+
+
+ done
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/work/project
+↑6.1k ↓29 R5.8k CH97.0% $0.013 (sub) 2.2%/272k (auto)                                                                              (openai) gpt-6.1-sol • medium

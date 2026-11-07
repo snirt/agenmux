@@ -1,10 +1,10 @@
 // State detection + sidebar subject extraction. Spec: scan.sh detect_state/scan.
 use crate::conf::{AgentConf, Check};
 
-/// Walk CHECK_ORDER against title + last 20 screen lines; first hit wins.
+/// Walk CHECK_ORDER against title + last SCREEN_LINES screen lines; first hit wins.
 pub fn detect_state(conf: &AgentConf, title: &str, screen: &str) -> &'static str {
     let lines: Vec<&str> = screen.trim_end_matches('\n').lines().collect();
-    let start = lines.len().saturating_sub(20);
+    let start = lines.len().saturating_sub(conf.screen_lines);
     // NBSP -> space: agents pad prompt lines with U+00A0, which Rust's
     // ASCII-only [[:space:]] would miss (breaks the idle-prompt guard)
     let tail = lines[start..].join("\n").replace('\u{a0}', " ");
@@ -155,6 +155,52 @@ mod tests {
         let c = conf("WORKING_SCREEN='needle'\nCHECK_ORDER=\"ws\"\n");
         let screen = format!("needle\n{}", "x\n".repeat(25));
         assert_eq!(detect_state(&c, "", &screen), "idle");
+    }
+
+    #[test]
+    fn screen_lines_widens_the_window() {
+        let c = conf("WORKING_SCREEN='needle'\nCHECK_ORDER=\"ws\"\nSCREEN_LINES=30\n");
+        assert_eq!(c.screen_lines, 30);
+        let screen = format!("needle\n{}", "x\n".repeat(25));
+        assert_eq!(detect_state(&c, "", &screen), "working");
+        // Not a positive count: the default stays.
+        assert_eq!(conf("SCREEN_LINES=0\n").screen_lines, 20);
+        assert_eq!(conf("SCREEN_LINES=many\n").screen_lines, 20);
+    }
+
+    // Layouts pi draws that no live capture covers: narrow and overflowing
+    // editor borders, retry/compaction labels, an extension's custom frame.
+    #[test]
+    fn pi_status_line_variants() {
+        let pi =
+            load_conf(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agents/pi.conf"))
+                .unwrap();
+        for working in [
+            "── ⠙ Working ────────",
+            "── ⠹ Working ──── ↑ 3 more ────",
+            "───⠸──────",
+            "⠼───",
+            " ⠴ Working",
+            " ⠦ Retrying (1/3) in 4s... (esc to cancel)",
+            "── ⠧ Compacting context... (esc to cancel) ───",
+            " ⠇ Auto-compacting... (esc to cancel)",
+            " ● Working",
+            "── ● Working ───────",
+            " Working",
+        ] {
+            assert_eq!(detect_state(&pi, "", working), "working", "{working:?}");
+        }
+        for idle in [
+            " not working",
+            " Still working",
+            " Working on it now",
+            " ✓ Working",
+            "✓ Working status verification completed",
+            "│ ⠙ Working",
+            " Step ⠙ done",
+        ] {
+            assert_eq!(detect_state(&pi, "", idle), "idle", "{idle:?}");
+        }
     }
 
     #[test]
