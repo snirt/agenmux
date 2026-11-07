@@ -525,6 +525,37 @@ impl Sidebar {
         }
     }
 
+    /// Icon for a quick launcher's executable: an agent binary uses that
+    /// agent's `AGENT_ICON` (as agent rows would show it), anything else the
+    /// `[[command_icons]]` rules.
+    pub(super) fn launcher_icon(&self, command: &str) -> Option<&str> {
+        let settings = &self.settings.settings;
+        let name = std::path::Path::new(command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(command);
+        if let Some(conf) = self
+            .confs
+            .iter()
+            .find(|c| c.bins.iter().any(|bin| bin == name))
+        {
+            let icon = conf.icon.as_str();
+            let shown = !icon.is_empty()
+                && settings.agent_label != crate::app_config::AgentLabel::Text
+                && settings.glyphs.shows_icon(icon);
+            return shown.then_some(icon);
+        }
+        settings.command_icons.lookup(name, settings.glyphs)
+    }
+
+    /// A launcher label prefixed with its icon, when it has one.
+    pub(super) fn launcher_label(&self, label: &str, command: Option<&str>) -> String {
+        match command.and_then(|command| self.launcher_icon(command)) {
+            Some(icon) => format!("{icon} {label}"),
+            None => label.to_string(),
+        }
+    }
+
     /// Animation phase: frozen at the first frame when animation is off, so
     /// blinking states stay lit and the spinner stands still.
     fn phase(&self) -> u32 {
@@ -807,13 +838,16 @@ impl Sidebar {
                     self.agent_label(&row.agent)
                 )
             } else {
-                let plain = self.settings.settings.glyphs == crate::app_config::Glyphs::Plain;
-                let glyph = match pane.command.as_str() {
-                    _ if plain => "▢",
-                    "nvim" => "\u{f36f}",    // nf-linux-neovim
-                    "lazygit" => "\u{e702}", // nf-dev-git
-                    _ if expanded => "▢",
-                    _ => "\u{eb7f}",
+                let glyphs = self.settings.settings.glyphs;
+                let glyph = match self
+                    .settings
+                    .settings
+                    .command_icons
+                    .lookup(&pane.command, glyphs)
+                {
+                    Some(icon) => icon,
+                    None if glyphs == crate::app_config::Glyphs::Plain || expanded => "▢",
+                    None => "\u{eb7f}",
                 };
                 format!("{base}{mark}{prefix}{window_icon}{glyph}{E}[0m ")
             };
@@ -988,9 +1022,14 @@ impl Sidebar {
         let sequence_hint = join(
             &self
                 .key_sequence
-                .continuations(&self.settings.settings)
+                .pending_bindings(&self.settings.settings)
                 .into_iter()
-                .map(|(key, label)| format!("{key} {label}"))
+                .map(|(key, binding)| {
+                    format!(
+                        "{key} {}",
+                        self.launcher_label(&binding.label, binding.command.as_deref())
+                    )
+                })
                 .collect::<Vec<_>>(),
         );
         let mut default_hints = vec![
@@ -1008,7 +1047,11 @@ impl Sidebar {
                 .filter(|launcher| launcher.enabled)
             {
                 if launcher.sequence.len() == 1 {
-                    default_hints.push(format!("{} {}", launcher.sequence, launcher.label));
+                    default_hints.push(format!(
+                        "{} {}",
+                        launcher.sequence,
+                        self.launcher_label(&launcher.label, Some(&launcher.command))
+                    ));
                 } else if let Some(prefix) = launcher.sequence.chars().next() {
                     if !prefixes.contains(&prefix) {
                         prefixes.push(prefix);
@@ -1804,6 +1847,63 @@ mod tests {
             "    \u{e702} shell",
             "a lazygit pane swaps its window glyph for the git icon"
         );
+        // User [[command_icons]] rules come before built-ins; plain glyphs
+        // keep user icons as written and hide only the built-ins.
+        let user_rules = crate::app_config::parse(
+            "[[command_icons]]\nmatch = 'b?top'\nicon = 'B'\n[[command_icons]]\nmatch = 'lazygit'\nicon = ''\n[[command_icons]]\nmatch = 'claude'\nicon = 'X'\n",
+        )
+        .and_then(|file| crate::app_config::resolve(&file, &Default::default()))
+        .unwrap()
+        .command_icons;
+        let default_rules = std::mem::replace(&mut sb.settings.settings.command_icons, user_rules);
+        let shell_row = |sb: &Sidebar| {
+            let line = sb
+                .last_frame
+                .lines()
+                .find(|line| line.contains("shell"))
+                .unwrap();
+            ansi.replace_all(line, "").trim_end().to_string()
+        };
+        sb.render(true);
+        assert_eq!(
+            shell_row(&sb),
+            "    \u{eb7f} shell",
+            "an empty icon disables the built-in"
+        );
+        sb.panes[3].command = "btop".into();
+        sb.render(true);
+        assert_eq!(
+            shell_row(&sb),
+            "    B shell",
+            "a user rule names its own icon"
+        );
+        sb.settings.settings.glyphs = crate::app_config::Glyphs::Plain;
+        sb.render(true);
+        assert_eq!(
+            shell_row(&sb),
+            "    B shell",
+            "plain glyphs keep user icons"
+        );
+        sb.panes[3].command = "nvim".into();
+        sb.render(true);
+        assert_eq!(
+            shell_row(&sb),
+            "    ▢ shell",
+            "plain glyphs hide built-in icons"
+        );
+        sb.settings.settings.glyphs = crate::app_config::Glyphs::Rich;
+        sb.panes[3].command = "zsh".into();
+        sb.render(true);
+        let agent_row = ansi.replace_all(&sb.last_frame, "").to_string();
+        let agent_row = agent_row
+            .lines()
+            .find(|line| line.contains("claude"))
+            .unwrap();
+        assert!(
+            !agent_row.contains('X'),
+            "agent rows ignore command rules: {agent_row}"
+        );
+        sb.settings.settings.command_icons = default_rules;
         sb.panes[3].command = "zsh".into();
 
         // AGENT_ICON prefixes the agent name in both views and counts toward
@@ -2851,9 +2951,76 @@ mod tests {
         );
         sb.render(true);
         let continuation = sb.last_frame.clone();
-        assert!(continuation.contains("g lazygit"), "{continuation}");
-        assert!(continuation.contains("t terminal"), "{continuation}");
+        assert!(
+            continuation.contains("g \u{e702} lazygit"),
+            "{continuation}"
+        );
+        assert!(
+            continuation.contains("t terminal"),
+            "launchers without an icon keep only their label: {continuation}"
+        );
         sb.key_sequence.clear();
+
+        // Launcher items share the [[command_icons]] rules by executable
+        // basename; an agent executable shows that agent's AGENT_ICON.
+        let icon_file = crate::app_config::parse(
+            "[tmux_management]\nenabled=true\n[quick_launchers.helix]\nsequence='oh'\nlabel='helix'\ncommand='/opt/bin/hx'\n[quick_launchers.claude]\nsequence='oc'\nlabel='claude'\ncommand='claude'\n[[command_icons]]\nmatch='hx'\nicon='H'\n[[command_icons]]\nmatch='claude'\nicon='X'\n",
+        )
+        .unwrap();
+        sb.settings.settings = crate::app_config::resolve(&icon_file, &Default::default()).unwrap();
+        sb.normal_keys = sb.settings.settings.normal.clone();
+        let agent_conf =
+            std::env::temp_dir().join(format!("agenmux-launcher-icon-{}.conf", std::process::id()));
+        std::fs::write(&agent_conf, "AGENT_BINS=\"claude\"\nAGENT_ICON=\"◆\"\n").unwrap();
+        let saved_confs = std::mem::replace(
+            &mut sb.confs,
+            vec![crate::conf::load_conf(&agent_conf).unwrap()],
+        );
+        std::fs::remove_file(&agent_conf).ok();
+        let launcher_hint = |sb: &mut Sidebar| {
+            sb.key_sequence.push(
+                'o',
+                None,
+                Instant::now(),
+                Duration::from_secs(1),
+                &sb.settings.settings,
+            );
+            sb.render(true);
+            sb.key_sequence.clear();
+            ansi.replace_all(&sb.last_frame, "").to_string()
+        };
+        let hint = launcher_hint(sb);
+        assert!(
+            hint.contains("h H helix"),
+            "a launcher uses the command rules: {hint}"
+        );
+        assert!(
+            hint.contains("c ◆ claude") && !hint.contains("X claude"),
+            "an agent launcher uses AGENT_ICON: {hint}"
+        );
+        sb.settings.settings.agent_label = crate::app_config::AgentLabel::Text;
+        let hint = launcher_hint(sb);
+        assert!(
+            hint.contains("c claude") && hint.contains("h H helix"),
+            "text labels hide agent icons only: {hint}"
+        );
+        sb.settings.settings.agent_label = crate::app_config::AgentLabel::IconText;
+        sb.daemon.as_mut().unwrap().size = (80, 40);
+        sb.overlay = Some(Overlay::Help);
+        sb.render(true);
+        let help = ansi.replace_all(&sb.last_frame, "").to_string();
+        assert!(
+            help.lines()
+                .any(|line| line.trim_start_matches(['│', ' ']).starts_with("oh")
+                    && line.contains("H helix")),
+            "help lists launcher icons: {help}"
+        );
+        sb.overlay = None;
+        sb.daemon.as_mut().unwrap().size = (80, 3);
+        sb.confs = saved_confs;
+        sb.settings.settings =
+            crate::app_config::resolve(&active_file, &Default::default()).unwrap();
+        sb.normal_keys = sb.settings.settings.normal.clone();
 
         let removed_file = crate::app_config::parse(
             "[tmux_management]\nenabled=true\n[quick_launchers.nvim]\nenabled=false\n[quick_launchers.lazygit]\nenabled=false\n[quick_launchers.terminal]\nsequence='ot'\nlabel='terminal'\ncommand='fish'\nenabled=false",

@@ -58,6 +58,18 @@ enabled = true
 # working_directory = "selected"
 # enabled = true
 
+# Command icons for non-agent panes and quick launcher items. `match` is a
+# regex for the whole tmux pane command; your rules are tried in file order,
+# then the built-ins (nvim, lazygit). icon = "" shows no icon. Agents always
+# keep their AGENT_ICON. Edit here and run `agenmux config reload`.
+# [[command_icons]]
+# match = "b?top|htop"
+# icon = "\uf4bc"     # Nerd Font icon; plain text such as "TOP" also works
+#
+# [[command_icons]]
+# match = "lazygit"
+# icon = ""           # turn off a built-in icon
+
 [theme]
 base = "dark"         # dark | light | terminal
 [theme.colors]        # semantic overrides: "default", 0..255, or "#RRGGBB"

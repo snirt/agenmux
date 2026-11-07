@@ -783,7 +783,8 @@ impl Sidebar {
                 for binding in bindings {
                     let prefix = binding.sequence.as_bytes()[0];
                     if action_for(&self.normal_keys, KeyChord::Printable(prefix)).is_none() {
-                        keys.push((binding.sequence, binding.label));
+                        let label = self.launcher_label(&binding.label, binding.command.as_deref());
+                        keys.push((binding.sequence, label));
                     }
                 }
                 // Fixed all-pane tree keys, listed while no action claims them.

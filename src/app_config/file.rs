@@ -495,6 +495,30 @@ mod tests {
     }
 
     #[test]
+    fn command_icons_are_file_only_and_survive_revert() {
+        let source =
+            "[display]\nmode = \"popup\"\n[[command_icons]]\nmatch = \"btop\"\nicon = \"B\"\n";
+        for name in [
+            "command_icons",
+            "command_icons[0]",
+            "command_icons[0].icon",
+            "command_icons.0.icon",
+        ] {
+            assert!(
+                edit_document(source, name, Some("\"X\"")).is_err(),
+                "{name}"
+            );
+        }
+        let reverted = revert_document(source).unwrap();
+        assert!(!reverted.contains("mode ="), "{reverted}");
+        assert_eq!(
+            parse(&reverted).unwrap().command_icons,
+            parse(source).unwrap().command_icons,
+            "the settings view never shows rules, so revert keeps them"
+        );
+    }
+
+    #[test]
     fn atomic_save_preserves_a_symlink_and_rejects_invalid_output() {
         let dir = Temp::new();
         let target = dir.0.join("real.toml");

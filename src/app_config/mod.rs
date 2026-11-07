@@ -82,6 +82,7 @@ pub struct FileConfig {
     pub tmux_management: Option<TmuxManagementConfig>,
     pub quick_launchers: Option<BTreeMap<String, QuickLauncherConfig>>,
     pub keys: Option<KeyConfig>,
+    pub command_icons: Option<Vec<CommandIconConfig>>,
 }
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -219,6 +220,7 @@ string_values!(AgentLabel, "expected icon-text, icon, or text", "icon-text" => I
 string_values!(Glyphs, "expected rich or plain", "rich" => Rich, "plain" => Plain);
 string_values!(AutoHeight, "expected auto", "auto" => Auto);
 
+mod command_icons;
 mod file;
 mod keys;
 mod launchers;
@@ -226,6 +228,7 @@ mod report;
 mod resolve;
 mod theme;
 
+pub use command_icons::*;
 pub use file::*;
 pub use keys::*;
 pub use launchers::*;
@@ -254,6 +257,20 @@ pub fn parse(source: &str) -> Result<FileConfig, ConfigError> {
     };
     let document: toml::Value =
         toml::from_str(source).map_err(|e| diagnostic(e, "invalid TOML syntax"))?;
+    // An array of tables, never one table or positional arrays.
+    if let Some(icons) = document.get("command_icons") {
+        let rules = icons.as_array().ok_or_else(|| {
+            ConfigError::invalid("command_icons", "must be an array of TOML tables")
+        })?;
+        for (i, rule) in rules.iter().enumerate() {
+            if !rule.is_table() {
+                return Err(ConfigError::invalid(
+                    &format!("command_icons[{i}]"),
+                    "must be a TOML table",
+                ));
+            }
+        }
+    }
     let config: FileConfig = toml::from_str(source)
         .map_err(|e| diagnostic(e, "invalid configuration schema (field, type, or value)"))?;
     // Serde's derived structs also accept positional sequences. TOML sections
@@ -361,6 +378,7 @@ fn validate(config: &FileConfig) -> Result<(), ConfigError> {
     let (launchers, _) = resolve_quick_launchers(config.quick_launchers.as_ref())?;
     let normal = resolved_keys(KeyMode::Normal, k.and_then(|k| k.normal.as_ref()))?;
     validate_quick_launcher_conflicts(&launchers, management_enabled, &normal)?;
+    resolve_command_icons(config.command_icons.as_ref())?;
     Ok(())
 }
 

@@ -29,6 +29,7 @@ pub struct AppConfig {
     pub normal: BTreeMap<Action, Vec<KeyChord>>,
     pub search: BTreeMap<Action, Vec<KeyChord>>,
     pub quick_launchers: Vec<QuickLauncher>,
+    pub command_icons: CommandIcons,
     /// Field name to the layer that decided it, named precisely enough to
     /// act on: a winning tmux option prints as `tmux @agenmux-width`.
     pub sources: BTreeMap<String, String>,
@@ -178,6 +179,7 @@ pub fn resolve_cli(
             file.keys.as_ref().and_then(|k| k.search.as_ref()),
         )?,
         quick_launchers,
+        command_icons: resolve_command_icons(file.command_icons.as_ref())?,
         sources,
     };
     fn apply(r: &mut AppConfig, f: &FileConfig, source: &str) {
@@ -529,13 +531,13 @@ pub fn reload(plugin_dir: &Path) -> i32 {
         println!("reloaded {path}");
         println!(
             "{} settings differ from the defaults; key tables reinstalled",
-            customized(&rows(&config))
+            customized(&rows(&config)) + customized(&command_icon_rows(&config))
         );
     } else {
         println!("reloaded {path}");
         println!(
             "{} settings differ from the defaults",
-            customized(&rows(&config))
+            customized(&rows(&config)) + customized(&command_icon_rows(&config))
         );
     }
     0
@@ -751,5 +753,30 @@ mod tests {
         let refreshed = live.refresh(&mut mux);
         assert_eq!(live.settings.sidebar_width, 42);
         assert!(refreshed.width_changed && !refreshed.reloaded);
+    }
+
+    #[test]
+    fn live_command_icons_follow_valid_files_only() {
+        let rule = |icon: &str| format!("[[command_icons]]\nmatch = 'btop'\nicon = '{icon}'\n");
+        let first = resolve(&parse(&rule("A")).unwrap(), &BTreeMap::new()).unwrap();
+        let mut live = LiveConfig::new(first.clone());
+        let edited = parse(&rule("B")).unwrap();
+        live.accept(resolve(&edited, &BTreeMap::new()));
+        assert_ne!(
+            live.settings, first,
+            "an edited icon is a new configuration"
+        );
+        assert_eq!(
+            live.settings.command_icons.lookup("btop", Glyphs::Rich),
+            Some("B")
+        );
+        let refused = parse("[[command_icons]]\nmatch = '('\nicon = 'C'\n")
+            .and_then(|file| resolve(&file, &BTreeMap::new()));
+        assert!(refused.is_err());
+        live.accept(refused);
+        assert_eq!(
+            live.settings.command_icons.lookup("btop", Glyphs::Rich),
+            Some("B")
+        );
     }
 }

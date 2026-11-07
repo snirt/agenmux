@@ -303,6 +303,8 @@ pub(crate) struct SequenceBinding {
     pub sequence: String,
     pub action: SequenceDispatch,
     pub label: String,
+    /// The launcher's executable, so views can show its command icon.
+    pub command: Option<String>,
 }
 
 pub(crate) fn sequence_bindings(config: &crate::app_config::AppConfig) -> Vec<SequenceBinding> {
@@ -311,6 +313,7 @@ pub(crate) fn sequence_bindings(config: &crate::app_config::AppConfig) -> Vec<Se
             sequence: binding.sequence.into(),
             action: SequenceDispatch::Builtin(binding.action),
             label: binding.label.into(),
+            command: None,
         })
         .collect();
     if config.tmux_management_enabled {
@@ -323,6 +326,7 @@ pub(crate) fn sequence_bindings(config: &crate::app_config::AppConfig) -> Vec<Se
                     sequence: launcher.sequence.clone(),
                     action: SequenceDispatch::QuickLauncher(launcher.id.clone()),
                     label: launcher.label.clone(),
+                    command: Some(launcher.command.clone()),
                 }),
         );
     }
@@ -384,22 +388,34 @@ impl KeySequence {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn continuations(
         &self,
         config: &crate::app_config::AppConfig,
     ) -> Vec<(char, String)> {
+        self.pending_bindings(config)
+            .into_iter()
+            .map(|(key, binding)| (key, binding.label))
+            .collect()
+    }
+
+    /// The next key of each binding that continues the pending sequence.
+    pub(crate) fn pending_bindings(
+        &self,
+        config: &crate::app_config::AppConfig,
+    ) -> Vec<(char, SequenceBinding)> {
         if self.pending.is_empty() {
             return Vec::new();
         }
         sequence_bindings(config)
-            .iter()
+            .into_iter()
             .filter_map(|binding| {
-                binding
+                let key = binding
                     .sequence
                     .strip_prefix(&self.pending)?
                     .chars()
-                    .next()
-                    .map(|key| (key, binding.label.clone()))
+                    .next()?;
+                Some((key, binding))
             })
             .collect()
     }

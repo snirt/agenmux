@@ -116,6 +116,41 @@ agenmux config check              # file only, no tmux needed
 agenmux config check --effective  # also tmux options, with the source of each value
 ```
 
+## Command icons
+
+Non-agent panes show an icon chosen by the command tmux reports for them
+(`pane_current_command`). The same rules give quick launcher items their
+icon:
+
+```toml
+[[command_icons]]
+match = "b?top|htop"   # regex for the whole command name
+icon = "\uf4bc"        # Nerd Font glyph or short text
+
+[[command_icons]]
+match = "lazygit"
+icon = ""              # match, but show no icon
+```
+
+- `match` must match the whole name: `"vim"` matches `vim` but not `nvim`.
+  An invalid pattern makes the file invalid, so `config reload` refuses it.
+- Your rules are tried in file order, then the built-ins: `nvim` (Neovim
+  icon) and `lazygit` (git icon). The first match wins. A pane with no match
+  keeps the default window/pane glyph.
+- Agents always show their `AGENT_ICON`; rules never change agent rows. A
+  launcher whose executable is in an agent's `AGENT_BINS` shows that agent's
+  icon.
+- Launcher items use the basename of `command`, so `/opt/bin/hx` matches
+  `hx`. A wrapper such as `command = "sh"` uses the wrapper's icon.
+- `display.glyphs = "plain"` hides the built-in icons only; your icons are
+  drawn as written. Plain text icons keep the config portable across
+  terminals without a Nerd Font.
+- Tools run by an interpreter report the interpreter (`python3`, `node`).
+- Rules live only in the file: the settings view doesn't list them, and
+  **Revert to defaults** keeps them. `agenmux config check --effective`
+  lists them in the order they are tried.
+- Limits: 64 rules, `match` up to 256 bytes, `icon` up to 16 bytes.
+
 ## Theme
 
 ```toml

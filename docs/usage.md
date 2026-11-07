@@ -65,7 +65,9 @@ enabled = false
 | Agent | Status glyph, agent icon and name, then the pane command |
 | Agent subject | Next line, prefixed with `↳` |
 
-Panes running `nvim` or `lazygit` show the Neovim or git icon.
+Panes running `nvim` or `lazygit` show the Neovim or git icon. Add or change
+command icons with `[[command_icons]]`; see
+[Configuration](configuration.md#command-icons).
 
 ### Collapsing
 
@@ -157,7 +159,8 @@ installer sets it from its font check. Change an icon with `AGENT_ICON`; see
   | idle | `⣿` green | `.` |
 
   Agent icons that are not plain ASCII are hidden (the name still shows), and
-  every window and pane row uses `▢`. The `#{agenmux}` status segment follows
+  window and pane rows use `▢`, except panes matched by your own
+  `[[command_icons]]` rules, which keep the icon you set. The `#{agenmux}` status segment follows
   the same setting.
 - With `rich` glyphs and no animation, blocked, done, and idle share `⣿` and
   differ only by color; `plain` gives each state its own shape.
