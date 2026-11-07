@@ -84,6 +84,15 @@ A @agenmux-* tmux option, when set, overrides the file.
   - enabled = false removes a launcher.
   - Launchers need [tmux_management] enabled; clashing sequences are rejected.
 
+[[command_icons]]                          (repeatable; tried in file order)
+  match                regex for the whole pane command   (required)
+  icon                 glyph or short text; "" for none   (required)
+
+  - Matches tmux's pane command for non-agent panes and launcher executables;
+    agents always keep AGENT_ICON.
+  - Your rules come first, then the built-ins nvim and lazygit; first match wins.
+  - Plain glyphs hide only the built-in icons; your icons show as written.
+
 [theme]
   base                 dark | light | terminal            (dark)
 
@@ -284,6 +293,31 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
         .collect()
 }
 
+/// `[[command_icons]]` rules in precedence order. Kept out of [`rows`]: the
+/// settings view edits those, and rules are edited in the file only.
+pub fn command_icon_rows(config: &AppConfig) -> Vec<Row> {
+    config
+        .command_icons
+        .rules
+        .iter()
+        .enumerate()
+        .map(|(i, rule)| Row {
+            name: format!("command_icons[{i}]"),
+            // Validated, but still user text: escape before it reaches a terminal.
+            value: format!(
+                "{} => {}",
+                escaped(&rule.pattern),
+                if rule.icon.is_empty() {
+                    "(none)".into()
+                } else {
+                    escaped(&rule.icon)
+                }
+            ),
+            source: if rule.builtin { "default" } else { "file" }.into(),
+        })
+        .collect()
+}
+
 /// Settings the user actually decided: everything a bare default did not.
 pub(super) fn customized(rows: &[Row]) -> usize {
     rows.iter()
@@ -306,13 +340,24 @@ pub fn effective_check(all: bool) -> i32 {
             if let Some(path) = config_path() {
                 println!("{}\n", escaped(&path.to_string_lossy()));
             }
-            let all_rows = rows(&config);
+            let mut all_rows = rows(&config);
+            let icons = command_icon_rows(&config);
+            // Any user rule shows the whole rule list: order decides matches.
+            let user_icons = icons.iter().any(|row| row.source == "file");
+            let icon_count = icons.len();
+            all_rows.extend(icons);
+            let first_icon = all_rows.len() - icon_count;
             let shown: Vec<&Row> = if all {
                 all_rows.iter().collect()
             } else {
                 all_rows
                     .iter()
-                    .filter(|row| row.source != "default" && row.source != "theme base")
+                    .enumerate()
+                    .filter(|(i, row)| {
+                        (row.source != "default" && row.source != "theme base")
+                            || (user_icons && *i >= first_icon)
+                    })
+                    .map(|(_, row)| row)
                     .collect()
             };
             if shown.is_empty() {
@@ -363,7 +408,7 @@ pub fn check() -> i32 {
     }
     // No tmux here: count what the file alone decides, not what options win.
     let set = resolve(&file, &Default::default())
-        .map(|config| customized(&rows(&config)))
+        .map(|config| customized(&rows(&config)) + customized(&command_icon_rows(&config)))
         .unwrap_or(0);
     println!("{shown}: valid");
     match set {
@@ -373,4 +418,36 @@ pub fn check() -> i32 {
         ),
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_icon_rows_follow_precedence_and_stay_out_of_settings() {
+        let file = parse("[[command_icons]]\nmatch = 'b?top'\nicon = 'B'\n[[command_icons]]\nmatch = 'lazygit'\nicon = ''\n").unwrap();
+        let config = resolve(&file, &Default::default()).unwrap();
+        let rows = command_icon_rows(&config);
+        let shown: Vec<_> = rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.value.as_str(), row.source.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("command_icons[0]", "b?top => B", "file"),
+                ("command_icons[1]", "lazygit => (none)", "file"),
+                ("command_icons[2]", r"nvim => \u{f36f}", "default"),
+                ("command_icons[3]", r"lazygit => \u{e702}", "default"),
+            ]
+        );
+        assert_eq!(customized(&rows), 2);
+        assert!(
+            super::rows(&config)
+                .iter()
+                .all(|row| !row.name.starts_with("command_icons")),
+            "the settings view never lists command icon rules"
+        );
+    }
 }
