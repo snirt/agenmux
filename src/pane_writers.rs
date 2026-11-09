@@ -57,10 +57,19 @@ pub struct PaneWriters {
 
 impl PaneWriters {
     pub fn new() -> PaneWriters {
+        PaneWriters::at(crate::mux::runtime_dir())
+    }
+
+    /// Writers for the frame FIFOs under `runtime`.
+    pub fn at(runtime: PathBuf) -> PaneWriters {
         PaneWriters {
             writers: HashMap::new(),
-            runtime: crate::mux::runtime_dir(),
+            runtime,
         }
+    }
+
+    pub fn is_open(&self, pane: &str) -> bool {
+        self.writers.contains_key(pane)
     }
 
     /// Match writers to visible panes; new targets need the last frame replayed.
@@ -252,10 +261,7 @@ mod tests {
         assert!(fd >= 0);
         let _reader = unsafe { File::from_raw_fd(fd) };
 
-        let mut writers = PaneWriters {
-            writers: HashMap::new(),
-            runtime: runtime.clone(),
-        };
+        let mut writers = PaneWriters::at(runtime.clone());
         assert!(writers.reconcile(["%1".to_string()]));
         let started = Instant::now();
         writers.emit(&"x".repeat(1 << 20));

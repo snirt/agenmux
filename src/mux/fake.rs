@@ -14,6 +14,11 @@ pub struct FakeMux {
     pub screens: HashMap<String, String>,
     pub options: BTreeMap<String, String>,
     pub changes: Changes,
+    pub sidebars: Vec<SidebarPane>,
+    /// The sidebar query goes unanswered, as on a stalled server.
+    pub sidebars_unanswered: bool,
+    /// Windows real clients are viewing.
+    pub visible: HashSet<String>,
     /// Actions taken, shared so a test can read them after handing the fake off.
     pub log: Rc<RefCell<Vec<String>>>,
 }
@@ -216,10 +221,13 @@ impl Multiplexer for FakeMux {
     }
 
     fn sidebar_panes(&mut self) -> Result<Vec<SidebarPane>, Error> {
-        Ok(Vec::new())
+        if self.sidebars_unanswered {
+            return Err(Error::Failed("no reply".into()));
+        }
+        Ok(self.sidebars.clone())
     }
     fn visible_windows(&mut self) -> HashSet<String> {
-        HashSet::new()
+        self.visible.clone()
     }
     fn resize_panes(&mut self, cols: &[(String, usize)]) -> bool {
         self.act(format!("resize {cols:?}"));

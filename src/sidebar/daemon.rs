@@ -420,22 +420,33 @@ impl Sidebar {
     }
 
     /// Focus moved: write only to sidebar panes in windows real clients view.
-    pub(super) fn refocus_writers(&mut self) {
+    /// Returns false while a viewed window has no open writer yet. On a first
+    /// visit the pane is still being made: pane-add titles it after the split,
+    /// and its reader creates the FIFO once it starts.
+    pub(super) fn refocus_writers(&mut self) -> bool {
         let windows = self.mux.visible_windows();
         if windows.is_empty() {
-            return; // no real client: leave mirror_tick's warm-one fallback alone
+            return true; // no real client: leave mirror_tick's warm-one fallback alone
         }
-        let panes: Vec<String> = self
-            .mux
-            .sidebar_panes()
-            .unwrap_or_default()
+        // An unanswered query is not "no sidebars": closing every writer on it
+        // would blank the panes. Leave them to the periodic scan.
+        let Ok(sidebars) = self.mux.sidebar_panes() else {
+            return true;
+        };
+        let viewed: Vec<_> = sidebars
             .into_iter()
             .filter(|m| windows.contains(&m.win))
-            .map(|m| m.pane)
             .collect();
-        if self.daemon.as_mut().unwrap().writers.reconcile(panes) {
+        let d = self.daemon.as_mut().unwrap();
+        if d.writers.reconcile(viewed.iter().map(|m| m.pane.clone())) {
             self.last_frame.clear();
         }
+        let fed: HashSet<&str> = viewed
+            .iter()
+            .filter(|m| d.writers.is_open(&m.pane))
+            .map(|m| m.win.as_str())
+            .collect();
+        windows.iter().all(|win| fed.contains(win.as_str()))
     }
 
     /// Preserved-pane shutdown: close visible writers, kill sidebar panes and
@@ -573,6 +584,89 @@ mod tests {
         assert!(!superseded("client-7", "")); // unset is not a claim
         assert!(!superseded("", "client-9")); // we never published a name
         assert!(!superseded("", ""));
+    }
+
+    #[test]
+    fn a_first_visit_is_unfed_until_its_pane_is_titled_and_reading() {
+        use crate::mux::fake::FakeMux;
+        let dir = std::env::temp_dir().join(format!(
+            "agenmux-refocus-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings =
+            crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+        let mut sb = new_sidebar(
+            Box::new(FakeMux::default()),
+            dir.clone(),
+            dir.join("cache"),
+            dir.join("rows"),
+            String::new(),
+            settings,
+        );
+        sb.daemon = Some(Daemon {
+            keys_path: dir.join("keys"),
+            keys_fd: -1,
+            writers: PaneWriters::at(dir.clone()),
+            size: (30, 24),
+            seen_mirror: true,
+            empty_ticks: 0,
+            client: String::new(),
+            generation: String::new(),
+            started: Instant::now(),
+            win_sizes: HashMap::new(),
+            attached: String::new(),
+        });
+        let sidebar = |pane: &str, win: &str| M {
+            pane: pane.into(),
+            win: win.into(),
+            ..m("$1", 24, true)
+        };
+        let view_with = |sb: &mut Sidebar, visible: &[&str], sidebars: Vec<M>, unanswered| {
+            sb.mux = Box::new(FakeMux {
+                visible: visible.iter().map(|w| w.to_string()).collect(),
+                sidebars,
+                sidebars_unanswered: unanswered,
+                ..FakeMux::default()
+            });
+            sb.refocus_writers()
+        };
+        let view =
+            |sb: &mut Sidebar, visible: &[&str], sidebars| view_with(sb, visible, sidebars, false);
+        let writer = |sb: &Sidebar, pane: &str| sb.daemon.as_ref().unwrap().writers.is_open(pane);
+        // Detached: nothing to feed, so nothing to retry.
+        assert!(view(&mut sb, &[], vec![]));
+        // Switched to @2 before pane-add split it: no sidebar there yet.
+        assert!(!view(&mut sb, &["@2"], vec![sidebar("%1", "@1")]));
+        // Split and titled, but its reader has not made the FIFO yet.
+        let both = || vec![sidebar("%1", "@1"), sidebar("%2", "@2")];
+        assert!(!view(&mut sb, &["@2"], both()));
+        assert!(!writer(&sb, "%2"));
+        // The reader is up: the retry finds it and feeds the window.
+        let path = crate::pane_writers::frame_path(&dir, "%2");
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let fd = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) };
+        assert!(fd >= 0);
+        sb.last_frame = "stale".into();
+        assert!(view(&mut sb, &["@2"], both()));
+        assert!(writer(&sb, "%2"));
+        assert!(
+            sb.last_frame.is_empty(),
+            "the new reader needs a full frame"
+        );
+        // A stalled server keeps the writer and does not spin on retries.
+        assert!(view_with(&mut sb, &["@3"], vec![], true));
+        assert!(writer(&sb, "%2"));
+        // Back to an unvisited window: the old writer goes, retries resume.
+        assert!(!view(&mut sb, &["@3"], both()));
+        assert!(!writer(&sb, "%2"));
+        unsafe { libc::close(fd) };
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

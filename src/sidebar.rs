@@ -29,6 +29,37 @@ const NAVIGATION_QUIET: Duration = Duration::from_millis(250);
 /// selection is given up: a few periodic scans on a loaded server.
 const PENDING_SELECT_PATIENCE: Duration = Duration::from_secs(10);
 
+/// A first visit's sidebar pane becomes feedable a few hundred ms after the
+/// focus change that brought the user there. Look again this often until it
+/// is fed, for up to the budget; the periodic scan covers anything slower.
+const FEED_RETRY_EVERY: Duration = Duration::from_millis(50);
+const FEED_RETRY_BUDGET: Duration = Duration::from_secs(1);
+
+/// Retries of `refocus_writers` while a viewed window has no open writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FeedRetry {
+    next: Instant,
+    until: Instant,
+}
+
+impl FeedRetry {
+    /// After a focus change: the budget starts over.
+    fn start(fed: bool, now: Instant) -> Option<Self> {
+        (!fed).then(|| Self {
+            next: now + FEED_RETRY_EVERY,
+            until: now + FEED_RETRY_BUDGET,
+        })
+    }
+
+    /// After a retry: keep going within the budget until every window is fed.
+    fn again(self, fed: bool, now: Instant) -> Option<Self> {
+        (!fed && now < self.until).then(|| Self {
+            next: (now + FEED_RETRY_EVERY).min(self.until),
+            ..self
+        })
+    }
+}
+
 struct ScanSchedule {
     next_periodic: Instant,
     next_output_eligible: Instant,
@@ -490,6 +521,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
     let key_fd = sb.daemon.as_ref().map_or(0, |d| d.keys_fd);
     let mut scans = ScanSchedule::new(Instant::now());
     let mut next_tick = Instant::now();
+    let mut feed_retry: Option<FeedRetry> = None;
     loop {
         if QUIT.load(Ordering::Relaxed) {
             trace!("event loop exit: termination signal");
@@ -569,7 +601,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             // A focus change lands the user on a pane the writers may not be
             // feeding yet; retarget now instead of after the next periodic tick.
             if sb.daemon.is_some() && !periodic && changes.focus {
-                sb.refocus_writers();
+                feed_retry = FeedRetry::start(sb.refocus_writers(), Instant::now());
             }
             if sb.daemon.as_ref().is_some_and(|d| !d.keys_path.exists()) {
                 // Deaf to keys without the FIFO: better gone than a zombie.
@@ -588,6 +620,13 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 scans.observe_output(now);
             }
         }
+        // Two control commands, no forks: cheap enough to poll briefly.
+        if let Some(retry) = feed_retry.filter(|r| now >= r.next && !key_waiting) {
+            let fed = sb.daemon.is_none() || sb.refocus_writers();
+            now = Instant::now();
+            feed_retry = retry.again(fed, now);
+            sb.render(false);
+        }
         let animating = sb.animating();
         // deadline-based tick: held keys keep poll_inputs returning early, so
         // advancing on poll timeout would freeze the spinner during key repeat
@@ -602,6 +641,9 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             .saturating_duration_since(now);
         if animating {
             wake = wake.min(next_tick.saturating_duration_since(now));
+        }
+        if let Some(retry) = feed_retry {
+            wake = wake.min(retry.next.saturating_duration_since(now));
         }
         if let Some(deadline) = sb.key_sequence.deadline(sequence_timeout) {
             wake = wake.min(deadline.saturating_duration_since(now));
@@ -1743,6 +1785,32 @@ mod tests {
             .due(expiry - Duration::from_millis(1), Some(expiry))
             .is_none());
         assert_eq!(schedule.due(expiry, Some(expiry)), Some(false));
+    }
+
+    #[test]
+    fn feed_retries_stop_once_fed_or_out_of_budget() {
+        let t0 = Instant::now();
+        assert_eq!(FeedRetry::start(true, t0), None);
+        let retry = FeedRetry::start(false, t0).unwrap();
+        assert_eq!(retry.next, t0 + FEED_RETRY_EVERY);
+        // Still unfed: look again, on the same budget.
+        let t1 = retry.next;
+        let retry = retry.again(false, t1).unwrap();
+        assert_eq!(retry.next, t1 + FEED_RETRY_EVERY);
+        assert_eq!(retry.until, t0 + FEED_RETRY_BUDGET);
+        // Fed: done.
+        assert_eq!(retry.again(true, t1), None);
+        // The last retry lands on the budget, not past it.
+        let late = t0 + FEED_RETRY_BUDGET - FEED_RETRY_EVERY / 2;
+        assert_eq!(retry.again(false, late).unwrap().next, retry.until);
+        // A window that never gets a sidebar stops costing anything.
+        assert_eq!(retry.again(false, retry.until), None);
+        // A new focus change restarts the budget.
+        let t2 = retry.until;
+        assert_eq!(
+            FeedRetry::start(false, t2).unwrap().until,
+            t2 + FEED_RETRY_BUDGET
+        );
     }
 
     #[test]
