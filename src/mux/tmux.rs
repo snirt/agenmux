@@ -642,6 +642,11 @@ pub fn pane_pid() -> Option<u32> {
         .ok()
 }
 
+/// The server `TMUX` names: `socket,pid,session`.
+pub fn server_pid() -> Option<u32> {
+    std::env::var("TMUX").ok()?.split(',').nth(1)?.parse().ok()
+}
+
 /// A tmux server answers.
 pub fn running() -> bool {
     quiet(&["list-sessions"]).is_some()

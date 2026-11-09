@@ -514,6 +514,26 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null; then
   tmux -L "$socket" kill-server 2>/dev/null || true
   rm -rf "$tmp"
 fi
+if [ "$fail" -eq 0 ] && command -v tmux >/dev/null; then
+  # A tmux server started from a Rex block hands its jobs REX_SESSION. With a
+  # Rex server up too, a job, in no pane, still belongs to tmux.
+  tmp="$(mktemp -d)"
+  socket="agenmux-rex-env-$$"
+  printf '#!/bin/sh\ncase "$*" in *whoami*) exit 0 ;; esac\nexit 1\n' >"$tmp/rex"
+  chmod +x "$tmp/rex"
+  env -u AGENMUX_MUX REX_SESSION=session:stale REX_BLOCK=block:stale \
+    AGENMUX_REX="$tmp/rex" AGENMUX_RUNTIME_DIR="$tmp" \
+    tmux -L "$socket" -f /dev/null new-session -d
+  job="$(tmux -L "$socket" run-shell "'$BIN' list >/dev/null 2>&1 && echo tmux")"
+  if [ "$job" = tmux ]; then
+    echo "ok   tmux-job-with-rex-env-resolves-tmux"
+  else
+    echo "FAIL tmux-job-with-rex-env-resolves-tmux: [$job]"
+    fail=1
+  fi
+  tmux -L "$socket" kill-server 2>/dev/null || true
+  rm -rf "$tmp"
+fi
 if [ "$fail" -eq 0 ]; then
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/bin"

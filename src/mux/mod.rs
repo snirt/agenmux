@@ -214,7 +214,8 @@ shell is in neither; pass --mux tmux or --mux rex, or set AGENMUX_MUX";
 /// 1. `--mux` (main exports it as AGENMUX_MUX) or AGENMUX_MUX;
 /// 2. the one whose pane or block this process runs in. Both variables can
 ///    be inherited stale (a Rex server started from tmux hands every block
-///    TMUX), so with both set the nearer ancestor shell decides;
+///    TMUX), so with both set the nearer ancestor shell decides, else a
+///    tmux server above this process (a tmux job runs in no pane);
 /// 3. outside both, the only server running.
 pub fn backend() -> Result<Backend, String> {
     static BACKEND: std::sync::OnceLock<Result<Backend, String>> = std::sync::OnceLock::new();
@@ -247,8 +248,13 @@ fn resolve() -> Result<Backend, String> {
         (true, false) => return Ok(Backend::Tmux),
         (false, true) => return Ok(Backend::Rex),
         (true, true) => {
-            if let Some(found) = nearest(&ancestors(), tmux::pane_pid(), rex::block_pid()) {
+            let chain = ancestors();
+            if let Some(found) = nearest(&chain, tmux::pane_pid(), rex::block_pid()) {
                 return Ok(found);
+            }
+            // a tmux job (run-shell, #()) runs under the server, in no pane
+            if tmux::server_pid().is_some_and(|pid| chain.contains(&pid)) {
+                return Ok(Backend::Tmux);
             }
         }
         (false, false) => {}
