@@ -185,7 +185,7 @@ p.width = 45
 tick(p)
 assert(#calls == 1 and calls[1].method == "session.resize_pane")
 assert(calls[1].args.before_block_id == "side" and calls[1].args.after_block_id == "shell")
-local expected = 0.2 * (45 + 0.5) / (31 + 0.5) / 0.4
+local expected = 0.2 * (45 + 0.15) / (31 + 0.5) / 0.4
 assert(math.abs(calls[1].args.ratio - expected) < 0.000001,
   "nested resize must use the adjacent split's span, not the whole window")
 print("ok   rex-lua-nested-adjacent-border")
@@ -201,11 +201,15 @@ peer_window.blocks[1].block_id, peer_window.layout.split.before.block_id = "peer
 peer_window.blocks[2].block_id, peer_window.layout.split.after.block_id = "peer-shell", "peer-shell"
 p.listing.sessions[2] = peer_session
 p.width = w.blocks[1].size.columns
+p.session = "s"
 tick(p); tick(p)
 change(0.25, true)
 tick(p)
 assert(tick(p).saved_width == w.blocks[1].size.columns)
 assert(#calls == 0, "drag adoption must not move the dragged divider")
+for _ = 1, 5 do tick(p) end
+assert(#calls == 0, "a hidden peer never answers a resize: it waits")
+p.session = "peer"
 tick(p)
 assert(#calls == 1 and calls[1].method == "session.resize_pane"
   and calls[1].args.session_id == "peer", "Lua must propagate drag intent to the peer")

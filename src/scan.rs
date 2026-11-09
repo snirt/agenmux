@@ -232,46 +232,53 @@ pub fn scan_cached(
                 panes.push(meta);
                 continue; // conf removed since cached
             };
-            let key = ScreenKey {
-                pane: pane.to_string(),
-                pid,
-                command: cmd.to_string(),
-                agent: name.clone(),
-                width,
-                height,
-                title: title.to_string(),
-                path: path.to_string(),
-            };
-            let force = force_capture(&policy, pane, &meta.session_id);
-            let key_waiting = policy.key_fd.is_some_and(crate::input::key_pending);
-            let stale = screens.stale(pane);
-            let (screen, reused) = if defer_capture(key_waiting, stale.is_some()) {
-                stats.deferred.insert(pane.to_string());
-                (stale.unwrap_or_default(), true)
+            // A reported idle or blocked needs no screen. A reported working
+            // still reads it: Pi reports working while its question waits.
+            let (state, screen) = if let Some(state) = reported.filter(|&s| s != "working") {
+                (state, String::new())
             } else {
-                screens.get_or_capture(key, force, policy.now, || mux.capture(pane))?
+                let key = ScreenKey {
+                    pane: pane.to_string(),
+                    pid,
+                    command: cmd.to_string(),
+                    agent: name.clone(),
+                    width,
+                    height,
+                    title: title.to_string(),
+                    path: path.to_string(),
+                };
+                let force = force_capture(&policy, pane, &meta.session_id);
+                let key_waiting = policy.key_fd.is_some_and(crate::input::key_pending);
+                let stale = screens.stale(pane);
+                let (screen, reused) = if defer_capture(key_waiting, stale.is_some()) {
+                    stats.deferred.insert(pane.to_string());
+                    (stale.unwrap_or_default(), true)
+                } else {
+                    screens.get_or_capture(key, force, policy.now, || mux.capture(pane))?
+                };
+                if reused {
+                    stats.reused += 1;
+                } else {
+                    stats.captured += 1;
+                }
+                let state = match crate::detect::detect_state(&confs[idx], title, &screen) {
+                    "blocked" => "blocked",
+                    detected => reported.unwrap_or(detected),
+                };
+                // Pane content never leaves a release binary: title and screen
+                // tail are dev-build evidence for tuning agents/*.conf rules.
+                if cfg!(debug_assertions) && !reused {
+                    let tail = screen
+                        .lines()
+                        .rev()
+                        .filter(|line| !line.trim().is_empty())
+                        .take(2)
+                        .map(|line| line.chars().take(80).collect::<String>())
+                        .collect::<Vec<_>>();
+                    trace!("detect {pane} {name} state={state} title={title:?} tail={tail:?}");
+                }
+                (state, screen)
             };
-            if reused {
-                stats.reused += 1;
-            } else {
-                stats.captured += 1;
-            }
-            let state = crate::detect::reported_or(
-                reported,
-                crate::detect::detect_state(&confs[idx], title, &screen),
-            );
-            // Pane content never leaves a release binary: title and screen
-            // tail are dev-build evidence for tuning agents/*.conf rules.
-            if cfg!(debug_assertions) && !reused {
-                let tail = screen
-                    .lines()
-                    .rev()
-                    .filter(|line| !line.trim().is_empty())
-                    .take(2)
-                    .map(|line| line.chars().take(80).collect::<String>())
-                    .collect::<Vec<_>>();
-                trace!("detect {pane} {name} state={state} reported={reported:?} title={title:?} tail={tail:?}");
-            }
             let mut subject = crate::detect::subject(&confs[idx], title, &screen, path);
             if state != "idle" {
                 subj.remove(pane); // pane got a new prompt — cached subject is stale
@@ -605,17 +612,21 @@ mod tests {
     }
 
     #[test]
-    fn a_reported_state_beats_the_screen_unless_the_screen_is_blocked() {
+    fn a_reported_state_skips_the_screen_unless_working() {
         use crate::mux::fake::{pane, FakeMux};
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let confs = crate::conf::load_all(root);
         let screen = |name: &str| {
             std::fs::read_to_string(root.join(format!("tests/fixtures/{name}.txt"))).unwrap()
         };
-        let state = |fixture: &str, reported: Option<&'static str>| {
+        // no fixture: a capture would fail the scan
+        let state = |fixture: Option<&str>, reported: Option<&'static str>| {
             let mut mux = FakeMux {
                 panes: vec![(pane("$1", "@1", "%1", "pi"), 101)],
-                screens: [("%1".to_string(), screen(fixture))].into(),
+                screens: fixture
+                    .map(|f| ("%1".to_string(), screen(f)))
+                    .into_iter()
+                    .collect(),
                 reported: reported
                     .map(|r| ("%1".to_string(), r))
                     .into_iter()
@@ -634,11 +645,12 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
             snapshot.agents[0].state.clone()
         };
-        assert_eq!(state("pi-idle", None), "idle");
-        assert_eq!(state("pi-idle", Some("working")), "working");
-        assert_eq!(state("pi-working", Some("idle")), "idle");
-        assert_eq!(state("pi-working", Some("blocked")), "blocked");
-        // Pi reports working while its question waits on screen
-        assert_eq!(state("pi-blocked", Some("working")), "blocked");
+        assert_eq!(state(Some("pi-working"), None), "working");
+        assert_eq!(state(Some("pi-blocked"), None), "blocked");
+        assert_eq!(state(None, Some("idle")), "idle");
+        assert_eq!(state(None, Some("blocked")), "blocked");
+        // a reported working still reads the screen
+        assert_eq!(state(Some("pi-idle"), Some("working")), "working");
+        assert_eq!(state(Some("pi-blocked"), Some("working")), "blocked");
     }
 }

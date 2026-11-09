@@ -48,7 +48,9 @@ local function plan(target, cols, at, previous, now)
   end
   local share
   if not p then
-    share = clamp(at.share * (target + 0.5) / (cols + 0.5), lo, hi)
+    -- aim low in the target column: the rest of it is an empty strip
+    -- beside the grid
+    share = clamp(at.share * (target + 0.15) / (cols + 0.5), lo, hi)
   elseif no_response then
     if cols < target then
       share = upper[2] and upper[1] or (at.share + upper[1]) / 2
@@ -239,7 +241,10 @@ local function reconcile(p)
           local id, cols = b.block_id, size.columns
           local dims = window_cells(w, size)
           local count = #(w.blocks or {}) + (w.others or 0)
+          -- a hidden window's blocks keep their last size, so feedback there
+          -- would push its divider to the limit: only the shown session's
           local visible = b.owner ~= nil and s.active_window_id == w.window_id
+            and (p.session == nil or s.session_id == p.session)
           local sample = table.concat({at.share, cols, size.rows, dims[1], dims[2],
             size.cell_width_px or 0, size.cell_height_px or 0, count}, ":")
           local old = state.blocks[id]

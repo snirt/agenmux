@@ -23,16 +23,6 @@ pub fn detect_state(conf: &AgentConf, title: &str, screen: &str) -> &'static str
     "idle"
 }
 
-/// An agent's own report beats its screen, except a blocked screen: Pi
-/// reports working while its question waits, and Claude reports nothing at
-/// the folder-trust prompt.
-pub fn reported_or(reported: Option<&'static str>, screen: &'static str) -> &'static str {
-    if screen == "blocked" {
-        return screen;
-    }
-    reported.unwrap_or(screen)
-}
-
 fn m(r: &Option<regex::Regex>, s: &str) -> bool {
     r.as_ref().is_some_and(|r| r.is_match(s))
 }

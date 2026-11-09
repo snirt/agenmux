@@ -532,13 +532,14 @@ impl Rex {
     /// persisted record may lag; rereading the same record is not a new
     /// selection.
     fn update_acting(&mut self, shown: Option<String>) {
+        // kept only once adopted: before the first scan no session is listed
         if let Some(shown) = shown {
             if self.shown.as_ref() != Some(&shown)
                 && self.listing.sessions.iter().any(|s| s.session_id == shown)
             {
                 self.acted = Some(shown.clone());
+                self.shown = Some(shown);
             }
-            self.shown = Some(shown);
         }
         // The app's saved selection can still name another session when the
         // toggle launches us: the launching block decides the first scan.
@@ -565,11 +566,13 @@ impl Rex {
             }
         }
         if moved.is_some() {
+            trace!("rex focus moved in {moved:?}, shown {:?}", self.shown);
             self.acted = moved;
         }
         let live = |id: &String| self.listing.sessions.iter().any(|s| &s.session_id == id);
         self.foci.retain(|id, _| live(id));
         if self.acted.as_ref().is_none_or(|id| !live(id)) {
+            trace!("rex acting session unknown, shown {:?}", self.shown);
             self.acted = self.listing.sessions.first().map(|s| s.session_id.clone());
         }
     }
@@ -1554,6 +1557,12 @@ impl Multiplexer for Rex {
         Some(format!("pid:{}", std::process::id()))
     }
 
+    /// Keys reach a Rex sidebar as terminal input, naming no client, and no
+    /// Rex call here takes one: the client the sidebars navigate stands in.
+    fn key_client(&mut self) -> Option<String> {
+        Some(std::env::var("AGENMUX_REX_CLIENT").unwrap_or_else(|_| "rex".into()))
+    }
+
     fn owner(&mut self) -> Option<Owner> {
         owner()
     }
@@ -1997,6 +2006,20 @@ mod tests {
         rex.update_acting(Some("session:1".into()));
         assert_eq!(rex.acted.as_deref(), Some("session:2"));
         assert!(!rex.foci.contains_key("session:1"));
+    }
+
+    #[test]
+    fn the_shown_session_read_before_the_first_scan_still_acts() {
+        let mut rex = Rex::default();
+        rex.update_acting(Some("session:1".into()));
+        let mut listing = listing();
+        listing.sessions.insert(
+            0,
+            serde_json::from_value(json!({"session_id": "session:0", "windows": []})).unwrap(),
+        );
+        rex.adopt(listing);
+        rex.update_acting(Some("session:1".into()));
+        assert_eq!(rex.acted.as_deref(), Some("session:1"));
     }
 
     #[test]

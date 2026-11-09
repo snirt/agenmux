@@ -109,6 +109,12 @@ pub trait Multiplexer {
     /// Clear the record, if `generation` (when given) still owns it.
     fn release(&mut self, generation: Option<&str>);
 
+    /// The client a sidebar key acts for when the key names none. tmux keys
+    /// always name theirs.
+    fn key_client(&mut self) -> Option<String> {
+        None
+    }
+
     /// tmux-only features. Every other backend returns None.
     fn as_tmux(&mut self) -> Option<&mut tmux::Tmux> {
         None

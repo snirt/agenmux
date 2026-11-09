@@ -78,11 +78,12 @@ removes nothing. Rex alone needs no tmux.
 
 Rex keeps what programs report of themselves (OSC 7501,
 `program_status`) and drops a record when its program exits. Verified live:
-Claude Code, Codex, OpenCode and Pi report working, blocked (Claude, OpenCode)
+Claude Code, Codex, OpenCode and Pi report working, blocked (Claude, Codex, OpenCode)
 and done/idle. Oh My Pi and Hermes report nothing. The scan fetches it per
-block; shared detection takes the report over the screen rules, except a
-blocked screen: Pi reports working while its question waits, and Claude
-reports nothing at the folder-trust prompt.
+block. A reported idle or blocked is the state and skips the capture. A
+reported working still captures, and a blocked screen wins: Pi reports
+working while its question waits. The screen rules read the rest, such as
+Claude at the folder-trust prompt, which reports nothing.
 
 ## Testing
 

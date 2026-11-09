@@ -42,10 +42,11 @@ Everything in [usage](usage.md) works the same, except:
   each sidebar block only shows its frames and passes on your keys and mouse.
   It starts with the first sidebar and ends with the last.
 - **Agent state**: an agent that reports its own state to Rex shows that
-  state; Claude Code, Codex, OpenCode and Pi report. A question or permission
-  prompt on screen still shows as blocked, since Pi reports working while one
-  waits. Oh My Pi and Hermes report nothing and are read from the screen and
-  title, as in tmux.
+  state; Claude Code, Codex, OpenCode and Pi report. A reported idle or
+  blocked skips the screen. A reported working still reads it, and a question
+  or permission prompt there shows as blocked: Pi reports working while its
+  question waits. Oh My Pi and Hermes report nothing and are read from the
+  screen and title, as in tmux.
 - **Width**: `display.sidebar_width`, in columns. Rex sizes splits by ratio, so
   the daemon moves each divider until the block reports that many columns.
   Dragging a sidebar's border resizes every sidebar and keeps that width, as

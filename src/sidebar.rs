@@ -912,13 +912,19 @@ impl Sidebar {
         Some((selected, pane))
     }
 
+    /// The client a key acts for: its own, the popup's, or the backend's.
+    fn invoking_client(&mut self, client: Option<String>) -> Option<String> {
+        client
+            .filter(|value| !value.is_empty())
+            .or_else(|| (!self.popup_client.is_empty()).then(|| self.popup_client.clone()))
+            .or_else(|| self.mux.key_client())
+    }
+
     fn begin_mutation(&mut self, action: SequenceAction, client: Option<String>) -> DispatchResult {
         if !self.settings.settings.tmux_management_enabled {
             return DispatchResult::Continue;
         }
-        let client = client
-            .filter(|value| !value.is_empty())
-            .or_else(|| (!self.popup_client.is_empty()).then(|| self.popup_client.clone()));
+        let client = self.invoking_client(client);
         let Some(client) = client else {
             trace!("mutation ignored: invoking tmux client is unknown");
             return DispatchResult::Continue;
@@ -1058,9 +1064,7 @@ impl Sidebar {
     /// selected, the cursor row's. IDs stay unique when display names repeat,
     /// and the cursor does not move.
     fn copy_reference(&mut self, client: Option<String>) {
-        let client = client
-            .filter(|value| !value.is_empty())
-            .or_else(|| (!self.popup_client.is_empty()).then(|| self.popup_client.clone()));
+        let client = self.invoking_client(client);
         let mut ids = self.marked_ids();
         self.clear_marks();
         if ids.is_empty() {
@@ -1121,9 +1125,7 @@ impl Sidebar {
         if !self.settings.settings.tmux_management_enabled {
             return DispatchResult::Continue;
         }
-        let client = client
-            .filter(|value| !value.is_empty())
-            .or_else(|| (!self.popup_client.is_empty()).then(|| self.popup_client.clone()));
+        let client = self.invoking_client(client);
         let Some(client) = client else {
             trace!("quick launcher ignored: invoking tmux client is unknown");
             return DispatchResult::Continue;
@@ -1845,5 +1847,47 @@ mod tests {
         sb.dispatch_key(Key::Open(row));
         assert_eq!(*log.borrow(), ["jump %1"]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dd_without_a_key_client_acts_for_the_backend_client() {
+        use crate::mux::fake::{pane, FakeMux};
+        for key_client in [None, Some("rex")] {
+            let dir = std::env::temp_dir()
+                .join(format!("agenmux-dd-{}-{key_client:?}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mux = FakeMux {
+                panes: vec![
+                    (pane("$1", "@1", "%1", "zsh"), 0),
+                    (pane("$1", "@2", "%2", "zsh"), 0),
+                ],
+                key_client: key_client.map(str::to_string),
+                ..FakeMux::default()
+            };
+            let log = mux.log.clone();
+            let settings =
+                crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+            let mut sb = new_sidebar(
+                Box::new(mux),
+                dir.clone(),
+                dir.join("cache"),
+                dir.join("rows"),
+                String::new(),
+                settings,
+            );
+            assert!(sb.scan_tick(true, &Changes::default()).is_ok());
+            let row = (1..=sb.visible.len())
+                .rev()
+                .find(|&i| sb.visible_pane_id(sb.visible[i - 1]) == "%2")
+                .unwrap();
+            sb.dispatch_key(Key::Select(row));
+            // Rex keys arrive as terminal input, naming no client
+            sb.dispatch_key(Key::Sequence('d', None));
+            sb.dispatch_key(Key::Sequence('d', None));
+            sb.dispatch_key(Key::Text("y".into()));
+            let deleted = log.borrow().iter().any(|a| a == "delete Window @2");
+            assert_eq!(deleted, key_client.is_some(), "{:?}", log.borrow());
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

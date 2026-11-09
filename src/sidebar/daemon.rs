@@ -28,6 +28,12 @@ fn watched_width(ms: &[M], active_session: &str) -> Option<usize> {
     ms.iter()
         .find(|m| m.self_sized && m.active && m.sess == active_session)
         .map(|m| m.w)
+        .or_else(|| {
+            // Rex resizes only shown sidebars: a hidden window's keeps the
+            // width it last had there
+            let shown = |m: &&M| m.active || !m.self_sized;
+            ms.iter().filter(shown).map(|m| m.w).min()
+        })
         .or_else(|| ms.iter().map(|m| m.w).min())
 }
 
@@ -603,6 +609,12 @@ mod tests {
             "a hidden Rex sidebar is stale"
         );
         assert_eq!(watched_width(&ms, ""), Some(29));
+        ms[1].active = false;
+        assert_eq!(
+            watched_width(&ms, ""),
+            Some(36),
+            "unwatched: the shown sidebars, not a hidden one"
+        );
     }
 
     #[test]
