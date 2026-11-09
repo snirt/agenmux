@@ -33,6 +33,9 @@ const PLACE: &str = include_str!("rex/place.lua");
 const POPUP_LAYER: &str = include_str!("rex/popup.lua");
 /// The dragged sidebar width, in cells.
 const WIDTH_FILE: &str = "rex-sidebar-width";
+/// The divider share the last daemon settled at, with its width and app
+/// window size: where a sidebar opens.
+const SETTLED_FILE: &str = "rex-sidebar-settled";
 /// `generation|client` of the daemon that owns the sidebars.
 const OWNER_FILE: &str = "agenmux-owner";
 
@@ -491,6 +494,7 @@ impl Rex {
                 ..Changes::default()
             },
             width: sidebar_width(),
+            layout_state: json!({"settled": settled()}),
             ..Rex::default()
         })
     }
@@ -650,6 +654,10 @@ impl Rex {
             format!("local scan = function()\n{SCAN}\nend\nrex.args.listing = scan()\n{PLACE}");
         let out: Reconciled =
             json_of(&["do", "-e", &script, "--args", &args.to_string(), "--json"])?;
+        let settled = &out.state["settled"];
+        if !settled.is_null() && *settled != self.layout_state["settled"] {
+            let _ = std::fs::write(state_file(SETTLED_FILE), settled.to_string());
+        }
         self.layout_state = out.state;
         self.adopt(out.listing);
         if let Some(width) = out.saved_width.filter(|w| (1..=10000).contains(w)) {
@@ -770,6 +778,13 @@ fn terminal(cwd: &str, label: &str, argv: Option<&[&str]>) -> Value {
 /// `$XDG_STATE_HOME/agenmux/<name>`.
 fn state_file(name: &str) -> PathBuf {
     crate::diag::daemon_log_path().with_file_name(name)
+}
+
+fn settled() -> Value {
+    std::fs::read(state_file(SETTLED_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or(Value::Null)
 }
 
 /// The session's current window.
@@ -1690,7 +1705,8 @@ fn add_sidebar(session: &str, window: &ViewWindow, focus: bool) -> Result<(), Er
         "anchor": anchor,
         "side": side,
         "edge": edge["block_id"].as_str().unwrap_or_default(),
-        "share": 0.2,
+        "width": sidebar_width(),
+        "settled": settled(),
         "label": SIDEBAR,
         "exe": sidebar_command(),
         "focus": focus,

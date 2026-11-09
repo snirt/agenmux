@@ -57,9 +57,12 @@ local function plan(target, cols, at, previous, now)
     else
       share = lower[2] and lower[1] or (at.share + lower[1]) / 2
     end
+  elseif not (lower[2] and upper[2]) then
+    -- one side unmeasured: halving towards the limit would swing far past
+    share = clamp(at.share * (target + 0.5) / (cols + 0.5), lower[1], upper[1])
   else
     local fraction = 0.5
-    if lower[2] and upper[2] and upper[2] > lower[2] then
+    if upper[2] > lower[2] then
       fraction = clamp((target - lower[2]) / (upper[2] - lower[2]), 0.125, 0.875)
     end
     share = lower[1] + (upper[1] - lower[1]) * fraction
@@ -81,10 +84,55 @@ local function fit(session, at, share)
   }) ~= nil
 end
 
+local function window_cells(w, font)
+  local widest, result = 0, {0, 0}
+  local function rect(node, id)
+    if not node then return end
+    if node.block_id == id then return node.rect end
+    if node.split then return rect(node.split.before, id) or rect(node.split.after, id) end
+  end
+  for _, b in ipairs(w.blocks or {}) do
+    local r, size = rect(w.layout, b.block_id), b.size or {}
+    if b.label ~= "agenmux" and b.label ~= "agenmux-popup"
+      and r and r[3] > widest and r[4] > 0 and measured(size) then
+      widest = r[3]
+      local cols = math.floor((size.columns or 0) * math.max(1, size.cell_width_px or 0) / math.max(1, font.cell_width_px or 0))
+      local rows = math.floor((size.rows or 0) * math.max(1, size.cell_height_px or 0) / math.max(1, font.cell_height_px or 0))
+      result = {math.floor(cols / r[3] + 0.5), math.floor(rows / r[4] + 0.5)}
+    end
+  end
+  return result
+end
+
+-- The share to open at: the one the last daemon settled on in an app window
+-- of this size, else the window's columns. Sized wrong, the sidebar is
+-- resized step by step, each step a visible bump.
+local function opening(p)
+  local view = rex.call("session.view", {session_id = p.session})
+  for _, w in ipairs(view and view.windows or {}) do
+    local l = w.layers and w.layers[1]
+    local blocks, has_edge = {}, false
+    for _, b in ipairs(l and l.blocks or {}) do
+      has_edge = has_edge or b.block_id == p.edge
+      blocks[#blocks + 1] = {block_id = b.block_id, label = b.label, size = rex.block.call(
+        "com.superlogical.terminal", "size", {session_id = p.session, block_id = b.block_id}) or {}}
+    end
+    if has_edge then
+      local dims = window_cells({blocks = blocks, layout = l.layout}, blocks[1].size)
+      local s = p.settled
+      if s and s.cols == p.width and s.dims and math.abs(s.dims[1] - dims[1]) <= 2 then
+        return s.share
+      end
+      if dims[1] > 0 then return clamp(p.width / dims[1], 0.05, 0.5) end
+    end
+  end
+  return 0.2
+end
+
 local function place(p)
   rex.session.attach{ session_id = p.session }
   local right = p.side == "after"
-  local share = tonumber(p.share)
+  local share = tonumber(p.share) or opening(p)
   local ratio = right and 1 - share or share
   -- the sidebar block's argv, built by the caller
   local command = p.exe
@@ -117,26 +165,6 @@ local function place(p)
     rex.sleep(0.003)
   end
   return sidebar
-end
-
-local function window_cells(w, font)
-  local widest, result = 0, {0, 0}
-  local function rect(node, id)
-    if not node then return end
-    if node.block_id == id then return node.rect end
-    if node.split then return rect(node.split.before, id) or rect(node.split.after, id) end
-  end
-  for _, b in ipairs(w.blocks or {}) do
-    local r, size = rect(w.layout, b.block_id), b.size or {}
-    if b.label ~= "agenmux" and b.label ~= "agenmux-popup"
-      and r and r[3] > widest and r[4] > 0 and measured(size) then
-      widest = r[3]
-      local cols = math.floor((size.columns or 0) * math.max(1, size.cell_width_px or 0) / math.max(1, font.cell_width_px or 0))
-      local rows = math.floor((size.rows or 0) * math.max(1, size.cell_height_px or 0) / math.max(1, font.cell_height_px or 0))
-      result = {math.floor(cols / r[3] + 0.5), math.floor(rows / r[4] + 0.5)}
-    end
-  end
-  return result
 end
 
 -- Window lifecycle and placement share this owner with divider feedback.

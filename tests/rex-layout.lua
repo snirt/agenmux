@@ -73,20 +73,25 @@ print("ok   rex-lua-delayed-drag-and-reload")
 
 -- Feedback uses real PTY columns; both docking sides and minimum plateaus.
 for _, right in ipairs({false, true}) do
-  for _, scale in ipairs({100, 174, 240}) do
-    for _, start in ipairs({0.05, 0.08, 0.2, 0.7}) do
-      for _, target in ipairs({17, 18, 30, 60}) do
+  for _, scale in ipairs({100, 166, 174, 240}) do
+    for _, start in ipairs({0.05, 0.08, 0.2, 0.2665, 0.7}) do
+      for _, target in ipairs({17, 18, 30, 43, 60}) do
         reset()
         local p, w, change = fixture(scale, start, 16, right)
         p.width = w.blocks[1].size.columns
+        local from, widest = p.width, 0
         tick(p); tick(p)
         apply = function(method, args)
           assert(method == "session.resize_pane")
           assert(args.before_block_id == (right and "shell" or "side"))
           change(right and 1 - args.ratio or args.ratio, true)
+          widest = math.max(widest, w.blocks[1].size.columns)
         end
         p.width = target
         for _ = 1, 80 do tick(p) end
+        -- off the minimum plateau, where one probe must cross it
+        assert(from == 16 or widest <= math.max(from, target) * 1.1 + 2, string.format(
+          "no swing past the target: scale=%s start=%s target=%s widest=%s", scale, start, target, widest))
         assert(w.blocks[1].size.columns == target,
           string.format("scale=%s start=%s target=%s actual=%s", scale, start, target, w.blocks[1].size.columns))
         local count = #calls
@@ -276,3 +281,30 @@ w.blocks[1].size = {columns = 80, rows = 24, cell_width_px = 8, cell_height_px =
 for _ = 1, 10 do tick(p) end
 assert(#calls == 0, "an unsized sidebar must not move its divider")
 print("ok   rex-lua-unsized-sidebar-not-authority")
+
+-- An opened sidebar starts at the share settled in an app window that size,
+-- else at its width over the window columns.
+local function open_at(settled)
+  local split, call = nil, rex.call
+  rex.sleep = function() end
+  rex.block = {call = function()
+    return {columns = 163, rows = 44, cell_width_px = 9, cell_height_px = 20, desired = {{}}}
+  end}
+  rex.call = function(method, args)
+    if method == "session.new_split" then split = args return {block_ids = {"side"}} end
+    return {windows = {{window_id = "w", layers = {{blocks = {{block_id = "shell", label = "shell"}},
+      layout = {block_id = "shell", rect = {0, 0, 1, 1}}}}}}}
+  end
+  rex.args = {session = "s", anchor = "shell", edge = "shell", side = "before",
+    width = 43, settled = settled, label = "agenmux", exe = {"agenmux"}}
+  dofile("src/mux/rex/place.lua")
+  rex.call = call
+  return split.ratio
+end
+assert(open_at({cols = 43, share = 0.2778, dims = {162, 44}}) == 0.2778, "the settled share")
+assert(math.abs(open_at({cols = 30, share = 0.2, dims = {162, 44}}) - 43 / 163) < 1e-9,
+  "another width: the window columns")
+assert(math.abs(open_at({cols = 43, share = 0.2778, dims = {120, 44}}) - 43 / 163) < 1e-9,
+  "another window size: the window columns")
+assert(math.abs(open_at(nil) - 43 / 163) < 1e-9, "nothing settled: the window columns")
+print("ok   rex-lua-open-at-settled-share")
