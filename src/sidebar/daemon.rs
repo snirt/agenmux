@@ -37,6 +37,16 @@ fn watched_width(ms: &[M], active_session: &str) -> Option<usize> {
         .or_else(|| ms.iter().map(|m| m.w).min())
 }
 
+/// `wopt`, kept 2 columns inside a window `cols` wide. A Rex window no client
+/// shows has no measured size (0): then `wopt` itself, never 1.
+fn fitted(wopt: usize, cols: usize) -> usize {
+    if cols == 0 {
+        wopt
+    } else {
+        wopt.min(cols.saturating_sub(2).max(1))
+    }
+}
+
 /// The user dragged this sidebar's border: its window is the active one, its
 /// size and pane count match the previous tick (nothing was split, killed or
 /// resized around it), and the width differs from the configured bound. A
@@ -44,7 +54,7 @@ fn watched_width(ms: &[M], active_session: &str) -> Option<usize> {
 /// layout change stacked it above or below the other panes. No border drag
 /// ends there, so that width is a layout accident, never a preference.
 fn dragged(m: &M, wopt: usize, baseline: Option<&((usize, usize), usize)>) -> bool {
-    let bound = wopt.min(m.win_size.0.saturating_sub(2).max(1));
+    let bound = fitted(wopt, m.win_size.0);
     m.active && m.w < m.win_size.0 && m.w != bound && baseline == Some(&(m.win_size, m.panes))
 }
 
@@ -327,7 +337,7 @@ impl Sidebar {
         let wopt = self.settings.settings.sidebar_width as usize;
         if width_changed {
             for m in &mut ms {
-                let width = wopt.min(m.win_size.0.saturating_sub(2).max(1));
+                let width = fitted(wopt, m.win_size.0);
                 if self.mux.resize_panes(&[(m.pane.clone(), width)]) {
                     m.w = width;
                 }
@@ -393,7 +403,7 @@ impl Sidebar {
         // changed, so the drag probe above stays quiet; put the width back.
         let mut put_back = Vec::new();
         for m in &mut ms {
-            let want = wopt.min(m.win_size.0.saturating_sub(2).max(1));
+            let want = fitted(wopt, m.win_size.0);
             let counted = self.daemon.as_ref().unwrap().win_sizes.get(&m.win);
             if m.self_sized || m.w == want || counted.is_none_or(|&(_, n)| n == m.panes) {
                 continue;
@@ -589,6 +599,14 @@ mod tests {
         assert!(!superseded("client-7", "")); // unset is not a claim
         assert!(!superseded("", "client-9")); // we never published a name
         assert!(!superseded("", ""));
+    }
+
+    #[test]
+    fn an_unmeasured_window_keeps_the_configured_width() {
+        assert_eq!(fitted(33, 0), 33, "a hidden Rex window");
+        assert_eq!(fitted(33, 172), 33);
+        assert_eq!(fitted(33, 20), 18);
+        assert_eq!(fitted(33, 2), 1);
     }
 
     #[test]
