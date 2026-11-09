@@ -50,13 +50,16 @@ Everything in [usage](usage.md) works the same, except:
 - **Width**: `display.sidebar_width`, in columns. Rex sizes splits by ratio, so
   the daemon moves each divider until the block reports that many columns.
   Dragging a sidebar's border resizes every sidebar and keeps that width, as
-  tmux keeps `@agenmux-width`. `display.sidebar_position` applies too.
+  tmux keeps `@agenmux-width`. Rex sizes only the window it shows, so the
+  others get the divider the shown one settled at and open at that width.
+  `display.sidebar_position` applies too.
 - **Popup**: `display.popup_width` and a fixed `popup_height` size it in
   cells; `popup_height = "auto"` takes 80% of the window.
-- **Focus**: the cursor follows the session the app shows. Rex does not report
-  it, so agenmux reads the app's own record of it from its macOS preferences,
-  and focus changes Rex reports win while that record lags. A popup follows the
-  block it opened over.
+- **Focus**: the cursor follows the session and window the app shows. Rex
+  does not report them, but the app sizes the blocks of each window it shows,
+  so the window sized last is the shown one. Before any is sized, agenmux reads
+  the app's record of its session from its macOS preferences. A popup follows
+  the block it opened over.
 - **Mouse**: click selects a row, double-click opens it, the wheel scrolls.
 - **Messages** (copy confirmations, errors) show in the sidebar's hint line;
   Rex has no message line.

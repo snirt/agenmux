@@ -3,6 +3,9 @@
 local a = rex.args
 local function clamp(n, lo, hi) return math.max(lo, math.min(hi, n)) end
 local function differs(x, y) return math.abs(x - y) > 0.000001 end
+-- More than half a column apart in a window `cols` wide: the app nudges a
+-- divider it lays out by less, and a drag moves it by more.
+local function apart(x, y, cols) return math.abs(x - y) > 0.5 / math.max(cols, 100) end
 -- Until a client sizes a terminal it reports Rex's default 80x24, which is
 -- no measurement of the layout.
 local function measured(size) return next(size.desired or {}) ~= nil end
@@ -29,9 +32,17 @@ local function seat(node, own)
   end
 end
 
+-- A step of whole columns over the window's width keeps the divider's place
+-- within its column. A proportional step also scales the padding every block
+-- loses, and from far off lands a column short.
+local function step(at, target, cols, window, aim)
+  if window > 0 then return at.share + (target - cols) / window end
+  return at.share * (target + aim) / (cols + 0.5)
+end
+
 -- Bounded feedback in the sidebar's own font. One liveness probe crosses a
 -- minimum-size plateau; a client that sends no fresh size then parks.
-local function plan(target, cols, at, previous, now)
+local function plan(target, cols, at, previous, now, window)
   if not at.border or cols == 0 or at.share <= 0 or target == cols then return end
   local lo, hi = at.border.span * 0.05, at.border.span * 0.95
   local p = previous
@@ -50,7 +61,7 @@ local function plan(target, cols, at, previous, now)
   if not p then
     -- aim low in the target column: the rest of it is an empty strip
     -- beside the grid
-    share = clamp(at.share * (target + 0.15) / (cols + 0.5), lo, hi)
+    share = clamp(step(at, target, cols, window, 0.15), lo, hi)
   elseif no_response then
     if cols < target then
       share = upper[2] and upper[1] or (at.share + upper[1]) / 2
@@ -59,7 +70,7 @@ local function plan(target, cols, at, previous, now)
     end
   elseif not (lower[2] and upper[2]) then
     -- one side unmeasured: halving towards the limit would swing far past
-    share = clamp(at.share * (target + 0.5) / (cols + 0.5), lower[1], upper[1])
+    share = clamp(step(at, target, cols, window, 0.5), lower[1], upper[1])
   else
     local fraction = 0.5
     if upper[2] > lower[2] then
@@ -73,9 +84,14 @@ local function plan(target, cols, at, previous, now)
     parked = false, measured_share = no_response and p.measured_share or at.share }
 end
 
-local function fit(session, at, share)
+-- Each divider move and adopted drag, for the daemon's trace.
+local log = {}
+local function note(...) log[#log + 1] = string.format(...) end
+
+local function fit(session, at, share, why)
   local b = at.border
   if not b then return false end
+  note("%s %s %.4f -> %.4f", why, session:sub(-6), at.share, share)
   local part = clamp(share / b.span, 0.05, 0.95)
   return rex.call("session.resize_pane", {
     session_id = session, direction = "horizontal",
@@ -220,19 +236,19 @@ local function maintain(p, state)
   for id in pairs(state.had_windows) do if not live[id] then state.had_windows[id] = nil end end
 end
 
-local function request(old, target, cols, at, session, now)
+local function request(old, target, cols, at, session, now, window)
   local pending = old.pending
   if cols == target then
     -- Cancelling an unacknowledged request restores the last measured divider.
     local share = pending and pending.from_columns == cols and pending.measured_share or at.share
     if differs(share, at.share) then
-      if not fit(session, at, share) then return false end
+      if not fit(session, at, share, "restore") then return false end
     end
     old.pending, old.share, old.cols = nil, share, cols
     return true
   end
-  local next = plan(target, cols, at, pending, now)
-  if next and fit(session, at, next.requested_share) then
+  local next = plan(target, cols, at, pending, now, window)
+  if next and fit(session, at, next.requested_share, "step " .. cols .. "->" .. target) then
     old.pending = next
     return true
   end
@@ -244,12 +260,18 @@ local function request(old, target, cols, at, session, now)
 end
 
 local function reconcile(p)
+  -- the app can show a window its session does not call active
+  for _, s in ipairs(p.listing.sessions or {}) do
+    for _, w in ipairs(s.session_id == p.session and s.windows or {}) do
+      if w.window_id == p.window then s.active_window_id = w.window_id end
+    end
+  end
   local state = p.state or {}
   local boot = not state.started
   state.blocks = state.blocks or {}
   local width, now = p.width, p.now
   local changed = state.width and state.width ~= width
-  local panes, live, drag = {}, {}, nil
+  local panes, live, drag, hidden = {}, {}, nil, {}
   for _, s in ipairs(p.listing.sessions or {}) do
     rex.session.attach{session_id = s.session_id}
     for _, w in ipairs(s.windows or {}) do
@@ -288,7 +310,8 @@ local function reconcile(p)
           if pending then
             if cols == pending.target then
               old.pending, old.share, old.cols = nil, at.share, cols
-            elseif differs(at.share, pending.requested_share) then
+            elseif apart(at.share, pending.requested_share, dims[1]) then
+              note("superseded %s %.4f, asked %.4f", id:sub(-6), at.share, pending.requested_share)
               old.pending = nil -- external layout change supersedes our request
             else
               if cols ~= pending.from_columns then old.share, old.cols = at.share, cols end
@@ -296,26 +319,28 @@ local function reconcile(p)
             end
           end
           local dragged = stable and visible and not changed and not reshaped and not duplicate
-            and not old.pending and differs(old.share, at.share) and old.cols ~= cols
+            and not old.pending and apart(old.share, at.share, dims[1]) and old.cols ~= cols
           if dragged then
+            note("drag %s %d -> %d cols", id:sub(-6), old.cols, cols)
             drag, width = id, cols
             old.share, old.cols, old.intent = at.share, cols, nil
           end
-          local waiting = not old.pending and differs(old.share, at.share) and old.cols == cols
+          local waiting = not old.pending and apart(old.share, at.share, dims[1]) and old.cols == cols
           if changed or (fresh and not boot) or duplicate or (reshaped and not old.pending and not dragged) then
             old.intent = width
           end
           if visible and stable and not duplicate and not dragged then
             if old.intent and (old.pending or not waiting) then
               local target = clamp(old.intent, 1, math.max(1, dims[1] - 2))
-              if request(old, target, cols, at, s.session_id, now) then old.intent = nil end
+              if request(old, target, cols, at, s.session_id, now, dims[1]) then old.intent = nil end
             elseif old.pending and retry then
-              request(old, old.pending.target, cols, at, s.session_id, now)
+              request(old, old.pending.target, cols, at, s.session_id, now, dims[1])
             end
           end
           if visible and stable and not old.pending and dims[1] > 0 then
             state.settled = {cols = cols, share = at.share, dims = dims}
           end
+          if not visible then hidden[#hidden + 1] = {session = s.session_id, at = at, old = old} end
           if stable and not waiting and not old.pending then
             old.share, old.cols, old.dims, old.count = at.share, cols, dims, count
             old.font = {size.cell_width_px or 0, size.cell_height_px or 0}
@@ -335,10 +360,21 @@ local function reconcile(p)
     saved = width
     for id, old in pairs(state.blocks) do if id ~= drag then old.intent = width end end
   end
+  -- Rex sizes no hidden terminal but keeps its divider: set it where the
+  -- shown window settled, and the window opens at the width. One app window
+  -- gives every window the same pixel width.
+  local fit_at = state.settled
+  for _, h in ipairs(fit_at and hidden or {}) do
+    local old, at = h.old, h.at
+    if old.intent == fit_at.cols and not old.pending and differs(at.share, fit_at.share)
+      and differs(old.preset or -1, fit_at.share) and fit(h.session, at, fit_at.share, "preset") then
+      old.share, old.preset = fit_at.share, fit_at.share
+    end
+  end
   for id in pairs(state.blocks) do if not live[id] then state.blocks[id] = nil end end
   maintain(p, state)
   state.started, state.width = true, width
-  return {listing = p.listing, state = state, panes = panes, saved_width = saved}
+  return {listing = p.listing, state = state, panes = panes, saved_width = saved, log = log}
 end
 
 -- Both tests and the daemon cross this same interface.

@@ -190,7 +190,8 @@ p.width = 45
 tick(p)
 assert(#calls == 1 and calls[1].method == "session.resize_pane")
 assert(calls[1].args.before_block_id == "side" and calls[1].args.after_block_id == "shell")
-local expected = 0.2 * (45 + 0.15) / (31 + 0.5) / 0.4
+-- 14 columns over the 170-column window (the shell's 34 over its 0.2)
+local expected = (0.2 + (45 - 31) / 170) / 0.4
 assert(math.abs(calls[1].args.ratio - expected) < 0.000001,
   "nested resize must use the adjacent split's span, not the whole window")
 print("ok   rex-lua-nested-adjacent-border")
@@ -208,16 +209,27 @@ p.listing.sessions[2] = peer_session
 p.width = w.blocks[1].size.columns
 p.session = "s"
 tick(p); tick(p)
+-- Rex keeps a hidden divider where it is set; its terminals keep their size
+apply = function(_, args)
+  local split = peer_window.layout.split
+  split.ratio, split.before.rect[3], split.after.rect[3] = args.ratio, args.ratio, 1 - args.ratio
+end
 change(0.25, true)
 tick(p)
 assert(tick(p).saved_width == w.blocks[1].size.columns)
-assert(#calls == 0, "drag adoption must not move the dragged divider")
+for _, call in ipairs(calls) do
+  assert(call.args.session_id == "peer", "drag adoption must not move the dragged divider")
+end
 for _ = 1, 5 do tick(p) end
-assert(#calls == 0, "a hidden peer never answers a resize: it waits")
-p.session = "peer"
-tick(p)
 assert(#calls == 1 and calls[1].method == "session.resize_pane"
-  and calls[1].args.session_id == "peer", "Lua must propagate drag intent to the peer")
+  and calls[1].args.session_id == "peer" and math.abs(calls[1].args.ratio - 0.25) < 1e-9,
+  "a hidden peer is preset where the dragged window settled")
+-- shown, the app sizes it at that divider: nothing is left to move
+peer_window.blocks[1].size.columns = w.blocks[1].size.columns
+peer_window.blocks[2].size.columns = w.blocks[2].size.columns
+p.session = "peer"
+for _ = 1, 5 do tick(p) end
+assert(#calls == 1, "the peer opened at the width")
 print("ok   rex-lua-drag-propagates-to-peer")
 
 -- Lifecycle: only an observed empty session is destroyed; real/nonterminal
@@ -308,3 +320,20 @@ assert(math.abs(open_at({cols = 43, share = 0.2778, dims = {120, 44}}) - 43 / 16
   "another window size: the window columns")
 assert(math.abs(open_at(nil) - 43 / 163) < 1e-9, "nothing settled: the window columns")
 print("ok   rex-lua-open-at-settled-share")
+
+-- The app can show a window its session does not call active: that one is
+-- the window a width change resizes.
+reset()
+p, w, change = fixture(174, 0.2, 16)
+p.session = "s"
+tick(p); tick(p)
+p.listing.sessions[1].windows[2] = {window_id = "other", blocks = {}}
+p.listing.sessions[1].active_window_id = "other"
+apply = function(_, args) change(args.ratio, true) end
+p.width = 40
+for _ = 1, 5 do tick(p) end
+assert(#calls == 0, "a window the app does not show waits")
+p.window = "w"
+for _ = 1, 20 do tick(p) end
+assert(w.blocks[1].size.columns == 40, "the shown window: " .. w.blocks[1].size.columns)
+print("ok   rex-lua-shown-window-over-active")

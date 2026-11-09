@@ -278,6 +278,16 @@ struct Size {
     columns: usize,
     #[serde(default)]
     rows: usize,
+    #[serde(default, deserialize_with = "list")]
+    desired: Vec<Desired>,
+}
+
+/// A client's size for a block. The app sends it each time it shows the
+/// block, changed or not.
+#[derive(Deserialize, Default, Debug)]
+struct Desired {
+    #[serde(default)]
+    updated_at: String,
 }
 
 /// `session.view`, for calls that need no process or size.
@@ -463,6 +473,8 @@ pub struct Rex {
     /// Last app preference observed; unchanged persisted data must not erase
     /// live focus.
     shown: Option<String>,
+    /// The window the app shows, from `shown`.
+    shown_window: Option<String>,
     /// Opaque state owned by place.lua.
     layout_state: Value,
     layout_started: Option<Instant>,
@@ -535,7 +547,7 @@ impl Rex {
     /// Observe app selection changes and live server focus changes. The app's
     /// persisted record may lag; rereading the same record is not a new
     /// selection.
-    fn update_acting(&mut self, shown: Option<String>) {
+    fn update_acting(&mut self, shown: Option<String>, sized: Option<String>) {
         // kept only once adopted: before the first scan no session is listed
         if let Some(shown) = shown {
             if self.shown.as_ref() != Some(&shown)
@@ -574,6 +586,9 @@ impl Rex {
             self.acted = moved;
         }
         let live = |id: &String| self.listing.sessions.iter().any(|s| &s.session_id == id);
+        if let Some(sized) = sized.filter(|id| live(id)) {
+            self.acted = Some(sized);
+        }
         self.foci.retain(|id, _| live(id));
         if self.acted.as_ref().is_none_or(|id| !live(id)) {
             trace!("rex acting session unknown, shown {:?}", self.shown);
@@ -581,8 +596,20 @@ impl Rex {
         }
     }
 
+    /// The session and window an app client sized last: the ones it shows.
+    /// The app records no switch it makes, and can show a window its session
+    /// does not call active.
+    fn shown(&self) -> Option<(String, String)> {
+        self.blocks()
+            .flat_map(|(s, w, b)| b.size.desired.iter().map(move |d| (&d.updated_at, s, w)))
+            .max_by(|a, b| a.0.cmp(b.0))
+            .map(|(_, s, w)| (s.session_id.clone(), w.window_id.clone()))
+    }
+
     fn acting(&mut self) -> Option<&Session> {
-        self.update_acting(shown_session());
+        let shown = self.shown();
+        self.shown_window = shown.as_ref().map(|(_, window)| window.clone());
+        self.update_acting(shown_session(), shown.map(|(session, _)| session));
         self.listing
             .sessions
             .iter()
@@ -627,6 +654,8 @@ impl Rex {
             #[serde(default, deserialize_with = "list")]
             panes: Vec<Measured>,
             saved_width: Option<usize>,
+            #[serde(default, deserialize_with = "list")]
+            log: Vec<String>,
         }
         #[derive(Deserialize)]
         struct Measured {
@@ -641,8 +670,10 @@ impl Rex {
             active: bool,
         }
         let session = self.acting().map(|s| s.session_id.clone());
+        let window = self.shown_window.clone();
         let args = json!({
             "op": "reconcile",
+            "window": window,
             "state": if self.layout_state.is_object() { self.layout_state.clone() } else { json!({}) },
             "width": self.width,
             "now": self.layout_started.get_or_insert_with(Instant::now).elapsed().as_secs_f64(),
@@ -657,6 +688,9 @@ impl Rex {
         let settled = &out.state["settled"];
         if !settled.is_null() && *settled != self.layout_state["settled"] {
             let _ = std::fs::write(state_file(SETTLED_FILE), settled.to_string());
+        }
+        for line in &out.log {
+            trace!("rex layout {line}");
         }
         self.layout_state = out.state;
         self.adopt(out.listing);
@@ -842,8 +876,8 @@ fn unbase64(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The session the app shows. Rex reports none, but the app keeps its own
-/// record in its preferences as you switch.
+/// The session the app last recorded in its preferences. It lags a switch by
+/// far: `Rex::shown` reads the live one once the app sizes a block.
 fn shown_session() -> Option<String> {
     let out = Command::new("defaults")
         .args(["export", "com.superlogical.rex", "-"])
@@ -1967,6 +2001,23 @@ mod tests {
     }
 
     #[test]
+    fn the_window_sized_last_is_the_one_shown() {
+        let mut rex = Rex::default();
+        rex.adopt(listing());
+        assert_eq!(rex.shown(), None, "no client sized anything");
+        let desired = |at: &str| json!([{"client_id": "client:1", "updated_at": at}]);
+        let size = |rex: &mut Rex, window: usize, at: &str| {
+            let block = &mut rex.listing.sessions[0].windows[window].blocks[0];
+            block.size = serde_json::from_value(json!({"desired": desired(at)})).unwrap();
+        };
+        size(&mut rex, 0, "2026-11-09T18:13:09.381+02:00");
+        size(&mut rex, 1, "2026-11-09T18:13:11.561+02:00");
+        // window:1, though its session calls window:0 active
+        let shown = Some(("session:1".to_string(), "window:1".to_string()));
+        assert_eq!(rex.shown(), shown);
+    }
+
+    #[test]
     fn panes_skip_sidebars_and_read_the_typed_command() {
         let mut rex = Rex::default();
         rex.adopt(listing());
@@ -2007,19 +2058,19 @@ mod tests {
             }))
             .unwrap(),
         );
-        rex.update_acting(Some("session:1".into()));
+        rex.update_acting(Some("session:1".into()), None);
         assert_eq!(rex.acted.as_deref(), Some("session:1"));
         rex.listing.sessions[1].windows[0].focused_block_id = Some("shell:9".into());
         for _ in 0..3 {
-            rex.update_acting(Some("session:1".into()));
+            rex.update_acting(Some("session:1".into()), None);
             assert_eq!(rex.acted.as_deref(), Some("session:2"));
         }
         // a newly changed app record still wins when focus has not moved
-        rex.update_acting(Some("session:2".into()));
-        rex.update_acting(Some("session:1".into()));
+        rex.update_acting(Some("session:2".into()), None);
+        rex.update_acting(Some("session:1".into()), None);
         assert_eq!(rex.acted.as_deref(), Some("session:1"));
         rex.listing.sessions.remove(0);
-        rex.update_acting(Some("session:1".into()));
+        rex.update_acting(Some("session:1".into()), None);
         assert_eq!(rex.acted.as_deref(), Some("session:2"));
         assert!(!rex.foci.contains_key("session:1"));
     }
@@ -2027,15 +2078,34 @@ mod tests {
     #[test]
     fn the_shown_session_read_before_the_first_scan_still_acts() {
         let mut rex = Rex::default();
-        rex.update_acting(Some("session:1".into()));
+        rex.update_acting(Some("session:1".into()), None);
         let mut listing = listing();
         listing.sessions.insert(
             0,
             serde_json::from_value(json!({"session_id": "session:0", "windows": []})).unwrap(),
         );
         rex.adopt(listing);
-        rex.update_acting(Some("session:1".into()));
+        rex.update_acting(Some("session:1".into()), None);
         assert_eq!(rex.acted.as_deref(), Some("session:1"));
+    }
+
+    #[test]
+    fn the_session_the_app_sized_acts_over_its_stale_record() {
+        let mut rex = Rex::default();
+        let mut listing = listing();
+        listing.sessions.insert(
+            0,
+            serde_json::from_value(json!({"session_id": "session:0", "windows": []})).unwrap(),
+        );
+        rex.adopt(listing);
+        rex.update_acting(Some("session:1".into()), None);
+        rex.update_acting(Some("session:1".into()), Some("session:0".into()));
+        assert_eq!(rex.acted.as_deref(), Some("session:0"));
+        // the record has not changed: the switch stands
+        rex.update_acting(Some("session:1".into()), None);
+        assert_eq!(rex.acted.as_deref(), Some("session:0"));
+        rex.update_acting(Some("session:1".into()), Some("session:gone".into()));
+        assert_eq!(rex.acted.as_deref(), Some("session:0"));
     }
 
     #[test]
