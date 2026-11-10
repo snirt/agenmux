@@ -602,7 +602,8 @@ impl Rex {
     fn shown(&self) -> Option<(String, String)> {
         self.blocks()
             .flat_map(|(s, w, b)| b.size.desired.iter().map(move |d| (&d.updated_at, s, w)))
-            .max_by(|a, b| a.0.cmp(b.0))
+            .filter_map(|(at, s, w)| Some((instant(at)?, s, w)))
+            .max_by_key(|(at, ..)| *at)
             .map(|(_, s, w)| (s.session_id.clone(), w.window_id.clone()))
     }
 
@@ -874,6 +875,38 @@ fn unbase64(text: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// An RFC 3339 time in nanoseconds since the epoch. Rex stamps local time
+/// with its offset, so text order breaks when the offset changes.
+fn instant(stamp: &str) -> Option<i128> {
+    let (date, rest) = stamp.split_once('T')?;
+    let (clock, zone) = rest.split_at(rest.rfind(['Z', '+', '-'])?);
+    let mut ymd = date.split('-').map(|n| n.parse::<i64>().ok());
+    let (y, m, d) = (ymd.next()??, ymd.next()??, ymd.next()??);
+    let mut hms = clock.split(':');
+    let hour: i64 = hms.next()?.parse().ok()?;
+    let minute: i64 = hms.next()?.parse().ok()?;
+    let seconds: f64 = hms.next()?.parse().ok()?;
+    let east = match zone {
+        "Z" => 0,
+        _ => {
+            let (h, m) = zone[1..].split_once(':')?;
+            let offset = h.parse::<i64>().ok()? * 3600 + m.parse::<i64>().ok()? * 60;
+            if zone.starts_with('-') {
+                -offset
+            } else {
+                offset
+            }
+        }
+    };
+    // days since the epoch, counting years from March
+    let y = if m <= 2 { y - 1 } else { y };
+    let (era, year) = (y.div_euclid(400), y.rem_euclid(400));
+    let day = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let days = era * 146_097 + year * 365 + year / 4 - year / 100 + day - 719_468;
+    let whole = days * 86_400 + hour * 3600 + minute * 60 - east;
+    Some(i128::from(whole) * 1_000_000_000 + (seconds * 1e9) as i128)
 }
 
 /// The session the app last recorded in its preferences. It lags a switch by
@@ -1861,6 +1894,21 @@ fn open_popup(session: &str, block: &str, config: Option<&AppConfig>) -> Result<
     }
 }
 
+/// `teardown`: stop the daemon, which closes the sidebars it served, then
+/// close any left. Closing them under a live daemon loses: it puts one back
+/// in the window the app shows.
+pub fn teardown() -> i32 {
+    if let Some(daemon) = daemon_pid() {
+        unsafe { libc::kill(daemon, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(daemon, 0) } == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    close_sidebars();
+    0
+}
+
 /// Close every sidebar and popup. Returns the windows that had a sidebar.
 pub fn close_sidebars() -> Vec<(String, String)> {
     let mut closed = Vec::new();
@@ -2015,6 +2063,29 @@ mod tests {
         // window:1, though its session calls window:0 active
         let shown = Some(("session:1".to_string(), "window:1".to_string()));
         assert_eq!(rex.shown(), shown);
+        // the clocks went back an hour: window:0 is later, though its text sorts first
+        size(&mut rex, 0, "2026-11-09T17:30:00.5+01:00");
+        let shown = Some(("session:1".to_string(), "window:0".to_string()));
+        assert_eq!(rex.shown(), shown);
+    }
+
+    #[test]
+    fn instants_order_across_offsets() {
+        assert_eq!(instant("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            instant("1970-01-02T01:00:00.25+01:00"),
+            Some(86_400_250_000_000)
+        );
+        assert_eq!(
+            instant("2026-11-10T10:05:28.814141+02:00"),
+            instant("2026-11-10T08:05:28.814141Z")
+        );
+        assert!(instant("2026-03-01T00:00:00Z") > instant("2026-02-28T23:59:59+00:30"));
+        assert_eq!(
+            instant("2024-02-29T12:00:00Z"),
+            Some(1_709_208_000_000_000_000)
+        );
+        assert_eq!(instant("yesterday"), None);
     }
 
     #[test]

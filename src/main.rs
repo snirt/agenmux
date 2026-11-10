@@ -142,11 +142,7 @@ fn main() {
         }
         ["pane-orphan"] => panes::pane_orphan(),
         ["pane-pin"] => panes::pane_pin(),
-        // The daemon ends with the last sidebar it served.
-        ["teardown"] if mux::is_rex() => {
-            mux::rex::close_sidebars();
-            0
-        }
+        ["teardown"] if mux::is_rex() => mux::rex::teardown(),
         ["teardown"] => match panes::lifecycle_lock() {
             Ok(_lock) => {
                 panes::stop_daemon();
