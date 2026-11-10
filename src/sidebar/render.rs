@@ -657,6 +657,8 @@ impl Sidebar {
                 .or_insert(0usize) += 1;
         }
         let window_icon = self.palette.done_fg.fg("");
+        let plain = self.settings.settings.glyphs == crate::app_config::Glyphs::Plain;
+        let window_glyph = if plain { "▢" } else { "\u{eb7f}" };
         let marked = self.marked_set();
         let selected_bg = self.palette.selected_bg.bg();
         let mut lines = Vec::new();
@@ -808,13 +810,12 @@ impl Sidebar {
                     self.agent_label(&row.agent)
                 )
             } else {
-                let plain = self.settings.settings.glyphs == crate::app_config::Glyphs::Plain;
                 let glyph = match pane.command.as_str() {
                     _ if plain => "▢",
                     "nvim" => "\u{f36f}",    // nf-linux-neovim
                     "lazygit" => "\u{e702}", // nf-dev-git
                     _ if expanded => "▢",
-                    _ => "\u{eb7f}",
+                    _ => window_glyph,
                 };
                 format!("{base}{mark}{prefix}{window_icon}{glyph}{E}[0m ")
             };
@@ -890,7 +891,7 @@ impl Sidebar {
                 ),
                 _ => (
                     format!(
-                        "  {}{accent}▼ {}{E}[0m",
+                        "  {}{window_icon}{window_glyph} {}{E}[0m",
                         header_mark(true),
                         name.display_clipped("▏", cols.saturating_sub(6))
                     ),
@@ -1251,6 +1252,12 @@ impl Sidebar {
                 let left = clip_width(text, half);
                 let style = if error {
                     self.palette.error_fg.fg("1")
+                } else if matches!(
+                    &self.overlay,
+                    Some(Overlay::Create { target, .. })
+                        if target.action == crate::input::SequenceAction::CreateWindow
+                ) {
+                    self.palette.done_fg.fg("")
                 } else {
                     self.palette.accent_fg.fg("1")
                 };
@@ -2716,19 +2723,66 @@ mod tests {
             "{}",
             sb.last_frame
         );
-        sb.overlay = Some(Overlay::Create {
-            target: MutationTarget {
-                action: SequenceAction::CreateWindow,
-                pane_id: "%7".into(),
-                window_id: "@4".into(),
-                session_id: "$2".into(),
-                cwd: "/tmp/work".into(),
-                client: "client-a".into(),
-            },
-            name: "dev".into(),
-        });
-        sb.render(true);
-        assert!(sb.last_frame.contains("dev▏"), "{}", sb.last_frame);
+        let saved_palette = sb.palette.clone();
+        let saved_panes = sb.panes.clone();
+        let saved_visible = sb.visible.clone();
+        let saved_glyphs = sb.settings.settings.glyphs;
+        sb.panes = vec![pane("$2", "s", "@4", 1, "shell", "%1", 1, "sh", Some(0))];
+        let file =
+            crate::app_config::parse("[theme.colors]\naccent_fg = 100\ndone_fg = 111").unwrap();
+        sb.palette = Palette::resolve(file.theme.as_ref().unwrap());
+        use crate::app_config::Glyphs;
+        for (show_all, glyphs, window_label) in [
+            (false, Glyphs::Rich, "\u{eb7f}"),
+            (true, Glyphs::Rich, "\u{eb7f}"),
+            (false, Glyphs::Plain, "▢"),
+            (true, Glyphs::Plain, "▢"),
+        ] {
+            sb.settings.settings.show_all_panes = show_all;
+            sb.settings.settings.glyphs = glyphs;
+            sb.rebuild_visible(false);
+            for (action, color) in [
+                (SequenceAction::CreateSession, sb.palette.accent_fg.fg("1")),
+                (SequenceAction::CreateWindow, sb.palette.done_fg.fg("")),
+            ] {
+                for name in ["", "dev"] {
+                    sb.overlay = Some(Overlay::Create {
+                        target: MutationTarget {
+                            action,
+                            pane_id: "%7".into(),
+                            window_id: "@4".into(),
+                            session_id: "$2".into(),
+                            cwd: "/tmp/work".into(),
+                            client: "client-a".into(),
+                        },
+                        name: name.into(),
+                    });
+                    sb.render(true);
+                    let label = if show_all {
+                        if action == SequenceAction::CreateSession {
+                            "▼"
+                        } else {
+                            window_label
+                        }
+                    } else if action == SequenceAction::CreateSession {
+                        "new session:"
+                    } else {
+                        "new window:"
+                    };
+                    assert!(
+                        sb.last_frame
+                            .contains(&format!("{color}{label} {name}▏{E}[0m")),
+                        "{action:?}, show_all={show_all}: {}",
+                        sb.last_frame
+                    );
+                }
+            }
+        }
+        sb.palette = saved_palette;
+        sb.panes = saved_panes;
+        sb.visible = saved_visible;
+        sb.settings.settings.glyphs = saved_glyphs;
+        sb.settings.settings.show_all_panes = false;
         sb.overlay = None;
         sb.key_sequence.clear();
         sb.overlay = Some(Overlay::Help);
