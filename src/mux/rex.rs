@@ -1750,6 +1750,23 @@ fn ensure_daemon(origin: Option<&str>) -> Result<(), Error> {
     Ok(())
 }
 
+/// A sidebar pane starting under no daemon, as Rex restores one after a
+/// server restart: start the daemon, or the pane stays blank. A toggle starts
+/// its daemon just before the pane, so give that one a moment to claim. The
+/// client the pane was opened for is gone with the old server.
+pub fn revive() {
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    while daemon_pid().is_none() {
+        if Instant::now() >= deadline {
+            if let Ok(mut daemon) = daemon_command(None) {
+                let _ = daemon.env_remove("AGENMUX_REX_CLIENT").spawn();
+            }
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Split the whole tiled layer (its top split, or its only block) so the
 /// sidebar spans the window's full height. `focus`: the user opened it.
 fn add_sidebar(session: &str, window: &ViewWindow, focus: bool) -> Result<(), Error> {
@@ -1894,19 +1911,20 @@ fn open_popup(session: &str, block: &str, config: Option<&AppConfig>) -> Result<
     }
 }
 
-/// `teardown`: stop the daemon, which closes the sidebars it served, then
-/// close any left. Closing them under a live daemon loses: it puts one back
-/// in the window the app shows.
-pub fn teardown() -> i32 {
+/// Close every sidebar for good, and stop the daemon. Returns the windows that
+/// had one. Closing them under a live daemon alone loses: it puts one back in
+/// the window the app shows, and never exits.
+pub fn teardown() -> Vec<(String, String)> {
+    let closed = close_sidebars();
     if let Some(daemon) = daemon_pid() {
         unsafe { libc::kill(daemon, libc::SIGTERM) };
         let deadline = Instant::now() + Duration::from_secs(5);
         while unsafe { libc::kill(daemon, 0) } == 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
+        close_sidebars();
     }
-    close_sidebars();
-    0
+    closed
 }
 
 /// Close every sidebar and popup. Returns the windows that had a sidebar.

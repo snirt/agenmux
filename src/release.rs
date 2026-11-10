@@ -679,7 +679,7 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
     let rex = crate::mux::is_rex();
     let running = !rex && tmux_running();
     let rex_sidebars = if rex {
-        crate::mux::rex::close_sidebars()
+        crate::mux::rex::teardown()
     } else {
         Vec::new()
     };

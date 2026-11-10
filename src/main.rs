@@ -142,7 +142,10 @@ fn main() {
         }
         ["pane-orphan"] => panes::pane_orphan(),
         ["pane-pin"] => panes::pane_pin(),
-        ["teardown"] if mux::is_rex() => mux::rex::teardown(),
+        ["teardown"] if mux::is_rex() => {
+            mux::rex::teardown();
+            0
+        }
         ["teardown"] => match panes::lifecycle_lock() {
             Ok(_lock) => {
                 panes::stop_daemon();

@@ -221,6 +221,7 @@ pub(crate) fn run_pane() -> i32 {
         return 1;
     }
     let mut frames = unsafe { File::from_raw_fd(fd) };
+    crate::mux::revive_daemon();
     unsafe {
         libc::signal(libc::SIGHUP, stop_pane as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, stop_pane as *const () as libc::sighandler_t);

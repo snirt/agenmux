@@ -329,6 +329,14 @@ pub fn routes_keys() -> bool {
     !is_rex()
 }
 
+/// A sidebar pane starting: bring up its daemon where nothing else will.
+/// tmux's hooks start one; Rex restores a pane after a restart with none.
+pub fn revive_daemon() {
+    if is_rex() {
+        rex::revive();
+    }
+}
+
 /// Where this server's daemon, sidebar panes and key senders meet.
 pub fn runtime_dir() -> PathBuf {
     if is_rex() {
