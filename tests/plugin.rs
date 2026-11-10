@@ -2658,7 +2658,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
         );
     };
     send_sequence("cc");
-    sidebar_shows("▼ ▏");
+    sidebar_shows("\u{eb7f} ▏");
     for _ in 0..2 {
         assert_success(
             tmux.bin(&["key", "sequence-63", "missing-client"]),
@@ -2742,7 +2742,7 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     // while the session has one window, so killing it returns the client to
     // the initial pane on every tmux build.
     send_sequence("cc");
-    sidebar_shows("▼ ▏");
+    sidebar_shows("\u{eb7f} ▏");
     assert_success(tmux.bin(&["key", "enter"]), "accept blank window name");
     tmux.wait_for(Duration::from_secs(4), || window_count() == windows + 1);
     assert_on_sidebar();
@@ -2774,9 +2774,9 @@ fn tmux_management_creates_and_deletes_stable_targets() {
     tmux.wait_for(Duration::from_secs(10), || selected() == initial);
 
     send_sequence("cc");
-    sidebar_shows("▼ ▏");
+    sidebar_shows("\u{eb7f} ▏");
     send_text("w");
-    sidebar_shows("▼ w▏");
+    sidebar_shows("\u{eb7f} w▏");
     assert_success(tmux.bin(&["key", "enter"]), "accept window name");
     tmux.wait_for(Duration::from_secs(4), || {
         tmux.text(&["list-windows", "-a", "-F", "#{window_id}"])
