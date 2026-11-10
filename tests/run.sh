@@ -524,11 +524,12 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null; then
   env -u AGENMUX_MUX REX_SESSION=session:stale REX_BLOCK=block:stale \
     AGENMUX_REX="$tmp/rex" AGENMUX_RUNTIME_DIR="$tmp" \
     tmux -L "$socket" -f /dev/null new-session -d
-  job="$(tmux -L "$socket" run-shell "'$BIN' list >/dev/null 2>&1 && echo tmux")"
-  if [ "$job" = tmux ]; then
+  # through files: tmux 3.4 prints none of a command-line run-shell's output
+  tmux -L "$socket" run-shell "'$BIN' list >/dev/null 2>'$tmp/err'; echo \$? >'$tmp/code'"
+  if [ "$(cat "$tmp/code" 2>/dev/null)" = 0 ]; then
     echo "ok   tmux-job-with-rex-env-resolves-tmux"
   else
-    echo "FAIL tmux-job-with-rex-env-resolves-tmux: [$job]"
+    echo "FAIL tmux-job-with-rex-env-resolves-tmux: [$(cat "$tmp/code" 2>/dev/null)] $(head -c 300 "$tmp/err" 2>/dev/null)"
     fail=1
   fi
   tmux -L "$socket" kill-server 2>/dev/null || true
