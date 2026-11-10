@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 /// Mirrors the CLI section of docs/usage.md: shell commands first, then the
 /// internal ones the tmux integration calls.
 const USAGE: &str = "\
-Usage: agenmux <command> [args]
+Usage: agenmux [--mux tmux|rex] <command> [args]
 
 Commands:
   list [-s <session>] [-a <agent>] [-c <command>]
@@ -49,6 +49,10 @@ Internal (called by the tmux integration):
   key <name> [client], click <pane> <row> <client> [double], wheel <pane> <up|down>,
   pane-add [window [client]], pane-orphan, pane-pin, teardown,
   notification-open <socket> <pane> <bundle>
+
+Rex (called by rex/agenmux.lua):
+  rex-toggle <session> <block> [split|popup] [client], rex-reload [client],
+  rex-sidebars                keep a sidebar in every window until Rex exits
 ";
 
 pub(crate) fn compat_env(name: &str, legacy: &str) -> Option<String> {
@@ -57,7 +61,11 @@ pub(crate) fn compat_env(name: &str, legacy: &str) -> Option<String> {
         .or_else(|| std::env::var(legacy).ok())
 }
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if let Err(e) = mux::take_mux_flag(&mut args) {
+        eprintln!("agenmux: {e}");
+        std::process::exit(2);
+    }
     let strs: Vec<&str> = args.iter().map(String::as_str).collect();
     let code = match strs.as_slice() {
         ["--version"] | ["-V"] => {
@@ -108,6 +116,14 @@ fn main() {
             sidebar::run_daemon(plugin_dir(), scan_cache_path())
         }
         ["sidebar-pane"] => pane_writers::run_pane(),
+        ["rex-toggle", session, block, rest @ ..] => mux::rex::toggle(
+            session,
+            block,
+            rest.first().copied().unwrap_or("split"),
+            rest.get(1).copied().unwrap_or(""),
+        ),
+        ["rex-reload", rest @ ..] => mux::rex::reload(rest.first().copied().unwrap_or("")),
+        ["rex-sidebars"] => mux::rex::sidebars(),
         ["key", key] => sidebar::send_key(key, None),
         ["key", key, client] => sidebar::send_key(key, Some(client)),
         ["click", pane, y, client] => y
@@ -126,6 +142,10 @@ fn main() {
         }
         ["pane-orphan"] => panes::pane_orphan(),
         ["pane-pin"] => panes::pane_pin(),
+        ["teardown"] if mux::is_rex() => {
+            mux::rex::teardown();
+            0
+        }
         ["teardown"] => match panes::lifecycle_lock() {
             Ok(_lock) => {
                 panes::stop_daemon();
@@ -274,7 +294,9 @@ fn cmd_status() -> i32 {
         scan::from_tsv(&std::fs::read_to_string(&cache).unwrap_or_default())
     } else {
         // a stale cache can mean a dead daemon; don't keep its sidebars
-        panes::reap_dead_owner();
+        if !mux::is_rex() {
+            panes::reap_dead_owner();
+        }
         match run_scan() {
             Ok(snapshot) => snapshot.agents,
             Err(_) => return 0, // no server -> empty segment, like bash
@@ -286,7 +308,7 @@ fn cmd_status() -> i32 {
         .ok()
         .and_then(|file| file.display?.glyphs)
         .unwrap_or(app_config::Glyphs::Rich);
-    print!("{}", scan::status_segment(&rows, glyphs));
+    print!("{}", scan::status_segment(&rows, glyphs, !mux::is_rex()));
     0
 }
 

@@ -97,8 +97,110 @@ extern "C" fn stop_pane(_: libc::c_int) {
     PANE_STOP.store(true, Ordering::Relaxed);
 }
 
+/// Terminal input for a daemon whose server routes no keys (Rex): typed
+/// bytes pass through for the daemon to decode with the user's keymap, mouse
+/// reports become the click and wheel packets tmux bindings send.
+#[derive(Default)]
+struct TtyInput {
+    /// An escape sequence split across reads.
+    partial: Vec<u8>,
+    /// Row and time of the last press, for double clicks.
+    last_press: Option<(usize, Instant)>,
+}
+
+const DOUBLE_CLICK: Duration = Duration::from_millis(300);
+/// Mouse reports on, in SGR encoding; the frame takes the alternate screen.
+/// Frames hide the cursor: Rex's cursor shader leaves an outline wherever a
+/// cursor was last shown, which no escape can clear or recolor.
+const TTY_ON: &str = "\x1b[?1049h\x1b[?1000h\x1b[?1006h";
+const TTY_OFF: &str = "\x1b[?25h\x1b[?1006l\x1b[?1000l\x1b[?1049l";
+
+impl TtyInput {
+    /// Packets for the key FIFO. `row_index`: the list index a frame row
+    /// shows, from the daemon's row map.
+    fn translate(
+        &mut self,
+        bytes: &[u8],
+        now: Instant,
+        row_index: impl Fn(usize) -> Option<u32>,
+    ) -> Vec<Vec<u8>> {
+        let mut input = std::mem::take(&mut self.partial);
+        input.extend_from_slice(bytes);
+        let mut packets = Vec::new();
+        let mut typed = Vec::new();
+        let mut at = 0;
+        while at < input.len() {
+            if input[at..].starts_with(b"\x1b[<") {
+                let Some(end) = input[at..].iter().position(|b| matches!(b, b'M' | b'm')) else {
+                    if input.len() - at < 32 {
+                        self.partial = input[at..].to_vec();
+                    }
+                    break;
+                };
+                let report = &input[at + 3..at + end];
+                let press = input[at + end] == b'M';
+                at += end + 1;
+                let mut fields = std::str::from_utf8(report)
+                    .unwrap_or_default()
+                    .split(';')
+                    .map(|f| f.parse::<usize>().ok());
+                let (Some(Some(button)), Some(Some(_x)), Some(Some(y))) =
+                    (fields.next(), fields.next(), fields.next())
+                else {
+                    continue;
+                };
+                if !typed.is_empty() {
+                    packets.push(std::mem::take(&mut typed));
+                }
+                match (button, press) {
+                    (64, true) => packets.push(vec![0x01]),
+                    (65, true) => packets.push(vec![0x02]),
+                    (0, true) => {
+                        let row = y.saturating_sub(1);
+                        let Some(index) = row_index(row) else {
+                            continue;
+                        };
+                        let double = self
+                            .last_press
+                            .is_some_and(|(last, at)| last == row && now - at < DOUBLE_CLICK);
+                        self.last_press = (!double).then_some((row, now));
+                        let mut packet = vec![if double { 0x0f } else { 0x05 }];
+                        packet.extend_from_slice(&index.to_be_bytes());
+                        packets.push(packet);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            let byte = input[at];
+            at += 1;
+            // Control bytes the key protocol reads as packets (wheel, click,
+            // text) never pass as typed input.
+            if byte >= 0x20 || matches!(byte, 0x03 | 0x0a | 0x0d | 0x1b) {
+                typed.push(byte);
+            }
+        }
+        if !typed.is_empty() {
+            packets.push(typed);
+        }
+        packets
+    }
+}
+
+/// The list index on `row` of the daemon's row map.
+fn row_index(runtime: &Path, row: usize) -> Option<u32> {
+    let rows = std::fs::read_to_string(runtime.join("agenmux-rows")).ok()?;
+    rows.lines()
+        .nth(row)?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
 /// One idle reader per split pane: tmux sends terminal paste to its PTY, not
 /// to key bindings. Frames arrive on a separate FIFO from the shared daemon.
+/// Where the server routes no keys, the reader forwards its terminal input.
 pub(crate) fn run_pane() -> i32 {
     let Some(pane) = crate::mux::own_pane() else {
         return 1;
@@ -119,6 +221,7 @@ pub(crate) fn run_pane() -> i32 {
         return 1;
     }
     let mut frames = unsafe { File::from_raw_fd(fd) };
+    crate::mux::revive_daemon();
     unsafe {
         libc::signal(libc::SIGHUP, stop_pane as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, stop_pane as *const () as libc::sighandler_t);
@@ -126,6 +229,12 @@ pub(crate) fn run_pane() -> i32 {
     let _raw = crate::input::RawMode::enable();
     let keys = crate::input::protocol_keys(crate::app_config::KeyMode::Search);
     let mut stdout = std::io::stdout().lock();
+    let mut tty = (!crate::mux::routes_keys()).then(TtyInput::default);
+    if tty.is_some() {
+        let _ = stdout
+            .write_all(TTY_ON.as_bytes())
+            .and_then(|_| stdout.flush());
+    }
     while !PANE_STOP.load(Ordering::Relaxed) {
         let mut fds = [
             libc::pollfd {
@@ -152,18 +261,33 @@ pub(crate) fn run_pane() -> i32 {
             let mut buf = [0u8; 8192];
             match frames.read(&mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(n)
+                Ok(n) => {
                     if stdout
                         .write_all(&buf[..n])
                         .and_then(|_| stdout.flush())
-                        .is_err() =>
-                {
-                    break
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
-                _ => {}
             }
         }
-        if fds[0].revents & libc::POLLIN != 0 {
+        if let Some(tty) = tty.as_mut().filter(|_| fds[0].revents & libc::POLLIN != 0) {
+            let mut buf = [0u8; 4096];
+            match std::io::stdin().lock().read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let packets =
+                        tty.translate(&buf[..n], Instant::now(), |row| row_index(&runtime, row));
+                    for packet in packets {
+                        // PIPE_BUF bounds an atomic FIFO write
+                        for chunk in packet.chunks(512) {
+                            let _ = crate::input::send_bytes_to(&runtime, chunk);
+                        }
+                    }
+                }
+            }
+        } else if fds[0].revents & libc::POLLIN != 0 {
             // Attached tmux clients strip paste markers and forward raw text;
             // tmux paste-buffer -p instead sends the bracketed sequence intact.
             match crate::input::read_search_key(0, keys) {
@@ -175,6 +299,11 @@ pub(crate) fn run_pane() -> i32 {
             }
         }
     }
+    if tty.is_some() {
+        let _ = stdout
+            .write_all(TTY_OFF.as_bytes())
+            .and_then(|_| stdout.flush());
+    }
     drop(stdout);
     drop(frames);
     let _ = std::fs::remove_file(path);
@@ -183,6 +312,30 @@ pub(crate) fn run_pane() -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tty_input_turns_mouse_reports_into_packets_and_drops_packet_bytes() {
+        let mut tty = super::TtyInput::default();
+        let t0 = std::time::Instant::now();
+        let rows = |row: usize| (row == 4).then_some(7u32);
+        assert_eq!(
+            tty.translate(b"j\x01\nk\x1b[A\x1b[<64;3;2M\x1b[<65;3;2M", t0, rows),
+            [b"j\nk\x1b[A".to_vec(), vec![0x01], vec![0x02]]
+        );
+        // press on row 5 (index 7), its release, then a quick second press
+        let click = tty.translate(b"\x1b[<0;2;5M\x1b[<0;2;5m", t0, rows);
+        assert_eq!(click, [vec![0x05, 0, 0, 0, 7]]);
+        let later = t0 + std::time::Duration::from_millis(100);
+        assert_eq!(
+            tty.translate(b"\x1b[<0;2;5M", later, rows),
+            [vec![0x0f, 0, 0, 0, 7]]
+        );
+        // a row the map does not list is no click
+        assert!(tty.translate(b"\x1b[<0;2;9M", later, rows).is_empty());
+        // a report split across reads completes on the next one
+        assert!(tty.translate(b"\x1b[<64;1", later, rows).is_empty());
+        assert_eq!(tty.translate(b";1M", later, rows), [vec![0x01]]);
+    }
+
     use super::*;
 
     #[test]

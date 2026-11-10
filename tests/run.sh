@@ -8,8 +8,10 @@ config_home="$(mktemp -d)"
 export XDG_CONFIG_HOME="$config_home"
 export XDG_STATE_HOME="$config_home/state"
 trap 'rm -rf "$config_home"' EXIT
-# Stubbed checks must not resolve runtime files through the developer's server.
-unset TMUX TMUX_PANE
+# Stubbed checks must not resolve runtime files through the developer's server,
+# and run against tmux even from inside a Rex block.
+unset TMUX TMUX_PANE REX_SESSION REX_BLOCK REX_SERVER AGENMUX_RUNTIME_DIR
+export AGENMUX_MUX=tmux
 
 if [ -z "${AGENMUX_BIN:-}" ]; then
   BIN="$DIR/target/release/agenmux"
@@ -33,7 +35,16 @@ else
   fail=1
 fi
 if "$DIR/tests/mux-boundary.sh"; then
-  echo "ok   tmux-only-behind-the-multiplexer-seam"
+  echo "ok   multiplexers-behind-the-seam"
+else
+  fail=1
+fi
+lua="$(command -v lua || command -v lua5.4 || true)"
+if [ -z "$lua" ]; then
+  echo "FAIL rex-lua-layout-policy: lua is not installed"
+  fail=1
+elif (cd "$DIR" && "$lua" tests/rex-layout.lua); then
+  echo "ok   rex-lua-layout-policy"
 else
   fail=1
 fi
@@ -498,6 +509,27 @@ if [ "$fail" -eq 0 ] && command -v tmux >/dev/null; then
     echo "ok   entrypoint-removes-legacy-follow-hooks"
   else
     echo "FAIL entrypoint-removes-legacy-follow-hooks: hooks=[$stale] setup=[$setup_version] bin=[$configured_bin]"
+    fail=1
+  fi
+  tmux -L "$socket" kill-server 2>/dev/null || true
+  rm -rf "$tmp"
+fi
+if [ "$fail" -eq 0 ] && command -v tmux >/dev/null; then
+  # A tmux server started from a Rex block hands its jobs REX_SESSION. With a
+  # Rex server up too, a job, in no pane, still belongs to tmux.
+  tmp="$(mktemp -d)"
+  socket="agenmux-rex-env-$$"
+  printf '#!/bin/sh\ncase "$*" in *whoami*) exit 0 ;; esac\nexit 1\n' >"$tmp/rex"
+  chmod +x "$tmp/rex"
+  env -u AGENMUX_MUX REX_SESSION=session:stale REX_BLOCK=block:stale \
+    AGENMUX_REX="$tmp/rex" AGENMUX_RUNTIME_DIR="$tmp" \
+    tmux -L "$socket" -f /dev/null new-session -d
+  # through files: tmux 3.4 prints none of a command-line run-shell's output
+  tmux -L "$socket" run-shell "'$BIN' list >/dev/null 2>'$tmp/err'; echo \$? >'$tmp/code'"
+  if [ "$(cat "$tmp/code" 2>/dev/null)" = 0 ]; then
+    echo "ok   tmux-job-with-rex-env-resolves-tmux"
+  else
+    echo "FAIL tmux-job-with-rex-env-resolves-tmux: [$(cat "$tmp/code" 2>/dev/null)] $(head -c 300 "$tmp/err" 2>/dev/null)"
     fail=1
   fi
   tmux -L "$socket" kill-server 2>/dev/null || true

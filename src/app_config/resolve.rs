@@ -506,7 +506,8 @@ pub fn reload(plugin_dir: &Path) -> i32 {
             return e.exit_code();
         }
     };
-    let reinstalled = crate::setup::bindings_stale(&config);
+    // Rex binds its keys in init.lua; only tmux bindings follow the config.
+    let reinstalled = !crate::mux::is_rex() && crate::setup::bindings_stale(&config);
     if reinstalled {
         if crate::setup::run_config(plugin_dir, &config) != 0 {
             return 1;

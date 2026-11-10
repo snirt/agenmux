@@ -6,25 +6,46 @@
 curl -fsSL https://snirt.github.io/agenmux/install.sh | sh
 ```
 
-The script clones the plugin to `~/.tmux/plugins/agenmux` at the latest
+The script clones agenmux once to `~/.local/share/agenmux` (under
+`$XDG_DATA_HOME` when set; an existing `~/.tmux/plugins/agenmux` install keeps
+updating there), where every supported multiplexer loads it, at the latest
 stable release tag (`AGENMUX_REF=<branch|tag>` picks another ref), creates
 `~/.config/agenmux/agents/`, shows a Nerd Font sample and asks whether it
 renders (yes sets `display.agent_label = "icon"`, no sets `"text"`; an existing
-`agent_label` is kept, and `AGENMUX_AGENT_LABEL` answers without a prompt),
-asks for the launcher keys (default `prefix + A`
-sidebar, `prefix + a` popup), shows the lines it wants in your tmux.conf (a
-`@plugin` entry if you use TPM, `run-shell` otherwise), writes them once you
-confirm, and reloads tmux. It also offers to symlink the `agenmux` command into
-`~/.local/bin` and prints the PATH line to add if that directory is not on
-your PATH. When tmux is running, it first installs the native
-engine with a progress indicator, so the first toggle opens at once; otherwise
-the engine installs in the background when tmux starts. Run it again to
-update: a release checkout moves to the newest stable tag, a branch checkout
-fast-forwards. An existing agenmux entry is left alone.
+`agent_label` is kept, and `AGENMUX_AGENT_LABEL` answers without a prompt), and
+offers to symlink the `agenmux` command into `~/.local/bin`, printing the PATH
+line to add if that directory is not on your PATH. Then it sets up each
+multiplexer you chose:
+
+- **tmux**: asks for the launcher keys (default `prefix + A` sidebar,
+  `prefix + a` popup), shows the lines it wants in your tmux.conf (a
+  `run-shell` line, also with TPM), writes them once you confirm, and reloads
+  tmux. When tmux is running, it first installs the native engine with a
+  progress indicator, so the first toggle opens at once; otherwise the engine
+  installs in the background when tmux starts.
+- **Rex** (beta, macOS only): asks for the Rex keys (default `alt+s` sidebar,
+  `alt+p` popup; Mac dead keys such as `alt+e` are refused), shows the
+  `dofile(...)` line it wants in `~/.config/rex/init.lua` (or `$REX_CONFIG`),
+  writes it once you confirm, and runs `rex config reload`. Without tmux it
+  installs the native engine itself. See [Rex](rex.md).
+
+Run it again to update: a release checkout moves to the newest stable tag, a
+branch checkout fast-forwards. An existing agenmux entry is left alone; to
+change keys, edit it by hand.
+
+On a terminal it starts with a checklist of the multiplexers it integrates
+with (currently tmux and Rex), checked as they stand now: arrows or `j`/`k`
+move, space toggles, enter applies. A multiplexer that is not installed shows
+as such and cannot be checked. Checking one adds its lines; unchecking one
+removes them after asking, unbinds its keys and closes its open sidebars.
+`AGENMUX_MUX=tmux`, `rex` or `both` skips the checklist and sets up those;
+without a terminal, every installed multiplexer is set up. Neither removes
+anything.
 
 ## TPM
 
-Install with [TPM](https://github.com/tmux-plugins/tpm) directly:
+For tmux alone, [TPM](https://github.com/tmux-plugins/tpm) can install it
+into its own plugin directory instead:
 
 ```tmux
 set -g @plugin 'snirt/agenmux'
@@ -40,9 +61,11 @@ TPM updates, the native engine is refreshed without removing the old binary.
 ## Manual install
 
 Clone the repo and add `run-shell /path/to/agenmux/agenmux.tmux` to
-`~/.tmux.conf`, then reload tmux.
+`~/.tmux.conf`, then reload tmux. For Rex, add the `init.lua` line from
+[Rex › Setup](rex.md#setup) instead.
 
-Requirements: tmux and bash for TPM/bootstrap. `curl` and `tar` enable the
+Requirements: git and bash for the installer, plus tmux, Rex (macOS), or both;
+tmux and bash for TPM/bootstrap. `curl` and `tar` enable the
 automatic native download; without them, Cargo builds it when available. No
 required build step on a supported release platform. A Nerd Font is recommended
 for private-use UI icons; the interactive installer prints a visual font check,
@@ -85,15 +108,16 @@ newest stable release in the background. Nothing running changes: the header
 shows `↑0.7.1 ready`, and the version picker says `v0.7.1 ready · next start`.
 
 The prepared release is switched to on the **next fresh start**: the next
-sidebar or popup launch while no agenmux view is running from this install on
-any tmux server. An open sidebar view does not wait for one: once the release
-is ready, it closes and reopens itself on the new release. An open popup is
-left alone and switches on its next launch. Adding a sidebar to a running view,
-moving within a popup, `config reload`, `list`, `status` and closing the view
-never switch. The switch is local (no network) and swaps source, engine and
-notification helper together. If the new release fails to start, the previous
-one is restored and opened instead, and that release is not retried
-automatically until a newer one appears or auto-update is turned back on.
+sidebar or popup launch while no agenmux view is running from this install in
+any tmux server or Rex. An open tmux sidebar view does not wait for one: once
+the release is ready, it closes and reopens itself on the new release. An open
+popup, or a view in Rex, is left alone and switches on its next launch. Adding
+a sidebar to a running view, moving within a popup, `config reload`, `list`,
+`status` and closing the view never switch. The switch is local (no network)
+and swaps source, engine and notification helper together. If the new release
+fails to start, the previous one is restored and opened instead, and that
+release is not retried automatically until a newer one appears or auto-update
+is turned back on.
 
 Auto-update skips, with the reason shown in the version picker:
 
@@ -109,8 +133,9 @@ already prepared is then not applied. Choosing a version by hand in the picker
 pauses auto-update the same way (written to `config.toml`), so a rollback
 sticks; turn it back on from the picker's `auto-update` row or in settings.
 
-Preparation state lives beside the plugin in
-`<plugins dir>/.agenmux-state/<plugin dir name>/`. Deleting that directory
+Preparation state lives beside the install in
+`<install parent>/.agenmux-state/<install dir name>/` (for the default install,
+`~/.local/share/.agenmux-state/agenmux/`). Deleting that directory
 while agenmux is closed discards a prepared release; an interrupted switch is
 recovered from it on the next start.
 
@@ -121,7 +146,8 @@ The plugin switches its source *and* its native engine to that release and
 reopens itself — so the same key rolls **back** to an older release just as
 easily. A manual switch first closes this tmux server's view; if another tmux
 server or popup still runs agenmux from the same install, it reopens the view
-and asks you to close the other one first.
+and asks you to close the other one first. In Rex it closes every sidebar and
+popup and reopens the sidebars on the new release.
 
 Details worth knowing:
 

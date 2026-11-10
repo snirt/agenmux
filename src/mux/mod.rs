@@ -1,8 +1,9 @@
 // Multiplexer seam: what the scan, sidebar and daemon need from the server
-// hosting the agent panes. tmux is the only backend; tmux-only features reach
-// it through `tmux` explicitly.
+// hosting the agent panes. tmux and Rex are the backends; tmux-only features
+// reach it through `tmux` explicitly, Rex-only ones through `rex`.
 #[cfg(test)]
 pub mod fake;
+pub mod rex;
 pub mod tmux;
 
 use crate::app_config::ConfigError;
@@ -108,6 +109,12 @@ pub trait Multiplexer {
     /// Clear the record, if `generation` (when given) still owns it.
     fn release(&mut self, generation: Option<&str>);
 
+    /// The client a sidebar key acts for when the key names none. tmux keys
+    /// always name theirs.
+    fn key_client(&mut self) -> Option<String> {
+        None
+    }
+
     /// tmux-only features. Every other backend returns None.
     fn as_tmux(&mut self) -> Option<&mut tmux::Tmux> {
         None
@@ -181,6 +188,9 @@ pub struct SidebarPane {
     pub panes: usize,
     /// Its window is its session's current one.
     pub active: bool,
+    /// The backend keeps it at the asked width and adopts drags itself:
+    /// shared code renders it, never resizes it or reads a drag from it.
+    pub self_sized: bool,
 }
 
 /// The daemon that owns the sidebars: the activation that started it, and
@@ -191,43 +201,199 @@ pub struct Owner {
     pub client: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    Tmux,
+    Rex,
+}
+
+const AMBIGUOUS: &str = "both a tmux and a Rex server are running, and this \
+shell is in neither; pass --mux tmux or --mux rex, or set AGENMUX_MUX";
+
+/// Which multiplexer this process works with, decided once:
+/// 1. `--mux` (main exports it as AGENMUX_MUX) or AGENMUX_MUX;
+/// 2. the one whose pane or block this process runs in. Both variables can
+///    be inherited stale (a Rex server started from tmux hands every block
+///    TMUX), so with both set the nearer ancestor shell decides, else a
+///    tmux server above this process (a tmux job runs in no pane);
+/// 3. outside both, the only server running.
+pub fn backend() -> Result<Backend, String> {
+    static BACKEND: std::sync::OnceLock<Result<Backend, String>> = std::sync::OnceLock::new();
+    BACKEND.get_or_init(resolve).clone()
+}
+
+pub fn is_rex() -> bool {
+    backend() == Ok(Backend::Rex)
+}
+
+/// The backend's name, as users read it in errors.
+pub fn name() -> &'static str {
+    if is_rex() {
+        "rex"
+    } else {
+        "tmux"
+    }
+}
+
+fn resolve() -> Result<Backend, String> {
+    match std::env::var("AGENMUX_MUX").as_deref() {
+        Ok("rex") => return Ok(Backend::Rex),
+        Ok("tmux") => return Ok(Backend::Tmux),
+        Ok("") | Err(_) => {}
+        Ok(other) => return Err(format!("AGENMUX_MUX={other}: expected tmux or rex")),
+    }
+    let in_tmux = std::env::var_os("TMUX").is_some();
+    let in_rex = std::env::var_os("REX_SESSION").is_some();
+    match (in_tmux, in_rex) {
+        (true, false) => return Ok(Backend::Tmux),
+        (false, true) => return Ok(Backend::Rex),
+        (true, true) => {
+            let chain = ancestors();
+            if let Some(found) = nearest(&chain, tmux::pane_pid(), rex::block_pid()) {
+                return Ok(found);
+            }
+            // a tmux job (run-shell, #()) runs under the server, in no pane
+            if tmux::server_pid().is_some_and(|pid| chain.contains(&pid)) {
+                return Ok(Backend::Tmux);
+            }
+        }
+        (false, false) => {}
+    }
+    match (tmux::running(), rex::running()) {
+        (true, true) => Err(AMBIGUOUS.into()),
+        (false, true) => Ok(Backend::Rex),
+        // with no server at all, tmux's own error says so
+        _ => Ok(Backend::Tmux),
+    }
+}
+
+/// The multiplexer whose shell is the nearest of `ancestors` (this process
+/// first): the inner one when nested, and never one whose pane is gone.
+fn nearest(ancestors: &[u32], tmux: Option<u32>, rex: Option<u32>) -> Option<Backend> {
+    let depth = |pid: Option<u32>| pid.and_then(|pid| ancestors.iter().position(|&a| a == pid));
+    match (depth(tmux), depth(rex)) {
+        (Some(t), Some(r)) if r < t => Some(Backend::Rex),
+        (Some(_), _) => Some(Backend::Tmux),
+        (None, Some(_)) => Some(Backend::Rex),
+        (None, None) => None,
+    }
+}
+
+/// This process and its parents, nearest first.
+fn ancestors() -> Vec<u32> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    let mut pid = Pid::from_u32(std::process::id());
+    let mut chain = vec![pid.as_u32()];
+    while chain.len() < 64 {
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        let Some(parent) = sys.process(pid).and_then(|p| p.parent()) else {
+            break;
+        };
+        chain.push(parent.as_u32());
+        pid = parent;
+    }
+    chain
+}
+
+/// `--mux tmux|rex` anywhere in `args`, removed and exported as AGENMUX_MUX
+/// so child processes agree.
+pub fn take_mux_flag(args: &mut Vec<String>) -> Result<(), String> {
+    let Some(at) = args
+        .iter()
+        .position(|a| a == "--mux" || a.starts_with("--mux="))
+    else {
+        return Ok(());
+    };
+    let flag = args.remove(at);
+    let value = match flag.strip_prefix("--mux=") {
+        Some(value) => Some(value.to_string()),
+        None => (at < args.len()).then(|| args.remove(at)),
+    };
+    match value.as_deref() {
+        Some(value @ ("tmux" | "rex")) => {
+            std::env::set_var("AGENMUX_MUX", value);
+            Ok(())
+        }
+        _ => Err("--mux takes tmux or rex".into()),
+    }
+}
+
+/// The server routes keys to the daemon itself (tmux key tables). Elsewhere
+/// each sidebar pane forwards its terminal input.
+pub fn routes_keys() -> bool {
+    !is_rex()
+}
+
+/// A sidebar pane starting: bring up its daemon where nothing else will.
+/// tmux's hooks start one; Rex restores a pane after a restart with none.
+pub fn revive_daemon() {
+    if is_rex() {
+        rex::revive();
+    }
+}
+
 /// Where this server's daemon, sidebar panes and key senders meet.
 pub fn runtime_dir() -> PathBuf {
-    tmux::runtime_dir()
+    if is_rex() {
+        rex::runtime_dir()
+    } else {
+        tmux::runtime_dir()
+    }
 }
 
 /// `runtime_dir`, created private to this user.
 pub fn prepare_runtime_dir() -> std::io::Result<PathBuf> {
-    tmux::prepare_runtime_dir()
+    tmux::prepare_dir(runtime_dir())
 }
 
 /// The pane this process runs in.
 pub fn own_pane() -> Option<String> {
-    tmux::own_pane()
+    if is_rex() {
+        rex::own_pane()
+    } else {
+        tmux::own_pane()
+    }
 }
 
 /// `Multiplexer::owner`, for a process not yet connected.
 pub fn owner() -> Option<Owner> {
-    tmux::owner()
+    if is_rex() {
+        rex::owner()
+    } else {
+        tmux::owner()
+    }
 }
 
 /// `Multiplexer::options`, for a command that holds no connection.
 pub fn options() -> Result<BTreeMap<String, String>, ConfigError> {
-    tmux::options()
+    if is_rex() {
+        Ok(rex::options())
+    } else {
+        tmux::options()
+    }
 }
 
 /// `Multiplexer::publish_reload`, for a command that holds no connection.
 pub fn publish_reload(token: &str) -> Result<(), Error> {
-    tmux::publish_reload(token)
+    if is_rex() {
+        rex::publish_reload(token)
+    } else {
+        tmux::publish_reload(token)
+    }
 }
 
 /// `monitoring`: the long-lived sidebar connection, which wants output events.
 pub fn connect(monitoring: bool) -> Result<Box<dyn Multiplexer>, Error> {
-    Ok(Box::new(if monitoring {
-        tmux::Tmux::connect_monitoring()?
-    } else {
-        tmux::Tmux::connect()?
-    }))
+    Ok(match (backend().map_err(Error::Failed)?, monitoring) {
+        (Backend::Rex, monitoring) => Box::new(rex::Rex::connect(monitoring)?),
+        (Backend::Tmux, true) => Box::new(tmux::Tmux::connect_monitoring()?),
+        (Backend::Tmux, false) => Box::new(tmux::Tmux::connect()?),
+    })
 }
 
 /// A request to the multiplexer failed.
@@ -239,13 +405,14 @@ pub enum Error {
     Io(std::io::Error),
 }
 
-// Users see these verbatim; worded for tmux, the only backend so far.
+// Users see these verbatim, named for the backend in use.
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let name = name();
         match self {
-            Error::Exited => write!(f, "tmux exited"),
-            Error::Failed(e) => write!(f, "tmux: {e}"),
-            Error::Io(e) => write!(f, "tmux pipe: {e}"),
+            Error::Exited => write!(f, "{name} exited"),
+            Error::Failed(e) => write!(f, "{name}: {e}"),
+            Error::Io(e) => write!(f, "{name} pipe: {e}"),
         }
     }
 }
@@ -265,4 +432,35 @@ pub struct Changes {
     pub full: bool,
     pub focus: bool,
     pub layout: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_nearer_shell_wins_and_a_gone_pane_never_does() {
+        let chain = [10, 20, 30, 40];
+        assert_eq!(nearest(&chain, Some(20), Some(40)), Some(Backend::Tmux));
+        assert_eq!(nearest(&chain, Some(40), Some(20)), Some(Backend::Rex));
+        // a stale TMUX: its pane is no ancestor of this process
+        assert_eq!(nearest(&chain, Some(99), Some(30)), Some(Backend::Rex));
+        assert_eq!(nearest(&chain, None, Some(30)), Some(Backend::Rex));
+        assert_eq!(nearest(&chain, None, None), None);
+    }
+
+    #[test]
+    fn the_mux_flag_is_taken_from_anywhere() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let mut list = args(&["list", "--mux", "tmux", "-s", "work"]);
+        assert_eq!(take_mux_flag(&mut list), Ok(()));
+        assert_eq!(list, args(&["list", "-s", "work"]));
+        let mut status = args(&["--mux=tmux", "status"]);
+        assert_eq!(take_mux_flag(&mut status), Ok(()));
+        assert_eq!(status, args(&["status"]));
+        assert!(take_mux_flag(&mut args(&["list", "--mux"])).is_err());
+        assert!(take_mux_flag(&mut args(&["--mux", "screen", "list"])).is_err());
+        let mut plain = args(&["list"]);
+        assert_eq!(take_mux_flag(&mut plain), Ok(()));
+    }
 }

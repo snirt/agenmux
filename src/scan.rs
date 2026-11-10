@@ -155,6 +155,8 @@ pub struct ParsedPane {
     pub pid: u32,
     pub width: usize,
     pub height: usize,
+    /// The state the agent reports of itself, where the backend carries it.
+    pub reported: Option<&'static str>,
 }
 
 pub fn scan(
@@ -208,6 +210,7 @@ pub fn scan_cached(
                 pid,
                 width,
                 height,
+                reported,
             } = parsed;
             let pane = meta.pane.as_str();
             let cmd = meta.command.as_str();
@@ -229,43 +232,53 @@ pub fn scan_cached(
                 panes.push(meta);
                 continue; // conf removed since cached
             };
-            let key = ScreenKey {
-                pane: pane.to_string(),
-                pid,
-                command: cmd.to_string(),
-                agent: name.clone(),
-                width,
-                height,
-                title: title.to_string(),
-                path: path.to_string(),
-            };
-            let force = force_capture(&policy, pane, &meta.session_id);
-            let key_waiting = policy.key_fd.is_some_and(crate::input::key_pending);
-            let stale = screens.stale(pane);
-            let (screen, reused) = if defer_capture(key_waiting, stale.is_some()) {
-                stats.deferred.insert(pane.to_string());
-                (stale.unwrap_or_default(), true)
+            // A reported idle or blocked needs no screen. A reported working
+            // still reads it: Pi reports working while its question waits.
+            let (state, screen) = if let Some(state) = reported.filter(|&s| s != "working") {
+                (state, String::new())
             } else {
-                screens.get_or_capture(key, force, policy.now, || mux.capture(pane))?
+                let key = ScreenKey {
+                    pane: pane.to_string(),
+                    pid,
+                    command: cmd.to_string(),
+                    agent: name.clone(),
+                    width,
+                    height,
+                    title: title.to_string(),
+                    path: path.to_string(),
+                };
+                let force = force_capture(&policy, pane, &meta.session_id);
+                let key_waiting = policy.key_fd.is_some_and(crate::input::key_pending);
+                let stale = screens.stale(pane);
+                let (screen, reused) = if defer_capture(key_waiting, stale.is_some()) {
+                    stats.deferred.insert(pane.to_string());
+                    (stale.unwrap_or_default(), true)
+                } else {
+                    screens.get_or_capture(key, force, policy.now, || mux.capture(pane))?
+                };
+                if reused {
+                    stats.reused += 1;
+                } else {
+                    stats.captured += 1;
+                }
+                let state = match crate::detect::detect_state(&confs[idx], title, &screen) {
+                    "blocked" => "blocked",
+                    detected => reported.unwrap_or(detected),
+                };
+                // Pane content never leaves a release binary: title and screen
+                // tail are dev-build evidence for tuning agents/*.conf rules.
+                if cfg!(debug_assertions) && !reused {
+                    let tail = screen
+                        .lines()
+                        .rev()
+                        .filter(|line| !line.trim().is_empty())
+                        .take(2)
+                        .map(|line| line.chars().take(80).collect::<String>())
+                        .collect::<Vec<_>>();
+                    trace!("detect {pane} {name} state={state} title={title:?} tail={tail:?}");
+                }
+                (state, screen)
             };
-            if reused {
-                stats.reused += 1;
-            } else {
-                stats.captured += 1;
-            }
-            let state = crate::detect::detect_state(&confs[idx], title, &screen);
-            // Pane content never leaves a release binary: title and screen
-            // tail are dev-build evidence for tuning agents/*.conf rules.
-            if cfg!(debug_assertions) && !reused {
-                let tail = screen
-                    .lines()
-                    .rev()
-                    .filter(|line| !line.trim().is_empty())
-                    .take(2)
-                    .map(|line| line.chars().take(80).collect::<String>())
-                    .collect::<Vec<_>>();
-                trace!("detect {pane} {name} state={state} title={title:?} tail={tail:?}");
-            }
             let mut subject = crate::detect::subject(&confs[idx], title, &screen, path);
             if state != "idle" {
                 subj.remove(pane); // pane got a new prompt — cached subject is stale
@@ -334,14 +347,19 @@ pub fn to_tsv(rows: &[PaneRow]) -> String {
 }
 
 /// `#[fg=red]⣿#[default]N #[fg=yellow]⣾#[default]N #[fg=green]⣿#[default]N`,
-/// zero counts omitted, no trailing space. Empty when no agents.
-pub fn status_segment(rows: &[PaneRow], glyphs: Glyphs) -> String {
+/// zero counts omitted, no trailing space. Empty when no agents. `markup`:
+/// tmux status-line colors; without them, plain counts for any status bar.
+pub fn status_segment(rows: &[PaneRow], glyphs: Glyphs, markup: bool) -> String {
     let n = |s: &str| rows.iter().filter(|r| r.state == s).count();
     [("blocked", "red"), ("working", "yellow"), ("idle", "green")]
         .into_iter()
         .filter_map(|(state, color)| {
             let count = n(state);
-            (count > 0).then(|| format!("#[fg={color}]{}#[default]{count}", glyphs.state(state)))
+            let glyph = glyphs.state(state);
+            (count > 0).then(|| match markup {
+                true => format!("#[fg={color}]{glyph}#[default]{count}"),
+                false => format!("{glyph}{count}"),
+            })
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -396,22 +414,25 @@ mod tests {
 
     #[test]
     fn segment_counts_and_omits_zeros() {
-        assert_eq!(status_segment(&[], Glyphs::Rich), "");
+        assert_eq!(status_segment(&[], Glyphs::Rich, true), "");
         assert_eq!(
-            status_segment(&[row("working"), row("idle"), row("idle")], Glyphs::Rich),
+            status_segment(
+                &[row("working"), row("idle"), row("idle")],
+                Glyphs::Rich,
+                true
+            ),
             "#[fg=yellow]⣾#[default]1 #[fg=green]⣿#[default]2"
         );
         assert_eq!(
-            status_segment(&[row("blocked")], Glyphs::Rich),
+            status_segment(&[row("blocked")], Glyphs::Rich, true),
             "#[fg=red]⣿#[default]1"
         );
+        let all = [row("blocked"), row("working"), row("idle")];
         assert_eq!(
-            status_segment(
-                &[row("blocked"), row("working"), row("idle")],
-                Glyphs::Plain
-            ),
+            status_segment(&all, Glyphs::Plain, true),
             "#[fg=red]!#[default]1 #[fg=yellow]>#[default]1 #[fg=green].#[default]1"
         );
+        assert_eq!(status_segment(&all, Glyphs::Plain, false), "!1 >1 .1");
     }
 
     #[test]
@@ -588,5 +609,48 @@ mod tests {
             panic!("{:?}", snapshot.agents.len())
         };
         assert_eq!((row.pane.as_str(), row.state.as_str()), ("%1", "working"));
+    }
+
+    #[test]
+    fn a_reported_state_skips_the_screen_unless_working() {
+        use crate::mux::fake::{pane, FakeMux};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let confs = crate::conf::load_all(root);
+        let screen = |name: &str| {
+            std::fs::read_to_string(root.join(format!("tests/fixtures/{name}.txt"))).unwrap()
+        };
+        // no fixture: a capture would fail the scan
+        let state = |fixture: Option<&str>, reported: Option<&'static str>| {
+            let mut mux = FakeMux {
+                panes: vec![(pane("$1", "@1", "%1", "pi"), 101)],
+                screens: fixture
+                    .map(|f| ("%1".to_string(), screen(f)))
+                    .into_iter()
+                    .collect(),
+                reported: reported
+                    .map(|r| ("%1".to_string(), r))
+                    .into_iter()
+                    .collect(),
+                ..FakeMux::default()
+            };
+            let mut idents = IdentCache::new();
+            idents.insert(("%1".into(), 101, "pi".into()), "pi".into());
+            let snapshot = scan(
+                &mut mux,
+                &confs,
+                &mut idents,
+                &mut SubjectCache::new(),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            snapshot.agents[0].state.clone()
+        };
+        assert_eq!(state(Some("pi-working"), None), "working");
+        assert_eq!(state(Some("pi-blocked"), None), "blocked");
+        assert_eq!(state(None, Some("idle")), "idle");
+        assert_eq!(state(None, Some("blocked")), "blocked");
+        // a reported working still reads the screen
+        assert_eq!(state(Some("pi-idle"), Some("working")), "working");
+        assert_eq!(state(Some("pi-blocked"), Some("working")), "blocked");
     }
 }

@@ -21,6 +21,32 @@ fn watched_height(ms: &[M], active_session: &str) -> usize {
         .unwrap_or(24)
 }
 
+/// Frame width: the narrowest sidebar, so no frame wraps. A self-sized
+/// sidebar (Rex) is resized only while a client shows it, so hidden ones keep
+/// stale widths; there the watched one decides.
+fn watched_width(ms: &[M], active_session: &str) -> Option<usize> {
+    ms.iter()
+        .find(|m| m.self_sized && m.active && m.sess == active_session)
+        .map(|m| m.w)
+        .or_else(|| {
+            // Rex resizes only shown sidebars: a hidden window's keeps the
+            // width it last had there
+            let shown = |m: &&M| m.active || !m.self_sized;
+            ms.iter().filter(shown).map(|m| m.w).min()
+        })
+        .or_else(|| ms.iter().map(|m| m.w).min())
+}
+
+/// `wopt`, kept 2 columns inside a window `cols` wide. A Rex window no client
+/// shows has no measured size (0): then `wopt` itself, never 1.
+fn fitted(wopt: usize, cols: usize) -> usize {
+    if cols == 0 {
+        wopt
+    } else {
+        wopt.min(cols.saturating_sub(2).max(1))
+    }
+}
+
 /// The user dragged this sidebar's border: its window is the active one, its
 /// size and pane count match the previous tick (nothing was split, killed or
 /// resized around it), and the width differs from the configured bound. A
@@ -28,7 +54,7 @@ fn watched_height(ms: &[M], active_session: &str) -> usize {
 /// layout change stacked it above or below the other panes. No border drag
 /// ends there, so that width is a layout accident, never a preference.
 fn dragged(m: &M, wopt: usize, baseline: Option<&((usize, usize), usize)>) -> bool {
-    let bound = wopt.min(m.win_size.0.saturating_sub(2).max(1));
+    let bound = fitted(wopt, m.win_size.0);
     m.active && m.w < m.win_size.0 && m.w != bound && baseline == Some(&(m.win_size, m.panes))
 }
 
@@ -272,7 +298,7 @@ impl Sidebar {
         let Some(ms) = self.measure_panes() else {
             return false;
         };
-        let Some(w) = ms.iter().map(|m| m.w).min() else {
+        let Some(w) = watched_width(&ms, &self.active_session) else {
             return false;
         };
         let size = (w, watched_height(&ms, &self.active_session));
@@ -299,7 +325,6 @@ impl Sidebar {
         }
         self.sync_panes_view();
         let width_changed = refreshed.width_changed;
-        let mut w = usize::MAX;
         let Some(mut ms) = self.measure_panes() else {
             return true;
         };
@@ -312,7 +337,7 @@ impl Sidebar {
         let wopt = self.settings.settings.sidebar_width as usize;
         if width_changed {
             for m in &mut ms {
-                let width = wopt.min(m.win_size.0.saturating_sub(2).max(1));
+                let width = fitted(wopt, m.win_size.0);
                 if self.mux.resize_panes(&[(m.pane.clone(), width)]) {
                     m.w = width;
                 }
@@ -328,7 +353,7 @@ impl Sidebar {
         // otherwise look exactly like a border drag and get adopted globally.
         let mut seen: HashSet<String> = HashSet::new();
         let dup: Vec<usize> = (0..ms.len())
-            .filter(|&i| !seen.insert(ms[i].win.clone()))
+            .filter(|&i| !seen.insert(ms[i].win.clone()) && !ms[i].self_sized)
             .collect();
         if !dup.is_empty() {
             let hit: HashSet<String> = dup.iter().map(|&i| ms[i].win.clone()).collect();
@@ -348,16 +373,16 @@ impl Sidebar {
         }
         // Width DOES fold to the minimum: mirror::draw clips rows but NOT
         // columns, so a frame wider than some pane would wrap and shift every
-        // row below it (breaking the click -> rows-file mapping). Widths are
-        // uniform by construction anyway, so the fold costs nothing.
-        for m in &ms {
-            w = w.min(m.w);
-        }
+        // row below it (breaking the click -> rows-file mapping). tmux widths
+        // are uniform by construction; Rex's follow watched_width.
+        let mut w = watched_width(&ms, &self.active_session).unwrap_or(usize::MAX);
         let h = watched_height(&ms, &self.active_session);
         let drag: Option<(String, usize)> = {
             let d = self.daemon.as_ref().unwrap();
             ms.iter()
-                .find(|m| !width_changed && dragged(m, wopt, d.win_sizes.get(&m.win)))
+                .find(|m| {
+                    !width_changed && !m.self_sized && dragged(m, wopt, d.win_sizes.get(&m.win))
+                })
                 .map(|m| (m.pane.clone(), m.w))
         };
         if let Some((src_pane, width)) = drag {
@@ -378,9 +403,9 @@ impl Sidebar {
         // changed, so the drag probe above stays quiet; put the width back.
         let mut put_back = Vec::new();
         for m in &mut ms {
-            let want = wopt.min(m.win_size.0.saturating_sub(2).max(1));
+            let want = fitted(wopt, m.win_size.0);
             let counted = self.daemon.as_ref().unwrap().win_sizes.get(&m.win);
-            if m.w == want || counted.is_none_or(|&(_, n)| n == m.panes) {
+            if m.self_sized || m.w == want || counted.is_none_or(|&(_, n)| n == m.panes) {
                 continue;
             }
             put_back.push((m.pane.clone(), want));
@@ -388,7 +413,7 @@ impl Sidebar {
         }
         if !put_back.is_empty() {
             self.mux.resize_panes(&put_back);
-            w = ms.iter().map(|m| m.w).min().unwrap_or(w);
+            w = watched_width(&ms, &self.active_session).unwrap_or(w);
         }
         let visible_windows = self.mux.visible_windows();
         let visible_panes = if visible_windows.is_empty() {
@@ -499,6 +524,7 @@ mod tests {
             win_size: (200, h),
             panes: 2,
             active,
+            self_sized: false,
         }
     }
 
@@ -573,6 +599,40 @@ mod tests {
         assert!(!superseded("client-7", "")); // unset is not a claim
         assert!(!superseded("", "client-9")); // we never published a name
         assert!(!superseded("", ""));
+    }
+
+    #[test]
+    fn an_unmeasured_window_keeps_the_configured_width() {
+        assert_eq!(fitted(33, 0), 33, "a hidden Rex window");
+        assert_eq!(fitted(33, 172), 33);
+        assert_eq!(fitted(33, 20), 18);
+        assert_eq!(fitted(33, 2), 1);
+    }
+
+    #[test]
+    fn self_sized_frames_follow_the_watched_sidebar_width() {
+        let mut ms = [m("$0", 40, true), m("$1", 40, true)];
+        (ms[0].w, ms[1].w) = (36, 29);
+        assert_eq!(
+            watched_width(&ms, "$0"),
+            Some(29),
+            "tmux folds to the narrowest"
+        );
+        for m in &mut ms {
+            m.self_sized = true;
+        }
+        assert_eq!(
+            watched_width(&ms, "$0"),
+            Some(36),
+            "a hidden Rex sidebar is stale"
+        );
+        assert_eq!(watched_width(&ms, ""), Some(29));
+        ms[1].active = false;
+        assert_eq!(
+            watched_width(&ms, ""),
+            Some(36),
+            "unwatched: the shown sidebars, not a hidden one"
+        );
     }
 
     #[test]

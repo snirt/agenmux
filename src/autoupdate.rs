@@ -1002,10 +1002,11 @@ fn apply(plugin_dir: &Path, dir: &Path, pending: &Pending, install: &Install) ->
 }
 
 /// Load the installed release's tmux integration (launchers and setup), the
-/// way sourcing the plugin does. Outside tmux there is nothing to set up.
+/// way sourcing the plugin does. Outside tmux there is nothing to set up: Rex
+/// blocks can inherit a stale `$TMUX`, so the backend decides.
 /// Bounded: a hung setup must not hold the installation lock forever.
 fn load_plugin(plugin_dir: &Path) -> bool {
-    if std::env::var_os("TMUX").is_none_or(|tmux| tmux.is_empty()) {
+    if crate::mux::is_rex() || std::env::var_os("TMUX").is_none_or(|tmux| tmux.is_empty()) {
         return true;
     }
     if fault("setup").is_err() {

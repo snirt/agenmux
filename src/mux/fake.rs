@@ -12,6 +12,10 @@ pub struct FakeMux {
     /// Each pane and the pid of its process; 0 is a plain shell.
     pub panes: Vec<(PaneMeta, u32)>,
     pub screens: HashMap<String, String>,
+    /// The state a pane's program reports of itself.
+    pub reported: HashMap<String, &'static str>,
+    /// What `key_client` answers.
+    pub key_client: Option<String>,
     pub options: BTreeMap<String, String>,
     pub changes: Changes,
     /// Actions taken, shared so a test can read them after handing the fake off.
@@ -70,6 +74,7 @@ impl Multiplexer for FakeMux {
                 pid: *pid,
                 width: 80,
                 height: 24,
+                reported: self.reported.get(&meta.pane).copied(),
             })
             .collect())
     }
@@ -168,6 +173,9 @@ impl Multiplexer for FakeMux {
     }
     fn focus_sidebar(&mut self, client: &str, expected_window: Option<&str>) {
         self.act(format!("focus sidebar of {client} in {expected_window:?}"));
+    }
+    fn key_client(&mut self) -> Option<String> {
+        self.key_client.clone()
     }
     fn message(&mut self, client: &str, text: &str) -> bool {
         self.act(format!("message {client}: {text}"));

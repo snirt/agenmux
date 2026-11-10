@@ -210,6 +210,9 @@ where
 fn click_command(event: &AttentionEvent) -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let exe = exe.to_str()?;
+    if crate::mux::is_rex() {
+        return Some(build_click_command(exe, REX, &event.pane, REX_BUNDLE));
+    }
     let tmux = std::env::var("TMUX").ok()?;
     let socket = tmux.split(',').next().filter(|socket| !socket.is_empty())?;
     let bundle = terminal_bundle()?;
@@ -251,7 +254,14 @@ fn known_bundle(bundle: &str) -> Option<&'static str> {
     }
 }
 
+/// The click target that names the Rex server rather than a tmux socket.
+const REX: &str = "rex";
+const REX_BUNDLE: &str = "com.superlogical.rex";
+
 pub fn open_pane(socket: &str, pane: &str, bundle: &str) -> i32 {
+    if socket == REX {
+        return open_block(pane);
+    }
     if socket.is_empty() || !valid_pane(pane) {
         return 0;
     }
@@ -314,6 +324,22 @@ pub fn open_pane(socket: &str, pane: &str, bundle: &str) -> i32 {
     };
     if !status.success() {
         return 0;
+    }
+    0
+}
+
+/// Bring the Rex app forward on `block`.
+fn open_block(block: &str) -> i32 {
+    if !crate::mux::rex::valid_id(block) {
+        return 0;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(command) = activation_command(REX_BUNDLE) {
+        let _ = SystemRunner.run(&command);
+    }
+    std::env::set_var("AGENMUX_MUX", REX);
+    if let Ok(mut mux) = crate::mux::connect(false) {
+        let _ = mux.jump(block);
     }
     0
 }

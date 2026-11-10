@@ -233,6 +233,10 @@ pub struct Sidebar {
     snapshot: Option<crate::snapshot::Store>,
     key_sequence: KeySequence,
     refresh_requested: bool,
+    /// A message the server cannot show, in the hint line until it expires.
+    flash: Option<(String, Instant)>,
+    /// A terminal escape (a clipboard copy) for the next frame to carry.
+    escape: String,
     sel: usize,    // 1-based index into visible, like the bash script
     scroll: usize, // first visible list line
     follow_selection: bool,
@@ -337,6 +341,8 @@ fn new_sidebar(
         snapshot: None,
         key_sequence: KeySequence::default(),
         refresh_requested: false,
+        flash: None,
+        escape: String::new(),
         sel: 1,
         scroll: 0,
         sel_pane: String::new(),
@@ -644,16 +650,19 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 } else {
                     KeyMode::Normal
                 };
+                // tmux bindings send the daemon protocol keys; elsewhere the
+                // daemon reads what the user typed, as a tty sidebar does
+                let typed = sb.daemon.is_none() || !mux::routes_keys();
                 let keys = if overlay_editing {
                     settings_keys()
-                } else if sb.daemon.is_some() {
+                } else if !typed {
                     protocol_keys(mode)
                 } else if text_input {
                     &sb.search_keys
                 } else {
                     &sb.normal_keys
                 };
-                let key = if text_input && sb.daemon.is_none() {
+                let key = if text_input && typed {
                     read_search_key(key_fd, keys)
                 } else {
                     read_key_with_config(key_fd, keys, &sb.settings.settings)
@@ -798,8 +807,14 @@ impl Sidebar {
         }
         if let Key::Select(index) | Key::Open(index) = &key {
             self.select_index(*index);
-            if matches!(key, Key::Open(_)) && self.on_branch_header() {
-                self.toggle_branch();
+            // tmux's click helper jumps to pane rows itself; Rex's forwards
+            // every double click here.
+            if matches!(key, Key::Open(_)) {
+                if self.on_branch_header() {
+                    self.toggle_branch();
+                } else if self.jump() {
+                    return DispatchResult::Break;
+                }
             }
             return DispatchResult::Continue;
         }
@@ -897,13 +912,19 @@ impl Sidebar {
         Some((selected, pane))
     }
 
+    /// The client a key acts for: its own, the popup's, or the backend's.
+    fn invoking_client(&mut self, client: Option<String>) -> Option<String> {
+        client
+            .filter(|value| !value.is_empty())
+            .or_else(|| (!self.popup_client.is_empty()).then(|| self.popup_client.clone()))
+            .or_else(|| self.mux.key_client())
+    }
+
     fn begin_mutation(&mut self, action: SequenceAction, client: Option<String>) -> DispatchResult {
         if !self.settings.settings.tmux_management_enabled {
             return DispatchResult::Continue;
         }
-        let client = client
-            .filter(|value| !value.is_empty())
-            .or_else(|| (!self.popup_client.is_empty()).then(|| self.popup_client.clone()));
+        let client = self.invoking_client(client);
         let Some(client) = client else {
             trace!("mutation ignored: invoking tmux client is unknown");
             return DispatchResult::Continue;
@@ -1043,9 +1064,7 @@ impl Sidebar {
     /// selected, the cursor row's. IDs stay unique when display names repeat,
     /// and the cursor does not move.
     fn copy_reference(&mut self, client: Option<String>) {
-        let client = client
-            .filter(|value| !value.is_empty())
-            .or_else(|| (!self.popup_client.is_empty()).then(|| self.popup_client.clone()));
+        let client = self.invoking_client(client);
         let mut ids = self.marked_ids();
         self.clear_marks();
         if ids.is_empty() {
@@ -1065,8 +1084,12 @@ impl Sidebar {
         let message = match self.mux.copy(client.as_deref(), &reference) {
             Ok(escape) => {
                 if let Some(escape) = escape {
-                    print!("{escape}");
-                    let _ = std::io::stdout().flush();
+                    if self.daemon.is_some() {
+                        self.escape = escape;
+                    } else {
+                        print!("{escape}");
+                        let _ = std::io::stdout().flush();
+                    }
                 }
                 if ids.len() > 1 {
                     format!("copied {} references", ids.len())
@@ -1076,8 +1099,14 @@ impl Sidebar {
             }
             Err(error) => format!("copy failed: {error}"),
         };
-        if let Some(client) = &client {
-            self.mux.message(client, &message);
+        self.tell(client.as_deref(), &message);
+    }
+
+    /// Show `text` on `client`'s message line, or in the hint line where the
+    /// server has none.
+    fn tell(&mut self, client: Option<&str>, text: &str) {
+        if !client.is_some_and(|client| self.mux.message(client, text)) {
+            self.flash = Some((text.to_string(), Instant::now() + Duration::from_secs(3)));
         }
     }
 
@@ -1096,9 +1125,7 @@ impl Sidebar {
         if !self.settings.settings.tmux_management_enabled {
             return DispatchResult::Continue;
         }
-        let client = client
-            .filter(|value| !value.is_empty())
-            .or_else(|| (!self.popup_client.is_empty()).then(|| self.popup_client.clone()));
+        let client = self.invoking_client(client);
         let Some(client) = client else {
             trace!("quick launcher ignored: invoking tmux client is unknown");
             return DispatchResult::Continue;
@@ -1144,7 +1171,7 @@ impl Sidebar {
 
     fn mutation_error(&mut self, client: &str, message: &str) {
         self.refresh_requested = true;
-        self.mux.message(client, message);
+        self.tell(Some(client), message);
     }
 
     fn execute_quick_launcher(
@@ -1788,5 +1815,79 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_double_click_on_a_pane_row_jumps_to_it() {
+        use crate::mux::fake::{pane, FakeMux};
+        let dir = std::env::temp_dir().join(format!("agenmux-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mux = FakeMux {
+            panes: vec![(pane("$1", "@1", "%1", "zsh"), 0)],
+            ..FakeMux::default()
+        };
+        let log = mux.log.clone();
+        let settings =
+            crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+        let mut sb = new_sidebar(
+            Box::new(mux),
+            dir.clone(),
+            dir.join("cache"),
+            dir.join("rows"),
+            String::new(),
+            settings,
+        );
+        assert!(sb.scan_tick(true, &Changes::default()).is_ok());
+        let row = (1..=sb.visible.len())
+            .rev()
+            .find(|&i| sb.visible_pane_id(sb.visible[i - 1]) == "%1")
+            .unwrap();
+        sb.dispatch_key(Key::Select(row));
+        assert!(log.borrow().is_empty(), "a click only selects");
+        sb.dispatch_key(Key::Open(row));
+        assert_eq!(*log.borrow(), ["jump %1"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dd_without_a_key_client_acts_for_the_backend_client() {
+        use crate::mux::fake::{pane, FakeMux};
+        for key_client in [None, Some("rex")] {
+            let dir = std::env::temp_dir()
+                .join(format!("agenmux-dd-{}-{key_client:?}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mux = FakeMux {
+                panes: vec![
+                    (pane("$1", "@1", "%1", "zsh"), 0),
+                    (pane("$1", "@2", "%2", "zsh"), 0),
+                ],
+                key_client: key_client.map(str::to_string),
+                ..FakeMux::default()
+            };
+            let log = mux.log.clone();
+            let settings =
+                crate::app_config::resolve(&Default::default(), &Default::default()).unwrap();
+            let mut sb = new_sidebar(
+                Box::new(mux),
+                dir.clone(),
+                dir.join("cache"),
+                dir.join("rows"),
+                String::new(),
+                settings,
+            );
+            assert!(sb.scan_tick(true, &Changes::default()).is_ok());
+            let row = (1..=sb.visible.len())
+                .rev()
+                .find(|&i| sb.visible_pane_id(sb.visible[i - 1]) == "%2")
+                .unwrap();
+            sb.dispatch_key(Key::Select(row));
+            // Rex keys arrive as terminal input, naming no client
+            sb.dispatch_key(Key::Sequence('d', None));
+            sb.dispatch_key(Key::Sequence('d', None));
+            sb.dispatch_key(Key::Text("y".into()));
+            let deleted = log.borrow().iter().any(|a| a == "delete Window @2");
+            assert_eq!(deleted, key_client.is_some(), "{:?}", log.borrow());
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
