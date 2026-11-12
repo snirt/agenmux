@@ -1,5 +1,4 @@
 use crate::attention::{AttentionEvent, AttentionKind};
-use crate::mux::tmux;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -152,26 +151,6 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn most_recent_client(rows: &str) -> Option<String> {
-    rows.lines()
-        .filter_map(|line| {
-            let separator = if line.contains('|') { '|' } else { '\t' };
-            let mut fields = line.splitn(3, separator);
-            let activity = fields.next()?.parse::<u64>().ok()?;
-            let first = fields.next()?;
-            let second = fields.next()?;
-            let (name, flags) = if separator == '|' {
-                (second, first)
-            } else {
-                (first, second)
-            };
-            (!flags.split(',').any(|flag| flag == "control-mode"))
-                .then(|| (activity, name.to_string()))
-        })
-        .max_by_key(|(activity, _)| *activity)
-        .map(|(_, name)| name)
-}
-
 pub fn deliver(enabled: bool, event: &AttentionEvent) -> DeliveryOutcome {
     let outcome = deliver_if_enabled(enabled, event, |payload| {
         #[cfg(target_os = "macos")]
@@ -210,13 +189,12 @@ where
 fn click_command(event: &AttentionEvent) -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let exe = exe.to_str()?;
-    if crate::mux::is_rex() {
-        return Some(build_click_command(exe, REX, &event.pane, REX_BUNDLE));
-    }
-    let tmux = std::env::var("TMUX").ok()?;
-    let socket = tmux.split(',').next().filter(|socket| !socket.is_empty())?;
-    let bundle = terminal_bundle()?;
-    Some(build_click_command(exe, socket, &event.pane, bundle))
+    let (server, app) = crate::mux::notification_server()?;
+    let bundle = match app {
+        Some(app) => app,
+        None => terminal_bundle()?,
+    };
+    Some(build_click_command(exe, &server, &event.pane, bundle))
 }
 
 #[cfg(target_os = "macos")]
@@ -254,99 +232,17 @@ fn known_bundle(bundle: &str) -> Option<&'static str> {
     }
 }
 
-/// The click target that names the Rex server rather than a tmux socket.
-const REX: &str = "rex";
-const REX_BUNDLE: &str = "com.superlogical.rex";
-
-pub fn open_pane(socket: &str, pane: &str, bundle: &str) -> i32 {
-    if socket == REX {
-        return open_block(pane);
-    }
-    if socket.is_empty() || !valid_pane(pane) {
-        return 0;
-    }
-    let mut verify = tmux_command(socket);
-    let Ok(output) = verify
-        .args(["display-message", "-p", "-t", pane, "#{pane_id}"])
-        .output()
-    else {
-        return 0;
-    };
-    if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != pane {
-        return 0;
-    }
-
-    let mut clients = tmux_command(socket);
-    let Ok(output) = clients
-        .args([
-            "list-clients",
-            "-F",
-            "#{client_activity}|#{client_flags}|#{client_name}",
-        ])
-        .output()
-    else {
-        return 0;
-    };
-    if !output.status.success() {
-        return 0;
-    }
-    let Some(client) = most_recent_client(&String::from_utf8_lossy(&output.stdout)) else {
-        return 0;
-    };
-
-    #[cfg(target_os = "macos")]
-    if let Some(command) = activation_command(bundle) {
-        let _ = SystemRunner.run(&command);
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = bundle;
-
-    let mut jump = tmux_command(socket);
-    let Ok(status) = jump
-        .args([
-            "switch-client",
-            "-c",
-            &client,
-            "-t",
-            pane,
-            ";",
-            "select-window",
-            "-t",
-            pane,
-            ";",
-            "select-pane",
-            "-t",
-            pane,
-        ])
-        .status()
-    else {
-        return 0;
-    };
-    if !status.success() {
-        return 0;
-    }
+/// `notification-open`: bring the user back to the pane that raised it.
+pub fn open_pane(server: &str, pane: &str, bundle: &str) -> i32 {
+    crate::mux::open_notified(server, pane, bundle, |bundle| {
+        #[cfg(target_os = "macos")]
+        if let Some(command) = activation_command(bundle) {
+            let _ = SystemRunner.run(&command);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = bundle;
+    });
     0
-}
-
-/// Bring the Rex app forward on `block`.
-fn open_block(block: &str) -> i32 {
-    if !crate::mux::rex::valid_id(block) {
-        return 0;
-    }
-    #[cfg(target_os = "macos")]
-    if let Some(command) = activation_command(REX_BUNDLE) {
-        let _ = SystemRunner.run(&command);
-    }
-    std::env::set_var("AGENMUX_MUX", REX);
-    if let Ok(mut mux) = crate::mux::connect(false) {
-        let _ = mux.jump(block);
-    }
-    0
-}
-
-fn valid_pane(pane: &str) -> bool {
-    pane.strip_prefix('%')
-        .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -359,12 +255,6 @@ fn activation_command(bundle: &str) -> Option<CommandSpec> {
         args: vec!["-b".into(), bundle.into()],
         stdin: None,
     })
-}
-
-fn tmux_command(socket: &str) -> Command {
-    let mut command = tmux::process();
-    command.args(["-S", socket]).env_remove("TMUX");
-    command
 }
 
 #[cfg(test)]
@@ -569,26 +459,6 @@ mod tests {
             ),
             "'/tmp/agent'\"'\"'s mon' 'notification-open' '/tmp/tmux socket' '%7' 'com.mitchellh.ghostty'"
         );
-    }
-
-    #[test]
-    fn click_target_is_the_most_recent_real_client() {
-        let clients = concat!(
-            "20\t/dev/ttys001\tattached,utf8\n",
-            "50\t/control\tattached,focused,control-mode,utf8\n",
-            "40\t/dev/ttys002\tattached,focused,utf8\n",
-        );
-        assert_eq!(most_recent_client(clients).as_deref(), Some("/dev/ttys002"));
-    }
-
-    #[test]
-    fn click_helper_accepts_only_exact_tmux_pane_ids() {
-        assert!(valid_pane("%1"));
-        assert!(valid_pane("%123"));
-        assert!(!valid_pane(""));
-        assert!(!valid_pane("%"));
-        assert!(!valid_pane("work:1.2"));
-        assert!(!valid_pane("%1; display-message hacked"));
     }
 
     #[test]

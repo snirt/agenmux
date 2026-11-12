@@ -1173,7 +1173,7 @@ impl Sidebar {
                     Key::Sequence('d', _) if self.forget_available() => {
                         forget = picked.map(|index| entries[index].id.clone());
                         if forget.is_some() {
-                            self.use_key_table("agenmux-settings-edit");
+                            self.use_key_table(crate::mux::InputMode::Settings);
                         }
                     }
                     Key::AllStates | Key::Quit | Key::Close => {
@@ -1243,7 +1243,7 @@ impl Sidebar {
     }
 
     fn reclaim_key_table(&mut self) {
-        self.use_key_table("agenmux");
+        self.use_key_table(crate::mux::InputMode::Normal);
     }
 
     /// nohup + no wait: update kills the panes this engine renders into, and a
@@ -1284,7 +1284,7 @@ impl Sidebar {
     /// sidebar's own.
     fn sync_key_table(&mut self) {
         if self.overlay_editing() {
-            self.use_key_table("agenmux-settings-edit");
+            self.use_key_table(crate::mux::InputMode::Settings);
         } else {
             self.reclaim_key_table();
         }
@@ -1303,9 +1303,9 @@ impl Sidebar {
             )
     }
 
-    fn use_key_table(&mut self, table: &str) {
-        if let Some(tmux) = self.daemon.as_ref().and(self.mux.as_tmux()) {
-            tmux.sidebar_key_table(table);
+    fn use_key_table(&mut self, mode: crate::mux::InputMode) {
+        if self.daemon.is_some() {
+            self.mux.input_mode(None, mode);
         }
     }
 
@@ -1333,11 +1333,12 @@ impl Sidebar {
             .resolve(&old_file, &options)
             .map_err(|error| error.to_string())?;
         crate::app_config::save_document(path, source).map_err(|error| error.to_string())?;
-        // tmux key tables follow the keymap; other servers bind keys themselves.
-        let tmux_keys = self.mux.as_tmux().is_some();
-        let install =
-            |config| !tmux_keys || crate::setup::run_config(&self.plugin_dir, config) == 0;
-        let rollback = || -> Result<(), String> {
+        // Servers that route keys themselves follow the keymap.
+        let plugin_dir = self.plugin_dir.clone();
+        let install = |mux: &mut Box<dyn crate::mux::Multiplexer>, config| {
+            mux.install_keys(&plugin_dir, config)
+        };
+        let rollback = |mux: &mut Box<dyn crate::mux::Multiplexer>| -> Result<(), String> {
             if old_existed {
                 crate::app_config::save_document(path, old_source)
                     .map_err(|error| error.to_string())?;
@@ -1346,13 +1347,13 @@ impl Sidebar {
                     return Err(error.to_string());
                 }
             }
-            if !install(&old) {
+            if !install(mux, &old) {
                 return Err("could not restore previous key tables".into());
             }
             Ok(())
         };
-        if !install(&next) {
-            return Err(match rollback() {
+        if !install(&mut self.mux, &next) {
+            return Err(match rollback(&mut self.mux) {
                 Ok(()) => "could not apply settings; previous settings restored".into(),
                 Err(error) => format!("could not apply settings; rollback failed: {error}"),
             });
@@ -1362,7 +1363,7 @@ impl Sidebar {
             .map(|duration| duration.as_nanos().to_string())
             .unwrap_or_else(|_| "settings".into());
         if self.mux.publish_reload(&token).is_err() {
-            return Err(match rollback() {
+            return Err(match rollback(&mut self.mux) {
                 Ok(()) => "could not publish settings; previous settings restored".into(),
                 Err(error) => format!("could not publish settings; rollback failed: {error}"),
             });
@@ -1374,12 +1375,9 @@ impl Sidebar {
         let position_changed = next.sidebar_position != self.settings.settings.sidebar_position;
         self.settings.replace(file, next);
         // Popups leave this to the daemon, which sees the reload.
-        // tmux docks by moving its panes; this overlay reinstalled the keys.
-        if position_changed && self.daemon.is_some() && self.mux.as_tmux().is_some() {
-            crate::panes::dock(
-                self.settings.settings.sidebar_position,
-                self.settings.settings.sidebar_width,
-            );
+        // This overlay reinstalled the keys, so docking only moves the panes.
+        if position_changed && self.daemon.is_some() {
+            self.mux.dock(&self.plugin_dir, &self.settings.settings);
         }
         if width_changed && self.daemon.is_some() {
             let wopt = self.settings.settings.sidebar_width as usize;

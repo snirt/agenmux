@@ -6,7 +6,7 @@ use std::process::Stdio;
 
 pub(crate) const NORMAL_TABLE: &str = "agenmux";
 pub(crate) const SEARCH_TABLE: &str = "agenmux-search";
-const SETTINGS_TABLE: &str = "agenmux-settings-edit";
+pub(crate) const SETTINGS_TABLE: &str = "agenmux-settings-edit";
 pub(crate) const SEQUENCE_TABLE: &str = "agenmux-sequence";
 const NAV_LAYOUT: &str = "16";
 // These are trusted runtime identities, not application-file settings. q
@@ -260,6 +260,19 @@ pub fn bindings_stale(config: &crate::app_config::AppConfig) -> bool {
     let installed =
         tmux::command(&["show-option", "-gqv", "@agenmux-nav-version"]).unwrap_or_default();
     installed.trim_end() != nav_version(config)
+}
+
+/// Reinstall the bindings when they predate `config`, and put clients back
+/// on the new tables. Ok(true): reinstalled.
+pub fn reinstall(plugin_dir: &Path, config: &crate::app_config::AppConfig) -> Result<bool, ()> {
+    if !bindings_stale(config) {
+        return Ok(false);
+    }
+    if run_config(plugin_dir, config) != 0 {
+        return Err(());
+    }
+    reclaim_client_tables();
+    Ok(true)
 }
 
 fn installed_current(config: &crate::app_config::AppConfig) -> bool {

@@ -2,7 +2,6 @@
 // responses out. Replaces one fork per tmux command with a write+read.
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -53,7 +52,7 @@ impl Notifications {
             .strip_prefix("%paste-buffer-changed agenmux.")
             .map(str::trim)
         {
-            if let (Some(fd), Some(bytes)) = (self.key_sink, crate::input::buffer_key_bytes(action))
+            if let (Some(fd), Some(bytes)) = (self.key_sink, super::keys::buffer_key_bytes(action))
             {
                 // best effort: a full FIFO drops the press, same as the CLI sender
                 unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
@@ -136,27 +135,6 @@ pub fn runtime_dir() -> PathBuf {
             Some(PathBuf::from(path))
         })
         .unwrap_or_else(std::env::temp_dir)
-}
-
-pub fn prepare_runtime_dir() -> std::io::Result<PathBuf> {
-    prepare_dir(runtime_dir())
-}
-
-/// `path`, created private to this user.
-pub fn prepare_dir(path: PathBuf) -> std::io::Result<PathBuf> {
-    match std::fs::DirBuilder::new().mode(0o700).create(&path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    }
-    let metadata = std::fs::symlink_metadata(&path)?;
-    if !metadata.file_type().is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-    {
-        return Err(std::io::Error::other("unsafe runtime directory"));
-    }
-    Ok(path)
 }
 
 /// A tmux process to configure and run, for what the helpers here cannot

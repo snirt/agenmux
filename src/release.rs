@@ -1,5 +1,3 @@
-use crate::mux::tmux;
-use crate::panes;
 use std::cmp::Ordering;
 use std::ffi::OsStr;
 use std::fs;
@@ -233,14 +231,8 @@ pub(crate) fn manifest_tag(plugin_dir: &Path) -> Option<String> {
         })
 }
 
-pub(crate) fn note(message: &str) {
-    if tmux::command_status(&["display-message", &format!("agenmux: {message}")]).is_err() {
-        println!("agenmux: {message}");
-    }
-}
-
 fn fail(message: &str) -> i32 {
-    note(message);
+    crate::mux::note(message);
     1
 }
 
@@ -534,47 +526,9 @@ fn tarball_install(plugin_dir: &Path, target: &str, package: &Path) -> Result<()
     write_engine_state(plugin_dir, target).map_err(|_| "engine")
 }
 
-fn tmux_value(args: &[&str]) -> String {
-    tmux::command(args)
-        .unwrap_or_default()
-        .trim_end()
-        .to_string()
-}
-
-fn tmux_option(name: &str) -> String {
-    let canonical = tmux_value(&["show-option", "-gqv", name]);
-    if !canonical.is_empty() {
-        return canonical;
-    }
-    let legacy = name.replacen("@agenmux-", "@agents-mon-", 1);
-    tmux_value(&["show-option", "-gqv", &legacy])
-}
-
-fn tmux_running() -> bool {
-    tmux::command_status(&["info"]).is_ok()
-}
-
-fn wait_for_client(name: &str) {
-    for _ in 0..80 {
-        let clients = tmux_value(&["list-clients", "-F", "#{client_name}"]);
-        if !clients.lines().any(|client| client == name) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-/// Close this server's view and wait for its control client to leave.
-fn teardown_runtime(old_control: &str) {
-    let _ = panes::teardown();
-    if !old_control.is_empty() {
-        wait_for_client(old_control);
-    }
-}
-
 /// Load the installed release's own entrypoint, then reopen the view if it was
 /// open, so a rollback never assumes commands that release lacks.
-fn reenter(plugin_dir: &Path, was_open: bool) {
+pub(crate) fn reenter(plugin_dir: &Path, was_open: bool) {
     let entrypoint = plugin_dir.join(format!("{}.tmux", runtime_name(plugin_dir)));
     let _ = Command::new("bash").arg(entrypoint).status();
     if !was_open {
@@ -588,27 +542,6 @@ fn reenter(plugin_dir: &Path, was_open: bool) {
     }
 }
 
-/// An open split view never makes the fresh start that activates a prepared
-/// update. Close it, wait for its daemon's lease, and reopen it through the
-/// launch gate, which switches first. An open popup keeps its lease: leave the
-/// update to its next start rather than close it under the user.
-pub(crate) fn restart_view(plugin_dir: &Path) {
-    if !tmux_running()
-        || tmux_option("@agenmux-on") != "1"
-        || tmux::runtime_dir().join("agenmux-pin").exists()
-    {
-        return;
-    }
-    teardown_runtime(&tmux_option("@agenmux-control-client"));
-    // Still busy (another tmux server): the gate reopens this release.
-    let _ = crate::autoupdate::exclusive(plugin_dir, Duration::from_secs(20));
-    let entrypoint = plugin_dir.join(format!("{}.tmux", runtime_name(plugin_dir)));
-    let _ = Command::new("bash")
-        .arg(entrypoint)
-        .args(["activate", "split", ""])
-        .status();
-}
-
 /// Switch source and engine to a release, then re-enter through that release's
 /// own public entrypoint so rollbacks do not assume new commands exist.
 pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
@@ -619,7 +552,7 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
         return fail("could not read package version");
     };
     if target == current {
-        note(&format!("already on {target}"));
+        crate::mux::note(&format!("already on {target}"));
         return 0;
     }
 
@@ -647,7 +580,7 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
         }
     }
 
-    note(&format!("switching to {target}…"));
+    crate::mux::note(&format!("switching to {target}…"));
     // Everything that needs the network happens first, with this tree's own
     // verified installer, before anything closes or the install is locked.
     let Ok(scratch) = Scratch::new("agenmux-up") else {
@@ -668,24 +601,9 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
         Ok(pause) => pause,
         Err(error) => return fail(&error),
     };
-    let was_open = tmux_option("@agenmux-on") == "1"
-        || !tmux_value(&["show-option", "-gqv", "@agenmux-sidebar"]).is_empty()
-        || !tmux_value(&["show-option", "-gqv", "@agents-mon-sidebar"]).is_empty();
-    let old_control = tmux_option("@agenmux-control-client");
-
     // This server's view releases its installation lease first; a lease still
     // held afterwards belongs to another tmux server or an open popup.
-    // Rex sidebars close with their blocks and reopen on the installed release.
-    let rex = crate::mux::is_rex();
-    let running = !rex && tmux_running();
-    let rex_sidebars = if rex {
-        crate::mux::rex::teardown()
-    } else {
-        Vec::new()
-    };
-    if running {
-        teardown_runtime(&old_control);
-    }
+    let view = crate::mux::close_view();
     // A closed daemon takes seconds to exit and release its lease.
     let result = crate::autoupdate::exclusive(plugin_dir, Duration::from_secs(20))
         .map_err(|()| "busy")
@@ -704,10 +622,7 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
             }
         });
     // Reopen whichever release is installed now: the target, or the old one.
-    if running {
-        reenter(plugin_dir, was_open);
-    }
-    crate::mux::rex::reopen(&rex_sidebars);
+    view.reopen(plugin_dir);
     if let Err(reason) = result {
         if let Some(pause) = pause {
             pause.undo();
@@ -715,7 +630,7 @@ pub fn update(plugin_dir: &Path, requested: &str) -> i32 {
         return refuse(reason);
     }
     crate::autoupdate::switched(plugin_dir);
-    note(&format!("now on {target}"));
+    crate::mux::note(&format!("now on {target}"));
     0
 }
 

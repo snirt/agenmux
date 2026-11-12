@@ -10,14 +10,11 @@ mod input;
 mod mux;
 mod notifications;
 mod pane_writers;
-mod panes;
 mod procs;
 mod release;
 mod scan;
-mod setup;
 mod sidebar;
 mod snapshot;
-mod toggle;
 
 use std::path::{Path, PathBuf};
 
@@ -116,51 +113,6 @@ fn main() {
             sidebar::run_daemon(plugin_dir(), scan_cache_path())
         }
         ["sidebar-pane"] => pane_writers::run_pane(),
-        ["rex-toggle", session, block, rest @ ..] => mux::rex::toggle(
-            session,
-            block,
-            rest.first().copied().unwrap_or("split"),
-            rest.get(1).copied().unwrap_or(""),
-        ),
-        ["rex-reload", rest @ ..] => mux::rex::reload(rest.first().copied().unwrap_or("")),
-        ["rex-sidebars"] => mux::rex::sidebars(),
-        ["key", key] => sidebar::send_key(key, None),
-        ["key", key, client] => sidebar::send_key(key, Some(client)),
-        ["click", pane, y, client] => y
-            .parse()
-            .map_or(2, |y| input::click(pane, y, client, false)),
-        ["click", pane, y, client, "double"] => {
-            y.parse().map_or(2, |y| input::click(pane, y, client, true))
-        }
-        ["wheel", pane, "up"] => input::wheel(pane, input::Direction::Up),
-        ["wheel", pane, "down"] => input::wheel(pane, input::Direction::Down),
-        ["pane-add"] => panes::pane_add(None),
-        ["pane-add", window] => panes::pane_add(Some(window)),
-        ["pane-add", window, client] => {
-            panes::reap_dead_owner();
-            panes::pane_add_for_client(window, client)
-        }
-        ["pane-orphan"] => panes::pane_orphan(),
-        ["pane-pin"] => panes::pane_pin(),
-        ["teardown"] if mux::is_rex() => {
-            mux::rex::teardown();
-            0
-        }
-        ["teardown"] => match panes::lifecycle_lock() {
-            Ok(_lock) => {
-                panes::stop_daemon();
-                panes::teardown()
-            }
-            Err(error) => {
-                eprintln!("agenmux: cannot acquire lifecycle lock: {error}");
-                1
-            }
-        },
-        ["setup"] => setup::run(&plugin_dir()),
-        ["setup", "--if-needed"] => setup::run_if_needed(&plugin_dir()),
-        ["toggle"] => toggle::run(&plugin_dir(), None, None),
-        ["toggle", mode] => toggle::run(&plugin_dir(), Some(mode), None),
-        ["toggle", mode, client] => toggle::run(&plugin_dir(), Some(mode), Some(client)),
         ["releases", "refresh"] => release::refresh(&plugin_dir()),
         ["update"] => release::update(&plugin_dir(), "latest"),
         ["update", target] => release::update(&plugin_dir(), target),
@@ -171,10 +123,10 @@ fn main() {
             print!("{USAGE}");
             0
         }
-        _ => {
+        args => mux::run_command(args, plugin_dir).unwrap_or_else(|| {
             eprint!("{USAGE}");
             2
-        }
+        }),
     };
     std::process::exit(code);
 }
@@ -302,9 +254,7 @@ fn cmd_status() -> i32 {
         rows
     } else {
         // a stale cache can mean a dead daemon; don't keep its sidebars
-        if !mux::is_rex() {
-            panes::reap_dead_owner();
-        }
+        mux::reap_dead_owner();
         match run_scan() {
             Ok(snapshot) => snapshot.agents,
             Err(_) => return 0, // no server -> empty segment, like bash

@@ -98,6 +98,23 @@ pub fn own_pane() -> Option<String> {
     std::env::var("REX_BLOCK").ok().filter(|id| valid_id(id))
 }
 
+/// What a notification click names in place of a tmux socket.
+pub const NOTIFY_SERVER: &str = "rex";
+/// The app that shows Rex blocks.
+pub const APP_BUNDLE: &str = "com.superlogical.rex";
+
+/// Bring the Rex app forward on `block`: `activate` gets its bundle.
+pub fn open_notified(block: &str, activate: impl FnOnce(&str)) {
+    if !valid_id(block) {
+        return;
+    }
+    activate(APP_BUNDLE);
+    std::env::set_var("AGENMUX_MUX", NOTIFY_SERVER);
+    if let Ok(mut mux) = super::connect(false) {
+        let _ = mux.jump(block);
+    }
+}
+
 pub fn valid_id(id: &str) -> bool {
     id.split_once(':').is_some_and(|(kind, rest)| {
         !kind.is_empty()

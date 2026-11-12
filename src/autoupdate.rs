@@ -1409,7 +1409,7 @@ pub fn run(plugin_dir: &Path) -> i32 {
     let outcome = prepare(plugin_dir);
     println!("agenmux: {outcome}");
     if outcome.ends_with(" ready") {
-        release::restart_view(plugin_dir);
+        crate::mux::restart_view(plugin_dir);
     }
     0
 }

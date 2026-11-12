@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Shared code reaches the multiplexer through the Multiplexer trait. Outside
-# src/mux/ nothing starts tmux or rex, only the modules that run from tmux
-# bindings and hooks name the tmux backend directly, and only the entry
-# points Rex actions and updates call name the Rex backend. Test modules are
-# exempt: they drive real tmux servers.
+# Shared code reaches the multiplexer through the Multiplexer trait and the
+# backend-neutral functions in src/mux/. Outside src/mux/ nothing starts tmux
+# or rex, and nothing names either backend module, in any import form
+# (`mux::tmux`, `mux::{self, rex}`). Test modules are exempt: they drive real
+# tmux servers. AGENMUX_REF_ROOT points the check at another tree.
 set -euo pipefail
 
-DIR="$(cd "$(dirname "$0")/.." && pwd)"
-integration='^src/(setup|toggle|panes|input|release|notifications)\.rs$'
-rex_entry='^src/(main|release|notifications)\.rs$'
+DIR="${AGENMUX_REF_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 
 # A file's lines before its `#[cfg(test)] mod tests`, prefixed `path:line:`.
 production() {
@@ -26,13 +24,8 @@ while IFS= read -r file; do
   case "$file" in src/mux/*) continue ;; esac
   lines="$(production "$file")"
   spawns="$(printf '%s\n' "$lines" | grep -E '\("(tmux|rex)"[,)]|rex_cli|REX_BIN_DIR' || true)"
-  named=""
-  if ! [[ $file =~ $integration ]]; then
-    named="$(printf '%s\n' "$lines" | grep -E 'mux::tmux' || true)"
-  fi
-  if ! [[ $file =~ $rex_entry ]]; then
-    named="$named$(printf '%s\n' "$lines" | grep -E 'mux::rex' || true)"
-  fi
+  named="$(printf '%s\n' "$lines" |
+    grep -E 'mux::(tmux|rex)\b|mux::\{[^}]*\b(tmux|rex)\b' || true)"
   found="$found${spawns:+$spawns$'\n'}${named:+$named$'\n'}"
 done < <(find src -name '*.rs' | LC_ALL=C sort)
 

@@ -159,9 +159,7 @@ pub fn run_daemon(plugin_dir: PathBuf, cache_file: PathBuf) -> i32 {
         Ok(mux) => mux,
         Err(_) => return 1,
     };
-    if let Some(tmux) = mux.as_tmux() {
-        tmux.set_key_sink(keys_fd);
-    }
+    mux.key_sink(keys_fd);
     // "" not TMUX_PANE: toggle.sh launches the daemon from the pane the user
     // pressed the key in, and adopting that pane would hide its agent
     let mut sb = new_sidebar(
@@ -257,9 +255,7 @@ impl Sidebar {
     /// Reading zero panes off a desynced tmux control pipe used to tear the
     /// whole mirror set down: discard stale replies before measuring.
     fn barrier(&mut self) {
-        if let Some(tmux) = self.mux.as_tmux() {
-            let _ = tmux.sync();
-        }
+        self.mux.settle();
     }
 
     /// None when the query failed. A dead server is caught by `scan_tick`,
@@ -319,9 +315,7 @@ impl Sidebar {
         self.adopt_reload(refreshed);
         // Before measuring, so the moved panes are what the drag probe sees.
         if self.settings.settings.sidebar_position != position {
-            if let Some(tmux) = self.mux.as_tmux() {
-                tmux.dock(&self.plugin_dir, &self.settings.settings);
-            }
+            self.mux.dock(&self.plugin_dir, &self.settings.settings);
         }
         self.sync_panes_view();
         let width_changed = refreshed.width_changed;

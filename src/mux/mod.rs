@@ -1,18 +1,22 @@
 // Multiplexer seam: what the scan, sidebar and daemon need from the server
-// hosting the agent panes. tmux and Rex are the backends; tmux-only features
-// reach it through `tmux` explicitly, Rex-only ones through `rex`.
+// hosting the agent panes. tmux and Rex are the backends. Code outside
+// src/mux/ never names either: it calls `Multiplexer`, or the functions here
+// for work that holds no connection.
 #[cfg(test)]
 pub mod fake;
 pub mod rex;
+mod runtime;
 pub mod tmux;
 
-use crate::app_config::ConfigError;
+pub use runtime::{prepare_dir, prepare_runtime_dir, runtime_dir};
+
+use crate::app_config::{AppConfig, Color, ConfigError};
 use crate::focus::ClientFocus;
 use crate::scan::ParsedPane;
 use crate::snapshot::{Closed, Live, Resume, Snapshot};
 use std::collections::{BTreeMap, HashSet};
 use std::os::fd::RawFd;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The server hosting the agent panes. Ids are opaque: only the backend that
 /// issued one reads meaning into it.
@@ -115,10 +119,42 @@ pub trait Multiplexer {
         None
     }
 
-    /// tmux-only features. Every other backend returns None.
-    fn as_tmux(&mut self) -> Option<&mut tmux::Tmux> {
+    // Where the server routes keys itself (`routes_keys`), the daemon steers
+    // that routing. The defaults suit a server that forwards terminal input.
+
+    /// Deliver keys the server resolved on its own straight into `fd`, the
+    /// daemon's key FIFO.
+    fn key_sink(&mut self, _fd: RawFd) {}
+    /// Route `client`'s keys, or every sidebar client's with None, as `mode`.
+    fn input_mode(&mut self, _client: Option<&str>, _mode: InputMode) {}
+    /// Install the key routing `config` asks for. false: it could not be.
+    fn install_keys(&mut self, _plugin_dir: &Path, _config: &AppConfig) -> bool {
+        true
+    }
+
+    /// Drop replies to earlier requests before measuring layout.
+    fn settle(&mut self) {}
+    /// Move the sidebars to the side the settings name, and the keys that
+    /// follow the side with them.
+    fn dock(&mut self, _plugin_dir: &Path, _settings: &AppConfig) {}
+    /// Fill header colors the settings leave unset from the server's theme.
+    /// Returns the active border's foreground.
+    fn inherit_header(&mut self, _settings: &mut AppConfig) -> Option<Color> {
         None
     }
+    /// Tell the user on this connection's client, where it has one.
+    fn notice(&mut self, _text: &str) {}
+}
+
+/// How keys typed in a sidebar are read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputMode {
+    /// Keys run sidebar actions.
+    Normal,
+    /// Keys type into a prompt (search, rename).
+    Text,
+    /// Keys edit a settings value.
+    Settings,
 }
 
 /// Which record an action names.
@@ -337,18 +373,103 @@ pub fn revive_daemon() {
     }
 }
 
-/// Where this server's daemon, sidebar panes and key senders meet.
-pub fn runtime_dir() -> PathBuf {
-    if is_rex() {
-        rex::runtime_dir()
-    } else {
-        tmux::runtime_dir()
+/// The internal commands tmux bindings and Rex actions run. None: `args`
+/// is none of them. `plugin_dir` is asked only by commands that need it.
+pub fn run_command(args: &[&str], plugin_dir: fn() -> std::path::PathBuf) -> Option<i32> {
+    Some(match args {
+        ["rex-toggle", session, block, rest @ ..] => rex::toggle(
+            session,
+            block,
+            rest.first().copied().unwrap_or("split"),
+            rest.get(1).copied().unwrap_or(""),
+        ),
+        ["rex-reload", rest @ ..] => rex::reload(rest.first().copied().unwrap_or("")),
+        ["rex-sidebars"] => rex::sidebars(),
+        ["teardown"] if is_rex() => {
+            rex::teardown();
+            0
+        }
+        _ => return tmux::run_command(args, plugin_dir),
+    })
+}
+
+/// Close the sidebars of a daemon that died without cleaning up. Rex
+/// sidebars close with their daemon.
+pub fn reap_dead_owner() {
+    if !is_rex() {
+        tmux::panes::reap_dead_owner();
     }
 }
 
-/// `runtime_dir`, created private to this user.
-pub fn prepare_runtime_dir() -> std::io::Result<PathBuf> {
-    tmux::prepare_dir(runtime_dir())
+/// `config reload`: reinstall key routing `config` no longer matches.
+/// Ok(true): reinstalled. Rex binds its keys in init.lua.
+pub fn reinstall_keys(plugin_dir: &Path, config: &AppConfig) -> Result<bool, ()> {
+    if is_rex() {
+        Ok(false)
+    } else {
+        tmux::setup::reinstall(plugin_dir, config)
+    }
+}
+
+/// Tell the user `message` on the tmux status line, else on stdout.
+pub fn note(message: &str) {
+    tmux::view::note(message);
+}
+
+/// Reopen an open tmux split view through the launch gate, which switches
+/// to a prepared update first. Leaves popups and closed views alone.
+pub fn restart_view(plugin_dir: &Path) {
+    tmux::view::restart(plugin_dir);
+}
+
+/// The view `close_view` closed, to put back once an update is done.
+pub enum ClosedView {
+    None,
+    Tmux(tmux::view::Closed),
+    Rex(Vec<(String, String)>),
+}
+
+/// Close this server's view so its daemon releases the installation.
+pub fn close_view() -> ClosedView {
+    if is_rex() {
+        ClosedView::Rex(rex::teardown())
+    } else {
+        tmux::view::close().map_or(ClosedView::None, ClosedView::Tmux)
+    }
+}
+
+impl ClosedView {
+    /// Reopen it on whichever release is installed now.
+    pub fn reopen(self, plugin_dir: &Path) {
+        match self {
+            ClosedView::None => {}
+            ClosedView::Tmux(closed) => closed.reopen(plugin_dir),
+            ClosedView::Rex(windows) => rex::reopen(&windows),
+        }
+    }
+}
+
+/// The server a notification click returns to, and the app that shows it
+/// (None: the terminal the server runs in).
+#[cfg(target_os = "macos")]
+pub fn notification_server() -> Option<(String, Option<&'static str>)> {
+    if is_rex() {
+        return Some((rex::NOTIFY_SERVER.into(), Some(rex::APP_BUNDLE)));
+    }
+    let tmux = std::env::var("TMUX").ok()?;
+    let socket = tmux.split(',').next().filter(|socket| !socket.is_empty())?;
+    Some((socket.into(), None))
+}
+
+/// `notification-open`: show `pane` on `server`, from `notification_server`.
+/// `activate` brings forward the app bundle that shows it, once `pane` is
+/// confirmed; `bundle` is the terminal's, recorded with the click.
+pub fn open_notified(server: &str, pane: &str, bundle: &str, activate: impl FnOnce(&str)) {
+    if server == rex::NOTIFY_SERVER {
+        rex::open_notified(pane, activate);
+    } else {
+        tmux::notified::open_notified(server, pane, || activate(bundle));
+    }
 }
 
 /// The pane this process runs in.

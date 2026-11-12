@@ -131,21 +131,27 @@ so restore matches them by id (`Live::by_id`). The Lua policy has its own test,
 
 To add a backend:
 
-- Implement every trait method. None has a default except `as_tmux`, so a
-  missing feature fails to compile instead of silently doing nothing. Ids are
-  opaque strings; only the backend that issued one reads meaning into it.
+- Implement every required trait method, so a missing feature fails to
+  compile instead of silently doing nothing. Ids are opaque strings; only the
+  backend that issued one reads meaning into it.
+- The defaulted methods (`key_sink`, `input_mode`, `install_keys`, `settle`,
+  `dock`, `inherit_header`, `notice`) serve servers that route keys or carry
+  a theme themselves; their no-op defaults suit one that forwards terminal
+  input.
 - Answer the connectionless functions next to the trait (`runtime_dir`,
-  `own_pane`, `options`, `publish_reload`, `owner`) for commands that hold no
-  connection.
-- Return `None` from `as_tmux`: tmux-only features (key tables, popups,
-  header colors, docking) then skip themselves.
+  `own_pane`, `options`, `publish_reload`, `owner`, `run_command`,
+  `reinstall_keys`, `close_view`, `notification_server`, `open_notified`) for
+  commands that hold no connection.
 - Test only the translation: commands built, replies parsed. Shared behaviour
   is tested once against the in-memory backend in `src/mux/fake.rs`.
 
-The modules that run only from tmux bindings and hooks (`setup.rs`,
-`toggle.rs`, `panes.rs`, and the tmux entry points in `input.rs`, `release.rs`
-and `notifications.rs`) call `mux::tmux` directly; the Rex entry points
-(`rex-*` in `main.rs`, `update` in `release.rs`, notification clicks) call
-`mux::rex`. `tests/mux-boundary.sh` keeps every other module off both, and
-`tests/run.sh` pins `AGENMUX_MUX=tmux` so the suites run against tmux even
+Everything tmux runs from its bindings and hooks lives in the tmux adapter:
+key tables and hooks (`src/mux/tmux/setup.rs`), sidebar panes
+(`panes.rs`), the toggle (`toggle.rs`), key, click and wheel senders
+(`keys.rs`), update teardown and reopen (`view.rs`) and notification clicks
+(`notified.rs`). `main.rs` hands every internal command it does not own to
+`mux::run_command`. Code outside `src/mux/` never names `mux::tmux` or
+`mux::rex`: `tests/mux-boundary.sh` enforces that,
+`tests/mux-boundary-self-test.sh` proves the gate catches a planted import,
+and `tests/run.sh` pins `AGENMUX_MUX=tmux` so the suites run against tmux even
 from a Rex block.
