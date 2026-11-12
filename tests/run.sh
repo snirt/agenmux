@@ -60,6 +60,9 @@ fi
 if ! "$DIR/tests/install-script.sh"; then
   fail=1
 fi
+if ! "$DIR/tests/pi-subject.sh"; then
+  fail=1
+fi
 
 if [ "$fail" -eq 0 ]; then
   version="$(bash "$DIR/scripts/version.sh")"

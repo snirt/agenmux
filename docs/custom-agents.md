@@ -43,3 +43,8 @@ title, then `SUBJECT_SCREEN`, then `SUBJECT_CMD`. The shell snippet can use
 `$path`, the pane's working directory. The Rust engine parses these assignments
 and executes `SUBJECT_CMD` through the shell when needed, so only install configs
 you trust.
+
+Scans wait for `SUBJECT_CMD`, so keep it fast. A call still running after
+1 second is killed with its process group and the subject stays empty until
+the agent's next prompt. Each scan spends at most about 2 seconds on these
+commands; panes past that budget get their subject on a later scan.

@@ -306,14 +306,7 @@ fn new_sidebar(
     let cached_rows = std::fs::read_to_string(&cache_file)
         .map(|tsv| scan::from_tsv(&tsv))
         .unwrap_or_default();
-    // Cached TSV stores cwd basename, enough to avoid blocking startup on
-    // unchanged panes. Live scans upgrade matching entries to full paths.
-    // Basename can collide; persist full cwd if cache format changes.
-    let seeded_subjects = cached_rows
-        .iter()
-        .filter(|row| row.pane != self_pane && !row.title.is_empty())
-        .map(|row| (row.pane.clone(), (row.cwd.clone(), row.title.clone())))
-        .collect();
+    let seeded_subjects = scan::seed_subjects(&cached_rows, &self_pane);
     let mut sb = Sidebar {
         mux,
         palette,

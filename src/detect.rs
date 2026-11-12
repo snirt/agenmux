@@ -67,23 +67,60 @@ pub fn subject(conf: &AgentConf, title: &str, screen: &str, path: &str) -> Strin
 /// process start as UTC YYYY-MM-DDTHH-MM-SS, empty when unknown). One bash
 /// fork — callers must cache (scan.rs SubjectCache); forking per scan tick
 /// stalls the sidebar loop.
+/// The scan waits on it synchronously, so it gets `timeout`: a command still
+/// running (or still holding its stdout open) then is killed with its whole
+/// process group, and the subject is None — the same as a failed spawn.
 pub fn subject_cmd(
     conf: &AgentConf,
     pane: &str,
     path: &str,
     started: Option<u64>,
+    timeout: std::time::Duration,
 ) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
     let cmd = conf.subject_cmd.as_ref()?;
-    let out = std::process::Command::new("bash")
+    let deadline = std::time::Instant::now() + timeout;
+    let mut child = std::process::Command::new("bash")
         .arg("-c")
         .arg(cmd)
         .env("pane", pane)
         .env("path", path)
         .env("started", started.map(utc_stamp).unwrap_or_default())
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
         .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    // a reader thread, so a chatty command can't fill the pipe and stall
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = stdout.read_to_end(&mut out);
+        let _ = tx.send(out);
+    });
+    let out = rx.recv_timeout(timeout).ok();
+    let exited = out.is_some()
+        && loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break true,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(1))
+                }
+                _ => break false,
+            }
+        };
+    if !exited {
+        // SAFETY: plain kill(2) on the group the child leads (process_group(0))
+        unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+        let _ = child.wait();
+        return None;
+    }
     Some(
-        String::from_utf8_lossy(&out.stdout)
+        String::from_utf8_lossy(&out?)
             .trim_end_matches('\n')
             .replace('\t', " "),
     )
@@ -116,6 +153,45 @@ mod tests {
     use super::*;
     use crate::conf::load_conf;
 
+    #[test]
+    fn subject_cmd_returns_output_within_its_timeout() {
+        let c = conf("SUBJECT_CMD='printf \"%s\\t%s\\n\" \"$pane\" \"$path\"'\n");
+        let got = subject_cmd(&c, "%7", "/w", None, std::time::Duration::from_secs(5));
+        assert_eq!(got.as_deref(), Some("%7 /w"));
+    }
+
+    // #256: a slow SUBJECT_CMD blocked `list` and scans for seconds. Past its
+    // timeout the whole group dies — also a background child that would
+    // otherwise hold stdout open and keep the reader waiting.
+    #[test]
+    fn subject_cmd_kills_a_slow_command_and_its_group() {
+        let pids =
+            std::env::temp_dir().join(format!("agenmux-subject-pids-{}", std::process::id()));
+        let c = conf(&format!(
+            "SUBJECT_CMD='sleep 30 & echo $! > {0}; echo $$ >> {0}; printf early; wait'\n",
+            pids.display()
+        ));
+        let t0 = std::time::Instant::now();
+        let got = subject_cmd(&c, "%1", "/", None, std::time::Duration::from_millis(300));
+        assert_eq!(got, None);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            t0.elapsed()
+        );
+        let listed = std::fs::read_to_string(&pids).unwrap();
+        let _ = std::fs::remove_file(&pids);
+        for pid in listed.split_whitespace() {
+            let pid: libc::pid_t = pid.parse().unwrap();
+            // the killed sleep is reaped by init asynchronously; give it a moment
+            let gone = (0..100).any(|_| {
+                let dead = unsafe { libc::kill(pid, 0) } != 0;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                dead
+            });
+            assert!(gone, "pid {pid} outlived the timeout");
+        }
+    }
     #[test]
     fn utc_stamp_matches_pi_session_prefix() {
         assert_eq!(utc_stamp(0), "1970-01-01T00-00-00");
