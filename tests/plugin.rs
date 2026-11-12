@@ -4071,9 +4071,11 @@ fn startup_ack_waits_for_focused_live_frame() {
     tmux.assert_tmux(&["select-pane", "-t", &agent, "-T", "codex"]);
     let plugin_dir = tmux.tmp.join("plugin");
     std::fs::create_dir_all(plugin_dir.join("agents")).unwrap();
+    // a slow subject makes the first scan slow; it stays under the 1 s
+    // SUBJECT_CMD timeout, past which the subject would be dropped
     std::fs::write(
         plugin_dir.join("agents/codex.conf"),
-        "AGENT_BINS='codex'\nSUBJECT_CMD='sleep 3; printf slow'\n",
+        "AGENT_BINS='codex'\nSUBJECT_CMD='sleep 0.1; printf slow'\n",
     )
     .unwrap();
     tmux.assert_tmux(&[
@@ -4144,6 +4146,80 @@ fn startup_ack_waits_for_focused_live_frame() {
     let _ = viewer.wait();
 }
 
+// #256: `list` started from an empty subject cache, so every call re-ran every
+// idle pane's SUBJECT_CMD although the daemon had just published the answers.
+#[test]
+fn list_reuses_subjects_a_live_daemon_published() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmux = TestTmux::new("list-subjects");
+    let codex = tmux.tmp.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nwhile :; do sleep 60; done\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let agent = tmux.text(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "plugin:",
+        codex.to_str().unwrap(),
+    ]);
+    tmux.assert_tmux(&["select-pane", "-t", &agent, "-T", "codex"]);
+    let cwd = tmux.text(&[
+        "display-message",
+        "-p",
+        "-t",
+        &agent,
+        "#{pane_current_path}",
+    ]);
+    let cwd = cwd.rsplit('/').next().unwrap();
+    let plugin_dir = tmux.tmp.join("plugin");
+    std::fs::create_dir_all(plugin_dir.join("agents")).unwrap();
+    let marker = tmux.tmp.join("subject-ran");
+    std::fs::write(
+        plugin_dir.join("agents/codex.conf"),
+        format!(
+            "AGENT_BINS='codex'\nSUBJECT_CMD='echo ran >> {}; printf computed'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let subject = |tmux: &TestTmux| {
+        let output = tmux
+            .bin_command(&["list"])
+            .env("AGENMUX_DIR", &plugin_dir)
+            .output()
+            .unwrap();
+        let rows = String::from_utf8(output.stdout).unwrap();
+        let row = rows
+            .lines()
+            .find(|row| row.starts_with(&format!("{agent}\t")))
+            .unwrap_or_else(|| panic!("no agent row: {rows:?}"));
+        row.rsplit('\t').next().unwrap().to_string()
+    };
+
+    let cache = tmux.tmp.join("agenmux-scan-cache");
+    std::fs::write(
+        &cache,
+        format!("{agent}\tplugin:1.0\tcodex\tidle\t{cwd}\tpublished\n"),
+    )
+    .unwrap();
+    assert_eq!(subject(&tmux), "published");
+    assert!(!marker.exists(), "SUBJECT_CMD ran despite a fresh cache");
+
+    // a cache nobody refreshes is a dead daemon's: compute again
+    let stale = std::time::SystemTime::now() - Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(&cache)
+        .unwrap()
+        .set_modified(stale)
+        .unwrap();
+    assert_eq!(subject(&tmux), "computed");
+    assert!(marker.exists());
+}
 #[test]
 fn binary_helper_uses_private_server() {
     let tmux = TestTmux::new("binary-helper");

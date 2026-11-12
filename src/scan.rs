@@ -14,6 +14,22 @@ use std::time::{Duration, Instant};
 /// Assumes new sessions always bounce through a non-idle state
 pub type SubjectCache = HashMap<String, (String, String)>;
 
+/// Subjects from published rows (the scan cache TSV), so a starting daemon
+/// or a one-shot `list` does not fork SUBJECT_CMD for unchanged panes.
+/// The TSV stores the cwd basename; live scans upgrade matching entries to
+/// full paths. Basename can collide; persist full cwd if cache format changes.
+pub fn seed_subjects(rows: &[PaneRow], self_pane: &str) -> SubjectCache {
+    rows.iter()
+        .filter(|row| row.pane != self_pane && !row.title.is_empty())
+        .map(|row| (row.pane.clone(), (row.cwd.clone(), row.title.clone())))
+        .collect()
+}
+
+/// SUBJECT_CMD runs synchronously inside a scan: one call is killed after
+/// SUBJECT_CMD_TIMEOUT, and all calls of one scan share SUBJECT_SCAN_BUDGET,
+/// so subjects never stall a scan for longer than the budget (#256).
+const SUBJECT_CMD_TIMEOUT: Duration = Duration::from_secs(1);
+const SUBJECT_SCAN_BUDGET: Duration = Duration::from_secs(2);
 const SCREEN_MAX_AGE: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -203,6 +219,7 @@ pub fn scan_cached(
     let mut agents = Vec::new();
     let mut seen = IdentCache::new();
     let mut stats = ScanStats::default();
+    let mut subject_spent = Duration::ZERO;
     let result: Result<ScanSnapshot, mux::Error> = (|| {
         for parsed in listed {
             let ParsedPane {
@@ -294,13 +311,30 @@ pub fn scan_cached(
                         subject = cached;
                         subj.insert(pane.to_string(), (path.to_string(), subject.clone()));
                     }
+                    None if subject_spent >= SUBJECT_SCAN_BUDGET => {
+                        // left uncached: a later scan fills it
+                        trace!("subject_cmd {pane} deferred: scan budget spent");
+                    }
                     None => {
                         let t0 = std::time::Instant::now();
+                        let limit = SUBJECT_CMD_TIMEOUT.min(SUBJECT_SCAN_BUDGET - subject_spent);
                         let started = procs::agent_start(&confs[idx], &mut snap, pid);
-                        subject = crate::detect::subject_cmd(&confs[idx], pane, path, started)
-                            .unwrap_or_default();
-                        trace!("subject_cmd {pane} {}ms", t0.elapsed().as_millis());
-                        subj.insert(pane.to_string(), (path.to_string(), subject.clone()));
+                        let out =
+                            crate::detect::subject_cmd(&confs[idx], pane, path, started, limit);
+                        subject_spent += t0.elapsed();
+                        trace!(
+                            "subject_cmd {pane} {}ms{}",
+                            t0.elapsed().as_millis(),
+                            if out.is_none() { " failed" } else { "" }
+                        );
+                        subject = out.clone().unwrap_or_default();
+                        // A command cut short by the scan's budget gets another
+                        // try next scan. One that failed or used its whole
+                        // timeout stays empty until the pane's next prompt,
+                        // rather than costing every scan.
+                        if out.is_some() || limit == SUBJECT_CMD_TIMEOUT {
+                            subj.insert(pane.to_string(), (path.to_string(), subject.clone()));
+                        }
                     }
                 }
             }
@@ -652,5 +686,74 @@ mod tests {
         // a reported working still reads the screen
         assert_eq!(state(Some("pi-idle"), Some("working")), "working");
         assert_eq!(state(Some("pi-blocked"), Some("working")), "blocked");
+    }
+
+    /// Idle panes %1..=%n of a `slow` agent whose SUBJECT_CMD is `cmd`.
+    fn slow_agents(n: u32, cmd: &str) -> (crate::mux::fake::FakeMux, Vec<AgentConf>, IdentCache) {
+        use crate::mux::fake::{pane, FakeMux};
+        let dir = std::env::temp_dir().join(format!(
+            "agenmux-slow-subject-{}-{}",
+            std::process::id(),
+            cmd.len()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("slow.conf");
+        std::fs::write(&file, format!("AGENT_BINS='slow'\nSUBJECT_CMD='{cmd}'\n")).unwrap();
+        let conf = crate::conf::load_conf(&file).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut idents = IdentCache::new();
+        let mut mux = FakeMux::default();
+        for i in 1..=n {
+            let id = format!("%{i}");
+            mux.panes.push((pane("$1", "@1", &id, "slow"), 100 + i));
+            mux.reported.insert(id.clone(), "idle");
+            idents.insert((id, 100 + i, "slow".into()), "slow".into());
+        }
+        (mux, vec![conf], idents)
+    }
+
+    fn subjects(snapshot: &ScanSnapshot) -> Vec<&str> {
+        snapshot.agents.iter().map(|a| a.title.as_str()).collect()
+    }
+
+    // #256: every idle pane's SUBJECT_CMD ran back to back inside one scan,
+    // so `list` took ~36s. A scan now stops starting calls once its budget
+    // is spent; the rest stay uncached and later scans fill them.
+    #[test]
+    fn subject_commands_share_a_scan_budget() {
+        let (mut mux, confs, mut idents) = slow_agents(4, "sleep 0.7; printf %s \"s$pane\"");
+        let mut subj = SubjectCache::new();
+        let t0 = Instant::now();
+        let first = scan(&mut mux, &confs, &mut idents, &mut subj, None)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let took = t0.elapsed();
+        let filled = subjects(&first).iter().filter(|s| !s.is_empty()).count();
+        assert!((1..4).contains(&filled), "{:?}", subjects(&first));
+        assert!(
+            took < SUBJECT_SCAN_BUDGET + Duration::from_millis(500),
+            "{took:?}"
+        );
+        let mut last = first;
+        for _ in 0..3 {
+            last = scan(&mut mux, &confs, &mut idents, &mut subj, None)
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+        assert_eq!(subjects(&last), ["s%1", "s%2", "s%3", "s%4"]);
+    }
+
+    #[test]
+    fn a_timed_out_subject_is_empty_and_not_rerun_while_idle() {
+        let (mut mux, confs, mut idents) = slow_agents(1, "sleep 5; printf late");
+        let mut subj = SubjectCache::new();
+        let t0 = Instant::now();
+        let first = scan(&mut mux, &confs, &mut idents, &mut subj, None)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(t0.elapsed() < SUBJECT_CMD_TIMEOUT * 4, "{:?}", t0.elapsed());
+        assert_eq!(subjects(&first), [""]);
+        let t1 = Instant::now();
+        let again = scan(&mut mux, &confs, &mut idents, &mut subj, None)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(t1.elapsed() < SUBJECT_CMD_TIMEOUT, "{:?}", t1.elapsed());
+        assert_eq!(subjects(&again), [""]);
     }
 }

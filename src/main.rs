@@ -203,11 +203,25 @@ fn self_pane() -> Option<String> {
     compat_env("AGENMUX_SELF", "AGENTS_MON_SELF").filter(|s| !s.is_empty())
 }
 
+/// The rows a daemon published, while it is alive to refresh them (every ~2s).
+fn fresh_scan_cache() -> Option<Vec<scan::PaneRow>> {
+    let cache = scan_cache_path();
+    std::fs::metadata(&cache)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < 6)
+        .then(|| scan::from_tsv(&std::fs::read_to_string(&cache).unwrap_or_default()))
+}
 fn run_scan() -> Result<scan::ScanSnapshot, mux::Error> {
     let confs = conf::load_all(&plugin_dir());
     let mut mux = mux::connect(false)?;
     let mut cache = procs::IdentCache::new();
-    let mut subj = scan::SubjectCache::new();
+    // A live daemon already ran every SUBJECT_CMD; reuse its answers rather
+    // than forking them again for one snapshot (#256).
+    let mut subj = fresh_scan_cache()
+        .map(|rows| scan::seed_subjects(&rows, &self_pane().unwrap_or_default()))
+        .unwrap_or_default();
     scan::scan(
         mux.as_mut(),
         &confs,
@@ -284,14 +298,8 @@ fn cmd_list(filter: ListFilter) -> i32 {
 
 fn cmd_status() -> i32 {
     // sidebar refreshes the cache every ~2s — reuse it instead of scanning
-    let cache = scan_cache_path();
-    let fresh = std::fs::metadata(&cache)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age.as_secs() < 6);
-    let rows = if fresh {
-        scan::from_tsv(&std::fs::read_to_string(&cache).unwrap_or_default())
+    let rows = if let Some(rows) = fresh_scan_cache() {
+        rows
     } else {
         // a stale cache can mean a dead daemon; don't keep its sidebars
         if !mux::is_rex() {
