@@ -320,7 +320,7 @@ pub(crate) fn pane_add_record(
         Ok(bin) => bin,
         Err(_) => return 1,
     };
-    let runtime = match tmux::prepare_runtime_dir() {
+    let runtime = match crate::mux::prepare_dir(tmux::runtime_dir()) {
         Ok(dir) => format!("AGENMUX_RUNTIME_DIR={}", dir.display()),
         Err(_) => return 1,
     };
@@ -692,7 +692,7 @@ pub(crate) fn teardown_panes() -> i32 {
         restore_layout(window);
         let _ = std::fs::remove_file(crate::pane_writers::frame_path(&tmux::runtime_dir(), pane));
     }
-    crate::setup::release_client_tables();
+    super::setup::release_client_tables();
 
     let options = tmux::lines(&["show-options", "-g"]).unwrap_or_default();
     for row in options {

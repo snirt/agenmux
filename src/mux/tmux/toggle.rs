@@ -1,5 +1,5 @@
+use super::{panes, setup};
 use crate::mux::tmux;
-use crate::{panes, setup};
 use std::collections::HashSet;
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -243,7 +243,7 @@ fn split(
     if !reuse {
         panes::stop_daemon();
         panes::teardown();
-        let runtime = match tmux::prepare_runtime_dir() {
+        let runtime = match crate::mux::prepare_dir(tmux::runtime_dir()) {
             Ok(dir) => dir,
             Err(error) => {
                 eprintln!("agenmux: cannot prepare runtime directory: {error}");
@@ -435,7 +435,7 @@ fn popup(
     txn: &mut Option<crate::autoupdate::Txn>,
     held: &mut Option<crate::autoupdate::Lock>,
 ) -> i32 {
-    let runtime = match tmux::prepare_runtime_dir() {
+    let runtime = match crate::mux::prepare_dir(tmux::runtime_dir()) {
         Ok(dir) => dir,
         Err(error) => {
             eprintln!("agenmux: cannot prepare runtime directory: {error}");

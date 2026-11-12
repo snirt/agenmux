@@ -437,8 +437,8 @@ impl LiveConfig {
             .and_then(|options| resolve_cli(&self.file, &options, self.cli_mode.as_deref()));
         let reported = self.reported.len();
         let width_changed = self.accept(next);
-        if let Some(tmux) = mux.as_tmux().filter(|_| self.reported.len() != reported) {
-            tmux.display("agenmux: invalid live application configuration; keeping last valid settings. Run agenmux config check --effective for details.");
+        if self.reported.len() != reported {
+            mux.notice("agenmux: invalid live application configuration; keeping last valid settings. Run agenmux config check --effective for details.");
         }
         Refreshed {
             width_changed,
@@ -507,13 +507,9 @@ pub fn reload(plugin_dir: &Path) -> i32 {
         }
     };
     // Rex binds its keys in init.lua; only tmux bindings follow the config.
-    let reinstalled = !crate::mux::is_rex() && crate::setup::bindings_stale(&config);
-    if reinstalled {
-        if crate::setup::run_config(plugin_dir, &config) != 0 {
-            return 1;
-        }
-        crate::setup::reclaim_client_tables();
-    }
+    let Ok(reinstalled) = crate::mux::reinstall_keys(plugin_dir, &config) else {
+        return 1;
+    };
     // Any changing value works; the clock keeps it readable in show-options.
     let token = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

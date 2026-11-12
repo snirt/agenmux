@@ -100,7 +100,6 @@ impl ScanSchedule {
 }
 
 #[allow(unused_imports)]
-pub use crate::input::send_key;
 use crate::input::{
     key_pending, poll_inputs, protocol_keys, read_key_with_config, read_search_key, settings_keys,
     Key, KeySequence, RawMode, SequenceAction, SequenceResult,
@@ -272,7 +271,7 @@ fn inherit_tmux_header(
     settings: &mut crate::app_config::AppConfig,
     mux: &mut dyn Multiplexer,
 ) -> Option<Color> {
-    mux.as_tmux()?.inherit_header(settings)
+    mux.inherit_header(settings)
 }
 
 fn uses_tmux_header_contrast(settings: &crate::app_config::AppConfig) -> bool {
@@ -1150,15 +1149,17 @@ impl Sidebar {
     fn enter_mutation_input(&mut self, client: &str) {
         trace!("mutation input on for {client}");
         self.follow_selection = true;
-        if let Some(tmux) = self.daemon.as_ref().and(self.mux.as_tmux()) {
-            tmux.key_table(client, crate::setup::SEARCH_TABLE);
+        if self.daemon.is_some() {
+            self.mux
+                .input_mode(Some(client), crate::mux::InputMode::Text);
         }
     }
 
     fn restore_mutation_input(&mut self, client: &str) {
         trace!("mutation input off for {client}");
-        if let Some(tmux) = self.daemon.as_ref().and(self.mux.as_tmux()) {
-            tmux.key_table(client, crate::setup::NORMAL_TABLE);
+        if self.daemon.is_some() {
+            self.mux
+                .input_mode(Some(client), crate::mux::InputMode::Normal);
         }
     }
 

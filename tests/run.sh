@@ -39,6 +39,11 @@ if "$DIR/tests/mux-boundary.sh"; then
 else
   fail=1
 fi
+if "$DIR/tests/mux-boundary-self-test.sh"; then
+  echo "ok   multiplexer-seam-gate"
+else
+  fail=1
+fi
 lua="$(command -v lua || command -v lua5.4 || true)"
 if [ -z "$lua" ]; then
   echo "FAIL rex-lua-layout-policy: lua is not installed"

@@ -1,8 +1,52 @@
-// The tmux backend. Its command helpers double as the escape hatch for
-// tmux-only features.
+// The tmux backend: the control-mode connection, and the integration tmux
+// runs from its bindings and hooks (key tables, sidebar panes, toggle).
 mod control;
+pub(crate) mod keys;
+pub(crate) mod notified;
+pub(crate) mod panes;
+pub(crate) mod setup;
+pub(crate) mod toggle;
+pub(crate) mod view;
 
 pub use control::*;
+
+/// The internal commands tmux bindings and hooks run. None: not one.
+pub fn run_command(args: &[&str], plugin_dir: fn() -> std::path::PathBuf) -> Option<i32> {
+    Some(match args {
+        ["key", key] => keys::send_key(key, None),
+        ["key", key, client] => keys::send_key(key, Some(client)),
+        ["click", pane, y, client] => y.parse().map_or(2, |y| keys::click(pane, y, client, false)),
+        ["click", pane, y, client, "double"] => {
+            y.parse().map_or(2, |y| keys::click(pane, y, client, true))
+        }
+        ["wheel", pane, "up"] => keys::wheel(pane, keys::Direction::Up),
+        ["wheel", pane, "down"] => keys::wheel(pane, keys::Direction::Down),
+        ["pane-add"] => panes::pane_add(None),
+        ["pane-add", window] => panes::pane_add(Some(window)),
+        ["pane-add", window, client] => {
+            panes::reap_dead_owner();
+            panes::pane_add_for_client(window, client)
+        }
+        ["pane-orphan"] => panes::pane_orphan(),
+        ["pane-pin"] => panes::pane_pin(),
+        ["teardown"] => match panes::lifecycle_lock() {
+            Ok(_lock) => {
+                panes::stop_daemon();
+                panes::teardown()
+            }
+            Err(error) => {
+                eprintln!("agenmux: cannot acquire lifecycle lock: {error}");
+                1
+            }
+        },
+        ["setup"] => setup::run(&plugin_dir()),
+        ["setup", "--if-needed"] => setup::run_if_needed(&plugin_dir()),
+        ["toggle"] => toggle::run(&plugin_dir(), None, None),
+        ["toggle", mode] => toggle::run(&plugin_dir(), Some(mode), None),
+        ["toggle", mode, client] => toggle::run(&plugin_dir(), Some(mode), Some(client)),
+        _ => return None,
+    })
+}
 
 use super::{
     Changes, Error, Identity, Ids, Kind, Multiplexer, New, Owner, SidebarPane, WindowMeta,
@@ -143,7 +187,7 @@ impl Multiplexer for Tmux {
     fn delete(&mut self, kind: Kind, ids: Ids) -> Result<(), Error> {
         match kind {
             Kind::Pane => {
-                let not_sidebar = format!("#{{?{},0,1}}", crate::panes::IS_SIDEBAR);
+                let not_sidebar = format!("#{{?{},0,1}}", panes::IS_SIDEBAR);
                 let panes = command(&[
                     "list-panes",
                     "-s",
@@ -328,7 +372,7 @@ impl Multiplexer for Tmux {
     /// hook, so wait briefly for it to appear.
     fn focus_sidebar(&mut self, client: &str, expected_window: Option<&str>) {
         let deadline = Instant::now() + Duration::from_millis(1500);
-        let location = format!("#{{window_id}}|#{{?{},1,0}}", crate::panes::IS_SIDEBAR);
+        let location = format!("#{{window_id}}|#{{?{},1,0}}", panes::IS_SIDEBAR);
         let client_filter = format!("#{{==:#{{client_name}},{client}}}");
         let mut reached_expected = expected_window.is_none();
         loop {
@@ -359,7 +403,7 @@ impl Multiplexer for Tmux {
                 "-t",
                 window,
                 "-f",
-                crate::panes::IS_SIDEBAR,
+                panes::IS_SIDEBAR,
                 "-F",
                 "#{pane_id}",
             ])
@@ -510,7 +554,7 @@ impl Multiplexer for Tmux {
     }
 
     fn close_sidebars(&mut self) {
-        let _ = crate::panes::teardown_panes();
+        let _ = panes::teardown_panes();
     }
 
     fn remember_width(&mut self, cols: usize) -> bool {
@@ -543,17 +587,25 @@ impl Multiplexer for Tmux {
     }
 
     fn release(&mut self, generation: Option<&str>) {
-        let _ = crate::panes::clear_ownership(generation);
+        let _ = panes::clear_ownership(generation);
     }
 
-    fn as_tmux(&mut self) -> Option<&mut Tmux> {
-        Some(self)
+    /// Buffer-delivered navigation keys skip the key-binding process.
+    fn key_sink(&mut self, fd: RawFd) {
+        self.set_key_sink(fd);
     }
-}
 
-impl Tmux {
-    /// Route keys typed in sidebar panes through `table`.
-    pub fn sidebar_key_table(&mut self, table: &str) {
+    /// One key table per mode. With no client: every client on a sidebar.
+    fn input_mode(&mut self, client: Option<&str>, mode: super::InputMode) {
+        let table = match mode {
+            super::InputMode::Normal => setup::NORMAL_TABLE,
+            super::InputMode::Text => setup::SEARCH_TABLE,
+            super::InputMode::Settings => setup::SETTINGS_TABLE,
+        };
+        if let Some(client) = client {
+            let _ = command_status(&["switch-client", "-c", client, "-T", table]);
+            return;
+        }
         let clients = self
             .run("list-clients -F '#{client_name}|#{pane_title}'")
             .unwrap_or_default();
@@ -567,14 +619,27 @@ impl Tmux {
         }
     }
 
-    /// Show `text` on this connection's client. Formats and strftime expand.
-    pub fn display(&mut self, text: &str) {
-        let _ = self.run(&format!("display-message {}", quote(text)));
+    /// tmux key tables follow the keymap.
+    fn install_keys(&mut self, plugin_dir: &Path, config: &AppConfig) -> bool {
+        setup::run_config(plugin_dir, config) == 0
     }
 
-    /// Header colors from the tmux theme, where the settings leave them
-    /// unset. Returns the active border's foreground.
-    pub fn inherit_header(&self, settings: &mut AppConfig) -> Option<Color> {
+    /// Reading zero panes off a desynced control pipe looks like every
+    /// sidebar closed.
+    fn settle(&mut self) {
+        let _ = self.sync();
+    }
+
+    /// tmux docks by moving the panes. The default jump and fold keys follow
+    /// the side: reload and the settings overlay reinstall them already, a
+    /// bare tmux option does not.
+    fn dock(&mut self, plugin_dir: &Path, settings: &AppConfig) {
+        panes::dock(settings.sidebar_position, settings.sidebar_width);
+        let _ = setup::reinstall(plugin_dir, settings);
+    }
+
+    /// Header colors from the tmux theme.
+    fn inherit_header(&mut self, settings: &mut AppConfig) -> Option<Color> {
         let option = |name: &str| command(&["show-option", "-gv", name]).unwrap_or_default();
         let active = std::env::var("AGENMUX_TMUX_ACTIVE_BORDER_STYLE")
             .unwrap_or_else(|_| option("pane-active-border-style"));
@@ -585,16 +650,9 @@ impl Tmux {
         active_border_fg
     }
 
-    /// The settings moved the sidebars to the other side. The default jump
-    /// and fold keys follow the side: reload and the settings overlay
-    /// reinstall them already, a bare tmux option does not.
-    pub fn dock(&mut self, plugin_dir: &Path, settings: &crate::app_config::AppConfig) {
-        crate::panes::dock(settings.sidebar_position, settings.sidebar_width);
-        if crate::setup::bindings_stale(settings)
-            && crate::setup::run_config(plugin_dir, settings) == 0
-        {
-            crate::setup::reclaim_client_tables();
-        }
+    /// Formats and strftime expand.
+    fn notice(&mut self, text: &str) {
+        let _ = self.run(&format!("display-message {}", quote(text)));
     }
 }
 
@@ -872,13 +930,6 @@ fn parse_windows(rows: &str) -> Vec<WindowMeta> {
             })
         })
         .collect()
-}
-
-impl Tmux {
-    /// Route `client`'s keys through `table`.
-    pub fn key_table(&mut self, client: &str, table: &str) {
-        let _ = command_status(&["switch-client", "-c", client, "-T", table]);
-    }
 }
 
 /// Split a closed pane back into its live window: after the nearest saved
