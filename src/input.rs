@@ -854,6 +854,16 @@ pub(crate) fn read_search_key(fd: libc::c_int, keys: &Keymap) -> Key {
         })
 }
 
+/// Typed input after a sequence prefix. tmux routes that key through its
+/// sequence table; typed input has none, so a printable key goes to the
+/// sequence instead of the keymap, where the `s` of `cs` opens settings.
+pub(crate) fn read_sequence_key(fd: libc::c_int, keys: &Keymap) -> Key {
+    match read_search_key(fd, keys) {
+        Key::Text(text) if text.len() == 1 => Key::Sequence(char::from(text.as_bytes()[0]), None),
+        key => key,
+    }
+}
+
 /// Relay terminal paste to the daemon without interpreting its bytes as keys.
 pub(crate) fn send_text_to(runtime: &std::path::Path, text: &str) -> i32 {
     let mut limit = text.len().min(2048);
@@ -1352,6 +1362,27 @@ mod tests {
         check(reader.as_raw_fd());
         drop(reader);
         sender.join().unwrap();
+    }
+
+    #[test]
+    fn typed_sequence_continuation_beats_the_keymap() {
+        let config = config(true);
+        with_input(b"s", |fd| {
+            assert!(matches!(
+                read_key_with_config(fd, &config.normal, &config),
+                Key::Settings
+            ));
+        });
+        with_input(b"s\x1b", |fd| {
+            assert!(matches!(
+                read_sequence_key(fd, &config.normal),
+                Key::Sequence('s', None)
+            ));
+            assert!(!matches!(
+                read_sequence_key(fd, &config.normal),
+                Key::Sequence(..)
+            ));
+        });
     }
 
     #[test]

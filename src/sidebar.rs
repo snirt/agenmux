@@ -101,8 +101,8 @@ impl ScanSchedule {
 
 #[allow(unused_imports)]
 use crate::input::{
-    key_pending, poll_inputs, protocol_keys, read_key_with_config, read_search_key, settings_keys,
-    Key, KeySequence, RawMode, SequenceAction, SequenceResult,
+    key_pending, poll_inputs, protocol_keys, read_key_with_config, read_search_key,
+    read_sequence_key, settings_keys, Key, KeySequence, RawMode, SequenceAction, SequenceResult,
 };
 
 mod daemon;
@@ -656,6 +656,8 @@ fn event_loop(sb: &mut Sidebar) -> bool {
                 };
                 let key = if text_input && typed {
                     read_search_key(key_fd, keys)
+                } else if typed && sb.key_sequence.pending_prefix().is_some() {
+                    read_sequence_key(key_fd, keys)
                 } else {
                     read_key_with_config(key_fd, keys, &sb.settings.settings)
                 };
