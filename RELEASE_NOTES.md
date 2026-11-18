@@ -1,3 +1,11 @@
+# Unreleased
+
+- `agenmux list` and its alias `scan` list agent panes by default, including
+  when you filter by session or command. If a script relied on `--session` or
+  `--command` to include non-agent panes, add `--all` to restore those rows.
+  Run `agenmux list --all` to include non-agent panes across all sessions
+  ([#257](https://github.com/snirt/agenmux/issues/257)).
+
 # agenmux v0.9.0
 
 ## What's changed
