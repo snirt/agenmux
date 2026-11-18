@@ -29,7 +29,8 @@ Commands:
                                --all      include non-agent panes
                            -s, --session  only panes in that session
                            -a, --agent    only that agent (claude)
-                           -c, --command  panes running that command (zsh)
+                           -c, --command  only panes running that command
+                           Example: agenmux list --all -c zsh
   status                   Print the tmux status-line segment
   config                   Show every configuration option
   config check [--effective [--all]]
