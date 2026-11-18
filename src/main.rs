@@ -24,11 +24,13 @@ const USAGE: &str = "\
 Usage: agenmux [--mux tmux|rex] <command> [args]
 
 Commands:
-  list [-s <session>] [-a <agent>] [-c <command>]
-                           List agent panes (TSV); scan is an alias.
-                           -s, --session  every pane in that session
+  list [--all] [-s <session>] [-a <agent>] [-c <command>]
+                           List agent panes by default (TSV); scan is an alias.
+                               --all      include non-agent panes
+                           -s, --session  only panes in that session
                            -a, --agent    only that agent (claude)
-                           -c, --command  panes running that command (zsh)
+                           -c, --command  only panes running that command
+                           Example: agenmux list --all -c zsh
   status                   Print the tmux status-line segment
   config                   Show every configuration option
   config check [--effective [--all]]
@@ -185,17 +187,22 @@ fn run_scan() -> Result<scan::ScanSnapshot, mux::Error> {
 
 #[derive(Debug, Default, PartialEq)]
 struct ListFilter<'a> {
+    all: bool,
     session: Option<&'a str>,
     agent: Option<&'a str>,
     command: Option<&'a str>,
 }
 
-/// `[-s <session>] [-a <agent>] [-c <command>]`, long or short, in any order.
+/// List options can appear in any order.
 fn parse_list_args<'a>(args: &[&'a str]) -> Option<ListFilter<'a>> {
     let mut out = ListFilter::default();
     let mut args = args.iter();
     while let Some(&flag) = args.next() {
         let slot = match flag {
+            "--all" if !out.all => {
+                out.all = true;
+                continue;
+            }
             "-s" | "--session" => &mut out.session,
             "-a" | "--agent" => &mut out.agent,
             "-c" | "--command" => &mut out.command,
@@ -208,8 +215,7 @@ fn parse_list_args<'a>(args: &[&'a str]) -> Option<ListFilter<'a>> {
     Some(out)
 }
 
-/// Plain `list` keeps its agent-only output. `--session` or `--command` widens
-/// it to every pane, with `-` in the agent and state columns of non-agent panes.
+/// List agents by default. With `--all`, non-agent rows use `-` for agent and state.
 fn cmd_list(filter: ListFilter) -> i32 {
     let snapshot = match run_scan() {
         Ok(snapshot) => snapshot,
@@ -224,13 +230,17 @@ fn cmd_list(filter: ListFilter) -> i32 {
             return 1;
         }
     }
-    let every_pane = filter.session.is_some() || filter.command.is_some();
     let rows: Vec<scan::PaneRow> = snapshot
         .panes
         .iter()
-        .filter(|p| every_pane || p.agent_index.is_some())
+        .filter(|p| filter.all || p.agent_index.is_some())
         .filter(|p| filter.session.is_none_or(|s| p.session_name == s))
         .filter(|p| filter.command.is_none_or(|c| p.command == c))
+        .filter(|p| {
+            filter
+                .agent
+                .is_none_or(|a| p.agent_index.is_some_and(|i| snapshot.agents[i].agent == a))
+        })
         .map(|p| match p.agent_index {
             Some(i) => snapshot.agents[i].clone(),
             None => scan::PaneRow {
@@ -242,7 +252,6 @@ fn cmd_list(filter: ListFilter) -> i32 {
                 title: p.command.clone(),
             },
         })
-        .filter(|r| filter.agent.is_none_or(|a| r.agent == a))
         .collect();
     print!("{}", scan::to_tsv(&rows));
     0
@@ -297,8 +306,9 @@ mod tests {
     fn list_filters_are_optional_flags_in_any_order() {
         assert_eq!(parse_list_args(&[]), Some(ListFilter::default()));
         assert_eq!(
-            parse_list_args(&["-c", "zsh", "--session", "work", "-a", "claude"]),
+            parse_list_args(&["-c", "zsh", "--all", "--session", "work", "-a", "claude"]),
             Some(ListFilter {
+                all: true,
                 session: Some("work"),
                 agent: Some("claude"),
                 command: Some("zsh"),
@@ -309,6 +319,7 @@ mod tests {
             &["work"],
             &["--type", "x"],
             &["--agent", "x", "--agent", "y"],
+            &["--all", "--all"],
         ] {
             assert_eq!(parse_list_args(bad), None, "{bad:?}");
         }

@@ -305,14 +305,24 @@ Commands for shell use:
 ```text
 agenmux --version
 agenmux scan | list | status        # scan is an alias for list
-agenmux list -s, --session <name>   # every pane in one session
+agenmux list --all                 # include non-agent panes in every session
+agenmux list -s, --session <name>   # only panes in the named session
 agenmux list -a, --agent <name>     # only that agent, e.g. claude
-agenmux list -c, --command <name>   # panes running that command, e.g. zsh
+agenmux list -c, --command <name>   # match the pane's command
 agenmux config [--help | check [--effective] | reload]
 agenmux detect <conf> <screen-file> [title]
 agenmux update [latest | vX.Y.Z]
 agenmux releases refresh
 ```
+
+`list` prints agent panes in TSV format by default. Use `--all` to include
+non-agent panes, whose agent and state columns show `-`. The filters can be
+combined with each other and with `--all`. For example, `agenmux list -s work`
+lists agents in `work`, `agenmux list --all -s work` includes its non-agent
+panes, and `agenmux list --all -c zsh` includes matching shell panes across
+sessions. The command filter uses the pane's command. In agent rows, the last
+TSV field holds the agent's subject and can be empty even when the command
+matches.
 
 Each command works with the multiplexer it runs in: the tmux pane or Rex block
 around it, even nested. Outside both, it uses whichever server is running. If
