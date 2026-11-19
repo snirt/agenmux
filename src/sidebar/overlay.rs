@@ -297,7 +297,9 @@ fn visible_settings_rows(
 ) -> Vec<SettingRow> {
     settings_rows(&settings.source, effective)
         .into_iter()
-        .filter(|row| settings.search.matches(&row.name))
+        .filter(|row| {
+            settings.search.matches(&row.name) || settings.search.matches(setting_label(&row.name))
+        })
         .collect()
 }
 
@@ -320,12 +322,13 @@ fn setting_group(name: &str) -> &'static str {
 }
 
 fn setting_label(name: &str) -> &str {
-    if name == "display.show_frame" {
-        "show frame"
-    } else {
-        name.strip_prefix("keys.")
+    match name {
+        "display.show_frame" => "show frame",
+        "display.animate" => "animations",
+        _ => name
+            .strip_prefix("keys.")
             .or_else(|| name.strip_prefix("quick_launchers."))
-            .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name))
+            .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name)),
     }
 }
 
@@ -2007,6 +2010,21 @@ mod tests {
             .find(|row| row.name == "display.sidebar_width")
             .unwrap();
         assert_eq!(toggled_value(&width), None);
+
+        settings.search.query = "animations".into();
+        let animations = visible_settings_rows(&settings, &effective);
+        assert_eq!(animations.len(), 1);
+        assert_eq!(animations[0].name, "display.animate");
+        assert_eq!(setting_label(&animations[0].name), "animations");
+        let disabled = crate::app_config::edit_document(
+            &settings.source,
+            &animations[0].name,
+            toggled_value(&animations[0]),
+        )
+        .and_then(|text| crate::app_config::parse(&text))
+        .and_then(|file| crate::app_config::resolve(&file, &Default::default()))
+        .unwrap();
+        assert!(!disabled.animate);
 
         settings.search.query = "split".into();
         assert!(visible_settings_rows(&settings, &effective).is_empty());

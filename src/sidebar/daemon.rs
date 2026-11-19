@@ -289,10 +289,7 @@ impl Sidebar {
         let Some(daemon) = self.daemon.as_mut() else {
             return false;
         };
-        let mut changed = daemon.size != size;
-        for pane in &ms {
-            changed |= daemon.writers.set_height(&pane.pane, pane.h);
-        }
+        let changed = daemon.writers.measure(&ms) || daemon.size != size;
         daemon.size = size;
         changed
     }
@@ -415,6 +412,7 @@ impl Sidebar {
         };
         let d = self.daemon.as_mut().unwrap();
         d.writers.reconcile(visible_panes);
+        d.writers.measure(&ms);
         d.win_sizes = ms
             .iter()
             .map(|m| (m.win.clone(), (m.win_size, m.panes)))
@@ -439,10 +437,11 @@ impl Sidebar {
         }
         daemon.writers.reconcile(
             panes
-                .into_iter()
+                .iter()
                 .filter(|m| windows.contains(&m.win))
-                .map(|m| (m.pane, m.h)),
+                .map(|m| (m.pane.clone(), m.h)),
         );
+        daemon.writers.measure(&panes);
     }
 
     /// Preserved-pane shutdown: close visible writers, kill sidebar panes and

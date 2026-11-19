@@ -122,6 +122,42 @@ impl Ink {
             Self::Typed(Color::Rgb(r, g, b)) => format!("\x1b[48;2;{r};{g};{b}m"),
         }
     }
+
+    /// Resolve a configured color for blending. Terminal defaults have no RGB value.
+    pub(crate) fn rgb(&self) -> Option<[u8; 3]> {
+        let index = match *self {
+            Self::Typed(Color::Rgb(r, g, b)) => return Some([r, g, b]),
+            Self::Basic(index) | Self::Typed(Color::Indexed(index)) => index,
+            Self::Inherited | Self::Typed(Color::Default) => return None,
+        };
+        const ANSI: [[u8; 3]; 16] = [
+            [0, 0, 0],
+            [128, 0, 0],
+            [0, 128, 0],
+            [128, 128, 0],
+            [0, 0, 128],
+            [128, 0, 128],
+            [0, 128, 128],
+            [192, 192, 192],
+            [128, 128, 128],
+            [255, 0, 0],
+            [0, 255, 0],
+            [255, 255, 0],
+            [0, 0, 255],
+            [255, 0, 255],
+            [0, 255, 255],
+            [255, 255, 255],
+        ];
+        Some(match index {
+            0..=15 => ANSI[usize::from(index)],
+            16..=231 => {
+                let index = usize::from(index - 16);
+                let cube = [0, 95, 135, 175, 215, 255];
+                [cube[index / 36], cube[index / 6 % 6], cube[index % 6]]
+            }
+            _ => [8 + (index - 232) * 10; 3],
+        })
+    }
 }
 
 /// Startup-resolved semantic roles. No source strings reach ANSI generation.

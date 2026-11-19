@@ -260,6 +260,188 @@ pub(super) fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
     out
 }
 
+const SHINE_RADIUS: f32 = 6.0;
+
+pub(super) struct AnimatedRow {
+    screen_row: usize,
+    animation: RowAnimation,
+    text: String,
+    last: String,
+    scrollbar: Option<char>,
+}
+
+#[derive(Clone, Copy)]
+enum RowAnimation {
+    Shine(usize),
+    FinishedPulse(usize),
+}
+
+impl RowAnimation {
+    fn for_state(state: &str, from: usize) -> Option<Self> {
+        match state {
+            "working" => Some(Self::Shine(from)),
+            "done" => Some(Self::FinishedPulse(from)),
+            _ => None,
+        }
+    }
+
+    fn apply(self, line: &str, effects: &TextEffects) -> Option<String> {
+        let colors = effects.colors.as_ref()?;
+        match self {
+            Self::Shine(from) => effects
+                .center
+                .map(|center| shine_text(line, center, from, colors)),
+            Self::FinishedPulse(from) => (effects.finished_strength > 0.0).then(|| {
+                tint_text(line, from, |_, style| {
+                    colors.blend(style, effects.finished_strength)
+                })
+            }),
+        }
+    }
+}
+
+struct TextEffects {
+    center: Option<f32>,
+    finished_strength: f32,
+    colors: Option<AnimationColors>,
+}
+
+struct AnimationColors {
+    text: [u8; 3],
+    muted: [u8; 3],
+    muted_style: String,
+    contrast: u8,
+}
+
+const SHINE_STRENGTH: f32 = 0.68;
+const FINISHED_STRENGTH: f32 = 0.55;
+
+impl TextEffects {
+    fn new(sb: &Sidebar, cols: usize) -> Self {
+        let animate = sb.settings.settings.animate;
+        let center = animate
+            .then(|| shine_center(sb.text_animation_step, cols))
+            .flatten();
+        let finished_strength = if animate {
+            f32::from(sb.finished_fade) / f32::from(u8::MAX) * FINISHED_STRENGTH
+        } else {
+            0.0
+        };
+        let colors = (center.is_some() || finished_strength > 0.0).then(|| {
+            let light =
+                sb.settings.settings.theme.base == Some(crate::app_config::ThemeBase::Light);
+            AnimationColors::new(&sb.palette, light)
+        });
+        Self {
+            center,
+            finished_strength,
+            colors,
+        }
+    }
+}
+
+impl AnimationColors {
+    fn new(palette: &Palette, light: bool) -> Self {
+        let light = palette.pane_bg.rgb().map_or(light, |[r, g, b]| {
+            (u32::from(r) * 2126 + u32::from(g) * 7152 + u32::from(b) * 722) >= 1_280_000
+        });
+        let inherited = if light { 32 } else { 205 };
+        Self {
+            text: palette.text_fg.rgb().unwrap_or([inherited; 3]),
+            muted: palette.muted_fg.rgb().unwrap_or([inherited; 3]),
+            muted_style: palette.muted_fg.fg(""),
+            contrast: if light { u8::MIN } else { u8::MAX },
+        }
+    }
+
+    fn blend(&self, style: &str, strength: f32) -> Option<[u8; 3]> {
+        let base = if !self.muted_style.is_empty() && style.contains(&self.muted_style) {
+            self.muted
+        } else {
+            self.text
+        };
+        let tinted = base.map(|channel| {
+            let delta = f32::from(self.contrast) - f32::from(channel);
+            (f32::from(channel) + delta * strength).round() as u8
+        });
+        (tinted != base).then_some(tinted)
+    }
+}
+
+fn shine_center(step: u32, cols: usize) -> Option<f32> {
+    (1..=super::TEXT_ANIMATION_ACTIVE_STEPS)
+        .contains(&step)
+        .then(|| {
+            let progress = (step - 1) as f32 / (super::TEXT_ANIMATION_ACTIVE_STEPS - 1) as f32;
+            progress * (cols.saturating_sub(1) as f32 + 2.0 * SHINE_RADIUS) - SHINE_RADIUS
+        })
+}
+
+/// Apply the moving highlight to glyphs while retaining the row's foreground styles.
+fn shine_text(line: &str, center: f32, shine_from: usize, colors: &AnimationColors) -> String {
+    tint_text(line, shine_from, |col, style| {
+        let distance = (col as f32 - center).abs();
+        let strength = (1.0 - (distance - 0.5).max(0.0) / (SHINE_RADIUS - 0.5)).max(0.0);
+        let eased = strength * strength * (3.0 - 2.0 * strength);
+        colors.blend(style, eased * SHINE_STRENGTH)
+    })
+}
+
+fn tint_text(line: &str, from: usize, shade_at: impl Fn(usize, &str) -> Option<[u8; 3]>) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(line.len());
+    let mut original_style = String::new();
+    let mut chars = line.chars().peekable();
+    let mut col: usize = 0;
+    let mut previous: Option<[u8; 3]> = None;
+    while let Some(c) = chars.next() {
+        if c == '\n' {
+            out.push(c);
+            out.extend(chars);
+            break;
+        }
+        if c == '\x1b' && chars.next_if_eq(&'[').is_some() {
+            let start = out.len();
+            out.push_str(E);
+            out.push('[');
+            for parameter in chars.by_ref() {
+                out.push(parameter);
+                if ('@'..='~').contains(&parameter) {
+                    break;
+                }
+            }
+            let style = &out[start..];
+            if style == "\x1b[0m" {
+                original_style.clear();
+                previous = None;
+            } else {
+                original_style.push_str(style);
+                if let Some([r, g, b]) = previous {
+                    let _ = write!(out, "{E}[38;2;{r};{g};{b}m");
+                }
+            }
+            continue;
+        }
+        let unit = next_unit(c, &mut chars);
+        let width = cell_width(&unit);
+        if width > 0 && col >= from {
+            let color = shade_at(col, &original_style);
+            if color != previous {
+                if let Some([r, g, b]) = color {
+                    let _ = write!(out, "{E}[38;2;{r};{g};{b}m");
+                } else {
+                    out.push_str("\x1b[0m");
+                    out.push_str(&original_style);
+                }
+                previous = color;
+            }
+        }
+        out.push_str(&unit);
+        col += width;
+    }
+    out
+}
+
 fn framed_size(cols: usize, height: usize) -> Option<(usize, usize)> {
     if cols >= 4 && height >= 4 {
         Some((cols - 2, height - 2))
@@ -596,16 +778,59 @@ impl Sidebar {
         let rows = format!("{lead}{rows}");
         // Restore the normal foreground after glyph/attribute resets, including
         // inside filled rows. Inherited dark foreground adds no bytes.
+        (self.with_text_color(frame), rows)
+    }
+
+    fn with_text_color(&self, frame: String) -> String {
         let fg = self.palette.text_fg.fg("");
-        let frame = if fg.is_empty() {
+        if fg.is_empty() {
             frame
         } else {
-            format!(
-                "{fg}{}",
-                frame.replace(&format!("{E}[0m"), &format!("{E}[0m{fg}"))
-            )
+            format!("{fg}{}", frame.replace("\x1b[0m", &format!("{E}[0m{fg}")))
+        }
+    }
+
+    /// Repaint the text on the last full frame. With mismatched mirror sizes,
+    /// the terminal can have wrapped or scrolled the frame, so repaint it whole.
+    pub(super) fn render_animated_rows(&mut self) -> bool {
+        use std::fmt::Write as _;
+        let Some(daemon) = self.daemon.as_ref() else {
+            return false;
         };
-        (frame, rows)
+        if self.animated_rows.is_empty()
+            || self.last_frame.is_empty()
+            || !self.escape.is_empty()
+            || !daemon.writers.fits(daemon.size)
+        {
+            return false;
+        }
+        let (width, height) = daemon.size;
+        let (cols, left) = self
+            .frame_size(width, height)
+            .map_or((width, 1), |(cols, _)| (cols, 2));
+        let effects = TextEffects::new(self, cols);
+        let mut frame = String::new();
+        for row in &mut self.animated_rows {
+            let text = row
+                .animation
+                .apply(&row.text, &effects)
+                .unwrap_or_else(|| row.text.clone());
+            if text == row.last {
+                continue;
+            }
+            let clipped = clip_frame(&text, cols, 1);
+            let _ = write!(frame, "{E}[{};{left}H{E}[0m{clipped}", row.screen_row);
+            if let Some(thumb) = row.scrollbar {
+                let _ = write!(frame, "{E}[{}G{E}[2m{thumb}{E}[0m", left + cols - 1);
+            }
+            row.last = text;
+        }
+        if !frame.is_empty() {
+            let frame = self.with_text_color(frame);
+            self.daemon.as_mut().unwrap().writers.emit_patch(&frame);
+            self.animation_patched = true;
+        }
+        true
     }
 
     #[allow(clippy::type_complexity)]
@@ -615,7 +840,11 @@ impl Sidebar {
         cursor: Option<usize>,
         accent: &str,
         muted: &str,
-    ) -> (Vec<(String, String, usize, u8)>, usize, usize) {
+    ) -> (
+        Vec<(String, String, usize, u8, Option<RowAnimation>)>,
+        usize,
+        usize,
+    ) {
         let mut counts = std::collections::HashMap::new();
         for pane in &self.panes {
             *counts
@@ -738,6 +967,7 @@ impl Sidebar {
                     pane.pane.clone(),
                     ordinal + 1,
                     if selected { 2 } else { 3 },
+                    None,
                 ));
                 if selected {
                     sel_bot = lines.len() - 1;
@@ -770,11 +1000,9 @@ impl Sidebar {
             // Everything on the row before the editable name, so the edit field
             // can be clipped to keep its cursor on screen in a narrow pane.
             let lead = if let Some(row) = agent {
-                format!(
-                    "{base}{mark}{prefix}{} {E}[1m{}{E}[0m ",
-                    self.dot(state),
-                    self.agent_label(&row.agent)
-                )
+                let dot = self.dot(state);
+                let label = self.agent_label(&row.agent);
+                format!("{base}{mark}{prefix}{dot} {E}[1m{label}{E}[0m ")
             } else {
                 let glyph = match pane.command.as_str() {
                     _ if plain => "▢",
@@ -818,6 +1046,7 @@ impl Sidebar {
                 pane.pane.clone(),
                 ordinal + 1,
                 u8::from(selected),
+                RowAnimation::for_state(state, base.len() + 2 + prefix.len() + 2),
             ));
             if let Some(row) = agent.filter(|row| !row.title.is_empty()) {
                 let title_prefix = if expanded { "        " } else { "      " };
@@ -833,6 +1062,7 @@ impl Sidebar {
                     pane.pane.clone(),
                     ordinal + 1,
                     u8::from(selected),
+                    RowAnimation::for_state(state, 0),
                 ));
             }
             if selected {
@@ -872,6 +1102,7 @@ impl Sidebar {
                     "-".into(),
                     0,
                     0,
+                    None,
                 ),
             );
             sel_top = at;
@@ -881,7 +1112,11 @@ impl Sidebar {
     }
 
     pub(super) fn render(&mut self, force: bool) {
-        let force = force || self.last_frame.is_empty();
+        let patched = std::mem::take(&mut self.animation_patched);
+        let force = force || self.last_frame.is_empty() || patched;
+        self.animated_text_visible = false;
+        self.finished_visible = false;
+        self.animated_rows.clear();
         let size @ (cols, height) = self.outer_size();
         let (frame, rows) = self.render_view(size, true);
         // Keep the watched view's map for consumers of the existing runtime
@@ -1168,6 +1403,7 @@ impl Sidebar {
                             "-".into(),
                             0,
                             0,
+                            None,
                         ));
                     }
                     if Some(n) == cursor {
@@ -1198,6 +1434,7 @@ impl Sidebar {
                         r.pane.clone(),
                         n + 1,
                         u8::from(selected),
+                        RowAnimation::for_state(&r.state, 5),
                     ));
                     if !r.title.is_empty() {
                         let t: String = r.title.chars().take(cols.saturating_sub(7)).collect();
@@ -1208,6 +1445,7 @@ impl Sidebar {
                             r.pane.clone(),
                             n + 1,
                             u8::from(selected),
+                            RowAnimation::for_state(&r.state, 0),
                         ));
                     }
                     if Some(n) == cursor {
@@ -1320,14 +1558,42 @@ impl Sidebar {
             } else {
                 0
             };
-            for (row, (text, pane, index, selected)) in lines[scroll..end].iter().enumerate() {
-                if overflow {
-                    frame.push_str(text.trim_end_matches('\n'));
-                    let glyph = if (thumb_start..thumb_start + thumb_len).contains(&row) {
+            let effects = TextEffects::new(self, cols);
+            let mut can_patch = true;
+            for (row, (source, pane, index, selected, animation)) in
+                lines[scroll..end].iter().enumerate()
+            {
+                let animation = animation.filter(|_| self.settings.settings.animate);
+                self.animated_text_visible |= animation.is_some();
+                self.finished_visible |= matches!(animation, Some(RowAnimation::FinishedPulse(_)));
+                let highlighted = animation.and_then(|animation| animation.apply(source, &effects));
+                let text = highlighted.as_ref().unwrap_or(source);
+                let scrollbar = overflow.then(|| {
+                    if (thumb_start..thumb_start + thumb_len).contains(&row) {
                         '▐'
                     } else {
                         '│'
-                    };
+                    }
+                });
+                if let Some(animation) = animation.filter(|_| primary && self.daemon.is_some()) {
+                    match source
+                        .strip_suffix("\x1b[K\n")
+                        .zip(text.strip_suffix("\x1b[K\n"))
+                    {
+                        Some((base, current)) if !base.contains(['\r', '\n', '\t']) => {
+                            self.animated_rows.push(AnimatedRow {
+                                screen_row: row + 2 + usize::from(framed.is_some()),
+                                animation,
+                                text: base.to_string(),
+                                last: current.to_string(),
+                                scrollbar,
+                            });
+                        }
+                        _ => can_patch = false,
+                    }
+                }
+                if let Some(glyph) = scrollbar {
+                    frame.push_str(text.trim_end_matches('\n'));
                     frame.push_str(&format!("{E}[{cols}G{E}[2m{glyph}{E}[0m\n"));
                 } else {
                     frame.push_str(text);
@@ -1337,6 +1603,9 @@ impl Sidebar {
                 } else {
                     vis.push_str(&format!("{pane}\t{index}\t{selected}\n"));
                 }
+            }
+            if !can_patch {
+                self.animated_rows.clear();
             }
         }
         if has_hint {
@@ -1527,8 +1796,10 @@ mod tests {
             for selected in 1..=4 {
                 sb.sel = selected;
                 sb.active = format!("%{selected}");
-                for tick in [0, 2, 7] {
+                for (tick, text_animation_step) in [(0, 0), (2, 4), (7, 5)] {
                     sb.tick = tick;
+                    sb.text_animation_step = text_animation_step;
+                    sb.finished_fade = super::super::finished_fade(tick, super::super::STATUS_TICK);
                     sb.render(true);
                     frames.push_str(&format!(
                         "focus={focused} selected={selected} tick={tick}\n{}\nrows={}\n",
@@ -1542,6 +1813,116 @@ mod tests {
                 }
             }
         }
+        let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap();
+        let peak = format!("{E}[38;2;218;218;218m");
+        let peaks: Vec<_> = sb
+            .last_frame
+            .lines()
+            .filter_map(|line| {
+                line.find(&peak)
+                    .map(|pos| ansi.replace_all(&line[..pos], "").chars().count())
+            })
+            .collect();
+        assert_eq!(
+            peaks.len(),
+            2,
+            "shine appears on the working item and its detail"
+        );
+        assert_eq!(peaks[0], peaks[1], "both lines share the same shine column");
+        let working_prefix = format!("{E}[33m❯{E}[0m {E}[33m⠹{E}[0m ");
+        let example = format!("{working_prefix}agent");
+        let colors = AnimationColors::new(&sb.palette, false);
+        let highlighted = shine_text(&example, 2.0, 4, &colors);
+        assert!(highlighted.starts_with(&working_prefix));
+        assert!(highlighted[working_prefix.len()..].contains("[38;2;"));
+        let cached_rows: Vec<_> = sb
+            .animated_rows
+            .iter()
+            .filter(|row| matches!(row.animation, RowAnimation::Shine(_)))
+            .map(|row| row.screen_row)
+            .collect();
+        let painted_rows: Vec<_> = sb
+            .last_frame
+            .lines()
+            .enumerate()
+            .filter_map(|(index, line)| line.contains(&peak).then_some(index + 2))
+            .collect();
+        assert_eq!(
+            cached_rows, painted_rows,
+            "patches include the frame's top inset"
+        );
+        sb.text_animation_step = 12;
+        sb.tick = 2;
+        sb.finished_fade = super::super::finished_fade(sb.tick, super::super::STATUS_TICK);
+        assert!(!sb.blink_on());
+        sb.render(true);
+        let pulse_rows: Vec<_> = sb
+            .animated_rows
+            .iter()
+            .filter(|row| matches!(row.animation, RowAnimation::FinishedPulse(_)))
+            .collect();
+        assert_eq!(pulse_rows.len(), 2);
+        for row in pulse_rows {
+            assert!(row.last.contains("[38;2;202;202;202m"));
+            assert_eq!(
+                ansi.replace_all(&row.last, ""),
+                ansi.replace_all(&row.text, "")
+            );
+        }
+        let mut custom = sb.palette.clone();
+        custom.text_fg = Ink::Typed(Color::Rgb(80, 100, 120));
+        custom.muted_fg = Ink::Typed(Color::Rgb(100, 120, 140));
+        let effects = TextEffects {
+            center: Some(2.0),
+            finished_strength: FINISHED_STRENGTH,
+            colors: Some(AnimationColors::new(&custom, false)),
+        };
+        let icon_and_label = format!("{E}[32m⣿{E}[0m {E}[1m◆ codex{E}[0m");
+        let pulse = RowAnimation::FinishedPulse(2);
+        let label = pulse.apply(&icon_and_label, &effects).unwrap();
+        assert!(label.contains(&format!("{E}[38;2;176;185;194m◆ codex")));
+        assert!(label.starts_with(&format!("{E}[32m⣿")));
+        let detail = format!("{}task{E}[0m", custom.muted_fg.fg(""));
+        assert!(RowAnimation::FinishedPulse(0)
+            .apply(&detail, &effects)
+            .unwrap()
+            .contains(&format!("{E}[38;2;185;194;203mtask")));
+        let shine = RowAnimation::Shine(2);
+        assert!(shine
+            .apply(&icon_and_label, &effects)
+            .unwrap()
+            .contains(&format!("{E}[38;2;199;205;212m◆")));
+        assert!(RowAnimation::Shine(0)
+            .apply(&detail, &effects)
+            .unwrap()
+            .contains(&format!("{E}[38;2;205;212;218m")));
+        custom.pane_bg = Ink::Typed(Color::Indexed(255));
+        let light_colors = AnimationColors::new(&custom, false);
+        assert_eq!(
+            light_colors.blend("", FINISHED_STRENGTH),
+            Some([36, 45, 54])
+        );
+        assert_eq!(
+            light_colors.blend(&custom.muted_fg.fg(""), FINISHED_STRENGTH),
+            Some([45, 54, 63])
+        );
+        assert_eq!(light_colors.blend("", SHINE_STRENGTH), Some([26, 32, 38]));
+        let fade = |tick| super::super::finished_fade(tick, super::super::STATUS_TICK);
+        assert!(fade(0) < fade(1) && fade(1) < fade(2));
+        assert!(fade(2) > fade(3) && fade(3) > fade(4));
+        sb.settings.settings.animate = false;
+        sb.render(true);
+        let steady_frame = sb.last_frame.clone();
+        sb.text_animation_step = 4;
+        sb.finished_fade = 50;
+        sb.tick = 5;
+        sb.render(true);
+        assert_eq!(sb.last_frame, steady_frame);
+        assert!(sb.animated_rows.is_empty() && !sb.animated_text_visible && !sb.animating());
+        sb.settings.settings.animate = true;
+        sb.tick = 7;
+        sb.text_animation_step = 0;
+        sb.finished_fade = 0;
         for mode in 0..7 {
             sb.search.query.clear();
             sb.attention_filter = false;

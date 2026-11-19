@@ -42,6 +42,7 @@ pub(crate) fn write_rows(path: &Path, rows: &str) -> std::io::Result<()> {
 struct PaneWriter {
     file: File,
     height: usize,
+    size: Option<(usize, usize)>,
     last_frame: String,
     last_rows: Option<String>,
 }
@@ -60,6 +61,7 @@ impl PaneWriter {
         Ok(Self {
             file,
             height,
+            size: None,
             last_frame: String::new(),
             last_rows: None,
         })
@@ -121,12 +123,6 @@ impl PaneWriters {
         }
     }
 
-    pub fn set_height(&mut self, pane: &str, height: usize) -> bool {
-        self.writers
-            .get_mut(pane)
-            .is_some_and(|writer| writer.set_height(height))
-    }
-
     pub fn heights(&self) -> HashSet<usize> {
         self.writers.values().map(|writer| writer.height).collect()
     }
@@ -154,6 +150,37 @@ impl PaneWriters {
             }
             true
         });
+    }
+
+    pub fn measure(&mut self, panes: &[crate::mux::SidebarPane]) -> bool {
+        let mut changed = false;
+        for (id, writer) in &mut self.writers {
+            let size = panes
+                .iter()
+                .find(|pane| &pane.pane == id)
+                .map(|pane| (pane.w, pane.h));
+            if let Some((_, height)) = size {
+                changed |= writer.set_height(height);
+            }
+            changed |= writer.size != size;
+            writer.size = size;
+        }
+        changed
+    }
+
+    pub fn fits(&self, size: (usize, usize)) -> bool {
+        !self.writers.is_empty()
+            && self
+                .writers
+                .values()
+                .all(|writer| writer.size == Some(size) && !writer.last_frame.is_empty())
+    }
+
+    pub fn emit_patch(&mut self, frame: &str) {
+        let deadline = Instant::now() + WRITE_BUDGET;
+        let packet = format!("\x1b[?2026h\x1b[?25l{frame}\x1b[?2026l");
+        self.writers
+            .retain(|_, writer| writer.emit(packet.as_bytes(), deadline).is_ok());
     }
 
     pub fn clear(&mut self) {

@@ -146,9 +146,9 @@ installer sets it from its font check. Change an icon with `AGENT_ICON`; see
 
 ### Motion and glyphs
 
-- `display.animate = false` stops the blink and the spinner, and the sidebar
-  stops redrawing every 250 ms. Every state shows a steady glyph; a working
-  agent shows `⣾`.
+- Press `s` and toggle **Display → animations** off, or set
+  `display.animate = false` in `config.toml`. This stops the spinner, blink,
+  working shine, and finished pulse. Every state shows a steady glyph.
 - `display.glyphs = "plain"` swaps braille and Nerd Font glyphs for plain
   text, for fonts and terminals without them:
 
