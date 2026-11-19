@@ -17,10 +17,37 @@ pub(crate) fn frame_path(runtime: &Path, pane: &str) -> PathBuf {
     runtime.join(format!("agenmux-frame-{pane}"))
 }
 
-struct PaneWriter(File);
+fn rows_path(runtime: &Path, pane: &str) -> PathBuf {
+    runtime.join(format!("agenmux-rows-{pane}"))
+}
+
+pub(crate) fn read_rows(runtime: &Path, pane: &str) -> std::io::Result<String> {
+    std::fs::read_to_string(rows_path(runtime, pane)).or_else(|error| {
+        // A split pane that has yet to receive a frame has no click targets.
+        if error.kind() == std::io::ErrorKind::NotFound && !frame_path(runtime, pane).exists() {
+            std::fs::read_to_string(runtime.join("agenmux-rows"))
+        } else {
+            Err(error)
+        }
+    })
+}
+
+pub(crate) fn write_rows(path: &Path, rows: &str) -> std::io::Result<()> {
+    // A click can read the map while the daemon replaces it.
+    let staged = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&staged, rows)?;
+    std::fs::rename(staged, path)
+}
+
+struct PaneWriter {
+    file: File,
+    height: usize,
+    last_frame: String,
+    last_rows: Option<String>,
+}
 
 impl PaneWriter {
-    fn open(runtime: &Path, pane: &str) -> std::io::Result<Self> {
+    fn open(runtime: &Path, pane: &str, height: usize) -> std::io::Result<Self> {
         // Nonblocking: neither a reader still starting nor one that stopped
         // draining may stall the daemon.
         let file = OpenOptions::new()
@@ -30,23 +57,41 @@ impl PaneWriter {
         if !file.metadata()?.file_type().is_fifo() {
             return Err(std::io::Error::other("sidebar frame target is not a FIFO"));
         }
-        Ok(Self(file))
+        Ok(Self {
+            file,
+            height,
+            last_frame: String::new(),
+            last_rows: None,
+        })
     }
 
     fn emit(&mut self, frame: &[u8], deadline: Instant) -> std::io::Result<()> {
         let mut rest = frame;
         while !rest.is_empty() {
             // Chunks fit the 8 KiB FIFO buffer macOS starts with.
-            match self.0.write(&rest[..rest.len().min(4096)]) {
+            match self.file.write(&rest[..rest.len().min(4096)]) {
                 Ok(n) => rest = &rest[n..],
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
-                        && crate::input::poll_by(self.0.as_raw_fd(), libc::POLLOUT, deadline) => {}
+                        && crate::input::poll_by(
+                            self.file.as_raw_fd(),
+                            libc::POLLOUT,
+                            deadline,
+                        ) => {}
                 Err(e) => return Err(e),
             }
         }
         Ok(())
+    }
+
+    fn set_height(&mut self, height: usize) -> bool {
+        if self.height == height {
+            return false;
+        }
+        self.height = height;
+        self.last_frame.clear();
+        true
     }
 }
 
@@ -63,27 +108,52 @@ impl PaneWriters {
         }
     }
 
-    /// Match writers to visible panes; new targets need the last frame replayed.
-    pub fn reconcile(&mut self, panes: impl IntoIterator<Item = String>) -> bool {
-        let wanted: HashSet<String> = panes.into_iter().collect();
-        let before = self.writers.len();
-        self.writers.retain(|pane, _| wanted.contains(pane));
-        let mut changed = self.writers.len() != before;
-        for pane in &wanted {
-            if !self.writers.contains_key(pane) {
-                if let Ok(writer) = PaneWriter::open(&self.runtime, pane) {
-                    self.writers.insert(pane.clone(), writer);
-                    changed = true;
-                }
+    /// New targets start with an empty frame cache, ready for a full repaint.
+    pub fn reconcile(&mut self, panes: impl IntoIterator<Item = (String, usize)>) {
+        let wanted: HashMap<_, _> = panes.into_iter().collect();
+        self.writers.retain(|pane, _| wanted.contains_key(pane));
+        for (pane, height) in wanted {
+            if let Some(writer) = self.writers.get_mut(&pane) {
+                writer.set_height(height);
+            } else if let Ok(writer) = PaneWriter::open(&self.runtime, &pane, height) {
+                self.writers.insert(pane, writer);
             }
         }
-        changed
     }
 
-    pub fn emit(&mut self, frame: &str) {
-        let deadline = Instant::now() + WRITE_BUDGET;
+    pub fn set_height(&mut self, pane: &str, height: usize) -> bool {
         self.writers
-            .retain(|_, writer| writer.emit(frame.as_bytes(), deadline).is_ok());
+            .get_mut(pane)
+            .is_some_and(|writer| writer.set_height(height))
+    }
+
+    pub fn heights(&self) -> HashSet<usize> {
+        self.writers.values().map(|writer| writer.height).collect()
+    }
+
+    pub fn emit(&mut self, frames: &HashMap<usize, (String, String)>, escape: &str, force: bool) {
+        let deadline = Instant::now() + WRITE_BUDGET;
+        self.writers.retain(|pane, writer| {
+            let (frame, rows) = &frames[&writer.height];
+            if force || !escape.is_empty() || writer.last_frame != *frame {
+                // Cursor movement preserves the upper rows even if the pane
+                // shrinks between measurement and delivery.
+                let positioned = frame.replace('\n', "\r\x1b[B");
+                // tmux can read the frame in several PTY-sized pieces. Hide
+                // the cursor throughout the draw, including on Rex.
+                let packet = format!("{escape}\x1b[?2026h\x1b[?25l{positioned}\x1b[?2026l");
+                if writer.emit(packet.as_bytes(), deadline).is_err() {
+                    return false;
+                }
+                writer.last_frame.clone_from(frame);
+            }
+            if writer.last_rows.as_ref() != Some(rows)
+                && write_rows(&rows_path(&self.runtime, pane), rows).is_ok()
+            {
+                writer.last_rows = Some(rows.clone());
+            }
+            true
+        });
     }
 
     pub fn clear(&mut self) {
@@ -188,8 +258,8 @@ impl TtyInput {
 }
 
 /// The list index on `row` of the daemon's row map.
-fn row_index(runtime: &Path, row: usize) -> Option<u32> {
-    let rows = std::fs::read_to_string(runtime.join("agenmux-rows")).ok()?;
+fn row_index(runtime: &Path, pane: &str, row: usize) -> Option<u32> {
+    let rows = read_rows(runtime, pane).ok()?;
     rows.lines()
         .nth(row)?
         .split_whitespace()
@@ -207,10 +277,12 @@ pub(crate) fn run_pane() -> i32 {
     };
     let runtime = crate::mux::runtime_dir();
     let path = frame_path(&runtime, &pane);
+    let rows = rows_path(&runtime, &pane);
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
         return 1;
     };
     let _ = std::fs::remove_file(&path); // stale FIFO from a killed pane
+    let _ = std::fs::remove_file(&rows);
     if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
         return 1;
     }
@@ -277,8 +349,9 @@ pub(crate) fn run_pane() -> i32 {
             match std::io::stdin().lock().read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let packets =
-                        tty.translate(&buf[..n], Instant::now(), |row| row_index(&runtime, row));
+                    let packets = tty.translate(&buf[..n], Instant::now(), |row| {
+                        row_index(&runtime, &pane, row)
+                    });
                     for packet in packets {
                         // PIPE_BUF bounds an atomic FIFO write
                         for chunk in packet.chunks(512) {
@@ -307,6 +380,7 @@ pub(crate) fn run_pane() -> i32 {
     drop(stdout);
     drop(frames);
     let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(rows);
     0
 }
 
@@ -359,7 +433,7 @@ mod tests {
         let frame = vec![b'x'; 20_000];
         let sent = frame.clone();
         let writer = std::thread::spawn(move || {
-            PaneWriter::open(&runtime, "%1")
+            PaneWriter::open(&runtime, "%1", 24)
                 .unwrap()
                 .emit(&sent, Instant::now() + Duration::from_secs(2))
                 .unwrap();
@@ -409,9 +483,14 @@ mod tests {
             writers: HashMap::new(),
             runtime: runtime.clone(),
         };
-        assert!(writers.reconcile(["%1".to_string()]));
+        writers.reconcile([("%1".to_string(), 24)]);
+        assert_eq!(writers.writers.len(), 1);
         let started = Instant::now();
-        writers.emit(&"x".repeat(1 << 20));
+        writers.emit(
+            &HashMap::from([(24, ("x".repeat(1 << 20), String::new()))]),
+            "",
+            false,
+        );
         assert!(
             started.elapsed() < WRITE_BUDGET * 3,
             "{:?}",

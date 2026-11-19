@@ -177,7 +177,7 @@ pub fn click(pane: &str, y: usize, client: &str, second: bool) -> i32 {
     }
     let runtime = tmux::runtime_dir();
 
-    let target = std::fs::read_to_string(runtime.join("agenmux-rows"))
+    let target = crate::pane_writers::read_rows(&runtime, pane)
         .ok()
         .and_then(|rows| {
             let mut fields = rows.lines().nth(y)?.split_whitespace();
