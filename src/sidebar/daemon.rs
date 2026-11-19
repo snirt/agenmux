@@ -279,17 +279,16 @@ impl Sidebar {
     /// adoption and pane reconciliation stay on the periodic mirror tick.
     pub(super) fn refresh_geometry(&mut self) -> bool {
         self.barrier();
-        let Some(ms) = self.measure_panes() else {
-            return false;
-        };
-        let Some(w) = watched_width(&ms, &self.active_session) else {
-            return false;
-        };
-        let size = (w, watched_height(&ms, &self.active_session));
+        let ms = self.measure_panes().unwrap_or_default();
         let Some(daemon) = self.daemon.as_mut() else {
             return false;
         };
-        let changed = daemon.writers.measure(&ms) || daemon.size != size;
+        let writers_changed = daemon.writers.measure(&ms);
+        let Some(w) = watched_width(&ms, &self.active_session) else {
+            return writers_changed;
+        };
+        let size = (w, watched_height(&ms, &self.active_session));
+        let changed = writers_changed || daemon.size != size;
         daemon.size = size;
         changed
     }
@@ -308,10 +307,16 @@ impl Sidebar {
         self.sync_panes_view();
         let width_changed = refreshed.width_changed;
         let Some(mut ms) = self.measure_panes() else {
+            if self.daemon.as_mut().unwrap().writers.measure(&[]) {
+                self.last_frame.clear();
+            }
             return true;
         };
         if ms.is_empty() {
             let d = self.daemon.as_mut().unwrap();
+            if d.writers.measure(&[]) {
+                self.last_frame.clear();
+            }
             d.empty_ticks += 1;
             return !suicide(d.seen_mirror, d.started.elapsed(), d.empty_ticks);
         }
@@ -365,6 +370,7 @@ impl Sidebar {
                 })
                 .map(|m| (m.pane.clone(), m.w))
         };
+        let size_requested = width_changed || !dup.is_empty() || drag.is_some();
         if let Some((src_pane, width)) = drag {
             if (1..=10000).contains(&width) && self.mux.remember_width(width) {
                 self.settings.settings.sidebar_width = width as u16;
@@ -412,7 +418,17 @@ impl Sidebar {
         };
         let d = self.daemon.as_mut().unwrap();
         d.writers.reconcile(visible_panes);
-        d.writers.measure(&ms);
+        // Requested dimensions can differ from the actual viewport until the
+        // backend reconciles. Wait for a fresh measurement before patching.
+        let measured = if size_requested || !put_back.is_empty() {
+            &[][..]
+        } else {
+            &ms
+        };
+        if d.writers.measure(measured) {
+            // Repaint for size changes and for readers without a prior frame.
+            self.last_frame.clear();
+        }
         d.win_sizes = ms
             .iter()
             .map(|m| (m.win.clone(), (m.win_size, m.panes)))

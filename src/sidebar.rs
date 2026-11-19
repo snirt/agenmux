@@ -259,7 +259,7 @@ pub struct Sidebar {
     animated_text_visible: bool,
     finished_visible: bool,
     finished_fade: u8,
-    animated_rows: Vec<render::AnimatedRow>,
+    animation_frame: Option<render::AnimationFrame>,
     animation_patched: bool,
     self_pane: String,
     pin: Option<String>,
@@ -360,7 +360,7 @@ fn new_sidebar(
         animated_text_visible: false,
         finished_visible: false,
         finished_fade: 0,
-        animated_rows: Vec::new(),
+        animation_frame: None,
         animation_patched: false,
         self_pane,
         pin: None,
@@ -649,7 +649,9 @@ fn event_loop(sb: &mut Sidebar) -> bool {
             sb.finished_fade = 0;
         }
         sb.text_animation_step = text_animation_step;
-        if spinner_due || (text_animation_due && !sb.render_animated_rows()) {
+        if spinner_due {
+            sb.render_status_tick();
+        } else if text_animation_due && !sb.render_animated_rows() {
             sb.render(false);
         }
 

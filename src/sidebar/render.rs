@@ -262,12 +262,29 @@ pub(super) fn clip_frame(frame: &str, cols: usize, cap: usize) -> String {
 
 const SHINE_RADIUS: f32 = 6.0;
 
-pub(super) struct AnimatedRow {
+pub(super) struct AnimationFrame {
+    size: (usize, usize),
+    chrome: String,
+    rows: Vec<PaintedRow>,
+}
+
+struct PaintedRow {
     screen_row: usize,
-    animation: RowAnimation,
+    animation: Option<RowAnimation>,
     text: String,
     last: String,
     scrollbar: Option<char>,
+}
+
+impl PaintedRow {
+    fn append_patch(&self, frame: &mut String, cols: usize, left: usize) {
+        use std::fmt::Write as _;
+        let clipped = clip_frame(&self.last, cols, 1);
+        let _ = write!(frame, "{E}[{};{left}H{E}[0m{clipped}", self.screen_row);
+        if let Some(thumb) = self.scrollbar {
+            let _ = write!(frame, "{E}[{}G{E}[2m{thumb}{E}[0m", left + cols - 1);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -424,7 +441,7 @@ fn tint_text(line: &str, from: usize, shade_at: impl Fn(usize, &str) -> Option<[
         }
         let unit = next_unit(c, &mut chars);
         let width = cell_width(&unit);
-        if width > 0 && col >= from {
+        if width > 0 && col >= from && unit != " " {
             let color = shade_at(col, &original_style);
             if color != previous {
                 if let Some([r, g, b]) = color {
@@ -790,46 +807,84 @@ impl Sidebar {
         }
     }
 
-    /// Repaint the text on the last full frame. With mismatched mirror sizes,
-    /// the terminal can have wrapped or scrolled the frame, so repaint it whole.
+    /// A mismatched mirror may have wrapped or scrolled the full frame, making
+    /// absolute row addresses unsafe. A new reader also needs a full frame.
+    fn can_patch(&self, size: (usize, usize)) -> bool {
+        !self.last_frame.is_empty()
+            && self.escape.is_empty()
+            && self.daemon.as_ref().map_or_else(
+                || !super::WINCH.load(std::sync::atomic::Ordering::Relaxed) && term_size() == size,
+                |daemon| {
+                    !self.mux.changes().layout && daemon.size == size && daemon.writers.fits(size)
+                },
+            )
+    }
+
+    fn write_patch(&mut self, frame: String) {
+        if !frame.is_empty() {
+            let frame = self.with_text_color(frame);
+            if let Some(daemon) = &mut self.daemon {
+                daemon.writers.emit_patch(&frame);
+            } else {
+                print!("{E}[?2026h{E}[?25l{frame}{E}[?2026l");
+                let _ = std::io::stdout().flush();
+            }
+            self.animation_patched = true;
+        }
+    }
+
+    /// Repaint the moving text without rebuilding the list between status ticks.
     pub(super) fn render_animated_rows(&mut self) -> bool {
-        use std::fmt::Write as _;
-        let Some(daemon) = self.daemon.as_ref() else {
+        let Some(size) = self.animation_frame.as_ref().map(|frame| frame.size) else {
             return false;
         };
-        if self.animated_rows.is_empty()
-            || self.last_frame.is_empty()
-            || !self.escape.is_empty()
-            || !daemon.writers.fits(daemon.size)
-        {
+        if !self.can_patch(size) {
             return false;
         }
-        let (width, height) = daemon.size;
-        let (cols, left) = self
-            .frame_size(width, height)
-            .map_or((width, 1), |(cols, _)| (cols, 2));
+        let (cols, left) = self.patch_columns(size);
         let effects = TextEffects::new(self, cols);
         let mut frame = String::new();
-        for row in &mut self.animated_rows {
-            let text = row
-                .animation
+        for row in &mut self.animation_frame.as_mut().unwrap().rows {
+            let Some(animation) = row.animation else {
+                continue;
+            };
+            let text = animation
                 .apply(&row.text, &effects)
                 .unwrap_or_else(|| row.text.clone());
             if text == row.last {
                 continue;
             }
-            let clipped = clip_frame(&text, cols, 1);
-            let _ = write!(frame, "{E}[{};{left}H{E}[0m{clipped}", row.screen_row);
-            if let Some(thumb) = row.scrollbar {
-                let _ = write!(frame, "{E}[{}G{E}[2m{thumb}{E}[0m", left + cols - 1);
-            }
             row.last = text;
+            row.append_patch(&mut frame, cols, left);
         }
-        if !frame.is_empty() {
-            let frame = self.with_text_color(frame);
-            self.daemon.as_mut().unwrap().writers.emit_patch(&frame);
-            self.animation_patched = true;
+        self.write_patch(frame);
+        true
+    }
+
+    fn patch_columns(&self, (width, height): (usize, usize)) -> (usize, usize) {
+        self.frame_size(width, height)
+            .map_or((width, 1), |(cols, _)| (cols, 2))
+    }
+
+    fn patch_status_rows(&mut self, previous: &AnimationFrame) -> bool {
+        let Some(current) = &self.animation_frame else {
+            return false;
+        };
+        if previous.size != current.size
+            || previous.chrome != current.chrome
+            || previous.rows.len() != current.rows.len()
+            || !self.can_patch(current.size)
+        {
+            return false;
         }
+        let (cols, left) = self.patch_columns(current.size);
+        let mut patch = String::new();
+        for (old, row) in previous.rows.iter().zip(&current.rows) {
+            if old.last != row.last {
+                row.append_patch(&mut patch, cols, left);
+            }
+        }
+        self.write_patch(patch);
         true
     }
 
@@ -1046,7 +1101,9 @@ impl Sidebar {
                 pane.pane.clone(),
                 ordinal + 1,
                 u8::from(selected),
-                RowAnimation::for_state(state, base.len() + 2 + prefix.len() + 2),
+                edit.is_none()
+                    .then(|| RowAnimation::for_state(state, base.len() + 2 + prefix.len() + 2))
+                    .flatten(),
             ));
             if let Some(row) = agent.filter(|row| !row.title.is_empty()) {
                 let title_prefix = if expanded { "        " } else { "      " };
@@ -1112,13 +1169,25 @@ impl Sidebar {
     }
 
     pub(super) fn render(&mut self, force: bool) {
-        let patched = std::mem::take(&mut self.animation_patched);
-        let force = force || self.last_frame.is_empty() || patched;
+        self.animation_frame = None;
+        self.render_list_or_overlay(force, None);
+    }
+
+    pub(super) fn render_status_tick(&mut self) {
+        let previous = self.animation_frame.take();
+        self.render_list_or_overlay(false, previous.as_ref());
+    }
+
+    fn render_list_or_overlay(&mut self, force: bool, previous: Option<&AnimationFrame>) {
         self.animated_text_visible = false;
         self.finished_visible = false;
-        self.animated_rows.clear();
         let size @ (cols, height) = self.outer_size();
         let (frame, rows) = self.render_view(size, true);
+        if !force && previous.is_some_and(|previous| self.patch_status_rows(previous)) {
+            return;
+        }
+        let patched = std::mem::take(&mut self.animation_patched);
+        let force = force || self.last_frame.is_empty() || patched;
         // Keep the watched view's map for consumers of the existing runtime
         // file. Split-pane clicks use the map published with their own frame.
         if rows != self.last_rows && crate::pane_writers::write_rows(&self.rows_file, &rows).is_ok()
@@ -1355,6 +1424,9 @@ impl Sidebar {
         let mut frame = format!(
             "{E}[H{hdr}{header_fg}{E}[1m{title}{E}[22m{muted}{filter}{E}[22m{notice}{hdr_pad}{E}[0m{E}[K\n"
         );
+        let header_end = frame.len();
+        let mut painted_rows = Vec::new();
+        let mut can_patch = primary && self.animating() && cols > 0;
         let mut vis = String::new();
         let cursor = self.cursor_row();
         let inventory_mode = self.settings.settings.show_all_panes;
@@ -1507,6 +1579,7 @@ impl Sidebar {
                     "{}{E}[K\n",
                     bar(&merged, &bg, cols, half + prompt.chars().count())
                 );
+                lines[sel_top].4 = None;
             }
             // cursor's session header gives context — drag it into view. An
             // inline prompt row (create placeholder, rename, confirm) is the
@@ -1559,7 +1632,6 @@ impl Sidebar {
                 0
             };
             let effects = TextEffects::new(self, cols);
-            let mut can_patch = true;
             for (row, (source, pane, index, selected, animation)) in
                 lines[scroll..end].iter().enumerate()
             {
@@ -1575,13 +1647,13 @@ impl Sidebar {
                         '│'
                     }
                 });
-                if let Some(animation) = animation.filter(|_| primary && self.daemon.is_some()) {
+                if can_patch {
                     match source
                         .strip_suffix("\x1b[K\n")
                         .zip(text.strip_suffix("\x1b[K\n"))
                     {
                         Some((base, current)) if !base.contains(['\r', '\n', '\t']) => {
-                            self.animated_rows.push(AnimatedRow {
+                            painted_rows.push(PaintedRow {
                                 screen_row: row + 2 + usize::from(framed.is_some()),
                                 animation,
                                 text: base.to_string(),
@@ -1604,10 +1676,8 @@ impl Sidebar {
                     vis.push_str(&format!("{pane}\t{index}\t{selected}\n"));
                 }
             }
-            if !can_patch {
-                self.animated_rows.clear();
-            }
         }
+        let footer_start = frame.len();
         if has_hint {
             for _ in vis.lines().count()..space {
                 frame.push_str(&format!("{E}[K\n"));
@@ -1618,6 +1688,13 @@ impl Sidebar {
             vis.push_str("-\n");
         }
         frame.push_str(&format!("{E}[J"));
+        if can_patch && !painted_rows.is_empty() {
+            self.animation_frame = Some(AnimationFrame {
+                size: (outer_cols, outer_rows),
+                chrome: format!("{}{}\n{vis}", &frame[..header_end], &frame[footer_start..]),
+                rows: painted_rows,
+            });
+        }
         self.fit_frame(&frame, &vis, size)
     }
 }
@@ -1723,6 +1800,7 @@ mod tests {
                     "--nocapture",
                 ])
                 .env("AGENMUX_THEME_TEST_CHILD", "1")
+                .env("AGENMUX_RUNTIME_DIR", state.join("runtime"))
                 .env("TMUX", format!("{socket},0,0"))
                 .env("XDG_STATE_HOME", &state)
                 // Pin the inherited header styles: the fixture was generated
@@ -1836,9 +1914,12 @@ mod tests {
         assert!(highlighted.starts_with(&working_prefix));
         assert!(highlighted[working_prefix.len()..].contains("[38;2;"));
         let cached_rows: Vec<_> = sb
-            .animated_rows
+            .animation_frame
+            .as_ref()
+            .unwrap()
+            .rows
             .iter()
-            .filter(|row| matches!(row.animation, RowAnimation::Shine(_)))
+            .filter(|row| matches!(row.animation, Some(RowAnimation::Shine(_))))
             .map(|row| row.screen_row)
             .collect();
         let painted_rows: Vec<_> = sb
@@ -1857,9 +1938,12 @@ mod tests {
         assert!(!sb.blink_on());
         sb.render(true);
         let pulse_rows: Vec<_> = sb
-            .animated_rows
+            .animation_frame
+            .as_ref()
+            .unwrap()
+            .rows
             .iter()
-            .filter(|row| matches!(row.animation, RowAnimation::FinishedPulse(_)))
+            .filter(|row| matches!(row.animation, Some(RowAnimation::FinishedPulse(_))))
             .collect();
         assert_eq!(pulse_rows.len(), 2);
         for row in pulse_rows {
@@ -1918,11 +2002,12 @@ mod tests {
         sb.tick = 5;
         sb.render(true);
         assert_eq!(sb.last_frame, steady_frame);
-        assert!(sb.animated_rows.is_empty() && !sb.animated_text_visible && !sb.animating());
+        assert!(sb.animation_frame.is_none() && !sb.animated_text_visible && !sb.animating());
         sb.settings.settings.animate = true;
         sb.tick = 7;
         sb.text_animation_step = 0;
         sb.finished_fade = 0;
+        assert_animation_repaints(&mut sb);
         for mode in 0..7 {
             sb.search.query.clear();
             sb.attention_filter = false;
@@ -2571,6 +2656,74 @@ mod tests {
             visual_frames(&mut sb, &PathBuf::from(output));
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn assert_animation_repaints(sb: &mut Sidebar) {
+        use std::io::{ErrorKind, Read};
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let runtime = crate::mux::runtime_dir();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let path = crate::pane_writers::frame_path(&runtime, "%100");
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let mut reader = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        let mut read_frame = || {
+            let mut frame = String::new();
+            let error = reader.read_to_string(&mut frame).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::WouldBlock);
+            frame
+        };
+        let mut pane = crate::mux::SidebarPane {
+            pane: "%100".into(),
+            w: 80,
+            h: 40,
+            ..Default::default()
+        };
+        let writers = &mut sb.daemon.as_mut().unwrap().writers;
+        writers.reconcile([(pane.pane.clone(), pane.h)]);
+        assert!(writers.measure(std::slice::from_ref(&pane)));
+
+        sb.tick = 0;
+        sb.render(true);
+        assert!(read_frame().contains("\x1b[2;2H"));
+        let rows_map = std::fs::read(&sb.rows_file).unwrap();
+
+        sb.tick = 1;
+        sb.render_status_tick();
+        let spinner = read_frame();
+        assert!(spinner.contains(SPIN[1]));
+        assert_eq!(spinner.matches('H').count(), 1, "only the spinner row");
+        assert!(!spinner.contains("\x1b[2;2H"));
+
+        sb.text_animation_step = 5;
+        assert!(sb.render_animated_rows());
+        let shine = read_frame();
+        assert!(shine.contains("[38;2;"));
+        assert_eq!(shine.matches('H').count(), 2, "working row and detail");
+        sb.text_animation_step = 13;
+        assert!(sb.render_animated_rows());
+        assert!(!read_frame().is_empty(), "restore the normal text colors");
+        sb.text_animation_step = 14;
+        assert!(sb.render_animated_rows());
+        assert!(read_frame().is_empty(), "blank padding needs no repaint");
+        assert_eq!(std::fs::read(&sb.rows_file).unwrap(), rows_map);
+
+        pane.h -= 1;
+        assert!(sb.daemon.as_mut().unwrap().writers.measure(&[pane]));
+        assert!(!sb.render_animated_rows());
+        sb.tick = 2;
+        sb.render_status_tick();
+        assert!(read_frame().contains("\x1b[2;2H"));
+        sb.daemon.as_mut().unwrap().writers.clear();
+        std::fs::remove_file(path).unwrap();
+        sb.tick = 7;
+        sb.text_animation_step = 0;
     }
 
     /// `v`/`V` over the all-panes tree: toggles, a range that follows the
