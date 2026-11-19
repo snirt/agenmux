@@ -4342,6 +4342,150 @@ fn public_popup_launch_errors_remove_pin_and_jump() {
     let _ = client.wait();
 }
 
+#[test]
+fn split_sidebars_fit_each_visible_pane_height() {
+    let tmux = TestTmux::new("split-heights");
+    tmux.assert_tmux(&["rename-window", "-t", "plugin:0", "tall-content"]);
+    tmux.assert_tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        "short",
+        "-n",
+        "short-content",
+        "exec sleep 3600",
+    ]);
+    tmux.assert_tmux(&[
+        "set-option",
+        "-g",
+        "@agenmux-bin",
+        env!("CARGO_BIN_EXE_agenmux"),
+    ]);
+    app_file(&tmux, "[display]\nshow_all_panes=true\nshow_frame=false\nanimate=false\n[behavior]\nnotifications=false\nauto_update=false");
+
+    let client = |session: &str| {
+        tmux.text(&[
+            "list-clients",
+            "-F",
+            "#{session_name}\t#{client_name}\t#{client_control_mode}",
+        ])
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split('\t');
+            let attached = fields.next()?;
+            let name = fields.next()?;
+            (attached == session && fields.next()? == "0").then(|| name.to_owned())
+        })
+    };
+    let _short_viewer = tmux.attach_sized("short", 120, 25);
+    tmux.wait_for(Duration::from_secs(2), || client("short").is_some());
+    assert_success(
+        tmux.bin(&["toggle", "split", &client("short").unwrap()]),
+        "start short sidebar",
+    );
+    // Make the tall client the newest, even on tmux versions whose timestamps
+    // have one-second resolution.
+    thread::sleep(Duration::from_secs(1));
+    let _tall_viewer = tmux.attach_sized("plugin", 120, 50);
+    tmux.wait_for(Duration::from_secs(2), || client("plugin").is_some());
+    let tall_client = client("plugin").unwrap();
+
+    let sidebar = |session: &str| {
+        tmux.text(&[
+            "list-panes",
+            "-t",
+            session,
+            "-f",
+            "#{==:#{pane_title},agenmux}",
+            "-F",
+            "#{pane_id}",
+        ])
+    };
+    tmux.wait_for(Duration::from_secs(5), || !sidebar("plugin:").is_empty());
+    let short = sidebar("short:");
+    let tall = sidebar("plugin:");
+    let capture = |pane: &str| tmux.text(&["capture-pane", "-p", "-t", pane]);
+    let fitted = |pane: &str, height: usize| {
+        let screen = capture(pane);
+        let lines: Vec<_> = screen.lines().collect();
+        lines.len() == height
+            && lines[0].starts_with("agenmux")
+            && screen.contains("tall-content")
+            && screen.contains("short-content")
+            && lines[height - 1].starts_with('›')
+    };
+    tmux.wait_for(Duration::from_secs(5), || fitted(&tall, 49));
+    assert!(fitted(&short, 24), "short frame: {:?}", capture(&short));
+
+    // Force the short viewport to scroll while the tall one can show the
+    // whole tree. A click on the short pane must use its visible row index.
+    let mut last = String::new();
+    for index in 0..26 {
+        last = tmux.text(&[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            "short:",
+            "-n",
+            &format!("extra-{index:02}"),
+            "exec sleep 3600",
+        ]);
+    }
+    let map = |pane: &str| {
+        std::fs::read_to_string(tmux.tmp.join(format!("agenmux-rows-{pane}"))).unwrap_or_default()
+    };
+    tmux.wait_for(Duration::from_secs(5), || {
+        map(&tall).contains(&format!("{last}\t"))
+    });
+    tmux.assert_tmux(&["select-pane", "-t", &tall]);
+    assert_success(tmux.bin(&["key", "last"]), "select last inventory row");
+    let selected_row = |pane: &str| {
+        map(pane)
+            .lines()
+            .position(|line| line.starts_with(&format!("{last}\t")) && line.ends_with("\t1"))
+    };
+    tmux.wait_for(Duration::from_secs(5), || {
+        selected_row(&short).is_some() && selected_row(&tall).is_some()
+    });
+    let y = selected_row(&short).unwrap();
+    assert_ne!(Some(y), selected_row(&tall));
+    assert!(capture(&short).lines().nth(y).unwrap().contains("extra-25"));
+    let short_client = client("short").unwrap();
+    assert_success(
+        tmux.bin(&["click", &short, &y.to_string(), &short_client]),
+        "click short sidebar record",
+    );
+    let click = std::fs::read_to_string(tmux.tmp.join("agenmux-click")).unwrap();
+    assert!(
+        click.starts_with(&format!("{short_client}\t{short}\t{last}\t")),
+        "{click}"
+    );
+    for _ in 0..2 {
+        assert_success(
+            tmux.bin(&["key", "sequence-67"]),
+            "return to top of inventory",
+        );
+    }
+    tmux.wait_for(Duration::from_secs(5), || fitted(&short, 24));
+
+    // With one client remaining, pin the window geometry so switching the
+    // larger terminal to the short window still exercises a 24-row sidebar.
+    tmux.assert_tmux(&["resize-window", "-t", "short:", "-x", "120", "-y", "24"]);
+    tmux.assert_tmux(&["detach-client", "-t", &short_client]);
+    for (session, pane, height) in [
+        ("short", &short, 24),
+        ("plugin", &tall, 49),
+        ("short", &short, 24),
+    ] {
+        tmux.assert_tmux(&["switch-client", "-c", &tall_client, "-t", session]);
+        tmux.wait_for(Duration::from_secs(5), || fitted(pane, height));
+    }
+    assert_success(tmux.bin(&["key", "close"]), "close split sidebars");
+}
+
 /// A fixed popup size is clamped to the client the toggle names, not to the
 /// client of the command's default session: here a larger one on `plugin`.
 #[test]

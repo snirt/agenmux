@@ -6,11 +6,8 @@ use std::time::{Duration, Instant};
 
 use super::{event_loop, new_sidebar, on_term, Sidebar};
 
-/// Height to render the shared frame at. NOT the minimum: every visible pane
-/// shows the same frame, so folding to the shortest let one stale 23-row window
-/// in a session nobody is looking at clip the list everywhere. Size to the
-/// mirror the user is actually watching — mirrors shorter than the frame clip
-/// themselves in mirror::draw.
+/// The watched pane drives the shared scroll position. Other visible panes
+/// render viewports at their own heights.
 fn watched_height(ms: &[M], active_session: &str) -> usize {
     ms.iter()
         .find(|m| m.active && m.sess == active_session)
@@ -85,7 +82,7 @@ pub(super) struct Daemon {
     pub(super) keys_path: PathBuf,
     pub(super) keys_fd: libc::c_int,
     pub(super) writers: PaneWriters,
-    pub(super) size: (usize, usize), // narrowest pane x watched pane's height
+    pub(super) size: (usize, usize), // shared width x watched pane's height
     pub(super) seen_mirror: bool,    // suicide only arms after the first pane appears
     pub(super) empty_ticks: u32,     // consecutive answered measurements that found no pane
     pub(super) client: String,       // our control client, as published in the option
@@ -265,15 +262,6 @@ impl Sidebar {
         self.mux.sidebar_panes().ok()
     }
 
-    /// Refresh preserved-pane inventory: min pane size drives the render, zero
-    /// panes (after at least one existed, or a 30s startup grace) = false.
-    /// Also detects a user dragging a sidebar border — width changed while
-    /// the window size and pane count did not, in a window the user can
-    /// actually see — and
-    /// adopts it as the global width. Serialization matters: one daemon
-    /// doing this (instead of racing hook scripts) means no stale
-    /// resize-pane ever fights the drag, and the dragged pane itself is
-    /// never touched — only the hidden sidebars in other windows move.
     pub(super) fn superseded(&mut self) -> bool {
         let Some((client, generation)) = self
             .daemon
@@ -301,13 +289,16 @@ impl Sidebar {
         let Some(daemon) = self.daemon.as_mut() else {
             return false;
         };
-        if daemon.size == size {
-            return false;
+        let mut changed = daemon.size != size;
+        for pane in &ms {
+            changed |= daemon.writers.set_height(&pane.pane, pane.h);
         }
         daemon.size = size;
-        true
+        changed
     }
 
+    /// Refresh visible writers and their geometry. Adopt a dragged border's
+    /// width without resizing the pane the user dragged.
     pub(super) fn mirror_tick(&mut self) -> bool {
         self.barrier();
         let position = self.settings.settings.sidebar_position;
@@ -365,10 +356,8 @@ impl Sidebar {
             self.mux.close_panes(&killed);
             self.mux.resize_panes(&widths);
         }
-        // Width DOES fold to the minimum: mirror::draw clips rows but NOT
-        // columns, so a frame wider than some pane would wrap and shift every
-        // row below it (breaking the click -> rows-file mapping). tmux widths
-        // are uniform by construction; Rex's follow watched_width.
+        // Keep the shared width within the narrowest tmux sidebar to avoid
+        // wrapping click rows. Rex follows the width of the watched sidebar.
         let mut w = watched_width(&ms, &self.active_session).unwrap_or(usize::MAX);
         let h = watched_height(&ms, &self.active_session);
         let drag: Option<(String, usize)> = {
@@ -416,19 +405,16 @@ impl Sidebar {
             ms.iter()
                 .filter(|m| m.active)
                 .take(1)
-                .map(|m| m.pane.clone())
+                .map(|m| (m.pane.clone(), m.h))
                 .collect::<Vec<_>>()
         } else {
             ms.iter()
                 .filter(|m| visible_windows.contains(&m.win))
-                .map(|m| m.pane.clone())
+                .map(|m| (m.pane.clone(), m.h))
                 .collect::<Vec<_>>()
         };
         let d = self.daemon.as_mut().unwrap();
-        if d.writers.reconcile(visible_panes) {
-            // A new pane reader has no copy of the last frame yet.
-            self.last_frame.clear();
-        }
+        d.writers.reconcile(visible_panes);
         d.win_sizes = ms
             .iter()
             .map(|m| (m.win.clone(), (m.win_size, m.panes)))
@@ -444,17 +430,19 @@ impl Sidebar {
         if windows.is_empty() {
             return; // no real client: leave mirror_tick's warm-one fallback alone
         }
-        let panes: Vec<String> = self
-            .mux
-            .sidebar_panes()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|m| windows.contains(&m.win))
-            .map(|m| m.pane)
-            .collect();
-        if self.daemon.as_mut().unwrap().writers.reconcile(panes) {
-            self.last_frame.clear();
+        let Some(panes) = self.measure_panes() else {
+            return;
+        };
+        let daemon = self.daemon.as_mut().unwrap();
+        if !panes.is_empty() {
+            daemon.size.1 = watched_height(&panes, &self.active_session);
         }
+        daemon.writers.reconcile(
+            panes
+                .into_iter()
+                .filter(|m| windows.contains(&m.win))
+                .map(|m| (m.pane, m.h)),
+        );
     }
 
     /// Preserved-pane shutdown: close visible writers, kill sidebar panes and

@@ -730,8 +730,11 @@ impl Sidebar {
         self.reclaim_key_table();
     }
 
-    pub(super) fn render_overlay(&mut self, force: bool) {
-        let (cols, rows) = self.render_size();
+    pub(super) fn render_overlay(
+        &mut self,
+        (cols, rows): (usize, usize),
+        primary: bool,
+    ) -> (String, String) {
         let top_bar = TopBar::new(&self.palette, self.plugin_selected, self.header_inherited);
         let header = |name| top_bar.overlay(name, cols);
         let muted = self.palette.muted_fg.fg("");
@@ -1010,6 +1013,7 @@ impl Sidebar {
                 text
             }
             Some(Overlay::Settings(settings)) => {
+                let scroll = settings.scroll;
                 let (text, targets) = render_settings(
                     settings,
                     &self.settings.settings,
@@ -1019,15 +1023,18 @@ impl Sidebar {
                     cols,
                     rows,
                 );
+                if !primary {
+                    settings.scroll = scroll;
+                }
                 click_rows = self::click_rows(&targets);
                 text
             }
             // Mutation prompts render inline in the list frame.
             Some(Overlay::Create { .. } | Overlay::Rename { .. } | Overlay::Confirm(_)) | None => {
-                return
+                return (String::new(), String::new());
             }
         };
-        self.emit(text, &click_rows, force);
+        (text, click_rows)
     }
 
     pub(super) fn open_rename_input(&mut self, mut target: MutationTarget, action: SequenceAction) {

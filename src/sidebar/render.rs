@@ -465,12 +465,13 @@ impl Sidebar {
             .flatten()
     }
 
+    fn outer_size(&self) -> (usize, usize) {
+        self.daemon.as_ref().map_or_else(term_size, |d| d.size)
+    }
+
+    #[cfg(test)]
     pub(super) fn render_size(&self) -> (usize, usize) {
-        let (cols, height) = self
-            .daemon
-            .as_ref()
-            .map(|daemon| daemon.size)
-            .unwrap_or_else(term_size);
+        let (cols, height) = self.outer_size();
         self.frame_size(cols, height).unwrap_or((cols, height))
     }
 
@@ -553,14 +554,12 @@ impl Sidebar {
         format!("{fg}{glyph}{E}[0m")
     }
 
-    /// Frame and click-row sink: stdout in tty mode; direct writes to visible
-    /// empty panes in daemon mode.
-    pub(super) fn emit(&mut self, frame: String, rows: &str, force: bool) {
-        let (cols, height) = self
-            .daemon
-            .as_ref()
-            .map(|d| d.size)
-            .unwrap_or_else(term_size);
+    fn fit_frame(
+        &self,
+        frame: &str,
+        rows: &str,
+        (cols, height): (usize, usize),
+    ) -> (String, String) {
         let framed = self.frame_size(cols, height);
         let (render_cols, render_height) = framed.unwrap_or((cols, height));
         let cap = if render_cols == 0 {
@@ -578,9 +577,9 @@ impl Sidebar {
                 self.plugin_selected,
                 self.tmux_active_border_fg,
             );
-            frame_pane(&frame, cols, height, &color)
+            frame_pane(frame, cols, height, &color)
         } else {
-            clip_frame(&frame, cols, cap)
+            clip_frame(frame, cols, cap)
         };
         let rows: String = rows
             .lines()
@@ -606,40 +605,7 @@ impl Sidebar {
                 frame.replace(&format!("{E}[0m"), &format!("{E}[0m{fg}"))
             )
         };
-        // Rows map must match what the click helper sees under each rendered row.
-        // Rename it into place: a truncate-then-write lets a concurrent click
-        // read an empty map. Animation frames leave the rows alone.
-        if rows != self.last_rows {
-            let staged = self.rows_file.with_extension("tmp");
-            if std::fs::write(&staged, &rows).is_ok()
-                && std::fs::rename(&staged, &self.rows_file).is_ok()
-            {
-                self.last_rows = rows;
-            }
-        }
-        let changed = force || frame != self.last_frame;
-        // Synchronized output: tmux reads a frame in PTY-sized pieces and can
-        // redraw between them, briefly showing the cursor on neither row.
-        // Split panes never hide the terminal cursor on their own; left
-        // visible, it hops across every redraw (cursor-trail shaders show it).
-        let synced = || format!("{E}[?2026h{E}[?25l{frame}{E}[?2026l");
-        match &mut self.daemon {
-            None => {
-                if changed {
-                    print!("{}", synced());
-                    let _ = std::io::stdout().flush();
-                }
-            }
-            Some(d) => {
-                if changed || !self.escape.is_empty() {
-                    let escape = std::mem::take(&mut self.escape);
-                    d.writers.emit(&format!("{escape}{}", synced()));
-                }
-            }
-        }
-        if changed {
-            self.last_frame = frame;
-        }
+        (frame, rows)
     }
 
     #[allow(clippy::type_complexity)]
@@ -915,23 +881,54 @@ impl Sidebar {
     }
 
     pub(super) fn render(&mut self, force: bool) {
-        // Mutation prompts stay inline: the list keeps rendering and the
-        // prompt shares the cursor row.
+        let force = force || self.last_frame.is_empty();
+        let size @ (cols, height) = self.outer_size();
+        let (frame, rows) = self.render_view(size, true);
+        // Keep the watched view's map for consumers of the existing runtime
+        // file. Split-pane clicks use the map published with their own frame.
+        if rows != self.last_rows && crate::pane_writers::write_rows(&self.rows_file, &rows).is_ok()
+        {
+            self.last_rows.clone_from(&rows);
+        }
+        if let Some(daemon) = &self.daemon {
+            let mut frames = std::collections::HashMap::new();
+            for other in daemon.writers.heights() {
+                if other != height {
+                    frames.insert(other, self.render_view((cols, other), false));
+                }
+            }
+            self.last_frame.clone_from(&frame);
+            frames.insert(height, (frame, rows));
+            self.daemon.as_mut().unwrap().writers.emit(
+                &frames,
+                &std::mem::take(&mut self.escape),
+                force,
+            );
+        } else if force || frame != self.last_frame {
+            // Synchronized output keeps partial PTY writes off screen.
+            print!("{E}[?2026h{E}[?25l{frame}{E}[?2026l");
+            let _ = std::io::stdout().flush();
+            self.last_frame = frame;
+        }
+    }
+
+    fn render_view(
+        &mut self,
+        size @ (outer_cols, outer_rows): (usize, usize),
+        primary: bool,
+    ) -> (String, String) {
+        let framed = self.frame_size(outer_cols, outer_rows);
+        let inner = framed.unwrap_or(size);
+        // Mutation prompts share the list viewport.
         if self
             .overlay
             .as_ref()
             .is_some_and(|overlay| !overlay.renders_inline())
         {
-            self.render_overlay(force);
-            return;
+            let (text, rows) = self.render_overlay(inner, primary);
+            return self.fit_frame(&text, &rows, size);
         }
-        let (outer_cols, outer_rows) = self
-            .daemon
-            .as_ref()
-            .map(|daemon| daemon.size)
-            .unwrap_or_else(term_size);
-        let framed = self.frame_size(outer_cols, outer_rows);
-        let (cols, trows) = framed.unwrap_or((outer_cols, outer_rows));
+        let (cols, trows) = inner;
 
         let muted = self.palette.muted_fg.fg("");
         let top_bar = TopBar::new(&self.palette, self.plugin_selected, self.header_inherited);
@@ -1280,26 +1277,34 @@ impl Sidebar {
                 .overlay
                 .as_ref()
                 .is_some_and(|overlay| overlay.renders_inline());
+            let mut scroll = self.scroll;
             if self.follow_selection && (cursor.is_some() || prompt_row) {
                 if sel_top > 0 && lines[sel_top - 1].1 == "-" {
                     sel_top -= 1;
                 }
                 if space > 0 {
-                    if sel_bot + 1 > self.scroll + space {
-                        self.scroll = sel_bot + 1 - space;
+                    if sel_bot + 1 > scroll + space {
+                        scroll = sel_bot + 1 - space;
                     }
-                    if sel_top < self.scroll {
-                        self.scroll = sel_top; // top wins when row + title exceed space
+                    if sel_top < scroll {
+                        scroll = sel_top; // top wins when row + title exceed space
                     }
                 }
             }
-            self.follow_selection = false;
             if space > 0 {
-                self.scroll = self.scroll.min(lines.len().saturating_sub(space));
+                scroll = scroll.min(lines.len().saturating_sub(space));
             } else {
-                self.scroll = 0;
+                scroll = 0;
             }
-            let end = (self.scroll + space).min(lines.len());
+            if primary {
+                self.scroll = scroll;
+                // Each split viewport keeps following the selection until a
+                // wheel event moves the shared scroll position manually.
+                if self.daemon.is_none() {
+                    self.follow_selection = false;
+                }
+            }
+            let end = (scroll + space).min(lines.len());
             let overflow = lines.len() > space && space > 0 && cols > 0;
             let thumb_len = if overflow {
                 space
@@ -1311,11 +1316,11 @@ impl Sidebar {
                 0
             };
             let thumb_start = if overflow {
-                self.scroll.saturating_mul(space - thumb_len) / lines.len().saturating_sub(space)
+                scroll.saturating_mul(space - thumb_len) / lines.len().saturating_sub(space)
             } else {
                 0
             };
-            for (row, (text, pane, index, selected)) in lines[self.scroll..end].iter().enumerate() {
+            for (row, (text, pane, index, selected)) in lines[scroll..end].iter().enumerate() {
                 if overflow {
                     frame.push_str(text.trim_end_matches('\n'));
                     let glyph = if (thumb_start..thumb_start + thumb_len).contains(&row) {
@@ -1344,7 +1349,7 @@ impl Sidebar {
             vis.push_str("-\n");
         }
         frame.push_str(&format!("{E}[J"));
-        self.emit(frame, &vis, force);
+        self.fit_frame(&frame, &vis, size)
     }
 }
 
