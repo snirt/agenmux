@@ -8,7 +8,7 @@ pub(crate) const NORMAL_TABLE: &str = "agenmux";
 pub(crate) const SEARCH_TABLE: &str = "agenmux-search";
 pub(crate) const SETTINGS_TABLE: &str = "agenmux-settings-edit";
 pub(crate) const SEQUENCE_TABLE: &str = "agenmux-sequence";
-const NAV_LAYOUT: &str = "16";
+const NAV_LAYOUT: &str = "18";
 // These are trusted runtime identities, not application-file settings. q
 // quotes them for the shell only when tmux executes the installed command.
 const ENGINE: &str = "AGENMUX_DIR=#{q:@agenmux-plugin-dir} AGENMUX_RUNTIME_DIR=#{q:@agenmux-runtime-dir} #{q:@agenmux-runtime-bin}";
@@ -547,7 +547,23 @@ fn clone_root_table(table: &str) -> Result<(), mux::Error> {
         .lines()
         // list-keys emits one leading table marker per binding. A command body
         // may also contain the literal text `-T root`; rewrite only the marker.
-        .map(|line| line.replacen("-T root ", &replacement, 1))
+        .map(|line| {
+            let mut binding = line.replacen("-T root ", &replacement, 1);
+            if line
+                .split_once("-T root ")
+                .is_some_and(|(_, rest)| preserves_table_after_resize(rest))
+            {
+                // tmux resets the client table before dispatching a binding.
+                // Run the inherited command with its original event, then
+                // check the active pane. A mouse event may target the pane
+                // across the border.
+                let active_title = "#{P:#{?pane_active,#{pane_title},}}";
+                binding.push_str(&format!(
+                    r" \; if -F '#{{&&:#{{==:{active_title},agenmux}},#{{==:#{{client_key_table}},root}}}}' {{ switch-client -T {table} }}"
+                ));
+            }
+            binding
+        })
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
@@ -568,6 +584,19 @@ fn clone_root_table(table: &str) -> Result<(), mux::Error> {
                 .to_string(),
         ))
     }
+}
+
+fn preserves_table_after_resize(binding: &str) -> bool {
+    let mut words = binding.split_whitespace();
+    let Some(key) = words.next() else {
+        return false;
+    };
+    matches!(
+        key,
+        "MouseDown1Border" | "MouseDrag1Border" | "MouseDragEnd1Border"
+    ) || (!key.contains("Mouse")
+        // list-keys also prints resize-pane inside quoted if-shell branches.
+        && words.any(|word| word.trim_matches(['"', '\'']) == "resize-pane"))
 }
 
 fn queue_bind(commands: &mut Vec<Vec<String>>, table: &str, key: &str, command: &str) {
@@ -1180,7 +1209,7 @@ mod tests {
 
         assert_ne!(nav_version(&enabled), nav_version(&custom));
         assert_eq!(nav_version(&enabled), nav_version(&config("version = 1")));
-        assert!(nav_version(&enabled).starts_with("16."));
+        assert!(nav_version(&enabled).starts_with("18."));
     }
 
     #[test]
