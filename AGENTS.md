@@ -30,6 +30,7 @@
 ## UI components
 
 - Reuse shared UI components and style primitives across main views and overlays. Do not duplicate common chrome such as top bars, headers, controls, focus states, or color-selection logic.
+- Derive animation colors from the resolved theme roles and reuse the shared palette blending.
 
 ## Commits
 

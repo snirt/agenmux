@@ -57,7 +57,7 @@ A @agenmux-* tmux option, when set, overrides the file.
   popup_width          1..=10000 cells                    (40)
   popup_height         "auto" or 1..=10000 cells          (auto)
   agent_label          icon-text | icon | text            (icon-text)
-  animate              true | false: blink and spin       (true)
+  animate              true | false: all sidebar motion   (true)
   glyphs               rich | plain: no braille/Nerd Font (rich)
 
 [behavior]

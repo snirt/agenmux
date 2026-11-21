@@ -20,6 +20,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+const STATUS_TICK: Duration = Duration::from_millis(250);
+const TEXT_ANIMATION_INTERVAL: Duration = Duration::from_micros(66_667);
+const TEXT_ANIMATION_ACTIVE_STEPS: u32 = 24;
+const TEXT_ANIMATION_CYCLE_STEPS: u32 = 30;
 const PERIODIC_SCAN: Duration = Duration::from_secs(2);
 const OUTPUT_SCAN_MIN: Duration = Duration::from_millis(500);
 /// Scans block the loop for tens to hundreds of ms. Holding j/k leaves the key
@@ -251,6 +255,12 @@ pub struct Sidebar {
     active_session: String,
     plugin_selected: bool,
     tick: u32,
+    text_animation_step: u32,
+    animated_text_visible: bool,
+    finished_visible: bool,
+    finished_fade: u8,
+    animation_frame: Option<render::AnimationFrame>,
+    animation_patched: bool,
     self_pane: String,
     pin: Option<String>,
     popup_client: String,
@@ -346,6 +356,12 @@ fn new_sidebar(
         active_session: String::new(),
         plugin_selected: false,
         tick: 0,
+        text_animation_step: 0,
+        animated_text_visible: false,
+        finished_visible: false,
+        finished_fade: 0,
+        animation_frame: None,
+        animation_patched: false,
         self_pane,
         pin: None,
         popup_client: crate::compat_env("AGENMUX_POPUP_CLIENT", "AGENTS_MON_POPUP_CLIENT")
@@ -483,11 +499,21 @@ fn navigation_key(key: &Key) -> Option<(NavigationTarget, i64)> {
     }
 }
 
+/// Follow the same two-on, two-off tick cycle as the finished status glyph.
+fn finished_fade(tick: u32, until_next_tick: Duration) -> u8 {
+    let elapsed = STATUS_TICK.saturating_sub(until_next_tick).as_secs_f32();
+    let phase = (tick % 4) as f32 + elapsed / STATUS_TICK.as_secs_f32();
+    let strength = 1.0 - (phase - 2.0).abs() * 0.5;
+    let eased = strength * strength * (3.0 - 2.0 * strength);
+    (eased * f32::from(u8::MAX)).round() as u8
+}
+
 /// Returns true when the loop ended because another daemon took ownership.
 fn event_loop(sb: &mut Sidebar) -> bool {
     let key_fd = sb.daemon.as_ref().map_or(0, |d| d.keys_fd);
     let mut scans = ScanSchedule::new(Instant::now());
     let mut next_tick = Instant::now();
+    let mut text_animation_started = None;
     loop {
         if QUIT.load(Ordering::Relaxed) {
             trace!("event loop exit: termination signal");
@@ -589,17 +615,55 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         let animating = sb.animating();
         // deadline-based tick: held keys keep poll_inputs returning early, so
         // advancing on poll timeout would freeze the spinner during key repeat
-        if animating && now >= next_tick {
+        let spinner_due = animating && now >= next_tick;
+        if spinner_due {
             sb.tick = (sb.tick + 1) % 40; // divisible by 8 (spin) and 4 (blink)
-            next_tick = now + Duration::from_millis(250);
+            next_tick = now + STATUS_TICK;
+        }
+
+        let (text_animation_step, animation_wait) =
+            if sb.animated_text_visible && sb.settings.settings.animate {
+                let started = *text_animation_started.get_or_insert(now);
+                let elapsed = now.saturating_duration_since(started).as_micros();
+                let interval = TEXT_ANIMATION_INTERVAL.as_micros();
+                let step = (elapsed / interval % u128::from(TEXT_ANIMATION_CYCLE_STEPS)) as u32;
+                let (step, frames_until_wake) =
+                    if step >= TEXT_ANIMATION_ACTIVE_STEPS && !sb.finished_visible {
+                        (0, TEXT_ANIMATION_CYCLE_STEPS - step + 1)
+                    } else {
+                        (step, 1)
+                    };
+                let wait = interval * u128::from(frames_until_wake) - elapsed % interval;
+                (step, Some(Duration::from_micros(wait as u64)))
+            } else {
+                text_animation_started = None;
+                (0, None)
+            };
+        let text_animation_due = text_animation_step != sb.text_animation_step;
+        if (text_animation_due || spinner_due)
+            && sb.finished_visible
+            && sb.settings.settings.animate
+        {
+            sb.finished_fade = finished_fade(sb.tick, next_tick.saturating_duration_since(now));
+        } else if !sb.finished_visible || !sb.settings.settings.animate {
+            sb.finished_fade = 0;
+        }
+        sb.text_animation_step = text_animation_step;
+        if spinner_due {
+            sb.render_status_tick();
+        } else if text_animation_due && !sb.render_animated_rows() {
             sb.render(false);
         }
-        // animated states need ticks; all-idle sleeps until the next scan
+
+        // Idle sidebars sleep until the next scan or input event.
         let mut wake = scans
             .next_deadline(sb.screens.next_expiry())
             .saturating_duration_since(now);
         if animating {
             wake = wake.min(next_tick.saturating_duration_since(now));
+        }
+        if let Some(wait) = animation_wait {
+            wake = wake.min(wait);
         }
         if let Some(deadline) = sb.key_sequence.deadline(sequence_timeout) {
             wake = wake.min(deadline.saturating_duration_since(now));

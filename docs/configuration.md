@@ -67,7 +67,7 @@ sidebar_position = "left" # left | right
 popup_width = 40
 popup_height = "auto"
 agent_label = "icon-text" # icon-text | icon | text
-animate = true            # false: steady glyphs, no blink or spinner
+animate = true            # false: steady glyphs and text
 glyphs = "rich"           # rich | plain: no braille or Nerd Font glyphs
 [behavior]
 notifications = true
@@ -96,6 +96,7 @@ Press `s` in the sidebar or popup to edit settings in place.
 
 - `↑`/`↓` move, `Enter` edits, `C-u` clears the field, `Esc` cancels or goes back.
 - Each row shows the file value, the effective value, and where it comes from.
+- Under **Display**, set **animations** to `false` to keep glyphs and text steady.
 - Values are validated before the file is saved; a bad value changes nothing.
 - **Revert to defaults** clears saved display, behavior, theme, and key
   settings. tmux option overrides stay in effect.
@@ -143,8 +144,10 @@ pane_bg = 236
   `blocked`, `working`, `idle`, `done`.
 - `pane_bg` fills the selected ordinary-pane row; `muted_fg` colors
   ordinary-pane cursors. `selected_bg` fills rows picked with `v` / `V`.
-- Colors change only color. `display.animate` and `display.glyphs` set the
-  blink, spinner, and glyphs; see [Usage](usage.md#motion-and-glyphs).
+- `display.animate` controls the spinner, blink, working shine, and finished
+  pulse. `display.glyphs` chooses the icon set. See [Usage](usage.md#motion-and-glyphs).
+- The working shine and finished pulse blend from `text_fg` and `muted_fg`.
+  The pane background determines whether the blend lightens or darkens the text.
 - The theme applies to the sidebar, popup, help, and version picker. Global
   tmux colors are never changed.
 
