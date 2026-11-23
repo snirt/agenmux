@@ -325,6 +325,7 @@ fn setting_label(name: &str) -> &str {
     match name {
         "display.show_frame" => "show frame",
         "display.animate" => "animations",
+        "display.animate_text" => "text animations",
         _ => name
             .strip_prefix("keys.")
             .or_else(|| name.strip_prefix("quick_launchers."))
@@ -338,6 +339,7 @@ fn is_bool_setting(name: &str) -> bool {
         "display.show_all_panes"
             | "display.show_frame"
             | "display.animate"
+            | "display.animate_text"
             | "behavior.notifications"
             | "behavior.auto_update"
             | "tmux_management.enabled"
@@ -2013,9 +2015,24 @@ mod tests {
 
         settings.search.query = "animations".into();
         let animations = visible_settings_rows(&settings, &effective);
-        assert_eq!(animations.len(), 1);
-        assert_eq!(animations[0].name, "display.animate");
+        assert_eq!(
+            animations
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["display.animate", "display.animate_text"]
+        );
         assert_eq!(setting_label(&animations[0].name), "animations");
+        assert_eq!(setting_label(&animations[1].name), "text animations");
+        let text_off = crate::app_config::edit_document(
+            &settings.source,
+            &animations[1].name,
+            toggled_value(&animations[1]),
+        )
+        .and_then(|text| crate::app_config::parse(&text))
+        .and_then(|file| crate::app_config::resolve(&file, &Default::default()))
+        .unwrap();
+        assert!(text_off.animate && !text_off.animate_text);
         let disabled = crate::app_config::edit_document(
             &settings.source,
             &animations[0].name,

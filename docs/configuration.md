@@ -68,6 +68,7 @@ popup_width = 40
 popup_height = "auto"
 agent_label = "icon-text" # icon-text | icon | text
 animate = true            # false: steady glyphs and text
+animate_text = true       # false: no row shine or pulse; spinner and blink stay
 glyphs = "rich"           # rich | plain: no braille or Nerd Font glyphs
 [behavior]
 notifications = true
@@ -96,7 +97,8 @@ Press `s` in the sidebar or popup to edit settings in place.
 
 - `↑`/`↓` move, `Enter` edits, `C-u` clears the field, `Esc` cancels or goes back.
 - Each row shows the file value, the effective value, and where it comes from.
-- Under **Display**, set **animations** to `false` to keep glyphs and text steady.
+- Under **Display**, set **animations** to `false` to keep glyphs and text
+  steady, or **text animations** to `false` to keep only the row text steady.
 - Values are validated before the file is saved; a bad value changes nothing.
 - **Revert to defaults** clears saved display, behavior, theme, and key
   settings. tmux option overrides stay in effect.
@@ -145,7 +147,8 @@ pane_bg = 236
 - `pane_bg` fills the selected ordinary-pane row; `muted_fg` colors
   ordinary-pane cursors. `selected_bg` fills rows picked with `v` / `V`.
 - `display.animate` controls the spinner, blink, working shine, and finished
-  pulse. `display.glyphs` chooses the icon set. See [Usage](usage.md#motion-and-glyphs).
+  pulse. `display.animate_text = false` turns off only the shine and pulse.
+  `display.glyphs` chooses the icon set. See [Usage](usage.md#motion-and-glyphs).
 - The working shine and finished pulse blend from `text_fg` and `muted_fg`.
   The pane background determines whether the blend lightens or darkens the text.
 - The theme applies to the sidebar, popup, help, and version picker. Global

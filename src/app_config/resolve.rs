@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub agent_label: AgentLabel,
     /// Blink and spin; off draws every state with a steady glyph.
     pub animate: bool,
+    /// Working shine and finished pulse on row text; `animate` still gates it.
+    pub animate_text: bool,
     pub glyphs: Glyphs,
     pub sidebar_width: u16,
     pub sidebar_position: SidebarPosition,
@@ -32,6 +34,14 @@ pub struct AppConfig {
     /// Field name to the layer that decided it, named precisely enough to
     /// act on: a winning tmux option prints as `tmux @agenmux-width`.
     pub sources: BTreeMap<String, String>,
+}
+
+impl AppConfig {
+    /// Whether row text runs the working shine and finished pulse. Off with
+    /// all motion, or on its own while the spinner and blink keep going.
+    pub fn text_animations(&self) -> bool {
+        self.animate && self.animate_text
+    }
 }
 
 /// Setting names a live `@agenmux-<name>` override may carry.
@@ -132,6 +142,7 @@ pub fn resolve_cli(
             ("display.show_frame", "default"),
             ("display.agent_label", "default"),
             ("display.animate", "default"),
+            ("display.animate_text", "default"),
             ("display.glyphs", "default"),
             ("display.sidebar_width", "default"),
             ("display.sidebar_position", "default"),
@@ -160,6 +171,7 @@ pub fn resolve_cli(
         show_frame: true,
         agent_label: AgentLabel::IconText,
         animate: true,
+        animate_text: true,
         glyphs: Glyphs::Rich,
         sidebar_width: 30,
         sidebar_position: SidebarPosition::Left,
@@ -195,6 +207,7 @@ pub fn resolve_cli(
             set!(show_frame, d.show_frame, "display.show_frame");
             set!(agent_label, d.agent_label, "display.agent_label");
             set!(animate, d.animate, "display.animate");
+            set!(animate_text, d.animate_text, "display.animate_text");
             set!(glyphs, d.glyphs, "display.glyphs");
             set!(sidebar_width, d.sidebar_width, "display.sidebar_width");
             set!(
@@ -614,6 +627,15 @@ mod tests {
         assert_eq!(calm.sources["display.animate"], "file");
         assert_eq!(calm.sources["display.glyphs"], "file");
         assert!(parse("[display]\nanimate = 'off'").is_err());
+        assert!(default.animate_text && default.text_animations());
+        assert!(!calm.animate_text || !calm.text_animations());
+        let still_text = parse("[display]\nanimate_text = false").unwrap();
+        let still_text = resolve(&still_text, &BTreeMap::new()).unwrap();
+        assert!(still_text.animate && !still_text.animate_text);
+        assert!(!still_text.text_animations());
+        assert_eq!(still_text.sources["display.animate_text"], "file");
+        assert_eq!(default.sources["display.animate_text"], "default");
+        assert!(parse("[display]\nanimate_text = 'off'").is_err());
         assert!(parse("[display]\nglyphs = 'ascii'").is_err());
         let paused = resolve(
             &parse("[behavior]\nauto_update = false").unwrap(),
@@ -646,6 +668,7 @@ mod tests {
                     && **field != "display.show_frame"
                     && **field != "display.agent_label"
                     && **field != "display.animate"
+                    && **field != "display.animate_text"
                     && **field != "display.glyphs"
                     && **field != "behavior.auto_update"
             })

@@ -622,7 +622,7 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         }
 
         let (text_animation_step, animation_wait) =
-            if sb.animated_text_visible && sb.settings.settings.animate {
+            if sb.animated_text_visible && sb.settings.settings.text_animations() {
                 let started = *text_animation_started.get_or_insert(now);
                 let elapsed = now.saturating_duration_since(started).as_micros();
                 let interval = TEXT_ANIMATION_INTERVAL.as_micros();
@@ -642,10 +642,10 @@ fn event_loop(sb: &mut Sidebar) -> bool {
         let text_animation_due = text_animation_step != sb.text_animation_step;
         if (text_animation_due || spinner_due)
             && sb.finished_visible
-            && sb.settings.settings.animate
+            && sb.settings.settings.text_animations()
         {
             sb.finished_fade = finished_fade(sb.tick, next_tick.saturating_duration_since(now));
-        } else if !sb.finished_visible || !sb.settings.settings.animate {
+        } else if !sb.finished_visible || !sb.settings.settings.text_animations() {
             sb.finished_fade = 0;
         }
         sb.text_animation_step = text_animation_step;

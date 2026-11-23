@@ -335,7 +335,7 @@ const FINISHED_STRENGTH: f32 = 0.55;
 
 impl TextEffects {
     fn new(sb: &Sidebar, cols: usize) -> Self {
-        let animate = sb.settings.settings.animate;
+        let animate = sb.settings.settings.text_animations();
         let center = animate
             .then(|| shine_center(sb.text_animation_step, cols))
             .flatten();
@@ -1635,7 +1635,7 @@ impl Sidebar {
             for (row, (source, pane, index, selected, animation)) in
                 lines[scroll..end].iter().enumerate()
             {
-                let animation = animation.filter(|_| self.settings.settings.animate);
+                let animation = animation.filter(|_| self.settings.settings.text_animations());
                 self.animated_text_visible |= animation.is_some();
                 self.finished_visible |= matches!(animation, Some(RowAnimation::FinishedPulse(_)));
                 let highlighted = animation.and_then(|animation| animation.apply(source, &effects));
@@ -2004,6 +2004,32 @@ mod tests {
         assert_eq!(sb.last_frame, steady_frame);
         assert!(sb.animation_frame.is_none() && !sb.animated_text_visible && !sb.animating());
         sb.settings.settings.animate = true;
+        // Text animations off on their own: rows stay steady and the text
+        // timer stays idle, while the spinner and blink keep ticking.
+        sb.settings.settings.animate_text = false;
+        sb.text_animation_step = 0;
+        sb.finished_fade = 0;
+        sb.tick = 0;
+        sb.render(true);
+        let calm_text = sb.last_frame.clone();
+        assert!(!sb.animated_text_visible && !sb.finished_visible);
+        assert!(sb.animating(), "the spinner and blink still tick");
+        let strip = |text: String| ansi.replace_all(&text, "").to_string();
+        assert_eq!(strip(sb.dot("working")), SPIN[0].to_string());
+        sb.tick = 1;
+        assert_eq!(
+            strip(sb.dot("working")),
+            SPIN[1].to_string(),
+            "the spinner turns"
+        );
+        sb.tick = 2;
+        assert_eq!(strip(sb.dot("done")), " ", "done still blinks");
+        sb.tick = 0;
+        sb.text_animation_step = 4;
+        sb.finished_fade = 200;
+        sb.render(true);
+        assert_eq!(sb.last_frame, calm_text, "no shine or pulse on row text");
+        sb.settings.settings.animate_text = true;
         sb.tick = 7;
         sb.text_animation_step = 0;
         sb.finished_fade = 0;

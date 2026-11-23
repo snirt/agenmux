@@ -58,6 +58,7 @@ A @agenmux-* tmux option, when set, overrides the file.
   popup_height         "auto" or 1..=10000 cells          (auto)
   agent_label          icon-text | icon | text            (icon-text)
   animate              true | false: all sidebar motion   (true)
+  animate_text         true | false: row shine and pulse  (true)
   glyphs               rich | plain: no braille/Nerd Font (rich)
 
 [behavior]
@@ -178,6 +179,10 @@ pub fn rows(config: &AppConfig) -> Vec<Row> {
             .into(),
         ),
         ("display.animate".into(), config.animate.to_string()),
+        (
+            "display.animate_text".into(),
+            config.animate_text.to_string(),
+        ),
         (
             "display.glyphs".into(),
             match config.glyphs {
