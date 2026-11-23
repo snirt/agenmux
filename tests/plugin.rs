@@ -49,8 +49,10 @@ impl TestTmux {
     }
 
     fn tmux(&self, args: &[&str]) -> Output {
+        // -u: read replies byte-exact whatever the host locale; outside UTF-8,
+        // tmux turns tabs and non-ASCII text in format output into `_`.
         Command::new("tmux")
-            .args(["-L", &self.socket])
+            .args(["-u", "-L", &self.socket])
             .args(args)
             .output()
             .unwrap()
@@ -3505,7 +3507,7 @@ fn setup_restores_touched_bindings_and_reports_rollback_failure() {
         let real = String::from_utf8(real.stdout).unwrap();
         let quote = |s: &str| format!("'{}'", s.replace('\'', "'\"'\"'"));
         let marker = tmux.tmp.join("failed");
-        let script = format!("#!/bin/sh\nif [ ! -e {marker} ] && [ \"$1 $2 $3\" = 'set-option -g @agenmux-nav-version' ]; then touch {marker}; echo 'injected setup failure' >&2; exit 1; fi\n{}\nexec {} \"$@\"\n",
+        let script = format!("#!/bin/sh\n[ \"$1\" != -u ] || shift\nif [ ! -e {marker} ] && [ \"$1 $2 $3\" = 'set-option -g @agenmux-nav-version' ]; then touch {marker}; echo 'injected setup failure' >&2; exit 1; fi\n{}\nexec {} -u \"$@\"\n",
             if fail_rollback { format!("if [ -e {} ]; then case \"$1 $2 $3\" in 'source-file - '*|'set-option -gu @agenmux-runtime-bin'|'set-option -g status-left'|'set-hook -g after-select-window[42]') echo 'injected rollback failure' >&2; exit 1;; esac; fi", quote(&marker.to_string_lossy())) } else { String::new() }, quote(real.trim()), marker = quote(&marker.to_string_lossy()));
         std::fs::write(stubs.join("tmux"), script).unwrap();
         std::fs::set_permissions(stubs.join("tmux"), std::fs::Permissions::from_mode(0o755))

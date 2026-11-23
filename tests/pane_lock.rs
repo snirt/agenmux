@@ -31,7 +31,7 @@ impl TestTmux {
     }
     fn tmux(&self, args: &[&str]) -> Output {
         let mut command = Command::new("tmux");
-        command.args(["-S", &self.socket]).args(args);
+        command.args(["-u", "-S", &self.socket]).args(args);
         let mut child = PaneLockChild::spawn(command);
         let deadline = Instant::now() + Duration::from_secs(5);
         while child.0.as_mut().unwrap().try_wait().unwrap().is_none() {
@@ -153,7 +153,9 @@ fn pause_pane_add(server: &TestTmux, window: &str, name: &str) -> (PaneLockChild
     std::fs::write(
         &wrapper,
         r#"#!/bin/bash
-if [ "$1" = list-panes ]; then
+command=$1
+[ "$command" != -u ] || command=$2
+if [ "$command" = list-panes ]; then
     printf '%s\n' "$$" > "$PANE_LOCK_TEST_PAUSE"
     for ((i = 0; i < 1500; i++)); do
         [ ! -e "$PANE_LOCK_TEST_PAUSE.release" ] || break
