@@ -106,6 +106,8 @@ tmux -S "$sock" set-option -g escape-time 250
 # bindings. This deliberately differs from tmux's defaults so the test proves
 # the configured command is inherited rather than hard-coded by the plugin.
 tmux -S "$sock" bind-key -n C-l select-pane -R
+tmux -S "$sock" bind-key -n M-h if -F '#{E:@editor-pane}' 'send-keys M-h' 'resize-pane -L 3'
+tmux -S "$sock" bind-key -n M-l if -F '#{E:@editor-pane}' 'send-keys M-l' 'resize-pane -R 3'
 
 # Attach through a genuine pseudo-terminal and relay test keys from the FIFO.
 # Unlike script(1), expect does not require this test's own stdin to be a tty.
@@ -164,7 +166,7 @@ normal_keys="$(tmux -S "$sock" list-keys -T agenmux)"
 search_keys="$(tmux -S "$sock" list-keys -T agenmux-search)"
 settings_keys="$(tmux -S "$sock" list-keys -T agenmux-settings-edit)"
 sequence_keys="$(tmux -S "$sock" list-keys -T agenmux-sequence)"
-has_re "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" '^16\.[0-9a-f]{16}$' &&
+has_re "$(tmux -S "$sock" show-option -gqv @agenmux-nav-version)" '^18\.[0-9a-f]{16}$' &&
   has "$normal_keys" 'C-l' &&
   has "$normal_keys" " key 'sequence-67'" &&
   has "$normal_keys" " key 'last'" &&
@@ -194,6 +196,78 @@ done
   echo "FAIL navigation-key-table: sidebar did not render a selection"
   exit 1
 }
+
+sidebar_cursor() {
+  tmux -S "$sock" capture-pane -p -t "$sidebar" | awk '/❯/ { print NR; exit }'
+}
+
+# Send the press, motion and release through the attached client's terminal.
+# A resize-pane command does not exercise tmux's mouse key dispatch.
+read -r sidebar_left sidebar_width < <(
+  tmux -S "$sock" display-message -p -t "$sidebar" '#{pane_left} #{pane_width}'
+)
+border_x=$((sidebar_left + sidebar_width + 1))
+drag_x=$((border_x + 5))
+printf '\033[<0;%d;5M\033[<32;%d;5M\033[<32;%d;5M\033[<0;%d;5m' \
+  "$border_x" "$((border_x + 1))" "$drag_x" "$drag_x" >&9
+for _ in $(tries 30); do
+  dragged_width="$(tmux -S "$sock" display-message -p -t "$sidebar" '#{pane_width}')"
+  [ "$dragged_width" -gt "$sidebar_width" ] && break
+  sleep 0.05
+done
+read -r drag_focus drag_table < <(
+  tmux -S "$sock" display-message -p -c "$client" '#{pane_id} #{client_key_table}'
+)
+if [ "$dragged_width" -le "$sidebar_width" ] || [ "$drag_focus" != "$sidebar" ] ||
+  [ "$drag_table" != agenmux ]; then
+  echo "FAIL sidebar border drag: width=$sidebar_width->$dragged_width focus=$drag_focus expected=$sidebar table=$drag_table"
+  exit 1
+fi
+for direction in l h; do
+  before_width="$(tmux -S "$sock" display-message -p -t "$sidebar" '#{pane_width}')"
+  printf '\033%s' "$direction" >&9
+  for _ in $(tries 30); do
+    read -r resized_focus resized_table resized_width < <(
+      tmux -S "$sock" display-message -p -c "$client" '#{pane_id} #{client_key_table} #{pane_width}'
+    )
+    [ "$resized_width" != "$before_width" ] && break
+    sleep 0.05
+  done
+  if [ "$resized_focus" != "$sidebar" ] || [ "$resized_table" != agenmux ] ||
+    [ "$resized_width" = "$before_width" ]; then
+    echo "FAIL Alt-$direction resize: width=$before_width->$resized_width focus=$resized_focus expected=$sidebar table=$resized_table"
+    exit 1
+  fi
+done
+before_resize_navigation="$(sidebar_cursor)"
+printf 'j' >&9
+for _ in $(tries 30); do
+  after_resize_down="$(sidebar_cursor)"
+  [ -n "$after_resize_down" ] && [ "$after_resize_down" != "$before_resize_navigation" ] && break
+  sleep 0.05
+done
+printf 'K' >&9 # the harness remaps Up from k to K
+for _ in $(tries 30); do
+  after_resize_up="$(sidebar_cursor)"
+  [ "$after_resize_up" = "$before_resize_navigation" ] && break
+  sleep 0.05
+done
+if [ -z "$before_resize_navigation" ] || [ -z "$after_resize_down" ] ||
+  [ "$after_resize_down" = "$before_resize_navigation" ] ||
+  [ "$after_resize_up" != "$before_resize_navigation" ]; then
+  echo "FAIL sidebar resize navigation: before=[$before_resize_navigation] down=[$after_resize_down] up=[$after_resize_up]"
+  exit 1
+fi
+# Wait for reconciliation before restoring the original test width.
+for _ in $(tries 30); do
+  [ "$(tmux -S "$sock" show-option -gqv @agenmux-width)" = "$resized_width" ] && break
+  sleep 0.05
+done
+tmux -S "$sock" set-option -g @agenmux-width "$sidebar_width"
+for _ in $(tries 30); do
+  [ "$(tmux -S "$sock" display-message -p -t "$sidebar" '#{pane_width}')" = "$sidebar_width" ] && break
+  sleep 0.05
+done
 
 pre_reload_hint="$(bottom_hint "$sidebar")"
 printf '[display]\nshow_all_panes = false\n[tmux_management]\nenabled = true\n[keys.normal]\nup = ["K"]\n' >"$XDG_CONFIG_HOME/agenmux/config.toml"
