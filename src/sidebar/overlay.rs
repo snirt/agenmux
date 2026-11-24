@@ -322,14 +322,9 @@ fn setting_group(name: &str) -> &'static str {
 }
 
 fn setting_label(name: &str) -> &str {
-    match name {
-        "display.show_frame" => "show frame",
-        "display.animate" => "animations",
-        _ => name
-            .strip_prefix("keys.")
-            .or_else(|| name.strip_prefix("quick_launchers."))
-            .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name)),
-    }
+    name.strip_prefix("keys.")
+        .or_else(|| name.strip_prefix("quick_launchers."))
+        .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name))
 }
 
 fn is_bool_setting(name: &str) -> bool {
@@ -338,6 +333,7 @@ fn is_bool_setting(name: &str) -> bool {
         "display.show_all_panes"
             | "display.show_frame"
             | "display.animate"
+            | "display.animate_text"
             | "behavior.notifications"
             | "behavior.auto_update"
             | "tmux_management.enabled"
@@ -1983,7 +1979,7 @@ mod tests {
         let visible = visible_settings_rows(&settings, &effective);
         assert_eq!(visible[0].name, "display.show_frame");
         assert_eq!(setting_group(&visible[0].name), "Display");
-        assert_eq!(setting_label(&visible[0].name), "show frame");
+        assert_eq!(setting_label(&visible[0].name), "show_frame");
         assert_eq!(choices(&visible[0].name), None);
         assert_eq!(visible[0].initial, "true");
         assert_eq!(toggled_value(&visible[0]), Some("false"));
@@ -2011,11 +2007,26 @@ mod tests {
             .unwrap();
         assert_eq!(toggled_value(&width), None);
 
-        settings.search.query = "animations".into();
+        settings.search.query = "animate".into();
         let animations = visible_settings_rows(&settings, &effective);
-        assert_eq!(animations.len(), 1);
-        assert_eq!(animations[0].name, "display.animate");
-        assert_eq!(setting_label(&animations[0].name), "animations");
+        assert_eq!(
+            animations
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["display.animate", "display.animate_text"]
+        );
+        assert_eq!(setting_label(&animations[0].name), "animate");
+        assert_eq!(setting_label(&animations[1].name), "animate_text");
+        let text_off = crate::app_config::edit_document(
+            &settings.source,
+            &animations[1].name,
+            toggled_value(&animations[1]),
+        )
+        .and_then(|text| crate::app_config::parse(&text))
+        .and_then(|file| crate::app_config::resolve(&file, &Default::default()))
+        .unwrap();
+        assert!(text_off.animate && !text_off.animate_text);
         let disabled = crate::app_config::edit_document(
             &settings.source,
             &animations[0].name,

@@ -31,6 +31,7 @@
 
 - Reuse shared UI components and style primitives across main views and overlays. Do not duplicate common chrome such as top bars, headers, controls, focus states, or color-selection logic.
 - Derive animation colors from the resolved theme roles and reuse the shared palette blending.
+- Settings view labels are the config key names, underscores included. Never add display aliases such as spaced or renamed labels.
 
 ## Commits
 

@@ -38,6 +38,12 @@ fn script(path: &Path, body: &str) {
     fs::set_permissions(path, mode).unwrap();
 }
 
+/// A fake tmux on PATH. agenmux always passes `-u` first; drop it so the
+/// body matches and logs the tmux command itself.
+fn tmux_script(path: &Path, body: &str) {
+    script(path, &format!("[ \"$1\" != -u ] || shift\n{body}"));
+}
+
 fn command(plugin: &Path, bin_dir: &Path, args: &[&str]) -> Command {
     let path = format!(
         "{}:{}",
@@ -168,7 +174,7 @@ exit 1"#,
 }
 
 fn no_server_tmux(bin_dir: &Path) {
-    script(
+    tmux_script(
         &bin_dir.join("tmux"),
         r#"[ "$1" = info ] && exit 1
 exit 0"#,
@@ -392,7 +398,7 @@ fn update_waits_for_old_daemon_then_reenters_the_target_release() {
     let polls = tmp.path().join("polls");
     fs::create_dir_all(&bin).unwrap();
     make_git_releases(&repo);
-    script(
+    tmux_script(
         &bin.join("tmux"),
         r#"printf 'tmux %s\n' "$*" >> "$RESTART_LOG"
 case "$*" in
@@ -439,7 +445,7 @@ fn open_view_uses_native_toggle_when_target_has_no_legacy_script() {
     git_ok(&repo, &["commit", "-qm", "native"]);
     git_ok(&repo, &["tag", "v0.2.0"]);
     git_ok(&repo, &["checkout", "-q", "v0.1.1"]);
-    script(
+    tmux_script(
         &bin.join("tmux"),
         r#"case "$*" in
   info) exit 0 ;;
@@ -471,7 +477,7 @@ fn closed_view_restarts_entrypoint_without_reopening() {
     let log = tmp.path().join("restart.log");
     fs::create_dir_all(&bin).unwrap();
     make_git_releases(&repo);
-    script(
+    tmux_script(
         &bin.join("tmux"),
         r#"case "$*" in
   info) exit 0 ;;
@@ -542,7 +548,7 @@ BIN
 fi
 exit 1"#,
     );
-    script(
+    tmux_script(
         &bin.join("tmux"),
         r#"case "$*" in
   info) exit 0 ;;
@@ -795,7 +801,7 @@ fn auto_fixture(name: &str, git_install: bool) -> Auto {
 printf 'https://example.invalid/repo/releases/tag/%s' "$LATEST_TAG""#,
     );
     // No server; a popup's sidebar "draws" its first frame unless told not to.
-    script(
+    tmux_script(
         &bin.join("tmux"),
         r#"[ "$1" = info ] && exit 1
 if [ "$1" = display-popup ] && [ -z "${POPUP_NEVER_READY:-}" ]; then
@@ -1405,7 +1411,7 @@ impl Auto {
         let runtime = self.tmp.path().join("runtime");
         fs::create_dir_all(&runtime).unwrap();
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
-        script(
+        tmux_script(
             &self.bin.join("tmux"),
             r#"printf 'tmux %s\n' "$*" >> "$RESTART_LOG"
 case "$*" in

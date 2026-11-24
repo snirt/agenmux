@@ -93,7 +93,7 @@ impl Notifications {
 }
 
 pub fn command(args: &[&str]) -> Result<String, Error> {
-    let output = Command::new("tmux").args(args).output()?;
+    let output = process().args(args).output()?;
     if !output.status.success() {
         return Err(Error::Failed(
             String::from_utf8_lossy(&output.stderr)
@@ -139,8 +139,14 @@ pub fn runtime_dir() -> PathBuf {
 
 /// A tmux process to configure and run, for what the helpers here cannot
 /// express (stdin, a socket of its own, a child to wait on).
+///
+/// `-u` keeps replies byte-exact: a tmux client outside a UTF-8 locale
+/// replaces tabs and non-ASCII text in format output with `_`, which would
+/// split fields wrongly and hide the glyphs agent titles are matched on.
 pub fn process() -> Command {
-    Command::new("tmux")
+    let mut command = Command::new("tmux");
+    command.arg("-u");
+    command
 }
 
 pub fn command_status(args: &[&str]) -> Result<(), Error> {
@@ -167,7 +173,7 @@ fn command_batch_chunk(commands: &[Vec<String>]) -> Result<(), Error> {
     if commands.is_empty() {
         return Ok(());
     }
-    let mut command = Command::new("tmux");
+    let mut command = process();
     for (index, args) in commands.iter().enumerate() {
         if index != 0 {
             command.arg(";");
@@ -187,7 +193,7 @@ fn command_batch_chunk(commands: &[Vec<String>]) -> Result<(), Error> {
 }
 
 pub fn command_spawn(args: &[&str]) -> Result<(), Error> {
-    Command::new("tmux").args(args).spawn()?;
+    process().args(args).spawn()?;
     Ok(())
 }
 
@@ -233,7 +239,7 @@ impl Tmux {
     }
 
     fn connect_with_output(output: bool) -> Result<Tmux, Error> {
-        let mut cmd = Command::new("tmux");
+        let mut cmd = process();
         // A stale $TMUX socket must not start a new server while attaching.
         cmd.arg("-N");
         // stay on the pane's server even on a non-default socket ($TMUX is
@@ -648,6 +654,28 @@ mod tests {
         assert!(format_truth("off"));
         assert!(format_truth("00"));
         assert!(format_truth("\t\n"));
+    }
+
+    #[test]
+    fn replies_stay_exact_outside_a_utf8_locale() {
+        let socket = format!("agenmux-locale-test-{}", std::process::id());
+        let tmux = |args: &[&str]| {
+            let mut command = process();
+            for var in ["LC_ALL", "LC_CTYPE", "LANG"] {
+                command.env_remove(var);
+            }
+            command.args(["-L", &socket]).args(args).output().unwrap()
+        };
+        assert!(tmux(&["-f", "/dev/null", "new-session", "-d"])
+            .status
+            .success());
+        assert!(tmux(&["select-pane", "-T", "⠹ agent"]).status.success());
+        let reply = tmux(&["display-message", "-p", "#{pane_title}\t#{pane_id}"]);
+        let _ = tmux(&["kill-server"]);
+        let reply = String::from_utf8(reply.stdout).unwrap();
+        let (title, pane) = reply.trim_end().split_once('\t').unwrap();
+        assert_eq!(title, "⠹ agent");
+        assert!(pane.starts_with('%'), "{reply:?}");
     }
 
     #[test]

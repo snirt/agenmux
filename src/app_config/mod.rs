@@ -91,6 +91,7 @@ pub struct DisplayConfig {
     pub show_frame: Option<bool>,
     pub agent_label: Option<AgentLabel>,
     pub animate: Option<bool>,
+    pub animate_text: Option<bool>,
     pub glyphs: Option<Glyphs>,
     pub sidebar_width: Option<u16>,
     pub sidebar_position: Option<SidebarPosition>,
