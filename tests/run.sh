@@ -548,6 +548,7 @@ if [ "$fail" -eq 0 ]; then
   mkdir -p "$tmp/bin"
   cat >"$tmp/bin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ "$1" != -u ] || shift # agenmux always passes -u first
 printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
 case "$*" in
   "show-option -gqv @agenmux-on") printf '1\n' ;;
@@ -562,7 +563,9 @@ exit 0
 SH
   chmod +x "$tmp/bin/tmux"
   TMUX_STUB_LOG="$tmp/tmux.log" PATH="$tmp/bin:$PATH" "$BIN" pane-orphan
-  if grep -Eq '^(switch-client|last-window|next-window)' "$tmp/tmux.log"; then
+  # The lookup proves the client check ran; without it no move is vacuous.
+  if ! grep -Fqx 'display-message -p -c c1 #{window_id}' "$tmp/tmux.log" ||
+    grep -Eq '^(switch-client|last-window|next-window)' "$tmp/tmux.log"; then
     echo "FAIL orphan-does-not-move-unstranded-client: moved focus from another window"
     cat "$tmp/tmux.log"
     fail=1
@@ -576,6 +579,7 @@ if [ "$fail" -eq 0 ]; then
   mkdir -p "$tmp/bin"
   cat >"$tmp/bin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ "$1" != -u ] || shift # agenmux always passes -u first
 printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
 case "$*" in
   "show-option -gqv @agenmux-on") printf '1\n' ;;
@@ -605,6 +609,7 @@ if [ "$fail" -eq 0 ]; then
   mkdir -p "$tmp/bin"
   cat >"$tmp/bin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ "$1" != -u ] || shift # agenmux always passes -u first
 printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
 case "$*" in
   "show-options -g") printf '@agenmux-width 41\n@agenmux-height 19\n' ;;
@@ -650,6 +655,7 @@ if [ "$fail" -eq 0 ]; then
   mkdir -p "$tmp/bin"
   cat >"$tmp/bin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ "$1" != -u ] || shift # agenmux always passes -u first
 printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
 case "$*" in
   "show-options -g") printf '@agenmux-width present\n' ;;
@@ -690,6 +696,7 @@ if [ "$fail" -eq 0 ]; then
   mkdir -p "$tmp/bin"
   cat >"$tmp/bin/tmux" <<'SH'
 #!/usr/bin/env bash
+[ "$1" != -u ] || shift # agenmux always passes -u first
 if [ "$1" = "kill-pane" ]; then
   printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
 fi
