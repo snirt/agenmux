@@ -1,9 +1,9 @@
-# agenmux v0.9.2
+# agenmux v0.9.3
 
 ## What's changed
 
-- Working sidebar rows now show a moving highlight, and recently finished rows pulse. Both effects use the active theme's colors and follow the existing animation setting. [#266](https://github.com/snirt/agenmux/pull/266)
-- Fixed missing upper rows in shorter tmux sidebars. Each split sidebar now fits its own pane height, so navigation and scrolling work when windows have different heights. [#267](https://github.com/snirt/agenmux/pull/267)
+- Fixed tmux sidebar navigation after dragging the pane border or resizing with inherited key bindings. `j` and `k` keep moving the selection when the sidebar stays focused. [#270](https://github.com/snirt/agenmux/pull/270)
+- Set `display.animate_text = false` to turn off the working-row highlight and finished-row pulse without disabling the spinner or status blinking. [#272](https://github.com/snirt/agenmux/pull/272)
 
 ### Assets
 
