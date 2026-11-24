@@ -146,11 +146,11 @@ installer sets it from its font check. Change an icon with `AGENT_ICON`; see
 
 ### Motion and glyphs
 
-- Press `s` and toggle **Display → animations** off, or set
+- Press `s` and toggle **Display → animate** off, or set
   `display.animate = false` in `config.toml`. This stops the spinner, blink,
   working shine, and finished pulse. Every state shows a steady glyph.
 - To keep the spinner and blink but stop the working shine and finished pulse
-  on row text, toggle **Display → text animations** off, or set
+  on row text, toggle **Display → animate_text** off, or set
   `display.animate_text = false`. Status changes still update the row.
 - `display.glyphs = "plain"` swaps braille and Nerd Font glyphs for plain
   text, for fonts and terminals without them:

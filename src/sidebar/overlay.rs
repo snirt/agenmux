@@ -322,15 +322,9 @@ fn setting_group(name: &str) -> &'static str {
 }
 
 fn setting_label(name: &str) -> &str {
-    match name {
-        "display.show_frame" => "show frame",
-        "display.animate" => "animations",
-        "display.animate_text" => "text animations",
-        _ => name
-            .strip_prefix("keys.")
-            .or_else(|| name.strip_prefix("quick_launchers."))
-            .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name)),
-    }
+    name.strip_prefix("keys.")
+        .or_else(|| name.strip_prefix("quick_launchers."))
+        .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name))
 }
 
 fn is_bool_setting(name: &str) -> bool {
@@ -1985,7 +1979,7 @@ mod tests {
         let visible = visible_settings_rows(&settings, &effective);
         assert_eq!(visible[0].name, "display.show_frame");
         assert_eq!(setting_group(&visible[0].name), "Display");
-        assert_eq!(setting_label(&visible[0].name), "show frame");
+        assert_eq!(setting_label(&visible[0].name), "show_frame");
         assert_eq!(choices(&visible[0].name), None);
         assert_eq!(visible[0].initial, "true");
         assert_eq!(toggled_value(&visible[0]), Some("false"));
@@ -2013,7 +2007,7 @@ mod tests {
             .unwrap();
         assert_eq!(toggled_value(&width), None);
 
-        settings.search.query = "animations".into();
+        settings.search.query = "animate".into();
         let animations = visible_settings_rows(&settings, &effective);
         assert_eq!(
             animations
@@ -2022,8 +2016,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["display.animate", "display.animate_text"]
         );
-        assert_eq!(setting_label(&animations[0].name), "animations");
-        assert_eq!(setting_label(&animations[1].name), "text animations");
+        assert_eq!(setting_label(&animations[0].name), "animate");
+        assert_eq!(setting_label(&animations[1].name), "animate_text");
         let text_off = crate::app_config::edit_document(
             &settings.source,
             &animations[1].name,

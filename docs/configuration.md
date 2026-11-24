@@ -97,8 +97,8 @@ Press `s` in the sidebar or popup to edit settings in place.
 
 - `↑`/`↓` move, `Enter` edits, `C-u` clears the field, `Esc` cancels or goes back.
 - Each row shows the file value, the effective value, and where it comes from.
-- Under **Display**, set **animations** to `false` to keep glyphs and text
-  steady, or **text animations** to `false` to keep only the row text steady.
+- Under **Display**, set **animate** to `false` to keep glyphs and text
+  steady, or **animate_text** to `false` to keep only the row text steady.
 - Values are validated before the file is saved; a bad value changes nothing.
 - **Revert to defaults** clears saved display, behavior, theme, and key
   settings. tmux option overrides stay in effect.
